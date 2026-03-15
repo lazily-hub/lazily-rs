@@ -1,13 +1,6 @@
 # lazily-rs
 
-Lazy reactive signals library for Rust.
-
-## Architecture
-
-- `src/context.rs` — `Context` struct, dependency graph, thread-local tracking stack
-- `src/slot.rs` — `SlotHandle<T>` (lightweight `Copy` id into Context)
-- `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
-- `tests/integration.rs` — 13 integration tests
+Lazy reactive primitives library for Rust.
 
 ## Key Design Decisions
 
