@@ -6,66 +6,75 @@ Rust library for lazy evaluation with context-aware dependency tracking and cach
 
 ### Context
 
-Container for all slots and their cached values. Owns all allocations.
+Container for all slots and cells. Owns all allocations via interior mutability (`RefCell`).
 
 ```rust
 pub struct Context {
-    cache: HashMap<TypeId, Box<dyn Any>>,
-}
-
-impl Context {
-    pub fn new() -> Self;
-    pub fn get_slot<T: 'static>(&self, key: TypeId) -> Option<&Slot<T>>;
+    nodes: RefCell<HashMap<SlotId, Node>>,
+    next_id: RefCell<u64>,
 }
 ```
-
-### Slot
-
-Lazily-computed cached value with dependency tracking. A Slot is either **unset** or **set** with a value produced by its activating function.
-
-```rust
-pub struct Slot<T> {
-    value: Option<T>,
-    compute: Box<dyn Fn(&mut Context) -> T>,
-    subscribers: Vec<Box<dyn FnMut(&mut Context)>>,
-    parents: Vec<SlotId>,
-}
-```
-
-**Semantics:**
-
-- **Activation:** First access calls the compute function, caches the result
-- **Clearing:** `slot.clear()` removes the cached value and clears all dependent slots
-- **Dependencies:** If Slot B accesses Slot A during computation, B depends on A. If A clears, B clears automatically
-- **Immutable by default:** Once set, a Slot's value doesn't change — only clear + recompute
 
 **API:**
 
 | Method | Purpose |
 |--------|---------|
-| `Slot::new(compute_fn)` | Create a new unset slot |
-| `slot.get(&mut ctx)` | Get value (compute if unset) |
-| `slot.clear(&mut ctx)` | Clear value and cascade to dependents |
-| `slot.is_set()` | Check if value is cached |
+| `Context::new()` | Create a new context |
+| `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot |
+| `ctx.get(&slot)` | Get value (computes if unset) |
+| `ctx.cell(value)` | Create a mutable cell |
+| `ctx.get_cell(&cell)` | Get cell value |
+| `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
+| `ctx.is_set(&slot)` | Check if slot has cached value |
+
+### Slot
+
+Lazily-computed cached value with dependency tracking. A Slot is either **unset** or **set** with a value produced by its compute function.
+
+```rust
+struct SlotNode {
+    value: Option<Box<dyn Any>>,
+    compute: Box<dyn Fn(&Context) -> Box<dyn Any>>,
+    dependencies: HashSet<SlotId>,
+    dependents: HashSet<SlotId>,
+}
+```
+
+**Semantics:**
+
+- **Activation:** First `ctx.get()` calls the compute function, caches the result
+- **Clearing:** Removes the cached value and clears all dependent slots recursively
+- **Dependencies:** If Slot B accesses Slot A during computation, B depends on A. If A clears, B clears automatically
+- **Immutable by default:** Once set, a Slot's value doesn't change — only clear + recompute
+- **Dynamic:** Dependencies re-discovered on each recomputation (no stale subscriptions)
 
 ### Cell
 
 Mutable value container. Changing a Cell's value clears all dependent Slots.
 
 ```rust
-pub struct Cell<T> {
-    value: T,
-    subscribers: Vec<Box<dyn FnMut(&mut Context)>>,
+struct CellNode {
+    value: Box<dyn Any>,
+    dependents: HashSet<SlotId>,
 }
 ```
 
-**API:**
+**Semantics:**
 
-| Method | Purpose |
-|--------|---------|
-| `Cell::new(initial)` | Create with initial value |
-| `cell.get()` | Read current value |
-| `cell.set(value, &mut ctx)` | Update value, clear dependents if changed |
+- `ctx.set_cell()` compares old and new via `PartialEq`
+- If unchanged, no invalidation occurs (no-op)
+- If changed, all dependent Slots are recursively cleared
+
+### SlotId
+
+Unique identifier for reactive nodes. Lightweight `Copy` type wrapping a `u64`.
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SlotId(u64);
+```
+
+Both `SlotHandle<T>` and `CellHandle<T>` wrap a `SlotId` with `PhantomData<T>` for type safety.
 
 ## Dependency Tracking
 
@@ -78,17 +87,16 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 
 ## Invalidation Semantics
 
-- `Cell.set()` → if value changed → clear all dependent slots
-- `Slot.clear()` → remove cached value → cascade clear to all dependents
-- Cleared slots recompute on next `get()` access
+- `ctx.set_cell()` → if value changed (PartialEq) → clear all dependent slots
+- Slot clearing → remove cached value → cascade clear to all dependents
+- Cleared slots recompute on next `ctx.get()` access
 
 ## Design Goals
 
 - **Lazy evaluation:** Values computed only when first accessed
 - **Fine-grained reactivity:** Only affected dependents recompute
-- **Zero-cost abstractions:** Compile-time type resolution where possible
-- **Thread safety:** Optional via feature flag (default: single-threaded)
-- **No runtime closures limitation:** Unlike Zig, Rust has full closure support
+- **Zero external dependencies:** Pure Rust, no crates
+- **Single-threaded:** `RefCell` interior mutability (no Mutex overhead)
 
 ## Differences from lazily-zig
 
@@ -98,14 +106,14 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 | Slot creation | `comptime` function pointers | Closures (`Box<dyn Fn>`) |
 | Storage modes | `.direct` / `.indirect` | Unified via generics |
 | FFI | Built-in `StringView` | Via `#[no_mangle]` + `extern "C"` |
-| Thread safety | Mutex by default | Feature flag |
+| Thread safety | Mutex by default | Single-threaded (`RefCell`) |
 
 ## Differences from lazily-py
 
 | Aspect | lazily-py | lazily-rs |
 |--------|----------|-----------|
 | Context | Plain `dict` | Typed `Context` struct |
-| Slot keys | Object identity | `TypeId` |
+| Slot keys | Object identity | `SlotId` (u64) |
 | Cell equality | `!=` operator | `PartialEq` trait |
-| Context resolvers | `resolve_ctx` functions | Trait-based |
+| Context resolvers | `resolve_ctx` functions | Direct context passing |
 | Dependencies | Zero | Zero (pure Rust) |
