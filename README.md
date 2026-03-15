@@ -106,7 +106,7 @@ lazily is implemented across three languages with shared semantics:
 
 - [lazily-zig](https://github.com/btakita/lazily-zig) — Zig implementation with FFI support
 - [lazily-py](https://github.com/btakita/lazily-py) — Python implementation with context-as-dict
-- [Blog post: Lazily — Reactive Primitives Done Right](https://briantakita.me/posts/2026-03-15-lazily-reactive-signals)
+- [Blog post: Lazily — Reactive Primitives Done Right](https://briantakita.me/posts/lazily-reactive-signals)
 
 ## License
 
