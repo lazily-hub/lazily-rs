@@ -29,3 +29,13 @@ cargo build         # Build
 
 - `lazily-zig` — Zig counterpart with FFI, thread-safe mutex
 - `lazily-py` — Python counterpart with context-as-dict model
+
+
+## Library Context Policy
+
+This library follows the agent-loop library-context policy. Contributors
+authoring `AGENTS.md`, `SKILL.md`, or runbooks in this repo must read:
+
+[Library Context Policy](../instruction-files/LIBRARY_CONTEXT_POLICY.md)
+
+before making changes.
