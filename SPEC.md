@@ -225,6 +225,7 @@ Locking model:
 - Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
 - Re-entrant user code must be able to call back into the same context without deadlocking
 - Concurrent first access may perform duplicate speculative computation, but at most one value may be published as the slot cache; later optimization can add in-flight deduplication
+- If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
 
 Tokio integration is scoped in two stages:

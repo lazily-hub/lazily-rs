@@ -137,7 +137,9 @@ effect.dispose(&ctx);
 graph across OS threads. It mirrors the core `Context` methods while requiring
 `Send + Sync + 'static` values and compute/effect callbacks. The graph lock is
 released before user compute callbacks, effect callbacks, or cleanup closures
-run, so callbacks can re-enter the same context without deadlocking.
+run, so callbacks can re-enter the same context without deadlocking. If a slot
+is invalidated while its callback is running, the stale result is discarded and
+the getter retries before returning a fresh value.
 
 ## Design
 
