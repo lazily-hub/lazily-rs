@@ -80,6 +80,8 @@ A `CellHandle<T>` holds a mutable value. `ctx.set_cell()` compares old and new v
 | `ctx.get_cell(&cell)` | Get cell value |
 | `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
 | `ctx.is_set(&slot)` | Check if slot has cached value |
+| `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
+| `cell.clear_dependents(&ctx)` | Clear downstream slots without changing cell value |
 
 ## Design
 

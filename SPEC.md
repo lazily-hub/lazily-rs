@@ -26,6 +26,8 @@ pub struct Context {
 | `ctx.get_cell(&cell)` | Get cell value |
 | `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
 | `ctx.is_set(&slot)` | Check if slot has cached value |
+| `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
+| `cell.clear_dependents(&ctx)` | Clear downstream slots without changing cell value |
 
 ### Slot
 
@@ -88,6 +90,8 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 ## Invalidation Semantics
 
 - `ctx.set_cell()` → if value changed (PartialEq) → clear all dependent slots
+- `slot.clear(&ctx)` → remove cached value → cascade clear to all dependents
+- `cell.clear_dependents(&ctx)` → clear all dependent slots without changing cell value
 - Slot clearing → remove cached value → cascade clear to all dependents
 - Cleared slots recompute on next `ctx.get()` access
 
