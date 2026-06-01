@@ -74,6 +74,12 @@ In a web server handling requests, you might have 50 computed values available b
 
 `Context` owns all Slots and Cells. It manages the dependency graph and provides the API for creating, reading, and mutating reactive values. Think of it as the "world" for your reactive computations — in web frameworks, this maps to a request context, application scope, or component tree.
 
+The current `Context` is intentionally single-threaded. It uses `RefCell` and
+non-`Send` callback storage to keep the fast path allocation-only and mutex-free.
+Create independent contexts per OS thread today. Shared-context parallelism is
+planned as an explicit `ThreadSafeContext` API rather than a silent change to
+`Context`.
+
 ### Slot
 
 A `SlotHandle<T>` wraps a compute function `Fn(&Context) -> T`. The result is cached after first access. Dependencies are discovered automatically via a thread-local tracking stack — any Slot or Cell accessed during computation becomes a dependency. `ctx.computed()` is the ergonomic name for a derived value; `ctx.slot()` is the same primitive. Use `ctx.memo()` when `T: PartialEq` and equal recomputations should suppress downstream work.
@@ -139,6 +145,24 @@ effect.dispose(&ctx);
 - Thread-local tracking stack for automatic dependency discovery
 - Zero external dependencies
 
+## Threading Roadmap
+
+`lazily-rs` currently guarantees local, single-threaded contexts plus portable
+id handles. `SlotHandle<T>` and `CellHandle<T>` are `Send + Sync` when `T` is
+`Send + Sync`, and `EffectHandle` is also `Send + Sync`, but handles must be used
+with their owning context.
+
+The planned thread-safe path should mirror the existing API on a separate
+`ThreadSafeContext` type or feature-gated context family. It should require
+`Send + Sync + 'static` cached values and compute/effect callbacks, use a single
+context-level lock first, and avoid holding that lock while running user
+callbacks or cleanups so re-entrant context access cannot deadlock.
+
+Tokio support should come after synchronous thread safety: first by allowing
+`ThreadSafeContext` to be shared through `tokio::spawn` and
+`tokio::task::spawn_blocking`, then by separately designing true async
+computations/effects with explicit cancellation and `.await` tracking semantics.
+
 ## Multi-Language
 
 lazily is implemented across three languages with shared semantics:
@@ -148,7 +172,7 @@ lazily is implemented across three languages with shared semantics:
 | Context | Owned `Context` struct | Explicit allocator | Plain `dict` |
 | Slot creation | `Box<dyn Fn>` closures | `comptime` function pointers | Lambdas |
 | Cell equality | `PartialEq` trait | `std.meta.eql` | `!=` operator |
-| Thread safety | Single-threaded (`RefCell`) | Mutex by default | GIL |
+| Thread safety | Single-threaded `Context`; explicit `ThreadSafeContext` planned | Mutex by default | GIL |
 | Storage | Unified generics | `.direct` / `.indirect` | Object identity |
 
 ## Related

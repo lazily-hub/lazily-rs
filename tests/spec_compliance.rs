@@ -9,10 +9,12 @@
 //! 6. Effect system — auto-tracking, scheduling, cleanup, disposal
 //! 7. Batch updates — deferred invalidation and effect flushing
 //! 8. Edge cases — no deps, shared deps, deep chains, dynamic deps
+//! 9. Threading contract — local contexts today, portable handles for future shared contexts
 
-use lazily::Context;
+use lazily::{CellHandle, Context, EffectHandle, SlotHandle};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::thread;
 
 // ============================================================================
 // 1. Context
@@ -71,6 +73,58 @@ mod context {
         ctx.set_cell(&c, 3);
         assert!(!ctx.is_set(&doubled));
         assert_eq!(ctx.get(&doubled), 6);
+    }
+}
+
+// ============================================================================
+// 1b. Threading Contract
+// ============================================================================
+
+mod threading_contract {
+    use super::*;
+
+    fn assert_copy<T: Copy>() {}
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    /// SPEC: Handles are lightweight ids. When their payload type is thread-safe,
+    /// the handle may be copied between threads even though the current Context is
+    /// not itself shareable.
+    #[test]
+    fn handles_are_copy_send_sync_ids() {
+        assert_copy::<SlotHandle<i32>>();
+        assert_copy::<CellHandle<i32>>();
+        assert_copy::<EffectHandle>();
+        assert_send_sync::<SlotHandle<i32>>();
+        assert_send_sync::<CellHandle<i32>>();
+        assert_send_sync::<EffectHandle>();
+    }
+
+    /// SPEC: The current `Context` is local to one thread, but multiple
+    /// independent contexts may run on different OS threads because dependency
+    /// tracking is thread-local.
+    #[test]
+    fn independent_contexts_can_run_on_separate_threads() {
+        let threads: Vec<_> = (0..4)
+            .map(|seed| {
+                thread::spawn(move || {
+                    let ctx = Context::new();
+                    let cell = ctx.cell(seed);
+                    let doubled = ctx.computed(move |ctx| ctx.get_cell(&cell) * 2);
+
+                    assert_eq!(ctx.get(&doubled), seed * 2);
+                    ctx.set_cell(&cell, seed + 10);
+                    ctx.get(&doubled)
+                })
+            })
+            .collect();
+
+        let values: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("context thread should finish"))
+            .collect();
+
+        assert_eq!(values, vec![20, 22, 24, 26]);
     }
 }
 

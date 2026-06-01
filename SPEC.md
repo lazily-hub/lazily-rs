@@ -153,6 +153,60 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 4. The child registers the parent as a dependent
 5. When a dependency clears, slot dependents hard-clear recursively; when a Cell changes, slot dependents are marked dirty and effect dependents are scheduled
 
+## Threading and Concurrency Contract
+
+### Current `Context`
+
+`Context` is intentionally local to one OS thread. It owns `RefCell` graph state,
+cached values as `Box<dyn Any>`, compute callbacks as `Box<dyn Fn(&Context)>`,
+effect callbacks as `Box<dyn Fn(&Context)>`, and cleanups as `Box<dyn FnOnce()>`.
+Those storage choices avoid synchronization overhead for the common single-threaded
+path and make `Context` neither `Send` nor `Sync`.
+
+Current guarantees:
+
+- Independent `Context` instances may be used on different OS threads
+- A single `Context` must not be moved into, shared with, or accessed from another thread
+- `SlotHandle<T>` and `CellHandle<T>` are lightweight ids and are `Send + Sync` when `T` is `Send + Sync`, but they are only meaningful with their owning context
+- `EffectHandle` is a lightweight id; effect execution and cleanup remain tied to the owning context thread
+- Dependency tracking is thread-local; a compute/effect callback cannot split work onto another thread and expect nested reads there to attach to the original tracking frame
+
+### Planned `ThreadSafeContext`
+
+Thread-safe support should be explicit rather than silently changing `Context`.
+The preferred API shape is a separate `ThreadSafeContext` type or feature-gated
+context family that mirrors the existing `Context` methods while preserving the
+single-threaded fast path.
+
+Planned API and bounds:
+
+| Method family | Additional bounds |
+|---------------|-------------------|
+| `cell`, `get_cell`, `set_cell` | `T: PartialEq + Clone + Send + Sync + 'static` |
+| `slot`, `computed` | `T: Clone + Send + Sync + 'static`; compute closure `Fn(&ThreadSafeContext) -> T + Send + Sync + 'static` |
+| `memo` | `T: PartialEq + Clone + Send + Sync + 'static`; compute closure `Send + Sync + 'static` |
+| `effect` | effect callback `Fn(&ThreadSafeContext) -> R + Send + Sync + 'static`; cleanup `FnOnce() + Send + 'static` |
+| handles | remain id-only and copyable; usable from any thread only with the owning `ThreadSafeContext` |
+
+Locking model:
+
+- Use one context-level synchronization primitive for graph state first, matching lazily-zig's mutex-first design before introducing finer-grained locks
+- Do not hold the graph lock while running user compute callbacks, effect callbacks, or cleanup closures
+- Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
+- Re-entrant user code must be able to call back into the same context without deadlocking
+- Concurrent first access may perform duplicate speculative computation, but at most one value may be published as the slot cache; later optimization can add in-flight deduplication
+- Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
+
+Tokio integration is scoped in two stages:
+
+1. Synchronous thread-safe sharing first: `ThreadSafeContext` should work inside
+   `tokio::spawn` and `tokio::task::spawn_blocking` when all captured values and
+   callbacks satisfy the `Send + Sync` bounds above.
+2. True async computations/effects are separate future work. They need explicit
+   semantics for in-flight future deduplication, cancellation, dependency tracking
+   across `.await`, stale future completion, cleanup ordering, and `Send` versus
+   `LocalSet` futures.
+
 ## Invalidation Semantics
 
 - `ctx.set_cell()` → if value changed (PartialEq) → mark all dependent slots dirty
@@ -175,7 +229,7 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 - **Effects:** Side effects are scheduled from the same dependency graph as slots
 - **Batching:** Multiple writes can share one invalidation/effect flush boundary
 - **Zero external dependencies:** Pure Rust, no crates
-- **Single-threaded:** `RefCell` interior mutability (no Mutex overhead)
+- **Single-threaded fast path:** `Context` uses `RefCell` interior mutability with no mutex overhead; shared-context support is reserved for explicit `ThreadSafeContext` work
 
 ## Differences from lazily-zig
 
@@ -185,7 +239,7 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 | Slot creation | `comptime` function pointers | Closures (`Box<dyn Fn>`) |
 | Storage modes | `.direct` / `.indirect` | Unified via generics |
 | FFI | Built-in `StringView` | Via `#[no_mangle]` + `extern "C"` |
-| Thread safety | Mutex by default | Single-threaded (`RefCell`) |
+| Thread safety | Mutex by default; `-Dthread_safe=false` removes locking | Current `Context` is single-threaded (`RefCell`); planned `ThreadSafeContext` should start with a context-level lock |
 
 ## Differences from lazily-py
 
