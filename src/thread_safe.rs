@@ -1,7 +1,11 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(feature = "instrumentation")]
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
+#[cfg(feature = "instrumentation")]
+use std::time::Instant;
 
 use crate::cell::CellHandle;
 use crate::context::SlotId;
@@ -105,11 +109,46 @@ struct ThreadSafeState {
     batched_cells: HashSet<SlotId>,
     batched_cell_clears: HashSet<SlotId>,
     batched_slots: HashSet<SlotId>,
+    #[cfg(feature = "instrumentation")]
+    instrumentation: crate::instrumentation::InstrumentationCounters,
 }
 
 #[derive(Default)]
 struct ThreadSafeInner {
     state: Mutex<ThreadSafeState>,
+    #[cfg(feature = "instrumentation")]
+    lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation,
+}
+
+#[cfg(feature = "instrumentation")]
+struct ProfiledMutexGuard<'a> {
+    guard: MutexGuard<'a, ThreadSafeState>,
+    lock_instrumentation: &'a crate::instrumentation::ThreadSafeLockInstrumentation,
+    acquired_at: Instant,
+}
+
+#[cfg(feature = "instrumentation")]
+impl Deref for ProfiledMutexGuard<'_> {
+    type Target = ThreadSafeState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+#[cfg(feature = "instrumentation")]
+impl DerefMut for ProfiledMutexGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+#[cfg(feature = "instrumentation")]
+impl Drop for ProfiledMutexGuard<'_> {
+    fn drop(&mut self) {
+        self.lock_instrumentation
+            .record_lock_hold(self.acquired_at.elapsed());
+    }
 }
 
 /// Return value accepted by [`ThreadSafeContext::effect`].
@@ -179,6 +218,7 @@ impl ThreadSafeContext {
         ThreadSafeContextId(Arc::as_ptr(&self.inner) as usize)
     }
 
+    #[cfg(not(feature = "instrumentation"))]
     fn lock_state(&self) -> MutexGuard<'_, ThreadSafeState> {
         self.inner
             .state
@@ -186,10 +226,32 @@ impl ThreadSafeContext {
             .expect("ThreadSafeContext mutex poisoned")
     }
 
+    #[cfg(feature = "instrumentation")]
+    fn lock_state(&self) -> ProfiledMutexGuard<'_> {
+        let wait_started = Instant::now();
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .expect("ThreadSafeContext mutex poisoned");
+        self.inner
+            .lock_instrumentation
+            .record_lock_wait(wait_started.elapsed());
+        ProfiledMutexGuard {
+            guard,
+            lock_instrumentation: &self.inner.lock_instrumentation,
+            acquired_at: Instant::now(),
+        }
+    }
+
     fn alloc_id(&self) -> SlotId {
         let mut state = self.lock_state();
         let slot_id = SlotId(state.next_id);
         state.next_id += 1;
+        #[cfg(feature = "instrumentation")]
+        {
+            state.instrumentation.record_node_allocation();
+        }
         slot_id
     }
 
@@ -198,6 +260,8 @@ impl ThreadSafeContext {
             return;
         }
 
+        #[cfg(feature = "instrumentation")]
+        let mut edge_added = false;
         let mut state = self.lock_state();
         if let Some(node) = state.nodes.get_mut(&dependency_id) {
             match node {
@@ -214,28 +278,66 @@ impl ThreadSafeContext {
         if let Some(node) = state.nodes.get_mut(&dependent_id) {
             match node {
                 ThreadSafeNode::Slot(parent) => {
-                    parent.dependencies.insert(dependency_id);
+                    #[cfg(feature = "instrumentation")]
+                    {
+                        edge_added = parent.dependencies.insert(dependency_id);
+                    }
+                    #[cfg(not(feature = "instrumentation"))]
+                    {
+                        parent.dependencies.insert(dependency_id);
+                    }
                 }
                 ThreadSafeNode::Effect(parent) => {
-                    parent.dependencies.insert(dependency_id);
+                    #[cfg(feature = "instrumentation")]
+                    {
+                        edge_added = parent.dependencies.insert(dependency_id);
+                    }
+                    #[cfg(not(feature = "instrumentation"))]
+                    {
+                        parent.dependencies.insert(dependency_id);
+                    }
                 }
                 ThreadSafeNode::Cell(_) => {}
             }
         }
+        #[cfg(feature = "instrumentation")]
+        if edge_added {
+            state.instrumentation.record_dependency_edge_added();
+        }
     }
 
     fn remove_dependent_edge(&self, dependency_id: SlotId, dependent_id: SlotId) {
+        #[cfg(feature = "instrumentation")]
+        let mut edge_removed = false;
         let mut state = self.lock_state();
         if let Some(node) = state.nodes.get_mut(&dependency_id) {
             match node {
                 ThreadSafeNode::Slot(slot) => {
-                    slot.dependents.remove(&dependent_id);
+                    #[cfg(feature = "instrumentation")]
+                    {
+                        edge_removed = slot.dependents.remove(&dependent_id);
+                    }
+                    #[cfg(not(feature = "instrumentation"))]
+                    {
+                        slot.dependents.remove(&dependent_id);
+                    }
                 }
                 ThreadSafeNode::Cell(cell) => {
-                    cell.dependents.remove(&dependent_id);
+                    #[cfg(feature = "instrumentation")]
+                    {
+                        edge_removed = cell.dependents.remove(&dependent_id);
+                    }
+                    #[cfg(not(feature = "instrumentation"))]
+                    {
+                        cell.dependents.remove(&dependent_id);
+                    }
                 }
                 ThreadSafeNode::Effect(_) => {}
             }
+        }
+        #[cfg(feature = "instrumentation")]
+        if edge_removed {
+            state.instrumentation.record_dependency_edge_removed();
         }
     }
 
@@ -389,16 +491,23 @@ impl ThreadSafeContext {
     fn recompute_slot_now(&self, id: SlotId) -> ThreadSafeRecomputeResult {
         let (compute, old_dependencies, was_unset, start_revision) = {
             let mut state = self.lock_state();
-            let slot = match state.nodes.get_mut(&id) {
-                Some(ThreadSafeNode::Slot(slot)) => slot,
-                _ => panic!("get_slot called on non-slot id"),
+            let result = {
+                let slot = match state.nodes.get_mut(&id) {
+                    Some(ThreadSafeNode::Slot(slot)) => slot,
+                    _ => panic!("get_slot called on non-slot id"),
+                };
+                (
+                    Arc::clone(&slot.compute),
+                    slot.dependencies.drain().collect::<Vec<_>>(),
+                    slot.value.is_none(),
+                    slot.revision,
+                )
             };
-            (
-                Arc::clone(&slot.compute),
-                slot.dependencies.drain().collect::<Vec<_>>(),
-                slot.value.is_none(),
-                slot.revision,
-            )
+            #[cfg(feature = "instrumentation")]
+            {
+                state.instrumentation.record_slot_recompute();
+            }
+            result
         };
 
         for dependency_id in old_dependencies {
@@ -421,6 +530,12 @@ impl ThreadSafeContext {
             }
 
             if was_unset && slot.value.is_some() && !slot.dirty && !slot.force_recompute {
+                #[cfg(feature = "instrumentation")]
+                {
+                    state
+                        .instrumentation
+                        .record_duplicate_speculative_recompute();
+                }
                 return ThreadSafeRecomputeResult::Fresh(false);
             }
 
@@ -636,6 +751,11 @@ impl ThreadSafeContext {
 
         if state.scheduled_effects.insert(id) {
             state.pending_effects.push_back(id);
+            #[cfg(feature = "instrumentation")]
+            {
+                let depth = state.pending_effects.len();
+                state.instrumentation.record_effect_queue_push(depth);
+            }
         }
     }
 
@@ -913,5 +1033,36 @@ impl ThreadSafeContext {
         } else {
             false
         }
+    }
+
+    /// Return the current benchmark instrumentation counters.
+    #[cfg(feature = "instrumentation")]
+    pub fn instrumentation_snapshot(&self) -> crate::instrumentation::InstrumentationSnapshot {
+        let mut snapshot = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .expect("ThreadSafeContext mutex poisoned");
+            state.instrumentation.snapshot()
+        };
+        self.inner
+            .lock_instrumentation
+            .apply_to_snapshot(&mut snapshot);
+        snapshot
+    }
+
+    /// Reset benchmark instrumentation counters to zero.
+    #[cfg(feature = "instrumentation")]
+    pub fn reset_instrumentation(&self) {
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("ThreadSafeContext mutex poisoned");
+            state.instrumentation.reset();
+        }
+        self.inner.lock_instrumentation.reset();
     }
 }

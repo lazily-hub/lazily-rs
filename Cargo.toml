@@ -10,6 +10,7 @@ categories = ["data-structures"]
 
 [features]
 default = []
+instrumentation = []
 tokio = ["dep:tokio"]
 
 [dependencies]
@@ -25,3 +26,8 @@ required-features = ["tokio"]
 [[bench]]
 name = "context"
 harness = false
+
+[[bench]]
+name = "profile"
+harness = false
+required-features = ["instrumentation"]

@@ -153,6 +153,7 @@ the getter retries before returning a fresh value.
 - Interior mutability via `RefCell` (single-threaded)
 - Thread-local tracking stack for automatic dependency discovery
 - Zero mandatory runtime dependencies in the default library surface
+- Optional `instrumentation` feature for benchmark counters and lock timing
 
 ## Threading Roadmap
 

@@ -100,6 +100,8 @@ pub struct Context {
     pub(crate) batched_cells: RefCell<HashSet<SlotId>>,
     pub(crate) batched_cell_clears: RefCell<HashSet<SlotId>>,
     pub(crate) batched_slots: RefCell<HashSet<SlotId>>,
+    #[cfg(feature = "instrumentation")]
+    pub(crate) instrumentation: RefCell<crate::instrumentation::InstrumentationCounters>,
 }
 
 struct BatchGuard<'a> {
@@ -124,6 +126,10 @@ impl Context {
             batched_cells: RefCell::new(HashSet::new()),
             batched_cell_clears: RefCell::new(HashSet::new()),
             batched_slots: RefCell::new(HashSet::new()),
+            #[cfg(feature = "instrumentation")]
+            instrumentation: RefCell::new(
+                crate::instrumentation::InstrumentationCounters::default(),
+            ),
         }
     }
 
@@ -131,6 +137,10 @@ impl Context {
         let mut id = self.next_id.borrow_mut();
         let slot_id = SlotId(*id);
         *id += 1;
+        #[cfg(feature = "instrumentation")]
+        {
+            self.instrumentation.borrow_mut().record_node_allocation();
+        }
         slot_id
     }
 
@@ -139,6 +149,8 @@ impl Context {
             return;
         }
 
+        #[cfg(feature = "instrumentation")]
+        let mut edge_added = false;
         let mut nodes = self.nodes.borrow_mut();
         // The node being accessed gets `dependent_id` as a dependent.
         if let Some(node) = nodes.get_mut(&dependency_id) {
@@ -158,28 +170,74 @@ impl Context {
         if let Some(node) = nodes.get_mut(&dependent_id) {
             match node {
                 Node::Slot(parent) => {
-                    parent.dependencies.insert(dependency_id);
+                    #[cfg(feature = "instrumentation")]
+                    {
+                        edge_added = parent.dependencies.insert(dependency_id);
+                    }
+                    #[cfg(not(feature = "instrumentation"))]
+                    {
+                        parent.dependencies.insert(dependency_id);
+                    }
                 }
                 Node::Effect(parent) => {
-                    parent.dependencies.insert(dependency_id);
+                    #[cfg(feature = "instrumentation")]
+                    {
+                        edge_added = parent.dependencies.insert(dependency_id);
+                    }
+                    #[cfg(not(feature = "instrumentation"))]
+                    {
+                        parent.dependencies.insert(dependency_id);
+                    }
                 }
                 Node::Cell(_) => {}
             }
         }
+        drop(nodes);
+
+        #[cfg(feature = "instrumentation")]
+        if edge_added {
+            self.instrumentation
+                .borrow_mut()
+                .record_dependency_edge_added();
+        }
     }
 
     fn remove_dependent_edge(&self, dependency_id: SlotId, dependent_id: SlotId) {
+        #[cfg(feature = "instrumentation")]
+        let mut edge_removed = false;
         let mut nodes = self.nodes.borrow_mut();
         if let Some(dep_node) = nodes.get_mut(&dependency_id) {
             match dep_node {
                 Node::Slot(s) => {
-                    s.dependents.remove(&dependent_id);
+                    #[cfg(feature = "instrumentation")]
+                    {
+                        edge_removed = s.dependents.remove(&dependent_id);
+                    }
+                    #[cfg(not(feature = "instrumentation"))]
+                    {
+                        s.dependents.remove(&dependent_id);
+                    }
                 }
                 Node::Cell(c) => {
-                    c.dependents.remove(&dependent_id);
+                    #[cfg(feature = "instrumentation")]
+                    {
+                        edge_removed = c.dependents.remove(&dependent_id);
+                    }
+                    #[cfg(not(feature = "instrumentation"))]
+                    {
+                        c.dependents.remove(&dependent_id);
+                    }
                 }
                 Node::Effect(_) => {}
             }
+        }
+        drop(nodes);
+
+        #[cfg(feature = "instrumentation")]
+        if edge_removed {
+            self.instrumentation
+                .borrow_mut()
+                .record_dependency_edge_removed();
         }
     }
 
@@ -327,6 +385,10 @@ impl Context {
                 Some(Node::Slot(s)) => s,
                 _ => panic!("get_slot called on non-slot id"),
             };
+            #[cfg(feature = "instrumentation")]
+            {
+                self.instrumentation.borrow_mut().record_slot_recompute();
+            }
             // Collect old dependencies to clear edges in a second pass.
             old_deps = slot.dependencies.drain().collect();
             // Get a pointer to the compute fn.
@@ -562,7 +624,15 @@ impl Context {
 
         let inserted = self.scheduled_effects.borrow_mut().insert(id);
         if inserted {
-            self.pending_effects.borrow_mut().push_back(id);
+            let mut pending = self.pending_effects.borrow_mut();
+            pending.push_back(id);
+            #[cfg(feature = "instrumentation")]
+            {
+                let depth = pending.len();
+                self.instrumentation
+                    .borrow_mut()
+                    .record_effect_queue_push(depth);
+            }
         }
     }
 
@@ -818,6 +888,18 @@ impl Context {
         } else {
             false
         }
+    }
+
+    /// Return the current benchmark instrumentation counters.
+    #[cfg(feature = "instrumentation")]
+    pub fn instrumentation_snapshot(&self) -> crate::instrumentation::InstrumentationSnapshot {
+        self.instrumentation.borrow().snapshot()
+    }
+
+    /// Reset benchmark instrumentation counters to zero.
+    #[cfg(feature = "instrumentation")]
+    pub fn reset_instrumentation(&self) {
+        self.instrumentation.borrow_mut().reset();
     }
 }
 

@@ -342,6 +342,7 @@ Implementation notes:
 - **Single-threaded fast path:** `Context` uses `RefCell` interior mutability with no mutex overhead
 - **Explicit thread-safe path:** `ThreadSafeContext` uses a context-level lock and `Send + Sync` bounds for shared reactive graphs
 - **Performance tracking:** Criterion benchmarks cover both `Context` and `ThreadSafeContext` for cached reads, cold first access, dependency fan-out, memo equality suppression, effect flushing, and batch storms; `ThreadSafeContext` also tracks 1/2/4/8/16-worker contention.
+- **Benchmark instrumentation:** The optional `instrumentation` feature exposes lightweight counters for recompute starts, duplicate speculative thread-safe computes, dependency edge churn, effect queue depth, reactive node allocations, and `ThreadSafeContext` lock wait/hold timing.
 
 ## Performance Benchmarks
 
@@ -358,6 +359,21 @@ Required benchmark scenarios:
 - Effect flushing after dependency mutation
 - Batch storms that coalesce many writes into one invalidation/effect flush boundary
 - `ThreadSafeContext` contention at 1, 2, 4, 8, and 16 workers
+
+The optional `instrumentation` feature adds `instrumentation_snapshot()` and
+`reset_instrumentation()` to both context types and exports
+`InstrumentationSnapshot`. The snapshot records:
+
+- Reactive node allocation events as a stable allocation proxy
+- Slot recompute callback starts
+- Duplicate speculative `ThreadSafeContext` recomputes that lose publication races
+- Dependency edges added and removed
+- Effect queue pushes and maximum pending queue depth
+- `ThreadSafeContext` graph-lock acquisitions plus total wait and hold nanoseconds
+
+The instrumentation profile bench lives in `benches/profile.rs` and is gated
+behind `required-features = ["instrumentation"]`; compile it with
+`cargo bench --features instrumentation --no-run`.
 
 ## Differences from lazily-zig
 

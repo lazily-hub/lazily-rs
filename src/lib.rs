@@ -37,11 +37,15 @@
 mod cell;
 mod context;
 mod effect;
+#[cfg(feature = "instrumentation")]
+mod instrumentation;
 mod slot;
 mod thread_safe;
 
 pub use cell::CellHandle;
 pub use context::Context;
 pub use effect::{EffectCallbackResult, EffectHandle};
+#[cfg(feature = "instrumentation")]
+pub use instrumentation::InstrumentationSnapshot;
 pub use slot::SlotHandle;
 pub use thread_safe::{ThreadSafeContext, ThreadSafeEffectCallbackResult};

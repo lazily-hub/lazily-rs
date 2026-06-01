@@ -518,6 +518,105 @@ mod threading_contract {
 }
 
 // ============================================================================
+// 1c. Benchmark Instrumentation
+// ============================================================================
+
+#[cfg(feature = "instrumentation")]
+mod benchmark_instrumentation {
+    use super::*;
+
+    /// SPEC: The optional instrumentation feature exposes lightweight counters
+    /// for benchmark diagnostics without changing the public reactive semantics.
+    #[test]
+    fn context_instrumentation_tracks_graph_work() {
+        let ctx = Context::new();
+        let root = ctx.cell(0usize);
+        let parity = ctx.memo(move |ctx| ctx.get_cell(&root) % 2);
+        let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
+        let _effect = ctx.effect(move |ctx| {
+            ctx.get(&label);
+        });
+
+        let allocation_snapshot = ctx.instrumentation_snapshot();
+        assert_eq!(
+            allocation_snapshot.node_allocations, 4,
+            "cell, memo slot, computed slot, and effect should allocate nodes"
+        );
+
+        ctx.reset_instrumentation();
+        ctx.set_cell(&root, 2);
+        assert_eq!(ctx.get(&label), 1);
+
+        let snapshot = ctx.instrumentation_snapshot();
+        assert!(
+            snapshot.slot_recomputes >= 1,
+            "dirty memo slot should validate during effect flush or later get"
+        );
+        assert!(
+            snapshot.dependency_edges_added >= 1,
+            "recompute should re-add tracked dependency edges"
+        );
+        assert!(
+            snapshot.dependency_edges_removed >= 1,
+            "recompute should remove stale dependency edges before rediscovery"
+        );
+        assert_eq!(snapshot.effect_queue_pushes, 1);
+        assert!(snapshot.max_effect_queue_depth >= 1);
+    }
+
+    /// SPEC: `ThreadSafeContext` instrumentation tracks graph work plus
+    /// duplicate speculative computes and lock timing.
+    #[test]
+    fn thread_safe_instrumentation_tracks_duplicates_and_locks() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(40usize);
+        let barrier = Arc::new(Barrier::new(2));
+        let compute_barrier = Arc::clone(&barrier);
+        let answer = ctx.computed(move |ctx| {
+            compute_barrier.wait();
+            ctx.get_cell(&root).wrapping_add(2)
+        });
+
+        let allocation_snapshot = ctx.instrumentation_snapshot();
+        assert_eq!(
+            allocation_snapshot.node_allocations, 2,
+            "cell and computed slot should allocate nodes"
+        );
+
+        ctx.reset_instrumentation();
+
+        let workers = (0..2)
+            .map(|_| {
+                let ctx = ctx.clone();
+                thread::spawn(move || ctx.get(&answer))
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            assert_eq!(worker.join().expect("worker should finish"), 42);
+        }
+
+        let snapshot = ctx.instrumentation_snapshot();
+        assert_eq!(
+            snapshot.slot_recomputes, 2,
+            "both first-get callers should start speculative computes"
+        );
+        assert_eq!(
+            snapshot.duplicate_speculative_recomputes, 1,
+            "one speculative compute should lose publication"
+        );
+        assert!(
+            snapshot.dependency_edges_added >= 1,
+            "published compute should track the cell dependency"
+        );
+        assert!(
+            snapshot.lock_acquisitions > 0,
+            "thread-safe operations should acquire the graph lock"
+        );
+    }
+}
+
+// ============================================================================
 // 2. Slot Semantics
 // ============================================================================
 
