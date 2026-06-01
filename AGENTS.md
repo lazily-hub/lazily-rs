@@ -9,7 +9,7 @@ Lazy reactive primitives library for Rust.
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
 - `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph
 - `tests/integration.rs` — 13 integration tests
-- `tests/spec_compliance.rs` — 61 spec compliance tests
+- `tests/spec_compliance.rs` — 68 spec compliance tests
 
 ## Key Design Decisions
 
@@ -23,7 +23,7 @@ Lazy reactive primitives library for Rust.
 ## Commands
 
 ```bash
-cargo test          # Run all tests (74 integration/spec tests + 1 doctest)
+cargo test          # Run all tests (81 integration/spec tests + 1 doctest)
 cargo clippy        # Lint
 cargo build         # Build
 ```

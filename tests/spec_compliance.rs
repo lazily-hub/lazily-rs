@@ -15,8 +15,10 @@ use lazily::{CellHandle, Context, EffectHandle, SlotHandle, ThreadSafeContext};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
+use std::time::Duration;
 
 // ============================================================================
 // 1. Context
@@ -229,6 +231,289 @@ mod threading_contract {
         assert_eq!(*seen.lock().expect("seen lock"), vec![0, 1]);
         ctx.dispose_effect(&effect);
         assert!(!ctx.is_effect_active(&effect));
+    }
+
+    /// SPEC: concurrent first access to one thread-safe slot returns the same
+    /// value to all callers and leaves the slot cached.
+    #[test]
+    fn thread_safe_concurrent_first_get_contention() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(21i32);
+        let compute_count = Arc::new(AtomicUsize::new(0));
+        let compute_count_for_slot = Arc::clone(&compute_count);
+        let answer = ctx.computed(move |ctx| {
+            compute_count_for_slot.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(10));
+            ctx.get_cell(&root) * 2
+        });
+
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let ctx = ctx.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    ctx.get(&answer)
+                })
+            })
+            .collect();
+
+        for worker in threads {
+            assert_eq!(worker.join().expect("worker should finish"), 42);
+        }
+        assert_eq!(ctx.get(&answer), 42);
+        assert!(ctx.is_set(&answer));
+        assert!(
+            compute_count.load(Ordering::SeqCst) <= 8,
+            "each contending caller should compute at most once"
+        );
+    }
+
+    /// SPEC: high-frequency concurrent cell writes do not corrupt graph state;
+    /// the final slot read matches the final cell value.
+    #[test]
+    fn thread_safe_concurrent_set_cell_contention() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(0usize);
+        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root) * 2);
+
+        assert_eq!(ctx.get(&doubled), 0);
+
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|thread_id| {
+                let ctx = ctx.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for step in 0..200 {
+                        ctx.set_cell(&root, thread_id * 1_000 + step);
+                        assert_eq!(ctx.get(&doubled) % 2, 0);
+                    }
+                })
+            })
+            .collect();
+
+        for worker in threads {
+            worker.join().expect("worker should finish");
+        }
+
+        let final_value = ctx.get_cell(&root);
+        assert_eq!(ctx.get(&doubled), final_value * 2);
+    }
+
+    /// SPEC: if an upstream cell changes while a thread-safe slot callback is
+    /// running, the stale callback result is discarded and recomputed before
+    /// the getter returns.
+    #[test]
+    fn thread_safe_retries_slot_compute_invalidated_midflight() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(0usize);
+        let compute_runs = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(AtomicUsize::new(0));
+        let compute_runs_for_slot = Arc::clone(&compute_runs);
+        let gate_for_slot = Arc::clone(&gate);
+        let derived = ctx.computed(move |ctx| {
+            let run = compute_runs_for_slot.fetch_add(1, Ordering::SeqCst) + 1;
+            let value = ctx.get_cell(&root);
+            if run == 1 {
+                gate_for_slot.store(1, Ordering::SeqCst);
+                while gate_for_slot.load(Ordering::SeqCst) == 1 {
+                    thread::yield_now();
+                }
+            }
+            value
+        });
+
+        let worker_ctx = ctx.clone();
+        let worker = thread::spawn(move || worker_ctx.get(&derived));
+
+        while gate.load(Ordering::SeqCst) != 1 {
+            thread::yield_now();
+        }
+        ctx.set_cell(&root, 1);
+        gate.store(2, Ordering::SeqCst);
+
+        assert_eq!(worker.join().expect("worker should finish"), 1);
+        assert_eq!(ctx.get(&derived), 1);
+        assert!(
+            compute_runs.load(Ordering::SeqCst) >= 2,
+            "midflight invalidation should force a retry"
+        );
+    }
+
+    /// SPEC: a batch opened on another thread defers thread-safe effect reruns
+    /// until the outermost batch exits.
+    #[test]
+    fn thread_safe_batch_flushes_after_cross_thread_exit() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(0i32);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_effect = Arc::clone(&seen);
+
+        let _effect = ctx.effect(move |ctx| {
+            seen_for_effect
+                .lock()
+                .expect("seen lock should not be poisoned")
+                .push(ctx.get_cell(&root));
+        });
+
+        assert_eq!(*seen.lock().expect("seen lock"), vec![0]);
+
+        let worker_ctx = ctx.clone();
+        let seen_for_worker = Arc::clone(&seen);
+        let worker = thread::spawn(move || {
+            worker_ctx.batch(|ctx| {
+                ctx.set_cell(&root, 1);
+                ctx.set_cell(&root, 2);
+                assert_eq!(
+                    *seen_for_worker.lock().expect("seen lock"),
+                    vec![0],
+                    "effect should not rerun before batch exit"
+                );
+            });
+        });
+        worker.join().expect("worker should finish");
+
+        assert_eq!(*seen.lock().expect("seen lock"), vec![0, 2]);
+    }
+
+    /// SPEC: diamond invalidation from another thread schedules one effect
+    /// rerun even when multiple dirty paths reach the same effect.
+    #[test]
+    fn thread_safe_effect_coalesces_diamond_invalidation_across_thread() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(0i32);
+        let left = ctx.computed(move |ctx| ctx.get_cell(&root) + 1);
+        let right = ctx.computed(move |ctx| ctx.get_cell(&root) + 1);
+        let sum = ctx.computed(move |ctx| ctx.get(&left) + ctx.get(&right));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_effect = Arc::clone(&seen);
+
+        let _effect = ctx.effect(move |ctx| {
+            seen_for_effect
+                .lock()
+                .expect("seen lock should not be poisoned")
+                .push(ctx.get(&sum));
+        });
+
+        assert_eq!(*seen.lock().expect("seen lock"), vec![2]);
+
+        let worker_ctx = ctx.clone();
+        let worker = thread::spawn(move || {
+            worker_ctx.set_cell(&root, 1);
+        });
+        worker.join().expect("worker should finish");
+
+        assert_eq!(*seen.lock().expect("seen lock"), vec![2, 4]);
+    }
+
+    /// SPEC: thread-safe effect callbacks may re-enter the same context and
+    /// schedule more work without deadlocking the active flush.
+    #[test]
+    fn thread_safe_effect_reentrant_write_does_not_deadlock() {
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let ctx = ThreadSafeContext::new();
+            let root = ctx.cell(0i32);
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let seen_for_effect = Arc::clone(&seen);
+
+            let effect = ctx.effect(move |ctx| {
+                let current = ctx.get_cell(&root);
+                seen_for_effect
+                    .lock()
+                    .expect("seen lock should not be poisoned")
+                    .push(current);
+                if current == 0 {
+                    ctx.set_cell(&root, 1);
+                }
+            });
+
+            ctx.dispose_effect(&effect);
+            tx.send(seen.lock().expect("seen lock").clone())
+                .expect("receiver should still be open");
+        });
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("effect rerun should not deadlock"),
+            vec![0, 1]
+        );
+    }
+
+    /// SPEC: clearing slots, clearing cell dependents, disposing effects, and
+    /// setting cells from different threads do not leave graph state corrupted.
+    #[test]
+    fn thread_safe_clear_and_dispose_races_remain_consistent() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(1usize);
+        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root) * 2);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_for_effect = Arc::clone(&runs);
+
+        let effect = ctx.effect(move |ctx| {
+            runs_for_effect.fetch_add(1, Ordering::SeqCst);
+            ctx.get(&doubled);
+        });
+
+        assert_eq!(ctx.get(&doubled), 2);
+
+        let barrier = Arc::new(Barrier::new(4));
+        let dispose_thread = {
+            let ctx = ctx.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                ctx.dispose_effect(&effect);
+            })
+        };
+        let set_thread = {
+            let ctx = ctx.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                for value in 2..100 {
+                    ctx.set_cell(&root, value);
+                }
+            })
+        };
+        let clear_slot_thread = {
+            let ctx = ctx.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..100 {
+                    ctx.clear(&doubled);
+                }
+            })
+        };
+        let clear_cell_thread = {
+            let ctx = ctx.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..100 {
+                    ctx.clear_cell_dependents(&root);
+                }
+            })
+        };
+
+        dispose_thread.join().expect("dispose thread should finish");
+        set_thread.join().expect("set thread should finish");
+        clear_slot_thread
+            .join()
+            .expect("slot clear thread should finish");
+        clear_cell_thread
+            .join()
+            .expect("cell clear thread should finish");
+
+        assert!(!ctx.is_effect_active(&effect));
+        let final_value = ctx.get_cell(&root);
+        assert_eq!(ctx.get(&doubled), final_value * 2);
+        assert!(runs.load(Ordering::SeqCst) >= 1);
     }
 }
 

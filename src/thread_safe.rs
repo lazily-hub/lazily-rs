@@ -68,6 +68,7 @@ struct ThreadSafeSlotNode {
     dependents: HashSet<SlotId>,
     dirty: bool,
     force_recompute: bool,
+    revision: u64,
 }
 
 struct ThreadSafeCellNode {
@@ -86,6 +87,11 @@ enum ThreadSafeNode {
     Slot(ThreadSafeSlotNode),
     Cell(ThreadSafeCellNode),
     Effect(ThreadSafeEffectNode),
+}
+
+enum ThreadSafeRecomputeResult {
+    Fresh(bool),
+    Stale,
 }
 
 #[derive(Default)]
@@ -287,6 +293,7 @@ impl ThreadSafeContext {
             dependents: HashSet::new(),
             dirty: false,
             force_recompute: false,
+            revision: 0,
         };
         self.lock_state()
             .nodes
@@ -354,7 +361,12 @@ impl ThreadSafeContext {
             return false;
         }
 
-        self.recompute_slot_now(id)
+        loop {
+            match self.recompute_slot_now(id) {
+                ThreadSafeRecomputeResult::Fresh(changed) => return changed,
+                ThreadSafeRecomputeResult::Stale => {}
+            }
+        }
     }
 
     fn is_slot_node(&self, id: SlotId) -> bool {
@@ -370,8 +382,8 @@ impl ThreadSafeContext {
         }
     }
 
-    fn recompute_slot_now(&self, id: SlotId) -> bool {
-        let (compute, old_dependencies, was_unset) = {
+    fn recompute_slot_now(&self, id: SlotId) -> ThreadSafeRecomputeResult {
+        let (compute, old_dependencies, was_unset, start_revision) = {
             let mut state = self.lock_state();
             let slot = match state.nodes.get_mut(&id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot,
@@ -381,6 +393,7 @@ impl ThreadSafeContext {
                 Arc::clone(&slot.compute),
                 slot.dependencies.drain().collect::<Vec<_>>(),
                 slot.value.is_none(),
+                slot.revision,
             )
         };
 
@@ -396,11 +409,15 @@ impl ThreadSafeContext {
             let mut state = self.lock_state();
             let slot = match state.nodes.get_mut(&id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot,
-                _ => return false,
+                _ => return ThreadSafeRecomputeResult::Fresh(false),
             };
 
+            if slot.revision != start_revision {
+                return ThreadSafeRecomputeResult::Stale;
+            }
+
             if was_unset && slot.value.is_some() && !slot.dirty && !slot.force_recompute {
-                return false;
+                return ThreadSafeRecomputeResult::Fresh(false);
             }
 
             let had_value = slot.value.is_some();
@@ -411,14 +428,14 @@ impl ThreadSafeContext {
             slot.dirty = false;
             slot.force_recompute = false;
             if unchanged {
-                false
+                ThreadSafeRecomputeResult::Fresh(false)
             } else {
                 slot.value = Some(result);
                 if had_value {
                     Self::notify_slot_value_changed_locked(&mut state, id);
-                    true
+                    ThreadSafeRecomputeResult::Fresh(true)
                 } else {
-                    false
+                    ThreadSafeRecomputeResult::Fresh(false)
                 }
             }
         }
@@ -752,6 +769,7 @@ impl ThreadSafeContext {
                 slot.value = None;
                 slot.dirty = false;
                 slot.force_recompute = false;
+                slot.revision = slot.revision.wrapping_add(1);
                 slot.dependents.iter().copied().collect::<Vec<_>>()
             } else {
                 return;
@@ -851,6 +869,7 @@ impl ThreadSafeContext {
                 return;
             };
             let should_propagate = !slot.dirty || (force_recompute && !slot.force_recompute);
+            slot.revision = slot.revision.wrapping_add(1);
             slot.dirty = true;
             if force_recompute {
                 slot.force_recompute = true;
