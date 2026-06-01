@@ -17,6 +17,7 @@ pub struct Context {
     flushing_effects: RefCell<bool>,
     batch_depth: RefCell<usize>,
     batched_cells: RefCell<HashSet<SlotId>>,
+    batched_cell_clears: RefCell<HashSet<SlotId>>,
     batched_slots: RefCell<HashSet<SlotId>>,
 }
 ```
@@ -27,13 +28,14 @@ pub struct Context {
 |--------|---------|
 | `Context::new()` | Create a new context |
 | `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot |
+| `ctx.memo(\|ctx\| T)` | Create a lazily-computed slot with a `PartialEq` memoization guard |
 | `ctx.get(&slot)` | Get value (computes if unset) |
 | `ctx.cell(value)` | Create a mutable cell |
 | `ctx.get_cell(&cell)` | Get cell value |
-| `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
-| `ctx.batch(\|ctx\| { ... })` | Defer changed-cell and explicit-slot invalidation until the outermost batch exits |
+| `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
+| `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
-| `ctx.is_set(&slot)` | Check if slot has cached value |
+| `ctx.is_set(&slot)` | Check if slot has a cached value that is not forced stale |
 | `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
 | `cell.clear_dependents(&ctx)` | Clear downstream slots without changing cell value |
 | `effect.dispose(&ctx)` | Dispose an effect, unsubscribe dependencies, and run cleanup |
@@ -42,27 +44,33 @@ pub struct Context {
 ### Slot
 
 Lazily-computed cached value with dependency tracking. A Slot is either **unset** or **set** with a value produced by its compute function.
+`ctx.memo()` creates a Slot whose values implement `PartialEq` so dirty caches can be compared against recomputed values.
 
 ```rust
 struct SlotNode {
     value: Option<Box<dyn Any>>,
     compute: Box<dyn Fn(&Context) -> Box<dyn Any>>,
+    equals: Option<Box<dyn Fn(&dyn Any, &dyn Any) -> bool>>,
     dependencies: HashSet<SlotId>,
     dependents: HashSet<SlotId>,
+    dirty: bool,
+    force_recompute: bool,
 }
 ```
 
 **Semantics:**
 
 - **Activation:** First `ctx.get()` calls the compute function, caches the result
-- **Clearing:** Removes the cached value and clears all dependent slots recursively
-- **Dependencies:** If Slot B accesses Slot A during computation, B depends on A. If A clears, B clears automatically
+- **Invalidation:** Marks the cached value dirty and marks downstream slots dirty without discarding their cached values
+- **Clearing:** Explicit `slot.clear(&ctx)` removes the cached value and clears all dependent slots recursively
+- **Memo guard:** Dirty `ctx.memo()` slots compare recomputed values with the previous cache via `PartialEq`; equal values make downstream dirty slots fresh without recomputing them
+- **Dependencies:** If Slot B accesses Slot A during computation, B depends on A. If A clears, B clears automatically; if A's value changes after dirty validation, B is forced stale
 - **Immutable by default:** Once set, a Slot's value doesn't change — only clear + recompute
 - **Dynamic:** Dependencies re-discovered on each recomputation (no stale subscriptions)
 
 ### Cell
 
-Mutable value container. Changing a Cell's value clears all dependent Slots.
+Mutable value container. Changing a Cell's value marks dependent Slots dirty.
 
 ```rust
 struct CellNode {
@@ -75,7 +83,7 @@ struct CellNode {
 
 - `ctx.set_cell()` compares old and new via `PartialEq`
 - If unchanged, no invalidation occurs (no-op)
-- If changed, all dependent Slots are recursively cleared
+- If changed, dependent Slots are marked dirty while cached values are preserved for memo validation
 
 ### Effect
 
@@ -88,6 +96,7 @@ struct EffectNode {
     run: Box<dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>>,
     dependencies: HashSet<SlotId>,
     cleanup: Option<Box<dyn FnOnce()>>,
+    force_run: bool,
 }
 ```
 
@@ -97,6 +106,7 @@ struct EffectNode {
 - **Auto-tracking:** Any Slot or Cell accessed during the callback becomes a dependency
 - **Scheduling:** Dependency invalidation schedules the effect, then the context flushes scheduled effects after the invalidation pass
 - **Coalescing:** An effect scheduled through multiple dependency paths in the same invalidation pass runs once
+- **Memo guard:** Effects scheduled by dirty slot dependencies first validate those slots and skip cleanup/rerun when values are unchanged
 - **Cleanup:** Returning a cleanup closure runs it before the next rerun and on disposal
 - **Disposal:** `effect.dispose(&ctx)` unsubscribes from dependencies, removes pending scheduled work, and prevents future reruns
 
@@ -114,11 +124,11 @@ ctx.batch(|ctx| {
 **Semantics:**
 
 - **Outermost boundary:** Nested batches flush only when the outermost batch exits
-- **Changed cells:** `ctx.set_cell()` still updates the cell value immediately, but dependent invalidation is queued until batch exit
+- **Changed cells:** `ctx.set_cell()` still updates the cell value immediately, but dependent dirty marking is queued until batch exit
 - **Explicit clears:** `slot.clear(&ctx)` and `cell.clear_dependents(&ctx)` are queued until batch exit
 - **Coalescing:** Repeated updates to the same cell or clears of the same slot queue one invalidation root
 - **Effect flushing:** Effects scheduled by batched invalidation rerun after the batch invalidation pass and coalesce duplicate schedules
-- **Reads during a batch:** Direct `ctx.get_cell()` reads see the latest cell value immediately; dependent slot reads keep their pre-batch cached value until invalidation flushes at batch exit
+- **Reads during a batch:** Direct `ctx.get_cell()` reads see the latest cell value immediately; dependent slot reads keep their pre-batch cached value until dirty marking flushes at batch exit
 
 ### SlotId
 
@@ -139,23 +149,26 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 2. When an Effect runs, it also pushes a frame onto the tracking stack
 3. Any nested slot/cell access sees the parent frame
 4. The child registers the parent as a dependent
-5. When a dependency clears or a Cell changes, slot dependents clear recursively and effect dependents are scheduled
+5. When a dependency clears, slot dependents hard-clear recursively; when a Cell changes, slot dependents are marked dirty and effect dependents are scheduled
 
 ## Invalidation Semantics
 
-- `ctx.set_cell()` → if value changed (PartialEq) → clear all dependent slots
+- `ctx.set_cell()` → if value changed (PartialEq) → mark all dependent slots dirty
 - `slot.clear(&ctx)` → remove cached value → cascade clear to all dependents
 - `cell.clear_dependents(&ctx)` → clear all dependent slots without changing cell value
-- `ctx.batch()` → queue changed cells and explicit slot/cell clears, then invalidate queued roots when the outermost batch exits
-- Slot clearing → remove cached value → cascade clear to all dependents
-- Cleared slots recompute on next `ctx.get()` access
+- `ctx.batch()` → queue changed cells and explicit slot/cell clears, then flush queued roots when the outermost batch exits
+- Slot invalidation → preserve cached value as dirty → validate/recompute on next `ctx.get()` access
+- If a dirty `ctx.memo()` slot recomputes to an equal value, downstream dirty slots become fresh without recomputing
+- Slot clearing → remove cached value → hard-clear dependents recursively
 - Effects rerun after the invalidation pass if any tracked dependency invalidated
+- Effects scheduled only by dirty slot dependencies skip rerun if those slots validate unchanged
 - Effect cleanup runs before rerun and on disposal
 
 ## Design Goals
 
-- **Lazy evaluation:** Values computed only when first accessed
+- **Lazy evaluation:** Values computed only when first accessed or when dirty caches are validated
 - **Fine-grained reactivity:** Only affected dependents recompute
+- **Memoized invalidation:** Equal intermediate `ctx.memo()` recomputation suppresses downstream recomputation/effect reruns
 - **Effects:** Side effects are scheduled from the same dependency graph as slots
 - **Batching:** Multiple writes can share one invalidation/effect flush boundary
 - **Zero external dependencies:** Pure Rust, no crates

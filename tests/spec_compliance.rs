@@ -5,7 +5,7 @@
 //! 2. Slot semantics — lazy compute, caching, clearing, cascading, immutability
 //! 3. Cell semantics — get, set, PartialEq guard, invalidation
 //! 4. Dependency tracking — thread-local stack, auto-discovery
-//! 5. Invalidation semantics — cascade, lazy recomputation
+//! 5. Invalidation semantics — lazy recomputation, memo guard
 //! 6. Effect system — auto-tracking, scheduling, cleanup, disposal
 //! 7. Batch updates — deferred invalidation and effect flushing
 //! 8. Edge cases — no deps, shared deps, deep chains, dynamic deps
@@ -140,7 +140,8 @@ mod slot_semantics {
         assert!(!ctx.is_set(&s), "slot should be cleared after cell change");
     }
 
-    /// SPEC: "Clearing cascades to dependents"
+    /// SPEC: Changed-cell invalidation keeps downstream cached until a changed
+    /// intermediate value is proven.
     #[test]
     fn clear_cascades_to_dependents() {
         let ctx = Context::new();
@@ -155,11 +156,13 @@ mod slot_semantics {
         assert!(ctx.is_set(&b));
         assert!(ctx.is_set(&d));
 
-        // Change cell — all downstream should clear.
+        // Change cell — the direct slot is forced stale, but downstream slots
+        // keep their cached values until access proves whether `a` changed.
         ctx.set_cell(&c, 2);
         assert!(!ctx.is_set(&a), "a should be cleared");
-        assert!(!ctx.is_set(&b), "b should be cleared (cascade from a)");
-        assert!(!ctx.is_set(&d), "d should be cleared (cascade from b)");
+        assert!(ctx.is_set(&b), "b keeps a memoized cached value");
+        assert!(ctx.is_set(&d), "d keeps a memoized cached value");
+        assert_eq!(ctx.get(&d), 112);
     }
 
     /// SPEC: "Dependencies auto-discovered via tracking stack"
@@ -397,10 +400,11 @@ mod dependency_tracking {
 
         assert_eq!(ctx.get(&outer), 11);
 
-        // Change cell — outer should also be invalidated because inner is its dep.
+        // Change cell — the direct dependent is forced stale. The outer slot
+        // keeps its cached value until its dependency is refreshed.
         ctx.set_cell(&c, 5);
         assert!(!ctx.is_set(&inner));
-        assert!(!ctx.is_set(&outer));
+        assert!(ctx.is_set(&outer));
 
         assert_eq!(ctx.get(&outer), 51);
         INNER_COUNT.with(|c| assert_eq!(c.get(), 2));
@@ -506,8 +510,7 @@ mod dependency_tracking {
 mod invalidation_semantics {
     use super::*;
 
-    /// SPEC: "Cell.set() → if value changed → clear all dependent slots"
-    /// The cell itself retains its new value; only dependents are cleared.
+    /// SPEC: `Cell.set()` stores the new value and marks dependent slots dirty.
     #[test]
     fn cell_set_clears_dependents_not_self() {
         let ctx = Context::new();
@@ -519,13 +522,14 @@ mod invalidation_semantics {
 
         // Cell has new value immediately.
         assert_eq!(ctx.get_cell(&c), 2);
-        // Dependent slot is cleared.
+        // Dependent slot is forced stale.
         assert!(!ctx.is_set(&s));
         // Recomputes with new value.
         assert_eq!(ctx.get(&s), 2);
     }
 
-    /// SPEC: "Slot.clear() → remove cached value → cascade clear to all dependents"
+    /// SPEC: `ctx.set_cell()` marks direct slot dependents stale without hard
+    /// clearing downstream memoized values.
     #[test]
     fn slot_clear_cascades() {
         let ctx = Context::new();
@@ -537,10 +541,12 @@ mod invalidation_semantics {
         assert!(ctx.is_set(&a));
         assert!(ctx.is_set(&b));
 
-        // Clearing a (via cell change) should cascade to b.
+        // Changing the cell forces `a` stale, while `b` keeps a cached value
+        // until access proves whether `a` changed.
         ctx.set_cell(&c, 2);
         assert!(!ctx.is_set(&a));
-        assert!(!ctx.is_set(&b));
+        assert!(ctx.is_set(&b));
+        assert_eq!(ctx.get(&b), 12);
     }
 
     /// SPEC: "Cleared slots recompute on next get() access" (lazy recomputation).
@@ -605,6 +611,57 @@ mod invalidation_semantics {
         assert_eq!(ctx.get(&s), 5);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 2, "exactly one recompute on access"));
     }
+
+    /// SPEC: If an intermediate slot recomputes equal, downstream dirty slots
+    /// become fresh again without recomputing.
+    #[test]
+    fn equal_intermediate_slot_prevents_downstream_recompute() {
+        let ctx = Context::new();
+        let root = ctx.cell(0i32);
+        let parity_computes = Rc::new(RefCell::new(0));
+        let parity_computes_for_slot = Rc::clone(&parity_computes);
+        let parity = ctx.memo(move |ctx| {
+            *parity_computes_for_slot.borrow_mut() += 1;
+            ctx.get_cell(&root) % 2
+        });
+        let downstream_computes = Rc::new(RefCell::new(0));
+        let downstream_computes_for_slot = Rc::clone(&downstream_computes);
+        let downstream = ctx.slot(move |ctx| {
+            *downstream_computes_for_slot.borrow_mut() += 1;
+            ctx.get(&parity) * 10
+        });
+
+        assert_eq!(ctx.get(&downstream), 0);
+        assert_eq!(*parity_computes.borrow(), 1);
+        assert_eq!(*downstream_computes.borrow(), 1);
+
+        ctx.set_cell(&root, 2);
+        assert!(!ctx.is_set(&parity));
+        assert!(ctx.is_set(&downstream));
+
+        assert_eq!(ctx.get(&downstream), 0);
+        assert_eq!(
+            *parity_computes.borrow(),
+            2,
+            "dirty intermediate slot should validate once"
+        );
+        assert_eq!(
+            *downstream_computes.borrow(),
+            1,
+            "equal intermediate value should keep downstream cache"
+        );
+        assert!(ctx.is_set(&parity));
+        assert!(ctx.is_set(&downstream));
+
+        ctx.set_cell(&root, 3);
+        assert_eq!(ctx.get(&downstream), 10);
+        assert_eq!(*parity_computes.borrow(), 3);
+        assert_eq!(
+            *downstream_computes.borrow(),
+            2,
+            "changed intermediate value should recompute downstream"
+        );
+    }
 }
 
 // ============================================================================
@@ -667,6 +724,54 @@ mod effect_system {
             vec![5, 23],
             "diamond invalidation should schedule one effect rerun"
         );
+    }
+
+    /// SPEC: Scheduled effects skip cleanup/rerun when slot dependencies
+    /// validate to the same value.
+    #[test]
+    fn effect_skips_rerun_when_slot_dependency_recomputes_equal() {
+        let ctx = Context::new();
+        let root = ctx.cell(0i32);
+        let parity_computes = Rc::new(RefCell::new(0));
+        let parity_computes_for_slot = Rc::clone(&parity_computes);
+        let parity = ctx.memo(move |ctx| {
+            *parity_computes_for_slot.borrow_mut() += 1;
+            ctx.get_cell(&root) % 2
+        });
+        let label_computes = Rc::new(RefCell::new(0));
+        let label_computes_for_slot = Rc::clone(&label_computes);
+        let label = ctx.slot(move |ctx| {
+            *label_computes_for_slot.borrow_mut() += 1;
+            ctx.get(&parity) * 10
+        });
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_for_effect = Rc::clone(&seen);
+
+        let _effect = ctx.effect(move |ctx| {
+            seen_for_effect.borrow_mut().push(ctx.get(&label));
+        });
+
+        assert_eq!(*seen.borrow(), vec![0]);
+        assert_eq!(*parity_computes.borrow(), 1);
+        assert_eq!(*label_computes.borrow(), 1);
+
+        ctx.set_cell(&root, 2);
+        assert_eq!(
+            *seen.borrow(),
+            vec![0],
+            "equal slot value should suppress the effect rerun"
+        );
+        assert_eq!(*parity_computes.borrow(), 2);
+        assert_eq!(
+            *label_computes.borrow(),
+            1,
+            "effect validation should not recompute unchanged downstream slot"
+        );
+
+        ctx.set_cell(&root, 3);
+        assert_eq!(*seen.borrow(), vec![0, 10]);
+        assert_eq!(*parity_computes.borrow(), 3);
+        assert_eq!(*label_computes.borrow(), 2);
     }
 
     /// SPEC: Cleanup runs before each rerun and when the effect is disposed.
@@ -994,6 +1099,30 @@ mod batch_updates {
             "dependent slot should recompute once after batch exit"
         );
     }
+
+    /// SPEC: Batched cell updates combined with explicit clears still hard-clear transitive slots.
+    #[test]
+    fn batch_cell_set_plus_clear_dependents_hard_clears_transitive_slots() {
+        let ctx = Context::new();
+        let value = ctx.cell(2i32);
+        let doubled = ctx.slot(move |ctx| ctx.get_cell(&value) * 2);
+        let label = ctx.slot(move |ctx| format!("value:{}", ctx.get(&doubled)));
+
+        assert_eq!(ctx.get(&label), "value:4");
+        assert!(ctx.is_set(&doubled));
+        assert!(ctx.is_set(&label));
+
+        ctx.batch(|ctx| {
+            ctx.set_cell(&value, 3);
+            value.clear_dependents(ctx);
+            assert!(ctx.is_set(&doubled));
+            assert!(ctx.is_set(&label));
+        });
+
+        assert!(!ctx.is_set(&doubled));
+        assert!(!ctx.is_set(&label));
+        assert_eq!(ctx.get(&label), "value:6");
+    }
 }
 
 // ============================================================================
@@ -1127,12 +1256,13 @@ mod edge_cases {
 
         // Change root.
         ctx.set_cell(&root, 100);
-        // All should be cleared.
+        // Only the direct dependent is forced stale. Transitive dependents keep
+        // cached values until access proves the previous layer changed.
         assert!(!ctx.is_set(&s1));
-        assert!(!ctx.is_set(&s2));
-        assert!(!ctx.is_set(&s3));
-        assert!(!ctx.is_set(&s4));
-        assert!(!ctx.is_set(&s5));
+        assert!(ctx.is_set(&s2));
+        assert!(ctx.is_set(&s3));
+        assert!(ctx.is_set(&s4));
+        assert!(ctx.is_set(&s5));
 
         // root=100, s1=100, s2=101, s3=102, s4=103, s5=104
         assert_eq!(ctx.get(&s5), 104);
@@ -1203,7 +1333,8 @@ mod edge_cases {
         COUNT.with(|cnt| assert_eq!(cnt.get(), 4, "should compute exactly 4 times"));
     }
 
-    /// Diamond dependency: cell → (a, b) → d. Changing cell clears both branches.
+    /// Diamond dependency: cell → (a, b) → d. Changing cell marks both
+    /// branches stale while preserving `d` until a branch proves changed.
     #[test]
     fn diamond_dependency_both_branches_cleared() {
         thread_local! {
@@ -1226,7 +1357,7 @@ mod edge_cases {
         ctx.set_cell(&root, 10);
         assert!(!ctx.is_set(&a));
         assert!(!ctx.is_set(&b));
-        assert!(!ctx.is_set(&d));
+        assert!(ctx.is_set(&d));
 
         assert_eq!(ctx.get(&d), 23); // (10+1) + (10+2) = 23
         D_COUNT.with(|c| assert_eq!(c.get(), 2));

@@ -13,7 +13,8 @@ Lazy reactive primitives for Rust — Context, Slots, Cells with automatic depen
 - **Cell** — a mutable value that invalidates dependent Slots when changed
 - **Effect** — a side-effect callback that automatically reruns after tracked dependencies invalidate
 
-Values are **lazy**: dependents are cleared on invalidation but only recomputed when accessed. This contrasts with eager "signal" systems that recompute immediately.
+Values are **lazy**: dependents are marked dirty on invalidation but only validated or recomputed when accessed. This contrasts with eager "signal" systems that recompute immediately.
+`ctx.memo()` Slots use a memo guard: if recomputation produces the same value, downstream dirty caches and effects are left alone.
 Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect reruns happen once after the outermost batch exits.
 
 ## Usage
@@ -34,7 +35,7 @@ let doubled = ctx.slot(|ctx| {
 
 assert_eq!(ctx.get(&doubled), 0);
 
-// Mutate the cell — dependents are cleared (not recomputed yet)
+// Mutate the cell — dependents are marked dirty (not recomputed yet)
 ctx.set_cell(&counter, 5);
 
 // Slot recomputes lazily on next access
@@ -75,23 +76,24 @@ In a web server handling requests, you might have 50 computed values available b
 
 ### Slot
 
-A `SlotHandle<T>` wraps a compute function `Fn(&Context) -> T`. The result is cached after first access. Dependencies are discovered automatically via a thread-local tracking stack — any Slot or Cell accessed during computation becomes a dependency.
+A `SlotHandle<T>` wraps a compute function `Fn(&Context) -> T`. The result is cached after first access. Dependencies are discovered automatically via a thread-local tracking stack — any Slot or Cell accessed during computation becomes a dependency. Use `ctx.memo()` instead of `ctx.slot()` when `T: PartialEq` and equal recomputations should suppress downstream work.
 
-When a dependency is invalidated, the Slot clears its cached value. It does **not** recompute until `ctx.get()` is called again.
+When a dependency is invalidated, the Slot marks its cached value dirty. It does **not** validate or recompute until `ctx.get()` is called again.
+For `ctx.memo()` slots, if recomputation returns a value equal to the previous cache, downstream dirty Slots become fresh without recomputing, and scheduled effects that only depended on unchanged Slots skip cleanup/rerun.
 
 **Dependencies are dynamic.** Every time a Slot recomputes, it re-discovers its dependencies from scratch. If your compute function has conditional branches that access different Cells depending on state, the dependency graph updates automatically. No stale subscriptions, no manual cleanup.
 
 ### Cell
 
-A `CellHandle<T>` holds a mutable value. `ctx.set_cell()` compares old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively cleared.
+A `CellHandle<T>` holds a mutable value. `ctx.set_cell()` compares old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively marked dirty.
 
 ### Batch Updates
 
-`ctx.batch(|ctx| { ... })` groups multiple cell updates and explicit slot/cell clears into one invalidation pass. Nested batches flush only when the outermost batch exits. Direct `ctx.get_cell()` reads inside the callback see the latest cell value immediately; dependent Slot caches are invalidated after the batch, so Slot reads during the callback return their pre-batch cached value until the batch completes.
+`ctx.batch(|ctx| { ... })` groups multiple cell updates and explicit slot/cell clears into one invalidation pass. Nested batches flush only when the outermost batch exits. Direct `ctx.get_cell()` reads inside the callback see the latest cell value immediately; changed-cell dependents are marked dirty after the batch, so Slot reads during the callback return their pre-batch cached value until the batch completes.
 
 ### Effect
 
-An `EffectHandle` represents a side-effect callback registered with `ctx.effect()`. Effects run immediately, track any Slots or Cells read during that run, and rerun after those dependencies invalidate. Scheduled effect reruns are flushed after the invalidation pass, so diamond dependency paths coalesce to one rerun.
+An `EffectHandle` represents a side-effect callback registered with `ctx.effect()`. Effects run immediately, track any Slots or Cells read during that run, and rerun after those dependencies invalidate. Scheduled effect reruns are flushed after the invalidation pass, so diamond dependency paths coalesce to one rerun. Effects scheduled only by dirty Slot dependencies first validate those Slots and skip cleanup/rerun when values are unchanged.
 
 Effects can return a cleanup closure. Cleanup runs before the next rerun and when the handle is disposed:
 
@@ -110,13 +112,14 @@ effect.dispose(&ctx);
 |--------|---------|
 | `Context::new()` | Create a new context |
 | `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot |
+| `ctx.memo(\|ctx\| T)` | Create a lazily-computed slot with a `PartialEq` memoization guard |
 | `ctx.get(&slot)` | Get value (computes if unset) |
 | `ctx.cell(value)` | Create a mutable cell |
 | `ctx.get_cell(&cell)` | Get cell value |
-| `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
-| `ctx.batch(\|ctx\| { ... })` | Defer changed-cell and explicit-slot invalidation until the outermost batch exits |
+| `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
+| `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
-| `ctx.is_set(&slot)` | Check if slot has cached value |
+| `ctx.is_set(&slot)` | Check if slot has a cached value that is not forced stale |
 | `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
 | `cell.clear_dependents(&ctx)` | Clear downstream slots without changing cell value |
 | `effect.dispose(&ctx)` | Dispose an effect and unsubscribe dependencies |
@@ -124,8 +127,9 @@ effect.dispose(&ctx);
 
 ## Design
 
-- **Lazy, not eager:** Slots clear on invalidation but only recompute on access
+- **Lazy, not eager:** Slots mark dirty on invalidation but only validate/recompute on access
 - **PartialEq guard:** `Cell.set()` only invalidates when value actually changes
+- **Memo guard:** Dirty `ctx.memo()` Slots compare recomputed values and suppress downstream recomputation/effect reruns when values are equal
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)
 - **Batching:** Multiple writes share one invalidation/effect flush boundary
 - **Effect scheduling:** Effects rerun after dependency invalidation and coalesce duplicate schedules

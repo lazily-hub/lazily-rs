@@ -8,19 +8,20 @@ Lazy reactive primitives library for Rust.
 - `src/slot.rs` — `SlotHandle<T>` (lightweight `Copy` id into Context)
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
 - `tests/integration.rs` — 13 integration tests
-- `tests/spec_compliance.rs` — 51 spec compliance tests
+- `tests/spec_compliance.rs` — 54 spec compliance tests
 
 ## Key Design Decisions
 
-- **Lazy, not eager:** Slots clear on invalidation but only recompute on access
+- **Lazy, not eager:** Slots mark dirty on invalidation but only recompute on access
 - **PartialEq guard:** `Cell.set()` only invalidates when value actually changes
+- **Memo guard:** `ctx.memo()` slots compare recomputed values and keep downstream caches when values are equal
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)
 - **RefCell interior mutability:** Single-threaded by design
 
 ## Commands
 
 ```bash
-cargo test          # Run all tests (64 total)
+cargo test          # Run all tests (67 total)
 cargo clippy        # Lint
 cargo build         # Build
 ```
