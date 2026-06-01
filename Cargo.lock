@@ -5,3 +5,15 @@ version = 4
 [[package]]
 name = "lazily"
 version = "0.1.1"
+
+[[patch.unused]]
+name = "agent-kit"
+version = "0.4.0"
+
+[[patch.unused]]
+name = "tagpath"
+version = "0.12.1"
+
+[[patch.unused]]
+name = "tmux-router"
+version = "0.3.10"

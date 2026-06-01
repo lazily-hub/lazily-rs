@@ -889,6 +889,112 @@ mod edge_cases {
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1, "no recompute without access"));
     }
 
+    /// SlotHandle::clear removes cached value and cascades to dependents.
+    #[test]
+    fn slot_handle_clear_cascades() {
+        let ctx = Context::new();
+        let a = ctx.slot(|_| 42);
+        let b = ctx.slot(move |ctx| ctx.get(&a) + 1);
+        let c = ctx.slot(move |ctx| ctx.get(&b) + 1);
+
+        assert_eq!(ctx.get(&c), 44);
+        assert!(ctx.is_set(&a));
+        assert!(ctx.is_set(&b));
+        assert!(ctx.is_set(&c));
+
+        a.clear(&ctx);
+        assert!(!ctx.is_set(&a), "cleared slot should be unset");
+        assert!(!ctx.is_set(&b), "dependent should cascade-clear");
+        assert!(!ctx.is_set(&c), "transitive dependent should cascade-clear");
+
+        assert_eq!(ctx.get(&c), 44);
+    }
+
+    /// SlotHandle::clear on an already-cleared slot is a no-op.
+    #[test]
+    fn slot_handle_clear_idempotent() {
+        thread_local! {
+            static COUNT: Cell<u32> = const { Cell::new(0) };
+        }
+        COUNT.with(|c| c.set(0));
+
+        let ctx = Context::new();
+        let s = ctx.slot(|_| {
+            COUNT.with(|c| c.set(c.get() + 1));
+            42
+        });
+
+        assert_eq!(ctx.get(&s), 42);
+        COUNT.with(|c| assert_eq!(c.get(), 1));
+
+        s.clear(&ctx);
+        s.clear(&ctx);
+        s.clear(&ctx);
+
+        assert_eq!(ctx.get(&s), 42);
+        COUNT.with(|c| assert_eq!(c.get(), 2, "only one recompute after multiple clears"));
+    }
+
+    /// SlotHandle::clear on a slot that was never accessed is a no-op.
+    #[test]
+    fn slot_handle_clear_on_unset_slot() {
+        let ctx = Context::new();
+        let s = ctx.slot(|_| 42);
+        assert!(!ctx.is_set(&s));
+        s.clear(&ctx);
+        assert!(!ctx.is_set(&s));
+        assert_eq!(ctx.get(&s), 42);
+    }
+
+    /// CellHandle::clear_dependents clears downstream slots without changing the cell value.
+    #[test]
+    fn cell_handle_clear_dependents() {
+        thread_local! {
+            static COUNT: Cell<u32> = const { Cell::new(0) };
+        }
+        COUNT.with(|c| c.set(0));
+
+        let ctx = Context::new();
+        let c = ctx.cell(10i32);
+        let s = ctx.slot(move |ctx| {
+            COUNT.with(|cnt| cnt.set(cnt.get() + 1));
+            ctx.get_cell(&c) * 2
+        });
+
+        assert_eq!(ctx.get(&s), 20);
+        COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
+
+        c.clear_dependents(&ctx);
+        assert!(!ctx.is_set(&s), "slot should be cleared");
+        assert_eq!(ctx.get_cell(&c), 10, "cell value unchanged");
+
+        assert_eq!(ctx.get(&s), 20);
+        COUNT.with(|cnt| assert_eq!(cnt.get(), 2, "slot recomputed after clear_dependents"));
+    }
+
+    /// CellHandle::clear_dependents cascades through transitive dependents.
+    #[test]
+    fn cell_handle_clear_dependents_cascades() {
+        let ctx = Context::new();
+        let c = ctx.cell(1i32);
+        let a = ctx.slot(move |ctx| ctx.get_cell(&c) + 1);
+        let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
+        let d = ctx.slot(move |ctx| ctx.get(&b) + 100);
+
+        assert_eq!(ctx.get(&d), 112);
+        assert!(ctx.is_set(&a));
+        assert!(ctx.is_set(&b));
+        assert!(ctx.is_set(&d));
+
+        c.clear_dependents(&ctx);
+        assert!(!ctx.is_set(&a));
+        assert!(!ctx.is_set(&b));
+        assert!(!ctx.is_set(&d));
+        assert_eq!(ctx.get_cell(&c), 1, "cell value unchanged");
+
+        assert_eq!(ctx.get(&d), 112);
+    }
+
     /// Slot handles are Copy — copies refer to the same underlying slot.
     #[test]
     fn slot_handle_copy_refers_to_same_slot() {

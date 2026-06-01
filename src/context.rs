@@ -285,7 +285,7 @@ impl Context {
     // -- Clearing ----------------------------------------------------------
 
     /// Clear a slot's cached value and recursively clear all dependents.
-    fn clear_slot(&self, id: SlotId) {
+    pub(crate) fn clear_slot(&self, id: SlotId) {
         let dependents: Vec<SlotId>;
         {
             let mut nodes = self.nodes.borrow_mut();
