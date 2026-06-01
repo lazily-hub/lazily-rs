@@ -12,6 +12,12 @@ Container for all slots and cells. Owns all allocations via interior mutability 
 pub struct Context {
     nodes: RefCell<HashMap<SlotId, Node>>,
     next_id: RefCell<u64>,
+    pending_effects: RefCell<VecDeque<SlotId>>,
+    scheduled_effects: RefCell<HashSet<SlotId>>,
+    flushing_effects: RefCell<bool>,
+    batch_depth: RefCell<usize>,
+    batched_cells: RefCell<HashSet<SlotId>>,
+    batched_slots: RefCell<HashSet<SlotId>>,
 }
 ```
 
@@ -25,6 +31,7 @@ pub struct Context {
 | `ctx.cell(value)` | Create a mutable cell |
 | `ctx.get_cell(&cell)` | Get cell value |
 | `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
+| `ctx.batch(\|ctx\| { ... })` | Defer changed-cell and explicit-slot invalidation until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.is_set(&slot)` | Check if slot has cached value |
 | `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
@@ -93,6 +100,26 @@ struct EffectNode {
 - **Cleanup:** Returning a cleanup closure runs it before the next rerun and on disposal
 - **Disposal:** `effect.dispose(&ctx)` unsubscribes from dependencies, removes pending scheduled work, and prevents future reruns
 
+### Batch
+
+Write-coalescing boundary for multiple cell updates or explicit slot clears.
+
+```rust
+ctx.batch(|ctx| {
+    ctx.set_cell(&a, 1);
+    ctx.set_cell(&b, 2);
+});
+```
+
+**Semantics:**
+
+- **Outermost boundary:** Nested batches flush only when the outermost batch exits
+- **Changed cells:** `ctx.set_cell()` still updates the cell value immediately, but dependent invalidation is queued until batch exit
+- **Explicit clears:** `slot.clear(&ctx)` and `cell.clear_dependents(&ctx)` are queued until batch exit
+- **Coalescing:** Repeated updates to the same cell or clears of the same slot queue one invalidation root
+- **Effect flushing:** Effects scheduled by batched invalidation rerun after the batch invalidation pass and coalesce duplicate schedules
+- **Reads during a batch:** Direct `ctx.get_cell()` reads see the latest cell value immediately; dependent slot reads keep their pre-batch cached value until invalidation flushes at batch exit
+
 ### SlotId
 
 Unique identifier for reactive nodes. Lightweight `Copy` type wrapping a `u64`.
@@ -119,6 +146,7 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 - `ctx.set_cell()` → if value changed (PartialEq) → clear all dependent slots
 - `slot.clear(&ctx)` → remove cached value → cascade clear to all dependents
 - `cell.clear_dependents(&ctx)` → clear all dependent slots without changing cell value
+- `ctx.batch()` → queue changed cells and explicit slot/cell clears, then invalidate queued roots when the outermost batch exits
 - Slot clearing → remove cached value → cascade clear to all dependents
 - Cleared slots recompute on next `ctx.get()` access
 - Effects rerun after the invalidation pass if any tracked dependency invalidated
@@ -129,6 +157,7 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 - **Lazy evaluation:** Values computed only when first accessed
 - **Fine-grained reactivity:** Only affected dependents recompute
 - **Effects:** Side effects are scheduled from the same dependency graph as slots
+- **Batching:** Multiple writes can share one invalidation/effect flush boundary
 - **Zero external dependencies:** Pure Rust, no crates
 - **Single-threaded:** `RefCell` interior mutability (no Mutex overhead)
 

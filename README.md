@@ -14,6 +14,7 @@ Lazy reactive primitives for Rust — Context, Slots, Cells with automatic depen
 - **Effect** — a side-effect callback that automatically reruns after tracked dependencies invalidate
 
 Values are **lazy**: dependents are cleared on invalidation but only recomputed when accessed. This contrasts with eager "signal" systems that recompute immediately.
+Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect reruns happen once after the outermost batch exits.
 
 ## Usage
 
@@ -46,6 +47,12 @@ let effect = ctx.effect(move |ctx| {
 
 ctx.set_cell(&counter, 6); // schedules and runs the effect once
 effect.dispose(&ctx); // unsubscribes and prevents future reruns
+
+// Batch writes coalesce invalidation and effect reruns.
+ctx.batch(|ctx| {
+    ctx.set_cell(&counter, 7);
+    ctx.set_cell(&counter, 8);
+});
 ```
 
 ## Why Lazy?
@@ -78,6 +85,10 @@ When a dependency is invalidated, the Slot clears its cached value. It does **no
 
 A `CellHandle<T>` holds a mutable value. `ctx.set_cell()` compares old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively cleared.
 
+### Batch Updates
+
+`ctx.batch(|ctx| { ... })` groups multiple cell updates and explicit slot/cell clears into one invalidation pass. Nested batches flush only when the outermost batch exits. Direct `ctx.get_cell()` reads inside the callback see the latest cell value immediately; dependent Slot caches are invalidated after the batch, so Slot reads during the callback return their pre-batch cached value until the batch completes.
+
 ### Effect
 
 An `EffectHandle` represents a side-effect callback registered with `ctx.effect()`. Effects run immediately, track any Slots or Cells read during that run, and rerun after those dependencies invalidate. Scheduled effect reruns are flushed after the invalidation pass, so diamond dependency paths coalesce to one rerun.
@@ -103,6 +114,7 @@ effect.dispose(&ctx);
 | `ctx.cell(value)` | Create a mutable cell |
 | `ctx.get_cell(&cell)` | Get cell value |
 | `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
+| `ctx.batch(\|ctx\| { ... })` | Defer changed-cell and explicit-slot invalidation until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.is_set(&slot)` | Check if slot has cached value |
 | `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
@@ -115,6 +127,7 @@ effect.dispose(&ctx);
 - **Lazy, not eager:** Slots clear on invalidation but only recompute on access
 - **PartialEq guard:** `Cell.set()` only invalidates when value actually changes
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)
+- **Batching:** Multiple writes share one invalidation/effect flush boundary
 - **Effect scheduling:** Effects rerun after dependency invalidation and coalesce duplicate schedules
 - Interior mutability via `RefCell` (single-threaded)
 - Thread-local tracking stack for automatic dependency discovery

@@ -86,6 +86,19 @@ pub struct Context {
     pub(crate) pending_effects: RefCell<VecDeque<SlotId>>,
     pub(crate) scheduled_effects: RefCell<HashSet<SlotId>>,
     pub(crate) flushing_effects: RefCell<bool>,
+    pub(crate) batch_depth: RefCell<usize>,
+    pub(crate) batched_cells: RefCell<HashSet<SlotId>>,
+    pub(crate) batched_slots: RefCell<HashSet<SlotId>>,
+}
+
+struct BatchGuard<'a> {
+    ctx: &'a Context,
+}
+
+impl Drop for BatchGuard<'_> {
+    fn drop(&mut self) {
+        self.ctx.finish_batch();
+    }
 }
 
 impl Context {
@@ -96,6 +109,9 @@ impl Context {
             pending_effects: RefCell::new(VecDeque::new()),
             scheduled_effects: RefCell::new(HashSet::new()),
             flushing_effects: RefCell::new(false),
+            batch_depth: RefCell::new(0),
+            batched_cells: RefCell::new(HashSet::new()),
+            batched_slots: RefCell::new(HashSet::new()),
         }
     }
 
@@ -313,20 +329,60 @@ impl Context {
                     c.value = Box::new(new_value);
                 }
             }
-            // Collect dependents and clear them.
-            let dependents: Vec<SlotId> = {
-                let nodes = self.nodes.borrow();
-                if let Some(Node::Cell(c)) = nodes.get(&handle.id) {
-                    c.dependents.iter().copied().collect()
-                } else {
-                    vec![]
-                }
-            };
-            for dep_id in dependents {
-                self.invalidate_dependent(dep_id);
+            if self.is_batching() {
+                self.batched_cells.borrow_mut().insert(handle.id);
+            } else {
+                self.invalidate_cell_dependents_now(handle.id);
+                self.flush_effects();
             }
-            self.flush_effects();
         }
+    }
+
+    // -- Batch API ---------------------------------------------------------
+
+    /// Run several updates as one invalidation pass.
+    ///
+    /// Cell updates and explicit clears inside the callback are collected and
+    /// applied when the outermost batch completes. Direct cell reads see the
+    /// latest values immediately; dependent slots keep their previous cached
+    /// values until the batch exits.
+    pub fn batch<F, R>(&self, run: F) -> R
+    where
+        F: FnOnce(&Context) -> R,
+    {
+        *self.batch_depth.borrow_mut() += 1;
+        let _guard = BatchGuard { ctx: self };
+        run(self)
+    }
+
+    fn finish_batch(&self) {
+        let should_flush = {
+            let mut depth = self.batch_depth.borrow_mut();
+            assert!(*depth > 0, "finish_batch called without active batch");
+            *depth -= 1;
+            *depth == 0
+        };
+
+        if should_flush {
+            self.flush_batched_invalidations();
+        }
+    }
+
+    fn is_batching(&self) -> bool {
+        *self.batch_depth.borrow() > 0
+    }
+
+    fn flush_batched_invalidations(&self) {
+        let cells: Vec<SlotId> = self.batched_cells.borrow_mut().drain().collect();
+        let slots: Vec<SlotId> = self.batched_slots.borrow_mut().drain().collect();
+
+        for cell_id in cells {
+            self.invalidate_cell_dependents_now(cell_id);
+        }
+        for slot_id in slots {
+            self.clear_slot_now(slot_id);
+        }
+        self.flush_effects();
     }
 
     // -- Effect API --------------------------------------------------------
@@ -461,6 +517,20 @@ impl Context {
 
     /// Clear a slot's cached value and recursively clear all dependents.
     pub(crate) fn clear_slot(&self, id: SlotId) {
+        if self.is_batching() {
+            self.batched_slots.borrow_mut().insert(id);
+            return;
+        }
+        self.clear_slot_now(id);
+    }
+
+    pub(crate) fn flush_effects_after_invalidation(&self) {
+        if !self.is_batching() {
+            self.flush_effects();
+        }
+    }
+
+    fn clear_slot_now(&self, id: SlotId) {
         let dependents: Vec<SlotId>;
         {
             let mut nodes = self.nodes.borrow_mut();
@@ -480,6 +550,15 @@ impl Context {
     }
 
     pub(crate) fn clear_cell_dependents(&self, id: SlotId) {
+        if self.is_batching() {
+            self.batched_cells.borrow_mut().insert(id);
+            return;
+        }
+        self.invalidate_cell_dependents_now(id);
+        self.flush_effects();
+    }
+
+    fn invalidate_cell_dependents_now(&self, id: SlotId) {
         let dependents: Vec<SlotId> = {
             let nodes = self.nodes.borrow();
             match nodes.get(&id) {
@@ -490,7 +569,6 @@ impl Context {
         for dep_id in dependents {
             self.invalidate_dependent(dep_id);
         }
-        self.flush_effects();
     }
 
     /// Check whether a slot currently has a cached value (for testing).

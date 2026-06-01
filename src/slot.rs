@@ -25,7 +25,7 @@ impl<T> SlotHandle<T> {
     /// The slot will recompute on the next [`Context::get`] call.
     pub fn clear(&self, ctx: &Context) {
         ctx.clear_slot(self.id);
-        ctx.flush_effects();
+        ctx.flush_effects_after_invalidation();
     }
 }
 

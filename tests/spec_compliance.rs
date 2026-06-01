@@ -7,7 +7,8 @@
 //! 4. Dependency tracking — thread-local stack, auto-discovery
 //! 5. Invalidation semantics — cascade, lazy recomputation
 //! 6. Effect system — auto-tracking, scheduling, cleanup, disposal
-//! 7. Edge cases — no deps, shared deps, deep chains, dynamic deps
+//! 7. Batch updates — deferred invalidation and effect flushing
+//! 8. Edge cases — no deps, shared deps, deep chains, dynamic deps
 
 use lazily::Context;
 use std::cell::{Cell, RefCell};
@@ -798,7 +799,205 @@ mod effect_system {
 }
 
 // ============================================================================
-// 7. Edge Cases
+// 7. Batch Updates
+// ============================================================================
+
+mod batch_updates {
+    use super::*;
+
+    /// SPEC: Batches defer changed-cell invalidation until the callback exits.
+    #[test]
+    fn batch_defers_cell_invalidation_until_outermost_exit() {
+        let ctx = Context::new();
+        let value = ctx.cell(0i32);
+        let computes = Rc::new(RefCell::new(0));
+        let computes_for_slot = Rc::clone(&computes);
+        let doubled = ctx.slot(move |ctx| {
+            *computes_for_slot.borrow_mut() += 1;
+            ctx.get_cell(&value) * 2
+        });
+
+        assert_eq!(ctx.get(&doubled), 0);
+        assert_eq!(*computes.borrow(), 1);
+
+        ctx.batch(|ctx| {
+            ctx.set_cell(&value, 1);
+            ctx.set_cell(&value, 2);
+
+            assert_eq!(ctx.get_cell(&value), 2);
+            assert!(
+                ctx.is_set(&doubled),
+                "dependent slot should stay cached while the batch is open"
+            );
+            assert_eq!(
+                ctx.get(&doubled),
+                0,
+                "dependent slot reads remain pre-batch until invalidation flushes"
+            );
+        });
+
+        assert!(
+            !ctx.is_set(&doubled),
+            "batch exit should clear changed-cell dependents"
+        );
+        assert_eq!(ctx.get(&doubled), 4);
+        assert_eq!(
+            *computes.borrow(),
+            2,
+            "slot should recompute once after the batch"
+        );
+    }
+
+    /// SPEC: Multiple updates in one batch schedule each dependent effect once.
+    #[test]
+    fn batch_coalesces_effect_reruns() {
+        let ctx = Context::new();
+        let value = ctx.cell(0i32);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_for_effect = Rc::clone(&seen);
+
+        let _effect = ctx.effect(move |ctx| {
+            seen_for_effect.borrow_mut().push(ctx.get_cell(&value));
+        });
+
+        assert_eq!(*seen.borrow(), vec![0]);
+
+        ctx.batch(|ctx| {
+            ctx.set_cell(&value, 1);
+            ctx.set_cell(&value, 2);
+            ctx.set_cell(&value, 3);
+            assert_eq!(
+                *seen.borrow(),
+                vec![0],
+                "effect should not rerun before batch exit"
+            );
+        });
+
+        assert_eq!(
+            *seen.borrow(),
+            vec![0, 3],
+            "effect should rerun once with the final batched value"
+        );
+    }
+
+    /// SPEC: Nested batches flush only when the outermost batch completes.
+    #[test]
+    fn nested_batches_flush_only_at_outermost_exit() {
+        let ctx = Context::new();
+        let value = ctx.cell(0i32);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_for_effect = Rc::clone(&seen);
+
+        let _effect = ctx.effect(move |ctx| {
+            seen_for_effect.borrow_mut().push(ctx.get_cell(&value));
+        });
+
+        ctx.batch(|ctx| {
+            ctx.set_cell(&value, 1);
+
+            ctx.batch(|ctx| {
+                ctx.set_cell(&value, 2);
+            });
+
+            assert_eq!(
+                *seen.borrow(),
+                vec![0],
+                "inner batch exit should not flush while outer batch is open"
+            );
+        });
+
+        assert_eq!(*seen.borrow(), vec![0, 2]);
+    }
+
+    /// SPEC: Explicit slot clears inside a batch are deferred and flush effects
+    /// after cleanup has been preserved.
+    #[test]
+    fn batch_defers_slot_clear_and_effect_cleanup() {
+        let ctx = Context::new();
+        let value = ctx.cell(2i32);
+        let doubled = ctx.slot(move |ctx| ctx.get_cell(&value) * 2);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_for_effect = Rc::clone(&events);
+
+        let _effect = ctx.effect(move |ctx| {
+            let current = ctx.get(&doubled);
+            events_for_effect
+                .borrow_mut()
+                .push(format!("run:{current}"));
+            let events_for_cleanup = Rc::clone(&events_for_effect);
+            move || {
+                events_for_cleanup
+                    .borrow_mut()
+                    .push(format!("cleanup:{current}"));
+            }
+        });
+
+        assert_eq!(*events.borrow(), vec!["run:4"]);
+
+        ctx.batch(|ctx| {
+            doubled.clear(ctx);
+            assert!(
+                ctx.is_set(&doubled),
+                "slot.clear should defer cache clearing while batched"
+            );
+            assert_eq!(
+                *events.borrow(),
+                vec!["run:4"],
+                "effect cleanup/rerun should wait for batch exit"
+            );
+        });
+
+        assert_eq!(
+            *events.borrow(),
+            vec!["run:4", "cleanup:4", "run:4"],
+            "batch exit should clear the slot and rerun dependents once"
+        );
+    }
+
+    /// SPEC: Explicit cell dependent clears inside a batch are deferred.
+    #[test]
+    fn batch_defers_cell_clear_dependents() {
+        let ctx = Context::new();
+        let value = ctx.cell(2i32);
+        let computes = Rc::new(RefCell::new(0));
+        let computes_for_slot = Rc::clone(&computes);
+        let doubled = ctx.slot(move |ctx| {
+            *computes_for_slot.borrow_mut() += 1;
+            ctx.get_cell(&value) * 2
+        });
+
+        assert_eq!(ctx.get(&doubled), 4);
+        assert_eq!(*computes.borrow(), 1);
+
+        ctx.batch(|ctx| {
+            value.clear_dependents(ctx);
+            assert!(
+                ctx.is_set(&doubled),
+                "cell.clear_dependents should defer dependent clearing while batched"
+            );
+            assert_eq!(ctx.get(&doubled), 4);
+            assert_eq!(
+                *computes.borrow(),
+                1,
+                "dependent slot should not recompute before batch exit"
+            );
+        });
+
+        assert!(
+            !ctx.is_set(&doubled),
+            "batch exit should clear explicit cell dependents"
+        );
+        assert_eq!(ctx.get(&doubled), 4);
+        assert_eq!(
+            *computes.borrow(),
+            2,
+            "dependent slot should recompute once after batch exit"
+        );
+    }
+}
+
+// ============================================================================
+// 8. Edge Cases
 // ============================================================================
 
 mod edge_cases {
