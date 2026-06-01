@@ -177,6 +177,12 @@ those need the separate `AsyncContext` design captured in `SPEC.md`, including
 in-flight future deduplication, stale completion handling, cleanup ordering, and
 separate `Send` versus `LocalSet` surfaces.
 
+`ThreadSafeContext` intentionally keeps a mutex-first graph lock. RwLock,
+sharded-lock, Condvar, or CAS variants should wait for lock wait/hold benchmark
+evidence and a Loom or Shuttle safety model for stale in-flight completion,
+invalidation during compute, effect scheduling/disposal, and re-entrant
+callbacks.
+
 ## Multi-Language
 
 lazily is implemented across three languages with shared semantics:

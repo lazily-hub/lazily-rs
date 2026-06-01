@@ -233,6 +233,13 @@ Locking model:
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
 
+Lock strategy evaluation:
+
+- Keep the context-level `Mutex` as the only graph synchronization primitive until benchmark instrumentation shows lock wait/hold time dominates the relevant workload
+- The current short contention sample after in-flight dedup improved 1-2 worker runs, was neutral around 4 workers, and regressed at 8-16 workers; this is not enough evidence to adopt `RwLock`, sharded locks, or targeted CAS
+- Any future `RwLock`, sharding, `Condvar`, or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the mutex-first design
+- A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
+
 Tokio integration is scoped in two stages:
 
 1. Synchronous thread-safe sharing first: `ThreadSafeContext` should work inside
