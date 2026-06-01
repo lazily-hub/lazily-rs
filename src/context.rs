@@ -15,7 +15,7 @@ type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
 
 /// Unique identifier for a reactive node (slot or cell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SlotId(u64);
+pub struct SlotId(pub(crate) u64);
 
 // ---------------------------------------------------------------------------
 // Thread-local tracking stack for automatic dependency discovery

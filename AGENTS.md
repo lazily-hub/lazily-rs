@@ -7,8 +7,9 @@ Lazy reactive primitives library for Rust.
 - `src/context.rs` — `Context` struct, dependency graph, thread-local tracking stack
 - `src/slot.rs` — `SlotHandle<T>` (lightweight `Copy` id into Context)
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
+- `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph
 - `tests/integration.rs` — 13 integration tests
-- `tests/spec_compliance.rs` — 57 spec compliance tests
+- `tests/spec_compliance.rs` — 61 spec compliance tests
 
 ## Key Design Decisions
 
@@ -17,11 +18,12 @@ Lazy reactive primitives library for Rust.
 - **Memo guard:** `ctx.memo()` slots compare recomputed values and keep downstream caches when values are equal
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)
 - **RefCell interior mutability:** Single-threaded by design
+- **Explicit thread safety:** `ThreadSafeContext` preserves `Context`'s fast path while adding `Send + Sync` shared graph support
 
 ## Commands
 
 ```bash
-cargo test          # Run all tests (70 integration/spec tests + 1 doctest)
+cargo test          # Run all tests (74 integration/spec tests + 1 doctest)
 cargo clippy        # Lint
 cargo build         # Build
 ```

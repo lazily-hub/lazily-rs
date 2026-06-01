@@ -42,6 +42,37 @@ pub struct Context {
 | `effect.dispose(&ctx)` | Dispose an effect, unsubscribe dependencies, and run cleanup |
 | `effect.is_active(&ctx)` | Check whether an effect is still registered |
 
+### ThreadSafeContext
+
+Mutex-backed counterpart to `Context` for sharing one reactive graph across OS
+threads. It mirrors the core local-context API and requires thread-safe values
+and callbacks.
+
+```rust
+pub struct ThreadSafeContext {
+    inner: Arc<ThreadSafeInner>,
+}
+```
+
+**API:**
+
+| Method | Purpose |
+|--------|---------|
+| `ThreadSafeContext::new()` | Create a new thread-safe context |
+| `ctx.computed(\|ctx\| T)` | Create a `Send + Sync` derived lazily-computed value |
+| `ctx.slot(\|ctx\| T)` | Create a `Send + Sync` lazily-computed slot |
+| `ctx.memo(\|ctx\| T)` | Create a `Send + Sync` lazily-computed slot with a `PartialEq` memoization guard |
+| `ctx.get(&slot)` | Get value from any thread (computes if unset) |
+| `ctx.cell(value)` | Create a mutable `Send + Sync` cell |
+| `ctx.get_cell(&cell)` | Get cell value from any thread |
+| `ctx.set_cell(&cell, value)` | Update cell and invalidate dependents across threads |
+| `ctx.batch(\|ctx\| { ... })` | Defer invalidation until the outermost shared batch exits |
+| `ctx.effect(\|ctx\| { ... })` | Run a `Send + Sync` effect immediately and rerun it after tracked dependencies invalidate |
+| `ctx.clear(&slot)` | Clear cached value and cascade to dependents |
+| `ctx.clear_cell_dependents(&cell)` | Clear downstream slots without changing cell value |
+| `ctx.dispose_effect(&effect)` | Dispose an effect, unsubscribe dependencies, and run cleanup |
+| `ctx.is_effect_active(&effect)` | Check whether an effect is still registered |
+
 ### Slot
 
 Lazily-computed cached value with dependency tracking. A Slot is **fresh**, **dirty**, or **unset**; dirty slots may retain a previous cached value for memo validation.
@@ -171,14 +202,13 @@ Current guarantees:
 - `EffectHandle` is a lightweight id; effect execution and cleanup remain tied to the owning context thread
 - Dependency tracking is thread-local; a compute/effect callback cannot split work onto another thread and expect nested reads there to attach to the original tracking frame
 
-### Planned `ThreadSafeContext`
+### `ThreadSafeContext`
 
-Thread-safe support should be explicit rather than silently changing `Context`.
-The preferred API shape is a separate `ThreadSafeContext` type or feature-gated
-context family that mirrors the existing `Context` methods while preserving the
+Thread-safe support is explicit rather than a silent change to `Context`.
+`ThreadSafeContext` mirrors the existing `Context` methods while preserving the
 single-threaded fast path.
 
-Planned API and bounds:
+API bounds:
 
 | Method family | Additional bounds |
 |---------------|-------------------|
@@ -190,7 +220,7 @@ Planned API and bounds:
 
 Locking model:
 
-- Use one context-level synchronization primitive for graph state first, matching lazily-zig's mutex-first design before introducing finer-grained locks
+- Uses one context-level synchronization primitive for graph state, matching lazily-zig's mutex-first design before introducing finer-grained locks
 - Do not hold the graph lock while running user compute callbacks, effect callbacks, or cleanup closures
 - Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
 - Re-entrant user code must be able to call back into the same context without deadlocking
@@ -229,7 +259,8 @@ Tokio integration is scoped in two stages:
 - **Effects:** Side effects are scheduled from the same dependency graph as slots
 - **Batching:** Multiple writes can share one invalidation/effect flush boundary
 - **Zero external dependencies:** Pure Rust, no crates
-- **Single-threaded fast path:** `Context` uses `RefCell` interior mutability with no mutex overhead; shared-context support is reserved for explicit `ThreadSafeContext` work
+- **Single-threaded fast path:** `Context` uses `RefCell` interior mutability with no mutex overhead
+- **Explicit thread-safe path:** `ThreadSafeContext` uses a context-level lock and `Send + Sync` bounds for shared reactive graphs
 
 ## Differences from lazily-zig
 
@@ -239,7 +270,7 @@ Tokio integration is scoped in two stages:
 | Slot creation | `comptime` function pointers | Closures (`Box<dyn Fn>`) |
 | Storage modes | `.direct` / `.indirect` | Unified via generics |
 | FFI | Built-in `StringView` | Via `#[no_mangle]` + `extern "C"` |
-| Thread safety | Mutex by default; `-Dthread_safe=false` removes locking | Current `Context` is single-threaded (`RefCell`); planned `ThreadSafeContext` should start with a context-level lock |
+| Thread safety | Mutex by default; `-Dthread_safe=false` removes locking | `Context` is single-threaded (`RefCell`); `ThreadSafeContext` uses a context-level lock |
 
 ## Differences from lazily-py
 

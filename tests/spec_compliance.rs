@@ -11,9 +11,11 @@
 //! 8. Edge cases — no deps, shared deps, deep chains, dynamic deps
 //! 9. Threading contract — local contexts today, portable handles for future shared contexts
 
-use lazily::{CellHandle, Context, EffectHandle, SlotHandle};
+use lazily::{CellHandle, Context, EffectHandle, SlotHandle, ThreadSafeContext};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 // ============================================================================
@@ -125,6 +127,108 @@ mod threading_contract {
             .collect();
 
         assert_eq!(values, vec![20, 22, 24, 26]);
+    }
+
+    /// SPEC: `ThreadSafeContext` shares a single graph across OS threads while
+    /// keeping handles id-only and copyable.
+    #[test]
+    fn thread_safe_context_shares_slot_across_threads() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(21i32);
+        let compute_count = Arc::new(AtomicUsize::new(0));
+        let compute_count_for_slot = Arc::clone(&compute_count);
+        let answer = ctx.computed(move |ctx| {
+            compute_count_for_slot.fetch_add(1, Ordering::SeqCst);
+            ctx.get_cell(&root) * 2
+        });
+
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let ctx = ctx.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    ctx.get(&answer)
+                })
+            })
+            .collect();
+
+        let values: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("worker should finish"))
+            .collect();
+
+        assert_eq!(values, vec![42; 8]);
+        assert!(
+            compute_count.load(Ordering::SeqCst) >= 1,
+            "slot should compute at least once"
+        );
+        assert!(ctx.is_set(&answer));
+    }
+
+    /// SPEC: changed values in one thread invalidate dependent slots read from
+    /// another thread.
+    #[test]
+    fn thread_safe_context_invalidates_across_threads() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(1i32);
+        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root) * 2);
+
+        assert_eq!(ctx.get(&doubled), 2);
+
+        let worker_ctx = ctx.clone();
+        let worker = thread::spawn(move || {
+            worker_ctx.set_cell(&root, 5);
+            worker_ctx.get(&doubled)
+        });
+
+        assert_eq!(worker.join().expect("worker should finish"), 10);
+        assert_eq!(ctx.get(&doubled), 10);
+    }
+
+    /// SPEC: the graph lock is not held while user compute callbacks run, so
+    /// callbacks may re-enter the same context through nested `get` calls.
+    #[test]
+    fn thread_safe_context_allows_reentrant_computation() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(1i32);
+        let inner = ctx.computed(move |ctx| ctx.get_cell(&root) + 1);
+        let outer = ctx.computed(move |ctx| ctx.get(&inner) + 1);
+
+        assert_eq!(ctx.get(&outer), 3);
+        ctx.set_cell(&root, 2);
+        assert_eq!(ctx.get(&outer), 4);
+    }
+
+    /// SPEC: thread-safe effects track dependencies and rerun when a different
+    /// thread mutates a dependency.
+    #[test]
+    fn thread_safe_effect_reruns_from_other_thread() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(0i32);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_effect = Arc::clone(&seen);
+
+        let effect = ctx.effect(move |ctx| {
+            seen_for_effect
+                .lock()
+                .expect("seen lock should not be poisoned")
+                .push(ctx.get_cell(&root));
+        });
+
+        assert!(ctx.is_effect_active(&effect));
+        assert_eq!(*seen.lock().expect("seen lock"), vec![0]);
+
+        let worker_ctx = ctx.clone();
+        let worker = thread::spawn(move || {
+            worker_ctx.set_cell(&root, 1);
+        });
+        worker.join().expect("worker should finish");
+
+        assert_eq!(*seen.lock().expect("seen lock"), vec![0, 1]);
+        ctx.dispose_effect(&effect);
+        assert!(!ctx.is_effect_active(&effect));
     }
 }
 
