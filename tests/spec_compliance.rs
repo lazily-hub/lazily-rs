@@ -160,6 +160,7 @@ mod threading_contract {
         let compute_count_for_slot = Arc::clone(&compute_count);
         let answer = ctx.computed(move |ctx| {
             compute_count_for_slot.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(10));
             ctx.get_cell(&root) * 2
         });
 
@@ -181,9 +182,10 @@ mod threading_contract {
             .collect();
 
         assert_eq!(values, vec![42; 8]);
-        assert!(
-            compute_count.load(Ordering::SeqCst) >= 1,
-            "slot should compute at least once"
+        assert_eq!(
+            compute_count.load(Ordering::SeqCst),
+            1,
+            "contending first-get callers should share one computation"
         );
         assert!(ctx.is_set(&answer));
     }
@@ -283,9 +285,10 @@ mod threading_contract {
         }
         assert_eq!(ctx.get(&answer), 42);
         assert!(ctx.is_set(&answer));
-        assert!(
-            compute_count.load(Ordering::SeqCst) <= 8,
-            "each contending caller should compute at most once"
+        assert_eq!(
+            compute_count.load(Ordering::SeqCst),
+            1,
+            "contending first-get callers should share one computation"
         );
     }
 
@@ -584,15 +587,14 @@ mod benchmark_instrumentation {
     }
 
     /// SPEC: `ThreadSafeContext` instrumentation tracks graph work plus
-    /// duplicate speculative computes and lock timing.
+    /// in-flight first-get deduplication and lock timing.
     #[test]
-    fn thread_safe_instrumentation_tracks_duplicates_and_locks() {
+    fn thread_safe_instrumentation_tracks_dedup_and_locks() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(40usize);
         let barrier = Arc::new(Barrier::new(2));
-        let compute_barrier = Arc::clone(&barrier);
         let answer = ctx.computed(move |ctx| {
-            compute_barrier.wait();
+            thread::sleep(Duration::from_millis(10));
             ctx.get_cell(&root).wrapping_add(2)
         });
 
@@ -607,7 +609,11 @@ mod benchmark_instrumentation {
         let workers = (0..2)
             .map(|_| {
                 let ctx = ctx.clone();
-                thread::spawn(move || ctx.get(&answer))
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    ctx.get(&answer)
+                })
             })
             .collect::<Vec<_>>();
 
@@ -617,12 +623,12 @@ mod benchmark_instrumentation {
 
         let snapshot = ctx.instrumentation_snapshot();
         assert_eq!(
-            snapshot.slot_recomputes, 2,
-            "both first-get callers should start speculative computes"
+            snapshot.slot_recomputes, 1,
+            "contending first-get callers should share one computation"
         );
         assert_eq!(
-            snapshot.duplicate_speculative_recomputes, 1,
-            "one speculative compute should lose publication"
+            snapshot.duplicate_speculative_recomputes, 0,
+            "deduplication should prevent duplicate speculative publication races"
         );
         assert!(
             snapshot.dependency_edges_added >= 1,

@@ -72,6 +72,7 @@ struct ThreadSafeSlotNode {
     dependents: HashSet<SlotId>,
     dirty: bool,
     force_recompute: bool,
+    computing: bool,
     revision: u64,
 }
 
@@ -192,6 +193,20 @@ struct BatchGuard {
 impl Drop for BatchGuard {
     fn drop(&mut self) {
         self.ctx.finish_batch();
+    }
+}
+
+struct RecomputeGuard {
+    ctx: ThreadSafeContext,
+    id: SlotId,
+    active: bool,
+}
+
+impl Drop for RecomputeGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.ctx.finish_slot_recompute(self.id);
+        }
     }
 }
 
@@ -395,6 +410,7 @@ impl ThreadSafeContext {
             dependents: HashSet::new(),
             dirty: false,
             force_recompute: false,
+            computing: false,
             revision: 0,
         };
         self.lock_state()
@@ -496,6 +512,11 @@ impl ThreadSafeContext {
                     Some(ThreadSafeNode::Slot(slot)) => slot,
                     _ => panic!("get_slot called on non-slot id"),
                 };
+                if slot.computing {
+                    drop(state);
+                    return self.wait_for_slot_recompute(id);
+                }
+                slot.computing = true;
                 (
                     Arc::clone(&slot.compute),
                     slot.dependencies.drain().collect::<Vec<_>>(),
@@ -508,6 +529,11 @@ impl ThreadSafeContext {
                 state.instrumentation.record_slot_recompute();
             }
             result
+        };
+        let mut recompute_guard = RecomputeGuard {
+            ctx: self.clone(),
+            id,
+            active: true,
         };
 
         for dependency_id in old_dependencies {
@@ -522,8 +548,13 @@ impl ThreadSafeContext {
             let mut state = self.lock_state();
             let slot = match state.nodes.get_mut(&id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot,
-                _ => return ThreadSafeRecomputeResult::Fresh(false),
+                _ => {
+                    recompute_guard.active = false;
+                    return ThreadSafeRecomputeResult::Fresh(false);
+                }
             };
+            slot.computing = false;
+            recompute_guard.active = false;
 
             if slot.revision != start_revision {
                 return ThreadSafeRecomputeResult::Stale;
@@ -557,6 +588,33 @@ impl ThreadSafeContext {
                     ThreadSafeRecomputeResult::Fresh(false)
                 }
             }
+        }
+    }
+
+    fn wait_for_slot_recompute(&self, id: SlotId) -> ThreadSafeRecomputeResult {
+        loop {
+            {
+                let state = self.lock_state();
+                let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&id) else {
+                    return ThreadSafeRecomputeResult::Fresh(false);
+                };
+                if slot.computing {
+                    // Prototype deduplication: avoid a broad lock redesign until
+                    // contention data justifies a Condvar/RwLock strategy.
+                } else if slot.value.is_some() && !slot.dirty && !slot.force_recompute {
+                    return ThreadSafeRecomputeResult::Fresh(false);
+                } else {
+                    return ThreadSafeRecomputeResult::Stale;
+                }
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    fn finish_slot_recompute(&self, id: SlotId) {
+        let mut state = self.lock_state();
+        if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) {
+            slot.computing = false;
         }
     }
 

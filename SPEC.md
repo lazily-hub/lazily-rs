@@ -229,7 +229,7 @@ Locking model:
 - Do not hold the graph lock while running user compute callbacks, effect callbacks, or cleanup closures
 - Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
 - Re-entrant user code must be able to call back into the same context without deadlocking
-- Concurrent first access may perform duplicate speculative computation, but at most one value may be published as the slot cache; later optimization can add in-flight deduplication
+- Concurrent first access shares one in-flight computation for the current slot revision; waiters return the published cache or retry if an invalidation makes the in-flight result stale
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
 
@@ -372,7 +372,7 @@ The optional `instrumentation` feature adds `instrumentation_snapshot()` and
 
 - Reactive node allocation events as a stable allocation proxy
 - Slot recompute callback starts
-- Duplicate speculative `ThreadSafeContext` recomputes that lose publication races
+- Duplicate speculative `ThreadSafeContext` recomputes that lose publication races; this should remain zero when in-flight deduplication is effective
 - Dependency edges added and removed
 - Effect queue pushes and maximum pending queue depth
 - `ThreadSafeContext` graph-lock acquisitions plus total wait and hold nanoseconds

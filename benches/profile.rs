@@ -1,6 +1,7 @@
 use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use lazily::{Context, InstrumentationSnapshot, ThreadSafeContext};
@@ -38,19 +39,22 @@ fn context_profile_snapshot() -> InstrumentationSnapshot {
 fn thread_safe_profile_snapshot() -> InstrumentationSnapshot {
     let ctx = ThreadSafeContext::new();
     let root = ctx.cell(40usize);
-    let barrier = Arc::new(Barrier::new(2));
-    let compute_barrier = Arc::clone(&barrier);
     let answer = ctx.computed(move |ctx| {
-        compute_barrier.wait();
+        thread::sleep(Duration::from_micros(200));
         ctx.get_cell(&root).wrapping_add(2)
     });
+    let start = Arc::new(Barrier::new(2));
 
     ctx.reset_instrumentation();
 
     let workers = (0..2)
         .map(|_| {
             let ctx = ctx.clone();
-            thread::spawn(move || black_box(ctx.get(&answer)))
+            let start = Arc::clone(&start);
+            thread::spawn(move || {
+                start.wait();
+                black_box(ctx.get(&answer))
+            })
         })
         .collect::<Vec<_>>();
 
