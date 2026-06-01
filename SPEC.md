@@ -232,7 +232,9 @@ Tokio integration is scoped in two stages:
 
 1. Synchronous thread-safe sharing first: `ThreadSafeContext` should work inside
    `tokio::spawn` and `tokio::task::spawn_blocking` when all captured values and
-   callbacks satisfy the `Send + Sync` bounds above.
+   callbacks satisfy the `Send + Sync` bounds above. This is exposed behind the
+   optional `tokio` feature with async tests and the `tokio_sync` example; it
+   must not introduce async compute/effect semantics.
 2. True async computations/effects are separate future work. They need explicit
    semantics for in-flight future deduplication, cancellation, dependency tracking
    across `.await`, stale future completion, cleanup ordering, and `Send` versus

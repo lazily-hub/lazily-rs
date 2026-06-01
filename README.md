@@ -161,10 +161,18 @@ the getter retries before returning a fresh value.
 `Send + Sync` when `T` is `Send + Sync`, and `EffectHandle` is also `Send + Sync`,
 but handles must be used with their owning context.
 
-Tokio support should come after synchronous thread safety: first by allowing
-`ThreadSafeContext` to be shared through `tokio::spawn` and
-`tokio::task::spawn_blocking`, then by separately designing true async
-computations/effects with explicit cancellation and `.await` tracking semantics.
+Enable the optional `tokio` feature for sync-on-Tokio integration tests and the
+`tokio_sync` example:
+
+```bash
+cargo test --features tokio
+cargo run --example tokio_sync --features tokio
+```
+
+The feature proves `ThreadSafeContext` can be shared through `tokio::spawn` and
+`tokio::task::spawn_blocking`. It does not add async computations or effects;
+those need a separate design with explicit cancellation and `.await` tracking
+semantics.
 
 ## Multi-Language
 

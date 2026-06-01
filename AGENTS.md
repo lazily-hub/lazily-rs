@@ -10,6 +10,7 @@ Lazy reactive primitives library for Rust.
 - `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
+- `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests
 
 ## Key Design Decisions
 
@@ -24,6 +25,7 @@ Lazy reactive primitives library for Rust.
 
 ```bash
 cargo test          # Run all tests (81 integration/spec tests + 1 doctest)
+cargo test --features tokio  # Include Tokio sync integration tests
 cargo clippy        # Lint
 cargo build         # Build
 ```

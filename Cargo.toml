@@ -8,4 +8,13 @@ repository = "https://github.com/btakita/lazily-rs"
 keywords = ["reactive", "signals", "lazy", "dependency-tracking", "cache"]
 categories = ["data-structures"]
 
+[features]
+default = []
+tokio = ["dep:tokio"]
+
 [dependencies]
+tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "tokio_sync"
+required-features = ["tokio"]
