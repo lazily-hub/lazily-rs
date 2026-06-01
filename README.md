@@ -27,8 +27,8 @@ let ctx = Context::new();
 // Create a mutable cell
 let counter = ctx.cell(0i32);
 
-// Create a derived slot (automatically tracks dependencies)
-let doubled = ctx.slot(|ctx| {
+// Create a derived value (automatically tracks dependencies)
+let doubled = ctx.computed(|ctx| {
     let val = ctx.get_cell(&counter);
     val * 2
 });
@@ -76,7 +76,7 @@ In a web server handling requests, you might have 50 computed values available b
 
 ### Slot
 
-A `SlotHandle<T>` wraps a compute function `Fn(&Context) -> T`. The result is cached after first access. Dependencies are discovered automatically via a thread-local tracking stack — any Slot or Cell accessed during computation becomes a dependency. Use `ctx.memo()` instead of `ctx.slot()` when `T: PartialEq` and equal recomputations should suppress downstream work.
+A `SlotHandle<T>` wraps a compute function `Fn(&Context) -> T`. The result is cached after first access. Dependencies are discovered automatically via a thread-local tracking stack — any Slot or Cell accessed during computation becomes a dependency. `ctx.computed()` is the ergonomic name for a derived value; `ctx.slot()` is the same primitive. Use `ctx.memo()` when `T: PartialEq` and equal recomputations should suppress downstream work.
 
 When a dependency is invalidated, the Slot marks its cached value dirty. It does **not** validate or recompute until `ctx.get()` is called again.
 For `ctx.memo()` slots, if recomputation returns a value equal to the previous cache, downstream dirty Slots become fresh without recomputing, and scheduled effects that only depended on unchanged Slots skip cleanup/rerun.
@@ -111,7 +111,8 @@ effect.dispose(&ctx);
 | Method | Purpose |
 |--------|---------|
 | `Context::new()` | Create a new context |
-| `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot |
+| `ctx.computed(\|ctx\| T)` | Create a derived lazily-computed value |
+| `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot; synonym of `ctx.computed()` |
 | `ctx.memo(\|ctx\| T)` | Create a lazily-computed slot with a `PartialEq` memoization guard |
 | `ctx.get(&slot)` | Get value (computes if unset) |
 | `ctx.cell(value)` | Create a mutable cell |
@@ -128,6 +129,7 @@ effect.dispose(&ctx);
 ## Design
 
 - **Lazy, not eager:** Slots mark dirty on invalidation but only validate/recompute on access
+- **Ergonomic aliases:** `ctx.computed()` names derived values while preserving `ctx.slot()` for low-level terminology
 - **PartialEq guard:** `Cell.set()` only invalidates when value actually changes
 - **Memo guard:** Dirty `ctx.memo()` Slots compare recomputed values and suppress downstream recomputation/effect reruns when values are equal
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)

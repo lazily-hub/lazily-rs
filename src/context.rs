@@ -194,6 +194,17 @@ impl Context {
         self.slot_with_equals(compute, None)
     }
 
+    /// Create a derived lazily-computed value.
+    ///
+    /// This is an ergonomic alias for [`Context::slot`].
+    pub fn computed<T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        T: 'static,
+        F: Fn(&Context) -> T + 'static,
+    {
+        self.slot(compute)
+    }
+
     /// Create a new lazily-computed slot with a `PartialEq` memoization guard.
     pub fn memo<T, F>(&self, compute: F) -> SlotHandle<T>
     where

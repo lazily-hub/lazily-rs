@@ -58,6 +58,20 @@ mod context {
         assert_eq!(ctx.get_cell(&c), 100);
         assert_eq!(ctx.get(&s), 101);
     }
+
+    #[test]
+    fn context_computed_alias_tracks_dependencies() {
+        let ctx = Context::new();
+        let c = ctx.cell(2i32);
+        let doubled = ctx.computed(move |ctx| ctx.get_cell(&c) * 2);
+
+        assert_eq!(ctx.get(&doubled), 4);
+        assert!(ctx.is_set(&doubled));
+
+        ctx.set_cell(&c, 3);
+        assert!(!ctx.is_set(&doubled));
+        assert_eq!(ctx.get(&doubled), 6);
+    }
 }
 
 // ============================================================================

@@ -27,7 +27,8 @@ pub struct Context {
 | Method | Purpose |
 |--------|---------|
 | `Context::new()` | Create a new context |
-| `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot |
+| `ctx.computed(\|ctx\| T)` | Create a derived lazily-computed value |
+| `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot; synonym of `ctx.computed()` |
 | `ctx.memo(\|ctx\| T)` | Create a lazily-computed slot with a `PartialEq` memoization guard |
 | `ctx.get(&slot)` | Get value (computes if unset) |
 | `ctx.cell(value)` | Create a mutable cell |
@@ -61,6 +62,7 @@ struct SlotNode {
 **Semantics:**
 
 - **Activation:** First `ctx.get()` calls the compute function, caches the result
+- **Computed alias:** `ctx.computed()` creates the same Slot as `ctx.slot()` for derived-value ergonomics
 - **Invalidation:** Marks the cached value dirty and marks downstream slots dirty without discarding their cached values
 - **Clearing:** Explicit `slot.clear(&ctx)` removes the cached value and clears all dependent slots recursively
 - **Memo guard:** Dirty `ctx.memo()` slots compare recomputed values with the previous cache via `PartialEq`; equal values make downstream dirty slots fresh without recomputing them
@@ -167,6 +169,7 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 ## Design Goals
 
 - **Lazy evaluation:** Values computed only when first accessed or when dirty caches are validated
+- **Ergonomic derived values:** `ctx.computed()` is the preferred spelling for ordinary derived slots
 - **Fine-grained reactivity:** Only affected dependents recompute
 - **Memoized invalidation:** Equal intermediate `ctx.memo()` recomputation suppresses downstream recomputation/effect reruns
 - **Effects:** Side effects are scheduled from the same dependency graph as slots
