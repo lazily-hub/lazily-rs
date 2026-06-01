@@ -119,7 +119,7 @@ effect.dispose(&ctx);
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
-| `ctx.is_set(&slot)` | Check if slot has a cached value that is not forced stale |
+| `ctx.is_set(&slot)` | Check if slot has a cached, fresh value |
 | `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
 | `cell.clear_dependents(&ctx)` | Clear downstream slots without changing cell value |
 | `effect.dispose(&ctx)` | Dispose an effect and unsubscribe dependencies |

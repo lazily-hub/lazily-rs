@@ -799,11 +799,11 @@ impl Context {
         }
     }
 
-    /// Check whether a slot currently has a cached value (for testing).
+    /// Check whether a slot currently has a cached, fresh value (for testing).
     pub fn is_set<T: 'static>(&self, handle: &SlotHandle<T>) -> bool {
         let nodes = self.nodes.borrow();
         if let Some(Node::Slot(slot)) = nodes.get(&handle.id) {
-            slot.value.is_some() && !slot.force_recompute
+            slot.value.is_some() && !slot.dirty
         } else {
             false
         }

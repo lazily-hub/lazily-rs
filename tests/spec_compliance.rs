@@ -156,12 +156,12 @@ mod slot_semantics {
         assert!(ctx.is_set(&b));
         assert!(ctx.is_set(&d));
 
-        // Change cell — the direct slot is forced stale, but downstream slots
-        // keep their cached values until access proves whether `a` changed.
+        // Change cell — slots become dirty while keeping cached values for
+        // validation until access proves whether `a` changed.
         ctx.set_cell(&c, 2);
-        assert!(!ctx.is_set(&a), "a should be cleared");
-        assert!(ctx.is_set(&b), "b keeps a memoized cached value");
-        assert!(ctx.is_set(&d), "d keeps a memoized cached value");
+        assert!(!ctx.is_set(&a), "a should be stale");
+        assert!(!ctx.is_set(&b), "b should be dirty");
+        assert!(!ctx.is_set(&d), "d should be dirty");
         assert_eq!(ctx.get(&d), 112);
     }
 
@@ -400,11 +400,11 @@ mod dependency_tracking {
 
         assert_eq!(ctx.get(&outer), 11);
 
-        // Change cell — the direct dependent is forced stale. The outer slot
-        // keeps its cached value until its dependency is refreshed.
+        // Change cell — dependents become dirty until their dependency chain is
+        // refreshed.
         ctx.set_cell(&c, 5);
         assert!(!ctx.is_set(&inner));
-        assert!(ctx.is_set(&outer));
+        assert!(!ctx.is_set(&outer));
 
         assert_eq!(ctx.get(&outer), 51);
         INNER_COUNT.with(|c| assert_eq!(c.get(), 2));
@@ -541,11 +541,11 @@ mod invalidation_semantics {
         assert!(ctx.is_set(&a));
         assert!(ctx.is_set(&b));
 
-        // Changing the cell forces `a` stale, while `b` keeps a cached value
-        // until access proves whether `a` changed.
+        // Changing the cell makes both slots dirty until access proves whether
+        // `a` changed.
         ctx.set_cell(&c, 2);
         assert!(!ctx.is_set(&a));
-        assert!(ctx.is_set(&b));
+        assert!(!ctx.is_set(&b));
         assert_eq!(ctx.get(&b), 12);
     }
 
@@ -637,7 +637,7 @@ mod invalidation_semantics {
 
         ctx.set_cell(&root, 2);
         assert!(!ctx.is_set(&parity));
-        assert!(ctx.is_set(&downstream));
+        assert!(!ctx.is_set(&downstream));
 
         assert_eq!(ctx.get(&downstream), 0);
         assert_eq!(
@@ -1256,13 +1256,12 @@ mod edge_cases {
 
         // Change root.
         ctx.set_cell(&root, 100);
-        // Only the direct dependent is forced stale. Transitive dependents keep
-        // cached values until access proves the previous layer changed.
+        // The chain is dirty until access proves each previous layer changed.
         assert!(!ctx.is_set(&s1));
-        assert!(ctx.is_set(&s2));
-        assert!(ctx.is_set(&s3));
-        assert!(ctx.is_set(&s4));
-        assert!(ctx.is_set(&s5));
+        assert!(!ctx.is_set(&s2));
+        assert!(!ctx.is_set(&s3));
+        assert!(!ctx.is_set(&s4));
+        assert!(!ctx.is_set(&s5));
 
         // root=100, s1=100, s2=101, s3=102, s4=103, s5=104
         assert_eq!(ctx.get(&s5), 104);
@@ -1334,7 +1333,7 @@ mod edge_cases {
     }
 
     /// Diamond dependency: cell → (a, b) → d. Changing cell marks both
-    /// branches stale while preserving `d` until a branch proves changed.
+    /// branches and their downstream dependent dirty.
     #[test]
     fn diamond_dependency_both_branches_cleared() {
         thread_local! {
@@ -1357,7 +1356,7 @@ mod edge_cases {
         ctx.set_cell(&root, 10);
         assert!(!ctx.is_set(&a));
         assert!(!ctx.is_set(&b));
-        assert!(ctx.is_set(&d));
+        assert!(!ctx.is_set(&d));
 
         assert_eq!(ctx.get(&d), 23); // (10+1) + (10+2) = 23
         D_COUNT.with(|c| assert_eq!(c.get(), 2));
