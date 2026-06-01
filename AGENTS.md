@@ -8,7 +8,7 @@ Lazy reactive primitives library for Rust.
 - `src/slot.rs` — `SlotHandle<T>` (lightweight `Copy` id into Context)
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
 - `tests/integration.rs` — 13 integration tests
-- `tests/spec_compliance.rs` — 36 spec compliance tests
+- `tests/spec_compliance.rs` — 46 spec compliance tests
 
 ## Key Design Decisions
 
@@ -20,7 +20,7 @@ Lazy reactive primitives library for Rust.
 ## Commands
 
 ```bash
-cargo test          # Run all tests (49 total)
+cargo test          # Run all tests (59 total)
 cargo clippy        # Lint
 cargo build         # Build
 ```

@@ -6,11 +6,12 @@ Lazy reactive primitives for Rust — Context, Slots, Cells with automatic depen
 
 ## Overview
 
-`lazily` provides three core primitives for lazy reactive computation:
+`lazily` provides four core primitives for lazy reactive computation:
 
 - **Context** — owns all reactive state and manages the dependency graph
 - **Slot** — a lazily-computed cached value that automatically tracks dependencies
 - **Cell** — a mutable value that invalidates dependent Slots when changed
+- **Effect** — a side-effect callback that automatically reruns after tracked dependencies invalidate
 
 Values are **lazy**: dependents are cleared on invalidation but only recomputed when accessed. This contrasts with eager "signal" systems that recompute immediately.
 
@@ -37,6 +38,14 @@ ctx.set_cell(&counter, 5);
 
 // Slot recomputes lazily on next access
 assert_eq!(ctx.get(&doubled), 10);
+
+// Effects run immediately and then after tracked dependencies change
+let effect = ctx.effect(move |ctx| {
+    println!("counter = {}", ctx.get_cell(&counter));
+});
+
+ctx.set_cell(&counter, 6); // schedules and runs the effect once
+effect.dispose(&ctx); // unsubscribes and prevents future reruns
 ```
 
 ## Why Lazy?
@@ -69,6 +78,21 @@ When a dependency is invalidated, the Slot clears its cached value. It does **no
 
 A `CellHandle<T>` holds a mutable value. `ctx.set_cell()` compares old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively cleared.
 
+### Effect
+
+An `EffectHandle` represents a side-effect callback registered with `ctx.effect()`. Effects run immediately, track any Slots or Cells read during that run, and rerun after those dependencies invalidate. Scheduled effect reruns are flushed after the invalidation pass, so diamond dependency paths coalesce to one rerun.
+
+Effects can return a cleanup closure. Cleanup runs before the next rerun and when the handle is disposed:
+
+```rust
+let effect = ctx.effect(move |ctx| {
+    let value = ctx.get_cell(&counter);
+    move || println!("cleanup for {value}")
+});
+
+effect.dispose(&ctx);
+```
+
 ## API
 
 | Method | Purpose |
@@ -79,15 +103,19 @@ A `CellHandle<T>` holds a mutable value. `ctx.set_cell()` compares old and new v
 | `ctx.cell(value)` | Create a mutable cell |
 | `ctx.get_cell(&cell)` | Get cell value |
 | `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
+| `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.is_set(&slot)` | Check if slot has cached value |
 | `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
 | `cell.clear_dependents(&ctx)` | Clear downstream slots without changing cell value |
+| `effect.dispose(&ctx)` | Dispose an effect and unsubscribe dependencies |
+| `effect.is_active(&ctx)` | Check whether an effect is still registered |
 
 ## Design
 
 - **Lazy, not eager:** Slots clear on invalidation but only recompute on access
 - **PartialEq guard:** `Cell.set()` only invalidates when value actually changes
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)
+- **Effect scheduling:** Effects rerun after dependency invalidation and coalesce duplicate schedules
 - Interior mutability via `RefCell` (single-threaded)
 - Thread-local tracking stack for automatic dependency discovery
 - Zero external dependencies

@@ -1,12 +1,15 @@
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::cell::CellHandle;
+use crate::effect::{EffectCallbackResult, EffectHandle};
 use crate::slot::SlotHandle;
 
 /// Type alias for the erased compute function stored in slots.
 type ComputeFn = dyn Fn(&Context) -> Box<dyn Any>;
+/// Type alias for the erased effect callback stored in effects.
+type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
 
 /// Unique identifier for a reactive node (slot or cell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,9 +59,19 @@ pub(crate) struct CellNode {
     pub(crate) dependents: HashSet<SlotId>,
 }
 
+pub(crate) struct EffectNode {
+    /// The effect callback.
+    pub(crate) run: Box<EffectFn>,
+    /// Slots/cells that this effect depends on. Populated during each run.
+    pub(crate) dependencies: HashSet<SlotId>,
+    /// Cleanup returned by the latest effect run, if any.
+    pub(crate) cleanup: Option<Box<dyn FnOnce()>>,
+}
+
 pub(crate) enum Node {
     Slot(SlotNode),
     Cell(CellNode),
+    Effect(EffectNode),
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +83,9 @@ pub(crate) enum Node {
 pub struct Context {
     pub(crate) nodes: RefCell<HashMap<SlotId, Node>>,
     pub(crate) next_id: RefCell<u64>,
+    pub(crate) pending_effects: RefCell<VecDeque<SlotId>>,
+    pub(crate) scheduled_effects: RefCell<HashSet<SlotId>>,
+    pub(crate) flushing_effects: RefCell<bool>,
 }
 
 impl Context {
@@ -77,6 +93,9 @@ impl Context {
         Self {
             nodes: RefCell::new(HashMap::new()),
             next_id: RefCell::new(0),
+            pending_effects: RefCell::new(VecDeque::new()),
+            scheduled_effects: RefCell::new(HashSet::new()),
+            flushing_effects: RefCell::new(false),
         }
     }
 
@@ -85,6 +104,68 @@ impl Context {
         let slot_id = SlotId(*id);
         *id += 1;
         slot_id
+    }
+
+    fn register_dependency(&self, dependency_id: SlotId, dependent_id: SlotId) {
+        if dependency_id == dependent_id {
+            return;
+        }
+
+        let mut nodes = self.nodes.borrow_mut();
+        // The node being accessed gets `dependent_id` as a dependent.
+        if let Some(node) = nodes.get_mut(&dependency_id) {
+            match node {
+                Node::Slot(s) => {
+                    s.dependents.insert(dependent_id);
+                }
+                Node::Cell(c) => {
+                    c.dependents.insert(dependent_id);
+                }
+                Node::Effect(_) => {}
+            }
+        }
+
+        // The currently-running slot/effect records the accessed node as a
+        // dependency. Cells never run and therefore never track dependencies.
+        if let Some(node) = nodes.get_mut(&dependent_id) {
+            match node {
+                Node::Slot(parent) => {
+                    parent.dependencies.insert(dependency_id);
+                }
+                Node::Effect(parent) => {
+                    parent.dependencies.insert(dependency_id);
+                }
+                Node::Cell(_) => {}
+            }
+        }
+    }
+
+    fn remove_dependent_edge(&self, dependency_id: SlotId, dependent_id: SlotId) {
+        let mut nodes = self.nodes.borrow_mut();
+        if let Some(dep_node) = nodes.get_mut(&dependency_id) {
+            match dep_node {
+                Node::Slot(s) => {
+                    s.dependents.remove(&dependent_id);
+                }
+                Node::Cell(c) => {
+                    c.dependents.remove(&dependent_id);
+                }
+                Node::Effect(_) => {}
+            }
+        }
+    }
+
+    fn invalidate_dependent(&self, id: SlotId) {
+        let is_effect = {
+            let nodes = self.nodes.borrow();
+            matches!(nodes.get(&id), Some(Node::Effect(_)))
+        };
+
+        if is_effect {
+            self.schedule_effect(id);
+        } else {
+            self.clear_slot(id);
+        }
     }
 
     // -- Slot API ----------------------------------------------------------
@@ -115,25 +196,8 @@ impl Context {
     /// registering dependency tracking.
     fn get_slot<T: Clone + 'static>(&self, id: SlotId) -> T {
         // Register dependency if someone is tracking.
-        if let Some(parent_id) = current_tracking_frame()
-            && parent_id != id
-        {
-            let mut nodes = self.nodes.borrow_mut();
-            // The node being accessed gets `parent_id` as a dependent.
-            if let Some(node) = nodes.get_mut(&id) {
-                match node {
-                    Node::Slot(s) => {
-                        s.dependents.insert(parent_id);
-                    }
-                    Node::Cell(c) => {
-                        c.dependents.insert(parent_id);
-                    }
-                }
-            }
-            // The parent records this node as a dependency.
-            if let Some(Node::Slot(parent)) = nodes.get_mut(&parent_id) {
-                parent.dependencies.insert(id);
-            }
+        if let Some(parent_id) = current_tracking_frame() {
+            self.register_dependency(id, parent_id);
         }
 
         // Check if value is already cached.
@@ -172,20 +236,8 @@ impl Context {
             };
         }
         // Clear old dependency edges (remove `id` from each old dep's dependents).
-        {
-            let mut nodes = self.nodes.borrow_mut();
-            for dep_id in old_deps {
-                if let Some(dep_node) = nodes.get_mut(&dep_id) {
-                    match dep_node {
-                        Node::Slot(s) => {
-                            s.dependents.remove(&id);
-                        }
-                        Node::Cell(c) => {
-                            c.dependents.remove(&id);
-                        }
-                    }
-                }
-            }
+        for dep_id in old_deps {
+            self.remove_dependent_edge(dep_id, id);
         }
 
         // Push tracking frame so nested gets register as dependencies.
@@ -211,13 +263,7 @@ impl Context {
     pub fn get_cell<T: Clone + 'static>(&self, handle: &CellHandle<T>) -> T {
         // Register dependency tracking.
         if let Some(parent_id) = current_tracking_frame() {
-            let mut nodes = self.nodes.borrow_mut();
-            if let Some(Node::Cell(c)) = nodes.get_mut(&handle.id) {
-                c.dependents.insert(parent_id);
-            }
-            if let Some(Node::Slot(parent)) = nodes.get_mut(&parent_id) {
-                parent.dependencies.insert(handle.id);
-            }
+            self.register_dependency(handle.id, parent_id);
         }
 
         let nodes = self.nodes.borrow();
@@ -277,8 +323,137 @@ impl Context {
                 }
             };
             for dep_id in dependents {
-                self.clear_slot(dep_id);
+                self.invalidate_dependent(dep_id);
             }
+            self.flush_effects();
+        }
+    }
+
+    // -- Effect API --------------------------------------------------------
+
+    /// Create an effect, run it immediately, and automatically rerun it after
+    /// any cells/slots it read are invalidated.
+    ///
+    /// The callback may return `()` for no cleanup or a `FnOnce() + 'static`
+    /// cleanup closure. Cleanup runs before each rerun and when the effect is
+    /// disposed.
+    pub fn effect<F, R>(&self, run: F) -> EffectHandle
+    where
+        F: Fn(&Context) -> R + 'static,
+        R: EffectCallbackResult + 'static,
+    {
+        let id = self.alloc_id();
+        let node = EffectNode {
+            run: Box::new(move |ctx| run(ctx).into_cleanup()),
+            dependencies: HashSet::new(),
+            cleanup: None,
+        };
+        self.nodes.borrow_mut().insert(id, Node::Effect(node));
+        let handle = EffectHandle::new(id);
+        self.schedule_effect(id);
+        self.flush_effects();
+        handle
+    }
+
+    /// Dispose an effect by handle.
+    pub fn dispose_effect(&self, handle: &EffectHandle) {
+        let (dependencies, cleanup) = {
+            let mut nodes = self.nodes.borrow_mut();
+            let Some(Node::Effect(effect)) = nodes.remove(&handle.id) else {
+                return;
+            };
+            (effect.dependencies, effect.cleanup)
+        };
+
+        self.scheduled_effects.borrow_mut().remove(&handle.id);
+        for dep_id in dependencies {
+            self.remove_dependent_edge(dep_id, handle.id);
+        }
+        if let Some(cleanup) = cleanup {
+            cleanup();
+        }
+    }
+
+    /// Check whether an effect is still registered.
+    pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
+        let nodes = self.nodes.borrow();
+        matches!(nodes.get(&handle.id), Some(Node::Effect(_)))
+    }
+
+    fn schedule_effect(&self, id: SlotId) {
+        let exists = {
+            let nodes = self.nodes.borrow();
+            matches!(nodes.get(&id), Some(Node::Effect(_)))
+        };
+        if !exists {
+            return;
+        }
+
+        let inserted = self.scheduled_effects.borrow_mut().insert(id);
+        if inserted {
+            self.pending_effects.borrow_mut().push_back(id);
+        }
+    }
+
+    pub(crate) fn flush_effects(&self) {
+        {
+            let mut flushing = self.flushing_effects.borrow_mut();
+            if *flushing {
+                return;
+            }
+            *flushing = true;
+        }
+
+        loop {
+            let Some(id) = ({ self.pending_effects.borrow_mut().pop_front() }) else {
+                break;
+            };
+            self.scheduled_effects.borrow_mut().remove(&id);
+            self.run_effect(id);
+        }
+
+        *self.flushing_effects.borrow_mut() = false;
+    }
+
+    fn run_effect(&self, id: SlotId) {
+        // Collect old dependencies and callback pointer, then drop the borrow
+        // before running user code because the effect may read or write context.
+        let run: Box<EffectFn>;
+        let old_deps: Vec<SlotId>;
+        let cleanup: Option<Box<dyn FnOnce()>>;
+        {
+            let mut nodes = self.nodes.borrow_mut();
+            let effect = match nodes.get_mut(&id) {
+                Some(Node::Effect(effect)) => effect,
+                _ => return,
+            };
+            old_deps = effect.dependencies.drain().collect();
+            cleanup = effect.cleanup.take();
+            // Safety: nodes keeps the boxed callback allocation alive while the
+            // effect node exists, and this method is single-threaded.
+            run = unsafe {
+                let ptr = &*effect.run as *const EffectFn;
+                Box::new(move |ctx| (*ptr)(ctx))
+            };
+        }
+
+        for dep_id in old_deps {
+            self.remove_dependent_edge(dep_id, id);
+        }
+        if let Some(cleanup) = cleanup {
+            cleanup();
+        }
+
+        push_tracking_frame(id);
+        let next_cleanup = run(self);
+        pop_tracking_frame();
+
+        let mut nodes = self.nodes.borrow_mut();
+        if let Some(Node::Effect(effect)) = nodes.get_mut(&id) {
+            effect.cleanup = next_cleanup;
+        } else if let Some(cleanup) = next_cleanup {
+            drop(nodes);
+            cleanup();
         }
     }
 
@@ -300,8 +475,22 @@ impl Context {
             }
         }
         for dep_id in dependents {
-            self.clear_slot(dep_id);
+            self.invalidate_dependent(dep_id);
         }
+    }
+
+    pub(crate) fn clear_cell_dependents(&self, id: SlotId) {
+        let dependents: Vec<SlotId> = {
+            let nodes = self.nodes.borrow();
+            match nodes.get(&id) {
+                Some(Node::Cell(c)) => c.dependents.iter().copied().collect(),
+                _ => vec![],
+            }
+        };
+        for dep_id in dependents {
+            self.invalidate_dependent(dep_id);
+        }
+        self.flush_effects();
     }
 
     /// Check whether a slot currently has a cached value (for testing).

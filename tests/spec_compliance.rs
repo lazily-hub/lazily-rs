@@ -6,10 +6,12 @@
 //! 3. Cell semantics — get, set, PartialEq guard, invalidation
 //! 4. Dependency tracking — thread-local stack, auto-discovery
 //! 5. Invalidation semantics — cascade, lazy recomputation
-//! 6. Edge cases — no deps, shared deps, deep chains, dynamic deps
+//! 6. Effect system — auto-tracking, scheduling, cleanup, disposal
+//! 7. Edge cases — no deps, shared deps, deep chains, dynamic deps
 
 use lazily::Context;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 // ============================================================================
 // 1. Context
@@ -84,7 +86,13 @@ mod slot_semantics {
 
         // First access triggers compute.
         assert_eq!(ctx.get(&s), 42);
-        COUNT.with(|c| assert_eq!(c.get(), 1, "compute should run exactly once on first access"));
+        COUNT.with(|c| {
+            assert_eq!(
+                c.get(),
+                1,
+                "compute should run exactly once on first access"
+            )
+        });
     }
 
     /// SPEC: Value cached after first access — no recompute on subsequent gets.
@@ -105,7 +113,13 @@ mod slot_semantics {
         for _ in 0..5 {
             assert_eq!(ctx.get(&s), 99);
         }
-        COUNT.with(|c| assert_eq!(c.get(), 1, "compute should only run once despite 5 accesses"));
+        COUNT.with(|c| {
+            assert_eq!(
+                c.get(),
+                1,
+                "compute should only run once despite 5 accesses"
+            )
+        });
         assert!(ctx.is_set(&s), "slot should be set after access");
     }
 
@@ -243,7 +257,10 @@ mod cell_semantics {
 
         // Set same value.
         ctx.set_cell(&c, 5);
-        assert!(ctx.is_set(&s), "slot should remain cached when cell value unchanged");
+        assert!(
+            ctx.is_set(&s),
+            "slot should remain cached when cell value unchanged"
+        );
         assert_eq!(ctx.get(&s), 15);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1, "no recomputation on same-value set"));
     }
@@ -268,7 +285,10 @@ mod cell_semantics {
 
         // Set different value.
         ctx.set_cell(&c, 2);
-        assert!(!ctx.is_set(&s), "slot should be cleared after cell value changed");
+        assert!(
+            !ctx.is_set(&s),
+            "slot should be cleared after cell value changed"
+        );
         assert_eq!(ctx.get(&s), 102);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 2));
     }
@@ -332,7 +352,10 @@ mod cell_semantics {
 
         // Same value (different allocation, same content).
         ctx.set_cell(&name, "alice".to_string());
-        assert!(ctx.is_set(&greeting), "should not invalidate on equal string");
+        assert!(
+            ctx.is_set(&greeting),
+            "should not invalidate on equal string"
+        );
         COUNT.with(|c| assert_eq!(c.get(), 1));
 
         // Different value.
@@ -447,7 +470,10 @@ mod dependency_tracking {
 
         // Changing b should NOT invalidate s (s doesn't depend on b right now).
         ctx.set_cell(&b, 99);
-        assert!(ctx.is_set(&s), "s should still be cached since it doesn't depend on b");
+        assert!(
+            ctx.is_set(&s),
+            "s should still be cached since it doesn't depend on b"
+        );
         COUNT.with(|c| assert_eq!(c.get(), 1));
 
         // Changing flag to false → s recomputes, now depends on b.
@@ -458,7 +484,10 @@ mod dependency_tracking {
 
         // Now changing a should NOT invalidate s (dynamic dep changed).
         ctx.set_cell(&a, 999);
-        assert!(ctx.is_set(&s), "s should still be cached since it no longer depends on a");
+        assert!(
+            ctx.is_set(&s),
+            "s should still be cached since it no longer depends on a"
+        );
         COUNT.with(|c| assert_eq!(c.get(), 2));
 
         // But changing b should invalidate s now.
@@ -578,7 +607,198 @@ mod invalidation_semantics {
 }
 
 // ============================================================================
-// 6. Edge Cases
+// 6. Effect System
+// ============================================================================
+
+mod effect_system {
+    use super::*;
+
+    /// SPEC: Effects run immediately and track cell dependencies automatically.
+    #[test]
+    fn effect_runs_immediately_and_reruns_when_cell_changes() {
+        let ctx = Context::new();
+        let count = ctx.cell(0i32);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_for_effect = Rc::clone(&seen);
+
+        let effect = ctx.effect(move |ctx| {
+            seen_for_effect.borrow_mut().push(ctx.get_cell(&count));
+        });
+
+        assert!(effect.is_active(&ctx));
+        assert_eq!(*seen.borrow(), vec![0], "effect should run on creation");
+
+        ctx.set_cell(&count, 1);
+        assert_eq!(
+            *seen.borrow(),
+            vec![0, 1],
+            "effect should rerun after dependency changes"
+        );
+
+        ctx.set_cell(&count, 1);
+        assert_eq!(
+            *seen.borrow(),
+            vec![0, 1],
+            "same-value cell set should not schedule the effect"
+        );
+    }
+
+    /// SPEC: Effects can depend on slots; slot invalidation schedules the effect once.
+    #[test]
+    fn effect_tracks_slot_dependencies_and_coalesces_scheduling() {
+        let ctx = Context::new();
+        let root = ctx.cell(1i32);
+        let left = ctx.slot(move |ctx| ctx.get_cell(&root) + 1);
+        let right = ctx.slot(move |ctx| ctx.get_cell(&root) + 2);
+        let sum = ctx.slot(move |ctx| ctx.get(&left) + ctx.get(&right));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_for_effect = Rc::clone(&seen);
+
+        let _effect = ctx.effect(move |ctx| {
+            seen_for_effect.borrow_mut().push(ctx.get(&sum));
+        });
+
+        assert_eq!(*seen.borrow(), vec![5]);
+
+        ctx.set_cell(&root, 10);
+        assert_eq!(
+            *seen.borrow(),
+            vec![5, 23],
+            "diamond invalidation should schedule one effect rerun"
+        );
+    }
+
+    /// SPEC: Cleanup runs before each rerun and when the effect is disposed.
+    #[test]
+    fn effect_cleanup_runs_before_rerun_and_on_dispose() {
+        let ctx = Context::new();
+        let value = ctx.cell(0i32);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_for_effect = Rc::clone(&events);
+
+        let effect = ctx.effect(move |ctx| {
+            let current = ctx.get_cell(&value);
+            events_for_effect
+                .borrow_mut()
+                .push(format!("run:{current}"));
+            let events_for_cleanup = Rc::clone(&events_for_effect);
+            move || {
+                events_for_cleanup
+                    .borrow_mut()
+                    .push(format!("cleanup:{current}"));
+            }
+        });
+
+        assert_eq!(*events.borrow(), vec!["run:0"]);
+
+        ctx.set_cell(&value, 1);
+        assert_eq!(
+            *events.borrow(),
+            vec!["run:0", "cleanup:0", "run:1"],
+            "cleanup from the previous run should execute before rerun"
+        );
+
+        effect.dispose(&ctx);
+        assert!(!effect.is_active(&ctx));
+        assert_eq!(
+            *events.borrow(),
+            vec!["run:0", "cleanup:0", "run:1", "cleanup:1"],
+            "dispose should run the latest cleanup"
+        );
+
+        ctx.set_cell(&value, 2);
+        assert_eq!(
+            *events.borrow(),
+            vec!["run:0", "cleanup:0", "run:1", "cleanup:1"],
+            "disposed effects should not rerun"
+        );
+    }
+
+    /// SPEC: Initial effect activation uses the scheduler, so invalidations
+    /// triggered during the first run queue a follow-up run instead of
+    /// recursively overwriting the latest cleanup.
+    #[test]
+    fn effect_initial_run_schedules_nested_invalidations_after_cleanup_is_stored() {
+        let ctx = Context::new();
+        let value = ctx.cell(0i32);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_for_effect = Rc::clone(&events);
+
+        let effect = ctx.effect(move |ctx| {
+            let current = ctx.get_cell(&value);
+            events_for_effect
+                .borrow_mut()
+                .push(format!("run:{current}"));
+            if current == 0 {
+                ctx.set_cell(&value, 1);
+            }
+            let events_for_cleanup = Rc::clone(&events_for_effect);
+            move || {
+                events_for_cleanup
+                    .borrow_mut()
+                    .push(format!("cleanup:{current}"));
+            }
+        });
+
+        assert_eq!(
+            *events.borrow(),
+            vec!["run:0", "cleanup:0", "run:1"],
+            "nested invalidation should run after the first cleanup is stored"
+        );
+
+        effect.dispose(&ctx);
+        assert_eq!(
+            *events.borrow(),
+            vec!["run:0", "cleanup:0", "run:1", "cleanup:1"],
+            "dispose should clean up the latest run, not the overwritten first run"
+        );
+    }
+
+    /// SPEC: Effect dependencies are dynamic and re-discovered on each rerun.
+    #[test]
+    fn effect_dependencies_are_dynamic() {
+        let ctx = Context::new();
+        let flag = ctx.cell(true);
+        let a = ctx.cell(10i32);
+        let b = ctx.cell(20i32);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_for_effect = Rc::clone(&seen);
+
+        let _effect = ctx.effect(move |ctx| {
+            let value = if ctx.get_cell(&flag) {
+                ctx.get_cell(&a)
+            } else {
+                ctx.get_cell(&b)
+            };
+            seen_for_effect.borrow_mut().push(value);
+        });
+
+        assert_eq!(*seen.borrow(), vec![10]);
+
+        ctx.set_cell(&b, 99);
+        assert_eq!(
+            *seen.borrow(),
+            vec![10],
+            "inactive branch should not schedule the effect"
+        );
+
+        ctx.set_cell(&flag, false);
+        assert_eq!(*seen.borrow(), vec![10, 99]);
+
+        ctx.set_cell(&a, 100);
+        assert_eq!(
+            *seen.borrow(),
+            vec![10, 99],
+            "old branch dependency should be unsubscribed"
+        );
+
+        ctx.set_cell(&b, 50);
+        assert_eq!(*seen.borrow(), vec![10, 99, 50]);
+    }
+}
+
+// ============================================================================
+// 7. Edge Cases
 // ============================================================================
 
 mod edge_cases {
@@ -771,7 +991,10 @@ mod edge_cases {
 
         // Second cycle — deps should still work.
         ctx.set_cell(&c, 3);
-        assert!(!ctx.is_set(&s), "dep should still be tracked after recompute");
+        assert!(
+            !ctx.is_set(&s),
+            "dep should still be tracked after recompute"
+        );
         assert_eq!(ctx.get(&s), 30);
 
         // Third cycle.

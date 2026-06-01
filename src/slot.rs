@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
-use crate::context::SlotId;
 use crate::Context;
+use crate::context::SlotId;
 
 /// A typed handle to a lazily-computed slot within a [`Context`].
 ///
@@ -25,6 +25,7 @@ impl<T> SlotHandle<T> {
     /// The slot will recompute on the next [`Context::get`] call.
     pub fn clear(&self, ctx: &Context) {
         ctx.clear_slot(self.id);
+        ctx.flush_effects();
     }
 }
 

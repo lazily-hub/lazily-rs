@@ -25,9 +25,12 @@ pub struct Context {
 | `ctx.cell(value)` | Create a mutable cell |
 | `ctx.get_cell(&cell)` | Get cell value |
 | `ctx.set_cell(&cell, value)` | Update cell (clears dependents if changed) |
+| `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.is_set(&slot)` | Check if slot has cached value |
 | `slot.clear(&ctx)` | Clear cached value and cascade to dependents |
 | `cell.clear_dependents(&ctx)` | Clear downstream slots without changing cell value |
+| `effect.dispose(&ctx)` | Dispose an effect, unsubscribe dependencies, and run cleanup |
+| `effect.is_active(&ctx)` | Check whether an effect is still registered |
 
 ### Slot
 
@@ -67,6 +70,29 @@ struct CellNode {
 - If unchanged, no invalidation occurs (no-op)
 - If changed, all dependent Slots are recursively cleared
 
+### Effect
+
+Side-effect callback that automatically tracks dependencies. Effects run
+immediately on creation, then rerun after any Cell or Slot read during the last
+run is invalidated.
+
+```rust
+struct EffectNode {
+    run: Box<dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>>,
+    dependencies: HashSet<SlotId>,
+    cleanup: Option<Box<dyn FnOnce()>>,
+}
+```
+
+**Semantics:**
+
+- **Immediate activation:** `ctx.effect()` runs the callback once during creation
+- **Auto-tracking:** Any Slot or Cell accessed during the callback becomes a dependency
+- **Scheduling:** Dependency invalidation schedules the effect, then the context flushes scheduled effects after the invalidation pass
+- **Coalescing:** An effect scheduled through multiple dependency paths in the same invalidation pass runs once
+- **Cleanup:** Returning a cleanup closure runs it before the next rerun and on disposal
+- **Disposal:** `effect.dispose(&ctx)` unsubscribes from dependencies, removes pending scheduled work, and prevents future reruns
+
 ### SlotId
 
 Unique identifier for reactive nodes. Lightweight `Copy` type wrapping a `u64`.
@@ -83,9 +109,10 @@ Both `SlotHandle<T>` and `CellHandle<T>` wrap a `SlotId` with `PhantomData<T>` f
 Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` approach).
 
 1. When a Slot computes, it pushes a frame onto the tracking stack
-2. Any nested slot/cell access sees the parent frame
-3. The child registers the parent as a dependent
-4. When a dependency clears or a Cell changes, all dependents clear recursively
+2. When an Effect runs, it also pushes a frame onto the tracking stack
+3. Any nested slot/cell access sees the parent frame
+4. The child registers the parent as a dependent
+5. When a dependency clears or a Cell changes, slot dependents clear recursively and effect dependents are scheduled
 
 ## Invalidation Semantics
 
@@ -94,11 +121,14 @@ Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` appro
 - `cell.clear_dependents(&ctx)` → clear all dependent slots without changing cell value
 - Slot clearing → remove cached value → cascade clear to all dependents
 - Cleared slots recompute on next `ctx.get()` access
+- Effects rerun after the invalidation pass if any tracked dependency invalidated
+- Effect cleanup runs before rerun and on disposal
 
 ## Design Goals
 
 - **Lazy evaluation:** Values computed only when first accessed
 - **Fine-grained reactivity:** Only affected dependents recompute
+- **Effects:** Side effects are scheduled from the same dependency graph as slots
 - **Zero external dependencies:** Pure Rust, no crates
 - **Single-threaded:** `RefCell` interior mutability (no Mutex overhead)
 

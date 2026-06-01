@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
-use crate::context::SlotId;
 use crate::Context;
+use crate::context::SlotId;
 
 /// A typed handle to a mutable cell within a [`Context`].
 ///
@@ -25,16 +25,7 @@ impl<T> CellHandle<T> {
     /// Useful when you know derived caches are stale but the input hasn't
     /// changed (e.g., an external resource was mutated).
     pub fn clear_dependents(&self, ctx: &Context) {
-        let dependents: Vec<SlotId> = {
-            let nodes = ctx.nodes.borrow();
-            match nodes.get(&self.id) {
-                Some(crate::context::Node::Cell(c)) => c.dependents.iter().copied().collect(),
-                _ => vec![],
-            }
-        };
-        for dep_id in dependents {
-            ctx.clear_slot(dep_id);
-        }
+        ctx.clear_cell_dependents(self.id);
     }
 }
 

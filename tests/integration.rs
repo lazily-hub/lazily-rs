@@ -75,7 +75,10 @@ fn cell_set_same_value_no_invalidation() {
 
     // Set same value — should NOT clear the slot.
     ctx.set_cell(&counter, 5);
-    assert!(ctx.is_set(&doubled), "slot should still be cached when cell value unchanged");
+    assert!(
+        ctx.is_set(&doubled),
+        "slot should still be cached when cell value unchanged"
+    );
 
     assert_eq!(ctx.get(&doubled), 10);
     SAME_COUNT.with(|c| assert_eq!(c.get(), 1, "compute should not be called again"));
@@ -223,9 +226,7 @@ fn slot_depending_on_slot() {
 fn works_with_string_types() {
     let ctx = Context::new();
     let name = ctx.cell("world".to_string());
-    let greeting = ctx.slot(move |ctx| {
-        format!("hello, {}!", ctx.get_cell(&name))
-    });
+    let greeting = ctx.slot(move |ctx| format!("hello, {}!", ctx.get_cell(&name)));
 
     assert_eq!(ctx.get(&greeting), "hello, world!");
     ctx.set_cell(&name, "rust".to_string());
