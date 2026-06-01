@@ -171,8 +171,9 @@ cargo run --example tokio_sync --features tokio
 
 The feature proves `ThreadSafeContext` can be shared through `tokio::spawn` and
 `tokio::task::spawn_blocking`. It does not add async computations or effects;
-those need a separate design with explicit cancellation and `.await` tracking
-semantics.
+those need the separate `AsyncContext` design captured in `SPEC.md`, including
+in-flight future deduplication, stale completion handling, cleanup ordering, and
+separate `Send` versus `LocalSet` surfaces.
 
 ## Multi-Language
 

@@ -24,7 +24,7 @@ Lazy reactive primitives library for Rust.
 ## Commands
 
 ```bash
-cargo test          # Run all tests (81 integration/spec tests + 1 doctest)
+cargo test          # Run all tests (81 integration/spec tests + 2 doctests)
 cargo test --features tokio  # Include Tokio sync integration tests
 cargo clippy        # Lint
 cargo build         # Build

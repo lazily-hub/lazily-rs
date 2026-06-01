@@ -16,6 +16,23 @@
 //!
 //! std::thread::spawn(move || ctx.get(&slot));
 //! ```
+//!
+//! # Async contract
+//!
+//! [`ThreadSafeContext`] can be used from async runtimes, but slot and effect
+//! callbacks are still synchronous. Async computations need a separate API
+//! because futures introduce in-flight state, cancellation, stale completion,
+//! and dependency tracking across `.await`.
+//!
+//! ```compile_fail
+//! use lazily::ThreadSafeContext;
+//!
+//! let ctx = ThreadSafeContext::new();
+//! let pending = ctx.computed(|_| async { 1usize });
+//!
+//! // The graph does not await async slot callbacks.
+//! let _ = ctx.get(&pending);
+//! ```
 
 mod cell;
 mod context;

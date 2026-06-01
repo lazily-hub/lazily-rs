@@ -240,6 +240,83 @@ Tokio integration is scoped in two stages:
    across `.await`, stale future completion, cleanup ordering, and `Send` versus
    `LocalSet` futures.
 
+### Future async computations/effects design
+
+True async support must be a new explicit async context surface, not an overload
+of `Context` or `ThreadSafeContext`. A future implementation should introduce an
+`AsyncContext` API behind a separate feature once these semantics are covered by
+tests.
+
+API sketch:
+
+```rust
+pub struct AsyncContext { /* shared async graph state */ }
+pub struct AsyncSlotHandle<T> { /* id + marker */ }
+pub struct AsyncEffectHandle { /* id */ }
+
+impl AsyncContext {
+    pub fn async_computed<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = T> + Send + 'static;
+
+    pub async fn get_async<T>(&self, slot: &AsyncSlotHandle<T>) -> T
+    where
+        T: Clone + Send + Sync + 'static;
+
+    pub fn async_effect<F, Fut, C, CleanupFut>(&self, effect: F) -> AsyncEffectHandle
+    where
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<C>> + Send + 'static,
+        C: FnOnce() -> CleanupFut + Send + 'static,
+        CleanupFut: Future<Output = ()> + Send + 'static;
+}
+```
+
+Required semantics:
+
+- **In-flight future deduplication:** each async slot has one published cache and
+  at most one in-flight computation for the current slot revision. Concurrent
+  `get_async` callers await the same in-flight result instead of spawning
+  duplicate futures.
+- **Cancellation:** dropping one waiter does not cancel the shared in-flight
+  computation while other waiters still need it. Explicit `clear`, dependency
+  invalidation, or context disposal may mark the in-flight revision canceled and
+  abort the task if the runtime provides an abort handle. User futures and
+  cleanup futures must be cancellation-safe because aborting drops them at an
+  `.await` boundary.
+- **Dependency tracking across `.await`:** do not depend on thread-local stack
+  state surviving across suspension or executor thread migration. Async compute
+  and effect callbacks receive an `AsyncComputeContext`; every `get_async` and
+  `get_cell` through that context records dependencies against the active async
+  node explicitly.
+- **Stale future completion:** an async computation records the slot revision it
+  started from. When it completes, the graph publishes its value only if the
+  slot revision is still current. Stale completions are discarded and waiting
+  callers retry or await the newer in-flight computation.
+- **Effect cleanup ordering:** async effect reruns are serialized per effect.
+  Before a rerun or disposal publishes the next effect state, the previous
+  cleanup future must run outside the graph lock and complete before the next
+  effect body starts. Disposal removes pending reruns before awaiting cleanup.
+- **`Send` versus `LocalSet`:** the default async context should require
+  `Send + Sync + 'static` values, callbacks, futures, and cleanup futures so it
+  can run on a multithreaded Tokio runtime. A separate `LocalAsyncContext` may
+  support `!Send` futures on `tokio::task::LocalSet`, but its handles must not be
+  interchangeable with the `Send` async context.
+
+Implementation notes:
+
+- Async graph locks must never be held while polling user futures or cleanup
+  futures.
+- Nested async slot reads should register dependencies on the awaiting parent
+  before awaiting the child result.
+- Batching semantics should remain synchronous at the graph mutation boundary:
+  invalidations schedule async reruns only after the outermost batch exits.
+- The sync `tokio` feature is not enough to enable this API; true async support
+  should use a separate feature flag so downstream users do not accidentally
+  accept the larger semantic surface.
+
 ## Invalidation Semantics
 
 - `ctx.set_cell()` → if value changed (PartialEq) → mark all dependent slots dirty
