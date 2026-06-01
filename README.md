@@ -152,7 +152,7 @@ the getter retries before returning a fresh value.
 - **Effect scheduling:** Effects rerun after dependency invalidation and coalesce duplicate schedules
 - Interior mutability via `RefCell` (single-threaded)
 - Thread-local tracking stack for automatic dependency discovery
-- Zero external dependencies
+- Zero mandatory runtime dependencies in the default library surface
 
 ## Threading Roadmap
 

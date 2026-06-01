@@ -317,18 +317,22 @@ impl ThreadSafeContext {
             self.register_dependency(id, parent_id);
         }
 
-        self.refresh_slot(id);
+        loop {
+            self.refresh_slot(id);
 
-        let state = self.lock_state();
-        if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&id)
-            && let Some(value) = &slot.value
-        {
-            return value
-                .downcast_ref::<T>()
-                .expect("type mismatch in slot")
-                .clone();
+            let state = self.lock_state();
+            match state.nodes.get(&id) {
+                Some(ThreadSafeNode::Slot(slot)) => {
+                    if let Some(value) = &slot.value {
+                        return value
+                            .downcast_ref::<T>()
+                            .expect("type mismatch in slot")
+                            .clone();
+                    }
+                }
+                _ => panic!("get_slot called on non-slot id"),
+            }
         }
-        panic!("get_slot called on unset or non-slot id");
     }
 
     fn refresh_slot(&self, id: SlotId) -> bool {

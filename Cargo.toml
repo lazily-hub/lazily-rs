@@ -15,6 +15,13 @@ tokio = ["dep:tokio"]
 [dependencies]
 tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt-multi-thread"] }
 
+[dev-dependencies]
+criterion = "0.8"
+
 [[example]]
 name = "tokio_sync"
 required-features = ["tokio"]
+
+[[bench]]
+name = "context"
+harness = false

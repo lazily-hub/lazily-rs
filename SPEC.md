@@ -338,9 +338,26 @@ Implementation notes:
 - **Memoized invalidation:** Equal intermediate `ctx.memo()` recomputation suppresses downstream recomputation/effect reruns
 - **Effects:** Side effects are scheduled from the same dependency graph as slots
 - **Batching:** Multiple writes can share one invalidation/effect flush boundary
-- **Zero external dependencies:** Pure Rust, no crates
+- **Zero mandatory runtime dependencies:** The default library surface uses only the Rust standard library; Tokio is optional and Criterion is dev-only for benchmarks
 - **Single-threaded fast path:** `Context` uses `RefCell` interior mutability with no mutex overhead
 - **Explicit thread-safe path:** `ThreadSafeContext` uses a context-level lock and `Send + Sync` bounds for shared reactive graphs
+- **Performance tracking:** Criterion benchmarks cover both `Context` and `ThreadSafeContext` for cached reads, cold first access, dependency fan-out, memo equality suppression, effect flushing, and batch storms; `ThreadSafeContext` also tracks 1/2/4/8/16-worker contention.
+
+## Performance Benchmarks
+
+The benchmark suite is a development-only surface under `benches/context.rs`.
+It must compile with `cargo bench --no-run` and should remain focused on public
+API behavior rather than private graph internals.
+
+Required benchmark scenarios:
+
+- Cached reads after the slot has already been computed
+- Cold first `get` including graph construction and initial dependency capture
+- Dependency fan-out invalidation followed by dependent reads
+- Memo equality suppression where an equal intermediate value prevents downstream recomputation
+- Effect flushing after dependency mutation
+- Batch storms that coalesce many writes into one invalidation/effect flush boundary
+- `ThreadSafeContext` contention at 1, 2, 4, 8, and 16 workers
 
 ## Differences from lazily-zig
 
@@ -360,4 +377,4 @@ Implementation notes:
 | Slot keys | Object identity | `SlotId` (u64) |
 | Cell equality | `!=` operator | `PartialEq` trait |
 | Context resolvers | `resolve_ctx` functions | Direct context passing |
-| Dependencies | Zero | Zero (pure Rust) |
+| Dependencies | Zero mandatory runtime crates by default; optional Tokio support and dev-only Criterion benchmarks | Zero (pure Rust) |
