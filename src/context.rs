@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use crate::cell::CellHandle;
 use crate::effect::{EffectCallbackResult, EffectHandle};
@@ -91,7 +91,7 @@ pub(crate) enum Node {
 /// Container for all reactive nodes. Owns allocations; uses interior
 /// mutability (`RefCell`) for single-threaded use.
 pub struct Context {
-    pub(crate) nodes: RefCell<HashMap<SlotId, Node>>,
+    pub(crate) nodes: RefCell<Vec<Option<Node>>>,
     pub(crate) next_id: RefCell<u64>,
     pub(crate) pending_effects: RefCell<VecDeque<SlotId>>,
     pub(crate) scheduled_effects: RefCell<HashSet<SlotId>>,
@@ -117,7 +117,7 @@ impl Drop for BatchGuard<'_> {
 impl Context {
     pub fn new() -> Self {
         Self {
-            nodes: RefCell::new(HashMap::new()),
+            nodes: RefCell::new(Vec::new()),
             next_id: RefCell::new(0),
             pending_effects: RefCell::new(VecDeque::new()),
             scheduled_effects: RefCell::new(HashSet::new()),
@@ -144,6 +144,32 @@ impl Context {
         slot_id
     }
 
+    fn node_index(id: SlotId) -> Option<usize> {
+        usize::try_from(id.0).ok()
+    }
+
+    fn get_node(nodes: &[Option<Node>], id: SlotId) -> Option<&Node> {
+        nodes.get(Self::node_index(id)?)?.as_ref()
+    }
+
+    fn get_node_mut(nodes: &mut [Option<Node>], id: SlotId) -> Option<&mut Node> {
+        nodes.get_mut(Self::node_index(id)?)?.as_mut()
+    }
+
+    fn take_node(nodes: &mut [Option<Node>], id: SlotId) -> Option<Node> {
+        nodes.get_mut(Self::node_index(id)?)?.take()
+    }
+
+    fn insert_node(&self, id: SlotId, node: Node) {
+        let index = Self::node_index(id).expect("SlotId does not fit usize");
+        let mut nodes = self.nodes.borrow_mut();
+        if nodes.len() <= index {
+            nodes.resize_with(index + 1, || None);
+        }
+        debug_assert!(nodes[index].is_none(), "SlotId reused");
+        nodes[index] = Some(node);
+    }
+
     fn register_dependency(&self, dependency_id: SlotId, dependent_id: SlotId) {
         if dependency_id == dependent_id {
             return;
@@ -153,7 +179,7 @@ impl Context {
         let mut edge_added = false;
         let mut nodes = self.nodes.borrow_mut();
         // The node being accessed gets `dependent_id` as a dependent.
-        if let Some(node) = nodes.get_mut(&dependency_id) {
+        if let Some(node) = Self::get_node_mut(&mut nodes, dependency_id) {
             match node {
                 Node::Slot(s) => {
                     s.dependents.insert(dependent_id);
@@ -167,7 +193,7 @@ impl Context {
 
         // The currently-running slot/effect records the accessed node as a
         // dependency. Cells never run and therefore never track dependencies.
-        if let Some(node) = nodes.get_mut(&dependent_id) {
+        if let Some(node) = Self::get_node_mut(&mut nodes, dependent_id) {
             match node {
                 Node::Slot(parent) => {
                     #[cfg(feature = "instrumentation")]
@@ -206,7 +232,7 @@ impl Context {
         #[cfg(feature = "instrumentation")]
         let mut edge_removed = false;
         let mut nodes = self.nodes.borrow_mut();
-        if let Some(dep_node) = nodes.get_mut(&dependency_id) {
+        if let Some(dep_node) = Self::get_node_mut(&mut nodes, dependency_id) {
             match dep_node {
                 Node::Slot(s) => {
                     #[cfg(feature = "instrumentation")]
@@ -294,7 +320,7 @@ impl Context {
             dirty: false,
             force_recompute: false,
         };
-        self.nodes.borrow_mut().insert(id, Node::Slot(node));
+        self.insert_node(id, Node::Slot(node));
         SlotHandle::new(id)
     }
 
@@ -314,7 +340,7 @@ impl Context {
         self.refresh_slot(id);
 
         let nodes = self.nodes.borrow();
-        if let Some(Node::Slot(slot)) = nodes.get(&id)
+        if let Some(Node::Slot(slot)) = Self::get_node(&nodes, id)
             && let Some(ref val) = slot.value
         {
             return val
@@ -333,7 +359,7 @@ impl Context {
     fn refresh_slot(&self, id: SlotId) -> bool {
         let dependencies: Vec<SlotId> = {
             let nodes = self.nodes.borrow();
-            match nodes.get(&id) {
+            match Self::get_node(&nodes, id) {
                 Some(Node::Slot(slot)) => slot.dependencies.iter().copied().collect(),
                 _ => return false,
             }
@@ -348,7 +374,7 @@ impl Context {
 
         let needs_recompute = {
             let nodes = self.nodes.borrow();
-            let slot = match nodes.get(&id) {
+            let slot = match Self::get_node(&nodes, id) {
                 Some(Node::Slot(slot)) => slot,
                 _ => return false,
             };
@@ -365,12 +391,12 @@ impl Context {
 
     fn is_slot_node(&self, id: SlotId) -> bool {
         let nodes = self.nodes.borrow();
-        matches!(nodes.get(&id), Some(Node::Slot(_)))
+        matches!(Self::get_node(&nodes, id), Some(Node::Slot(_)))
     }
 
     fn clear_slot_dirty_flags(&self, id: SlotId) {
         let mut nodes = self.nodes.borrow_mut();
-        if let Some(Node::Slot(slot)) = nodes.get_mut(&id) {
+        if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut nodes, id) {
             slot.dirty = false;
             slot.force_recompute = false;
         }
@@ -381,7 +407,7 @@ impl Context {
         let old_deps: Vec<SlotId>;
         {
             let mut nodes = self.nodes.borrow_mut();
-            let slot = match nodes.get_mut(&id) {
+            let slot = match Self::get_node_mut(&mut nodes, id) {
                 Some(Node::Slot(s)) => s,
                 _ => panic!("get_slot called on non-slot id"),
             };
@@ -413,7 +439,7 @@ impl Context {
         // Store the computed value.
         let changed = {
             let mut nodes = self.nodes.borrow_mut();
-            let slot = match nodes.get_mut(&id) {
+            let slot = match Self::get_node_mut(&mut nodes, id) {
                 Some(Node::Slot(slot)) => slot,
                 _ => return false,
             };
@@ -447,7 +473,7 @@ impl Context {
         }
 
         let nodes = self.nodes.borrow();
-        if let Some(Node::Cell(c)) = nodes.get(&handle.id) {
+        if let Some(Node::Cell(c)) = Self::get_node(&nodes, handle.id) {
             c.value
                 .downcast_ref::<T>()
                 .expect("type mismatch in cell")
@@ -466,7 +492,7 @@ impl Context {
             value: Box::new(value),
             dependents: HashSet::new(),
         };
-        self.nodes.borrow_mut().insert(id, Node::Cell(node));
+        self.insert_node(id, Node::Cell(node));
         CellHandle::new(id)
     }
 
@@ -475,7 +501,7 @@ impl Context {
     pub fn set_cell<T: PartialEq + 'static>(&self, handle: &CellHandle<T>, new_value: T) {
         let changed = {
             let nodes = self.nodes.borrow();
-            if let Some(Node::Cell(c)) = nodes.get(&handle.id) {
+            if let Some(Node::Cell(c)) = Self::get_node(&nodes, handle.id) {
                 let old = c
                     .value
                     .downcast_ref::<T>()
@@ -489,7 +515,7 @@ impl Context {
         if changed {
             {
                 let mut nodes = self.nodes.borrow_mut();
-                if let Some(Node::Cell(c)) = nodes.get_mut(&handle.id) {
+                if let Some(Node::Cell(c)) = Self::get_node_mut(&mut nodes, handle.id) {
                     c.value = Box::new(new_value);
                 }
             }
@@ -573,7 +599,7 @@ impl Context {
             cleanup: None,
             force_run: true,
         };
-        self.nodes.borrow_mut().insert(id, Node::Effect(node));
+        self.insert_node(id, Node::Effect(node));
         let handle = EffectHandle::new(id);
         self.schedule_effect(id, false);
         self.flush_effects();
@@ -584,7 +610,7 @@ impl Context {
     pub fn dispose_effect(&self, handle: &EffectHandle) {
         let (dependencies, cleanup) = {
             let mut nodes = self.nodes.borrow_mut();
-            let Some(Node::Effect(effect)) = nodes.remove(&handle.id) else {
+            let Some(Node::Effect(effect)) = Self::take_node(&mut nodes, handle.id) else {
                 return;
             };
             (effect.dependencies, effect.cleanup)
@@ -602,13 +628,13 @@ impl Context {
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
         let nodes = self.nodes.borrow();
-        matches!(nodes.get(&handle.id), Some(Node::Effect(_)))
+        matches!(Self::get_node(&nodes, handle.id), Some(Node::Effect(_)))
     }
 
     fn schedule_effect(&self, id: SlotId, force: bool) {
         let exists = {
             let mut nodes = self.nodes.borrow_mut();
-            match nodes.get_mut(&id) {
+            match Self::get_node_mut(&mut nodes, id) {
                 Some(Node::Effect(effect)) => {
                     if force {
                         effect.force_run = true;
@@ -678,7 +704,7 @@ impl Context {
         let cleanup: Option<Box<dyn FnOnce()>>;
         {
             let mut nodes = self.nodes.borrow_mut();
-            let effect = match nodes.get_mut(&id) {
+            let effect = match Self::get_node_mut(&mut nodes, id) {
                 Some(Node::Effect(effect)) => effect,
                 _ => return,
             };
@@ -705,7 +731,7 @@ impl Context {
         pop_tracking_frame();
 
         let mut nodes = self.nodes.borrow_mut();
-        if let Some(Node::Effect(effect)) = nodes.get_mut(&id) {
+        if let Some(Node::Effect(effect)) = Self::get_node_mut(&mut nodes, id) {
             effect.cleanup = next_cleanup;
         } else if let Some(cleanup) = next_cleanup {
             drop(nodes);
@@ -716,7 +742,7 @@ impl Context {
     fn effect_should_run(&self, id: SlotId) -> bool {
         let (force_run, dependencies) = {
             let nodes = self.nodes.borrow();
-            let Some(Node::Effect(effect)) = nodes.get(&id) else {
+            let Some(Node::Effect(effect)) = Self::get_node(&nodes, id) else {
                 return false;
             };
             (
@@ -755,7 +781,7 @@ impl Context {
         let dependents: Vec<SlotId>;
         {
             let mut nodes = self.nodes.borrow_mut();
-            if let Some(Node::Slot(slot)) = nodes.get_mut(&id) {
+            if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut nodes, id) {
                 if slot.value.is_none() && !slot.dirty {
                     return; // Already cleared, stop recursion.
                 }
@@ -784,7 +810,7 @@ impl Context {
     fn invalidate_cell_dependents_now(&self, id: SlotId) {
         let dependents: Vec<SlotId> = {
             let nodes = self.nodes.borrow();
-            match nodes.get(&id) {
+            match Self::get_node(&nodes, id) {
                 Some(Node::Cell(c)) => c.dependents.iter().copied().collect(),
                 _ => vec![],
             }
@@ -797,7 +823,7 @@ impl Context {
     fn clear_cell_dependents_now(&self, id: SlotId) {
         let dependents: Vec<SlotId> = {
             let nodes = self.nodes.borrow();
-            match nodes.get(&id) {
+            match Self::get_node(&nodes, id) {
                 Some(Node::Cell(c)) => c.dependents.iter().copied().collect(),
                 _ => vec![],
             }
@@ -810,7 +836,7 @@ impl Context {
     fn clear_dependent_now(&self, id: SlotId) {
         let is_effect = {
             let nodes = self.nodes.borrow();
-            matches!(nodes.get(&id), Some(Node::Effect(_)))
+            matches!(Self::get_node(&nodes, id), Some(Node::Effect(_)))
         };
 
         if is_effect {
@@ -823,7 +849,7 @@ impl Context {
     fn invalidate_dependent_from_changed_value(&self, id: SlotId) {
         let is_effect = {
             let nodes = self.nodes.borrow();
-            matches!(nodes.get(&id), Some(Node::Effect(_)))
+            matches!(Self::get_node(&nodes, id), Some(Node::Effect(_)))
         };
 
         if is_effect {
@@ -836,7 +862,7 @@ impl Context {
     fn notify_slot_value_changed(&self, id: SlotId) {
         let dependents: Vec<SlotId> = {
             let nodes = self.nodes.borrow();
-            match nodes.get(&id) {
+            match Self::get_node(&nodes, id) {
                 Some(Node::Slot(slot)) => slot.dependents.iter().copied().collect(),
                 _ => vec![],
             }
@@ -851,7 +877,7 @@ impl Context {
         let should_propagate: bool;
         {
             let mut nodes = self.nodes.borrow_mut();
-            let Some(Node::Slot(slot)) = nodes.get_mut(&id) else {
+            let Some(Node::Slot(slot)) = Self::get_node_mut(&mut nodes, id) else {
                 return;
             };
             should_propagate = !slot.dirty || (force_recompute && !slot.force_recompute);
@@ -869,7 +895,7 @@ impl Context {
         for dep_id in dependents {
             let is_effect = {
                 let nodes = self.nodes.borrow();
-                matches!(nodes.get(&dep_id), Some(Node::Effect(_)))
+                matches!(Self::get_node(&nodes, dep_id), Some(Node::Effect(_)))
             };
 
             if is_effect {
@@ -883,7 +909,7 @@ impl Context {
     /// Check whether a slot currently has a cached, fresh value (for testing).
     pub fn is_set<T: 'static>(&self, handle: &SlotHandle<T>) -> bool {
         let nodes = self.nodes.borrow();
-        if let Some(Node::Slot(slot)) = nodes.get(&handle.id) {
+        if let Some(Node::Slot(slot)) = Self::get_node(&nodes, handle.id) {
             slot.value.is_some() && !slot.dirty
         } else {
             false

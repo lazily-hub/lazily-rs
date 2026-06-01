@@ -150,6 +150,7 @@ the getter retries before returning a fresh value.
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)
 - **Batching:** Multiple writes share one invalidation/effect flush boundary
 - **Effect scheduling:** Effects rerun after dependency invalidation and coalesce duplicate schedules
+- Slot-id-indexed contiguous node storage for the single-threaded fast path
 - Interior mutability via `RefCell` (single-threaded)
 - Thread-local tracking stack for automatic dependency discovery
 - Zero mandatory runtime dependencies in the default library surface

@@ -78,6 +78,25 @@ mod context {
         assert!(!ctx.is_set(&doubled));
         assert_eq!(ctx.get(&doubled), 6);
     }
+
+    #[test]
+    fn context_allocates_after_effect_disposal() {
+        let ctx = Context::new();
+        let root = ctx.cell(1i32);
+        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root) * 2);
+        let effect = ctx.effect(move |ctx| {
+            ctx.get(&doubled);
+        });
+
+        effect.dispose(&ctx);
+        assert!(!effect.is_active(&ctx));
+
+        let tripled = ctx.computed(move |ctx| ctx.get_cell(&root) * 3);
+        assert_eq!(ctx.get(&tripled), 3);
+
+        ctx.set_cell(&root, 2);
+        assert_eq!(ctx.get(&tripled), 6);
+    }
 }
 
 // ============================================================================

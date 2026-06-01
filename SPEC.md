@@ -10,7 +10,7 @@ Container for all slots and cells. Owns all allocations via interior mutability 
 
 ```rust
 pub struct Context {
-    nodes: RefCell<HashMap<SlotId, Node>>,
+    nodes: RefCell<Vec<Option<Node>>>,
     next_id: RefCell<u64>,
     pending_effects: RefCell<VecDeque<SlotId>>,
     scheduled_effects: RefCell<HashSet<SlotId>>,
@@ -41,6 +41,11 @@ pub struct Context {
 | `cell.clear_dependents(&ctx)` | Clear downstream slots without changing cell value |
 | `effect.dispose(&ctx)` | Dispose an effect, unsubscribe dependencies, and run cleanup |
 | `effect.is_active(&ctx)` | Check whether an effect is still registered |
+
+`Context` stores nodes in a slot-id-indexed `Vec<Option<Node>>` rather than a
+hash map. `SlotId` values are monotonically allocated and are not reused; effect
+disposal leaves a vacant entry so existing handles and dependency ids remain
+stable while lookups stay contiguous and hash-free.
 
 ### ThreadSafeContext
 
@@ -340,6 +345,7 @@ Implementation notes:
 - **Batching:** Multiple writes can share one invalidation/effect flush boundary
 - **Zero mandatory runtime dependencies:** The default library surface uses only the Rust standard library; Tokio is optional and Criterion is dev-only for benchmarks
 - **Single-threaded fast path:** `Context` uses `RefCell` interior mutability with no mutex overhead
+- **Contiguous local storage:** `Context` indexes nodes directly by `SlotId` to avoid hash-map lookup and churn in the single-threaded fast path
 - **Explicit thread-safe path:** `ThreadSafeContext` uses a context-level lock and `Send + Sync` bounds for shared reactive graphs
 - **Performance tracking:** Criterion benchmarks cover both `Context` and `ThreadSafeContext` for cached reads, cold first access, dependency fan-out, memo equality suppression, effect flushing, and batch storms; `ThreadSafeContext` also tracks 1/2/4/8/16-worker contention.
 - **Benchmark instrumentation:** The optional `instrumentation` feature exposes lightweight counters for recompute starts, duplicate speculative thread-safe computes, dependency edge churn, effect queue depth, reactive node allocations, and `ThreadSafeContext` lock wait/hold timing.
