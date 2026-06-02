@@ -34,6 +34,7 @@ pub struct Context {
 | `ctx.cell(value)` | Create a mutable cell |
 | `ctx.get_cell(&cell)` | Get cell value |
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
+| `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.is_set(&slot)` | Check if slot has a cached, fresh value |
@@ -119,7 +120,7 @@ struct CellNode {
 
 **Semantics:**
 
-- `ctx.set_cell()` compares old and new via `PartialEq`
+- `ctx.set_cell()` and `cell.set(&ctx, value)` compare old and new via `PartialEq`
 - If unchanged, no invalidation occurs (no-op)
 - If changed, dependent Slots are marked dirty while cached values are preserved for memo validation
 

@@ -36,7 +36,7 @@ let doubled = ctx.computed(|ctx| {
 assert_eq!(ctx.get(&doubled), 0);
 
 // Mutate the cell — dependents are marked dirty (not recomputed yet)
-ctx.set_cell(&counter, 5);
+counter.set(&ctx, 5);
 
 // Slot recomputes lazily on next access
 assert_eq!(ctx.get(&doubled), 10);
@@ -46,13 +46,13 @@ let effect = ctx.effect(move |ctx| {
     println!("counter = {}", ctx.get_cell(&counter));
 });
 
-ctx.set_cell(&counter, 6); // schedules and runs the effect once
+counter.set(&ctx, 6); // schedules and runs the effect once
 effect.dispose(&ctx); // unsubscribes and prevents future reruns
 
 // Batch writes coalesce invalidation and effect reruns.
 ctx.batch(|ctx| {
-    ctx.set_cell(&counter, 7);
-    ctx.set_cell(&counter, 8);
+    counter.set(ctx, 7);
+    counter.set(ctx, 8);
 });
 ```
 
@@ -90,7 +90,7 @@ For `ctx.memo()` slots, if recomputation returns a value equal to the previous c
 
 ### Cell
 
-A `CellHandle<T>` holds a mutable value. `ctx.set_cell()` compares old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively marked dirty.
+A `CellHandle<T>` holds a mutable value. `cell.set(&ctx, value)` and `ctx.set_cell()` compare old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively marked dirty.
 
 ### Batch Updates
 
@@ -123,6 +123,7 @@ effect.dispose(&ctx);
 | `ctx.cell(value)` | Create a mutable cell |
 | `ctx.get_cell(&cell)` | Get cell value |
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
+| `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.is_set(&slot)` | Check if slot has a cached, fresh value |
@@ -145,7 +146,7 @@ the getter retries before returning a fresh value.
 
 - **Lazy, not eager:** Slots mark dirty on invalidation but only validate/recompute on access
 - **Ergonomic aliases:** `ctx.computed()` names derived values while preserving `ctx.slot()` for low-level terminology
-- **PartialEq guard:** `Cell.set()` only invalidates when value actually changes
+- **PartialEq guard:** `CellHandle::set()` only invalidates when value actually changes
 - **Memo guard:** Dirty `ctx.memo()` Slots compare recomputed values and suppress downstream recomputation/effect reruns when values are equal
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)
 - **Batching:** Multiple writes share one invalidation/effect flush boundary

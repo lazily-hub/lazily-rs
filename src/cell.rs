@@ -20,6 +20,16 @@ impl<T> CellHandle<T> {
         }
     }
 
+    /// Set this cell's value through its owning context.
+    ///
+    /// This is an ergonomic alias for [`Context::set_cell`].
+    pub fn set(&self, ctx: &Context, value: T)
+    where
+        T: PartialEq + 'static,
+    {
+        ctx.set_cell(self, value);
+    }
+
     /// Clear all dependent slots without changing the cell's value.
     ///
     /// Useful when you know derived caches are stale but the input hasn't

@@ -1653,7 +1653,7 @@ mod cell_semantics {
         assert_eq!(ctx.get_cell(&c), 42);
     }
 
-    /// SPEC: "cell.set(value, &mut ctx) — Update value"
+    /// SPEC: `cell.set(&ctx, value)` updates the cell value.
     #[test]
     fn cell_set_updates_value() {
         let ctx = Context::new();
@@ -1931,7 +1931,7 @@ mod dependency_tracking {
 mod invalidation_semantics {
     use super::*;
 
-    /// SPEC: `Cell.set()` stores the new value and marks dependent slots dirty.
+    /// SPEC: `CellHandle::set()` stores the new value and marks dependent slots dirty.
     #[test]
     fn cell_set_clears_dependents_not_self() {
         let ctx = Context::new();
@@ -2966,6 +2966,21 @@ mod edge_cases {
         assert_eq!(ctx.get_cell(&c), 1, "cell value unchanged");
 
         assert_eq!(ctx.get(&d), 112);
+    }
+
+    /// CellHandle::set updates the cell through its owning context.
+    #[test]
+    fn cell_handle_set_updates_and_invalidates_dependents() {
+        let ctx = Context::new();
+        let c = ctx.cell(1i32);
+        let doubled = ctx.slot(move |ctx| ctx.get_cell(&c) * 2);
+
+        assert_eq!(ctx.get(&doubled), 2);
+        c.set(&ctx, 21);
+
+        assert!(!ctx.is_set(&doubled));
+        assert_eq!(ctx.get_cell(&c), 21);
+        assert_eq!(ctx.get(&doubled), 42);
     }
 
     /// Slot handles are Copy — copies refer to the same underlying slot.
