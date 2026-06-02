@@ -27,6 +27,7 @@ struct ThreadSafeContextId(usize);
 struct ThreadSafeTrackingFrame {
     context_id: ThreadSafeContextId,
     node_id: SlotId,
+    known_dependencies: HashSet<SlotId>,
     dependencies: HashSet<SlotId>,
 }
 
@@ -73,6 +74,23 @@ fn push_tracking_frame(context_id: ThreadSafeContextId, node_id: SlotId) -> Trac
         stack.borrow_mut().push(ThreadSafeTrackingFrame {
             context_id,
             node_id,
+            known_dependencies: HashSet::new(),
+            dependencies: HashSet::new(),
+        });
+    });
+    TrackingGuard { active: true }
+}
+
+fn push_tracking_frame_with_known_dependencies(
+    context_id: ThreadSafeContextId,
+    node_id: SlotId,
+    known_dependencies: HashSet<SlotId>,
+) -> TrackingGuard {
+    THREAD_SAFE_TRACKING_STACK.with(|stack| {
+        stack.borrow_mut().push(ThreadSafeTrackingFrame {
+            context_id,
+            node_id,
+            known_dependencies,
             dependencies: HashSet::new(),
         });
     });
@@ -84,8 +102,11 @@ fn track_dependency(context_id: ThreadSafeContextId, dependency_id: SlotId) -> O
         let mut stack = stack.borrow_mut();
         for frame in stack.iter_mut().rev() {
             if frame.context_id == context_id {
-                frame.dependencies.insert(dependency_id);
-                return Some(frame.node_id);
+                let newly_tracked = frame.dependencies.insert(dependency_id);
+                if newly_tracked && !frame.known_dependencies.contains(&dependency_id) {
+                    return Some(frame.node_id);
+                }
+                return None;
             }
         }
         None
@@ -589,7 +610,18 @@ impl ThreadSafeContext {
                             .clone(),
                     )
                 } else {
-                    ThreadSafeSlotRead::Refresh(slot.dependencies.iter().copied().collect())
+                    ThreadSafeSlotRead::Refresh(
+                        slot.dependencies
+                            .iter()
+                            .filter(|dependency_id| {
+                                matches!(
+                                    state.nodes.get(dependency_id),
+                                    Some(ThreadSafeNode::Slot(_))
+                                )
+                            })
+                            .copied()
+                            .collect(),
+                    )
                 }
             }
             _ => panic!("get_slot called on non-slot id"),
@@ -602,7 +634,17 @@ impl ThreadSafeContext {
         let dependencies: Vec<SlotId> = {
             let state = self.lock_state();
             match state.nodes.get(&id) {
-                Some(ThreadSafeNode::Slot(slot)) => slot.dependencies.iter().copied().collect(),
+                Some(ThreadSafeNode::Slot(slot)) => slot
+                    .dependencies
+                    .iter()
+                    .filter(|dependency_id| {
+                        matches!(
+                            state.nodes.get(dependency_id),
+                            Some(ThreadSafeNode::Slot(_))
+                        )
+                    })
+                    .copied()
+                    .collect(),
                 _ => return false,
             }
         };
@@ -682,7 +724,11 @@ impl ThreadSafeContext {
             active: true,
         };
 
-        let _tracking = push_tracking_frame(self.context_id(), id);
+        let _tracking = push_tracking_frame_with_known_dependencies(
+            self.context_id(),
+            id,
+            old_dependencies.clone(),
+        );
         let result = compute(self);
         let new_dependencies = _tracking.finish();
 

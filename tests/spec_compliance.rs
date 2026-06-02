@@ -1103,8 +1103,8 @@ mod benchmark_instrumentation {
         assert_eq!(waiter_b_done.load(Ordering::SeqCst), 102);
     }
 
-    /// SPEC: Thread-safe recompute preserves unchanged dependency edges instead
-    /// of removing and re-adding them on every recompute.
+    /// SPEC: Thread-safe recompute preserves unchanged dependency edges and skips
+    /// redundant edge-registration locks for dependencies already subscribed.
     #[test]
     fn thread_safe_recompute_preserves_unchanged_dependency_edges() {
         let ctx = ThreadSafeContext::new();
@@ -1132,9 +1132,16 @@ mod benchmark_instrumentation {
 
         let dependency_edge_locks = lock_site(&ctx, ThreadSafeLockSite::DependencyEdge);
         assert_eq!(
-            dependency_edge_locks.lock_acquisitions,
-            cells.len() as u64,
-            "unchanged dependencies are still read, but should not be removed and re-added"
+            dependency_edge_locks.lock_acquisitions, 0,
+            "unchanged dependencies should stay subscribed without redundant edge-registration locks"
+        );
+
+        let get_refresh_locks = lock_site(&ctx, ThreadSafeLockSite::GetRefresh);
+        assert!(
+            get_refresh_locks.lock_acquisitions <= 3,
+            "forced recompute of a cell-only total should only read, decide, then return fresh; \
+             saw {} get_refresh acquisitions",
+            get_refresh_locks.lock_acquisitions
         );
     }
 
@@ -1166,8 +1173,8 @@ mod benchmark_instrumentation {
 
         let dependency_edge_locks = lock_site(&ctx, ThreadSafeLockSite::DependencyEdge);
         assert_eq!(
-            dependency_edge_locks.lock_acquisitions, 2,
-            "only the dependencies read during recompute should take edge-registration locks"
+            dependency_edge_locks.lock_acquisitions, 1,
+            "only newly discovered dependencies should take edge-registration locks"
         );
     }
 
