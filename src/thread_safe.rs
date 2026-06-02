@@ -24,10 +24,10 @@ type ThreadSafeEffectFn =
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ThreadSafeContextId(usize);
 
-#[derive(Clone, Copy)]
 struct ThreadSafeTrackingFrame {
     context_id: ThreadSafeContextId,
     node_id: SlotId,
+    dependencies: HashSet<SlotId>,
 }
 
 thread_local! {
@@ -41,13 +41,30 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-struct TrackingGuard;
+struct TrackingGuard {
+    active: bool,
+}
+
+impl TrackingGuard {
+    fn finish(mut self) -> HashSet<SlotId> {
+        self.active = false;
+        THREAD_SAFE_TRACKING_STACK.with(|stack| {
+            stack
+                .borrow_mut()
+                .pop()
+                .map(|frame| frame.dependencies)
+                .unwrap_or_default()
+        })
+    }
+}
 
 impl Drop for TrackingGuard {
     fn drop(&mut self) {
-        THREAD_SAFE_TRACKING_STACK.with(|stack| {
-            stack.borrow_mut().pop();
-        });
+        if self.active {
+            THREAD_SAFE_TRACKING_STACK.with(|stack| {
+                stack.borrow_mut().pop();
+            });
+        }
     }
 }
 
@@ -56,19 +73,22 @@ fn push_tracking_frame(context_id: ThreadSafeContextId, node_id: SlotId) -> Trac
         stack.borrow_mut().push(ThreadSafeTrackingFrame {
             context_id,
             node_id,
+            dependencies: HashSet::new(),
         });
     });
-    TrackingGuard
+    TrackingGuard { active: true }
 }
 
-fn current_tracking_frame(context_id: ThreadSafeContextId) -> Option<SlotId> {
+fn track_dependency(context_id: ThreadSafeContextId, dependency_id: SlotId) -> Option<SlotId> {
     THREAD_SAFE_TRACKING_STACK.with(|stack| {
-        stack
-            .borrow()
-            .iter()
-            .rev()
-            .find(|frame| frame.context_id == context_id)
-            .map(|frame| frame.node_id)
+        let mut stack = stack.borrow_mut();
+        for frame in stack.iter_mut().rev() {
+            if frame.context_id == context_id {
+                frame.dependencies.insert(dependency_id);
+                return Some(frame.node_id);
+            }
+        }
+        None
     })
 }
 
@@ -372,15 +392,27 @@ impl ThreadSafeContext {
         Self::remove_dependent_edge_locked(&mut state, dependency_id, dependent_id);
     }
 
-    fn remove_dependent_edges_locked<I>(
+    fn remove_stale_dependencies_locked(
         state: &mut ThreadSafeState,
-        dependency_ids: I,
         dependent_id: SlotId,
-    ) where
-        I: IntoIterator<Item = SlotId>,
-    {
-        for dependency_id in dependency_ids {
-            Self::remove_dependent_edge_locked(state, dependency_id, dependent_id);
+        old_dependencies: &HashSet<SlotId>,
+        new_dependencies: &HashSet<SlotId>,
+    ) {
+        for dependency_id in old_dependencies.difference(new_dependencies) {
+            Self::remove_parent_dependency_locked(state, dependent_id, *dependency_id);
+            Self::remove_dependent_edge_locked(state, *dependency_id, dependent_id);
+        }
+    }
+
+    fn remove_parent_dependency_locked(
+        state: &mut ThreadSafeState,
+        dependent_id: SlotId,
+        dependency_id: SlotId,
+    ) -> bool {
+        match state.nodes.get_mut(&dependent_id) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependencies.remove(&dependency_id),
+            Some(ThreadSafeNode::Effect(effect)) => effect.dependencies.remove(&dependency_id),
+            Some(ThreadSafeNode::Cell(_)) | None => false,
         }
     }
 
@@ -398,13 +430,6 @@ impl ThreadSafeContext {
         #[cfg(feature = "instrumentation")]
         if _edge_removed {
             state.instrumentation.record_dependency_edge_removed();
-        }
-    }
-
-    fn drain_slot_dependencies_locked(state: &mut ThreadSafeState, id: SlotId) -> Vec<SlotId> {
-        match state.nodes.get_mut(&id) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependencies.drain().collect(),
-            _ => Vec::new(),
         }
     }
 
@@ -483,7 +508,7 @@ impl ThreadSafeContext {
     where
         T: Clone + Send + Sync + 'static,
     {
-        if let Some(parent_id) = current_tracking_frame(self.context_id()) {
+        if let Some(parent_id) = track_dependency(self.context_id(), id) {
             self.register_dependency(id, parent_id);
         }
 
@@ -554,7 +579,7 @@ impl ThreadSafeContext {
     }
 
     fn recompute_slot_now(&self, id: SlotId) -> ThreadSafeRecomputeResult {
-        let (compute, was_unset, start_revision) = {
+        let (compute, old_dependencies, was_unset, start_revision) = {
             #[cfg(feature = "instrumentation")]
             let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
             let mut state = self.lock_state();
@@ -570,12 +595,11 @@ impl ThreadSafeContext {
                 slot.computing = true;
                 (
                     Arc::clone(&slot.compute),
+                    slot.dependencies.clone(),
                     slot.value.is_none(),
                     slot.revision,
                 )
             };
-            let old_dependencies = Self::drain_slot_dependencies_locked(&mut state, id);
-            Self::remove_dependent_edges_locked(&mut state, old_dependencies, id);
             #[cfg(feature = "instrumentation")]
             {
                 state.instrumentation.record_slot_recompute();
@@ -590,26 +614,39 @@ impl ThreadSafeContext {
 
         let _tracking = push_tracking_frame(self.context_id(), id);
         let result = compute(self);
-        drop(_tracking);
+        let new_dependencies = _tracking.finish();
 
         {
             #[cfg(feature = "instrumentation")]
             let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
             let mut state = self.lock_state();
-            let slot = match state.nodes.get_mut(&id) {
-                Some(ThreadSafeNode::Slot(slot)) => slot,
-                _ => {
-                    recompute_guard.active = false;
-                    return ThreadSafeRecomputeResult::Fresh(false);
-                }
-            };
-            slot.computing = false;
-            recompute_guard.active = false;
+            {
+                let slot = match state.nodes.get_mut(&id) {
+                    Some(ThreadSafeNode::Slot(slot)) => slot,
+                    _ => {
+                        recompute_guard.active = false;
+                        return ThreadSafeRecomputeResult::Fresh(false);
+                    }
+                };
+                slot.computing = false;
+                recompute_guard.active = false;
 
-            if slot.revision != start_revision {
-                return ThreadSafeRecomputeResult::Stale;
+                if slot.revision != start_revision {
+                    return ThreadSafeRecomputeResult::Stale;
+                }
             }
 
+            Self::remove_stale_dependencies_locked(
+                &mut state,
+                id,
+                &old_dependencies,
+                &new_dependencies,
+            );
+
+            let slot = match state.nodes.get_mut(&id) {
+                Some(ThreadSafeNode::Slot(slot)) => slot,
+                _ => return ThreadSafeRecomputeResult::Fresh(false),
+            };
             if was_unset && slot.value.is_some() && !slot.dirty && !slot.force_recompute {
                 #[cfg(feature = "instrumentation")]
                 {
@@ -693,7 +730,7 @@ impl ThreadSafeContext {
     where
         T: Clone + Send + Sync + 'static,
     {
-        if let Some(parent_id) = current_tracking_frame(self.context_id()) {
+        if let Some(parent_id) = track_dependency(self.context_id(), handle.id) {
             self.register_dependency(handle.id, parent_id);
         }
 

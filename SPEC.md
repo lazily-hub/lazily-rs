@@ -228,7 +228,7 @@ Locking model:
 - Uses one context-level synchronization primitive for graph state, matching lazily-zig's mutex-first design before introducing finer-grained locks
 - Do not hold the graph lock while running user compute callbacks, effect callbacks, or cleanup closures
 - Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
-- Slot refresh must avoid helper-level lock churn: dependency refresh should not take a separate node-kind probe lock before recursively validating a dependency, clean dirty flags should be folded into the refresh decision lock, and stale dependency edge removal during recompute should be batched into the publish mutation before user callbacks run
+- Slot refresh must avoid helper-level lock churn: dependency refresh should not take a separate node-kind probe lock before recursively validating a dependency, clean dirty flags should be folded into the refresh decision lock, and recompute must diff old/new dependency sets at publish so unchanged edges stay subscribed while only stale edges are removed
 - Re-entrant user code must be able to call back into the same context without deadlocking
 - Concurrent first access shares one in-flight computation for the current slot revision; waiters return the published cache or retry if an invalidation makes the in-flight result stale
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state

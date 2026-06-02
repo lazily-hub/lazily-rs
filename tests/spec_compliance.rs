@@ -796,10 +796,10 @@ mod benchmark_instrumentation {
         }
     }
 
-    /// SPEC: Thread-safe recompute batches stale dependency edge removal into
-    /// the publish mutation instead of taking one graph lock per removed edge.
+    /// SPEC: Thread-safe recompute preserves unchanged dependency edges instead
+    /// of removing and re-adding them on every recompute.
     #[test]
-    fn thread_safe_recompute_batches_dependency_edge_removal_locks() {
+    fn thread_safe_recompute_preserves_unchanged_dependency_edges() {
         let ctx = ThreadSafeContext::new();
         let cells = [
             ctx.cell(0usize),
@@ -820,14 +820,47 @@ mod benchmark_instrumentation {
         assert_eq!(ctx.get(&total), 1);
 
         let snapshot = ctx.instrumentation_snapshot();
-        assert_eq!(snapshot.dependency_edges_removed, cells.len() as u64);
-        assert_eq!(snapshot.dependency_edges_added, cells.len() as u64);
+        assert_eq!(snapshot.dependency_edges_removed, 0);
+        assert_eq!(snapshot.dependency_edges_added, 0);
 
         let dependency_edge_locks = lock_site(&ctx, ThreadSafeLockSite::DependencyEdge);
         assert_eq!(
             dependency_edge_locks.lock_acquisitions,
             cells.len() as u64,
-            "stale edge removal should be batched into the recompute publish lock"
+            "unchanged dependencies are still read, but should not be removed and re-added"
+        );
+    }
+
+    /// SPEC: Thread-safe recompute diffs old and new dependency sets at publish
+    /// so dynamic dependency changes add and remove only changed edges.
+    #[test]
+    fn thread_safe_recompute_diffs_dynamic_dependency_edges() {
+        let ctx = ThreadSafeContext::new();
+        let use_right = ctx.cell(false);
+        let left = ctx.cell(1usize);
+        let right = ctx.cell(10usize);
+        let selected = ctx.computed(move |ctx| {
+            if ctx.get_cell(&use_right) {
+                ctx.get_cell(&right)
+            } else {
+                ctx.get_cell(&left)
+            }
+        });
+
+        assert_eq!(ctx.get(&selected), 1);
+        ctx.reset_instrumentation();
+
+        ctx.set_cell(&use_right, true);
+        assert_eq!(ctx.get(&selected), 10);
+
+        let snapshot = ctx.instrumentation_snapshot();
+        assert_eq!(snapshot.dependency_edges_added, 1);
+        assert_eq!(snapshot.dependency_edges_removed, 1);
+
+        let dependency_edge_locks = lock_site(&ctx, ThreadSafeLockSite::DependencyEdge);
+        assert_eq!(
+            dependency_edge_locks.lock_acquisitions, 2,
+            "only the dependencies read during recompute should take edge-registration locks"
         );
     }
 
