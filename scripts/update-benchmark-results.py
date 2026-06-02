@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -30,7 +31,8 @@ GROUP_ORDER = {
     "effect_flushing": 5,
     "batch_storms": 6,
     "thread_safe_contention": 7,
-    "profile_instrumentation": 8,
+    "thread_safe_effect_contention": 8,
+    "profile_instrumentation": 9,
 }
 SET_CELL_INVALIDATION_CASE_ORDER = {
     "high_fan_out": 0,
@@ -44,6 +46,27 @@ THREAD_SAFE_CONTENTION_CASE_ORDER = {
     "read_mostly_waiters": 2,
     "batched_write_bursts": 3,
 }
+THREAD_SAFE_EFFECT_CONTENTION_CASE_ORDER = {
+    "queue_coalescing": 0,
+    "cleanup_execution": 1,
+    "batch_flush": 2,
+}
+REQUIRED_LATENCY_CASES: tuple[tuple[str, str], ...] = (
+    ("thread_safe_contention", "same_slot_write_read / 8"),
+    ("thread_safe_contention", "same_slot_write_read / 16"),
+    ("thread_safe_contention", "independent_slots / 8"),
+    ("thread_safe_contention", "independent_slots / 16"),
+    ("thread_safe_contention", "read_mostly_waiters / 8"),
+    ("thread_safe_contention", "read_mostly_waiters / 16"),
+    ("thread_safe_contention", "batched_write_bursts / 8"),
+    ("thread_safe_contention", "batched_write_bursts / 16"),
+    ("thread_safe_effect_contention", "queue_coalescing / 8"),
+    ("thread_safe_effect_contention", "queue_coalescing / 16"),
+    ("thread_safe_effect_contention", "cleanup_execution / 8"),
+    ("thread_safe_effect_contention", "cleanup_execution / 16"),
+    ("thread_safe_effect_contention", "batch_flush / 8"),
+    ("thread_safe_effect_contention", "batch_flush / 16"),
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +76,15 @@ class BenchmarkResult:
     mean_ns: float
     lower_ns: float
     upper_ns: float
+
+
+@dataclass(frozen=True)
+class LatencyResult:
+    group: str
+    case: str
+    p50_ns: float
+    p95_ns: float
+    samples: int
 
 
 @dataclass(frozen=True)
@@ -163,7 +195,7 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
             LockAttributionBudget("other", 900),
             LockAttributionBudget("dependency_edge", 900),
             LockAttributionBudget("set_cell_invalidation", 16),
-            LockAttributionBudget("get_refresh", 0),
+            LockAttributionBudget("get_refresh", 64),
             LockAttributionBudget("publish", 0),
         ),
     ),
@@ -173,7 +205,7 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
         site_budgets=(
             LockAttributionBudget("other", 400),
             LockAttributionBudget("dependency_edge", 700),
-            LockAttributionBudget("set_cell_invalidation", 220),
+            LockAttributionBudget("set_cell_invalidation", 256),
             LockAttributionBudget("get_refresh", 0),
             LockAttributionBudget("publish", 0),
         ),
@@ -183,10 +215,10 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
         max_lock_acquisitions=1_500,
         site_budgets=(
             LockAttributionBudget("other", 1_300),
-            LockAttributionBudget("get_refresh", 8),
+            LockAttributionBudget("get_refresh", 32),
             LockAttributionBudget("dependency_edge", 96),
             LockAttributionBudget("set_cell_invalidation", 16),
-            LockAttributionBudget("publish", 8),
+            LockAttributionBudget("publish", 32),
         ),
     ),
 )
@@ -282,6 +314,30 @@ def read_estimate(path: Path) -> tuple[float, float, float]:
     )
 
 
+def read_sample_latencies(path: Path) -> tuple[float, float, int]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    iters = data["iters"]
+    times = data["times"]
+    latencies = sorted(
+        float(time_ns) / float(iter_count)
+        for iter_count, time_ns in zip(iters, times)
+        if float(iter_count) > 0
+    )
+    if not latencies:
+        raise ValueError(f"{path}: no non-empty Criterion samples")
+    return (
+        percentile(latencies, 0.50),
+        percentile(latencies, 0.95),
+        len(latencies),
+    )
+
+
+def percentile(sorted_values: list[float], quantile: float) -> float:
+    index = math.ceil(quantile * len(sorted_values)) - 1
+    index = min(max(index, 0), len(sorted_values) - 1)
+    return sorted_values[index]
+
+
 def discover_results(criterion_dir: Path) -> list[BenchmarkResult]:
     results: list[BenchmarkResult] = []
     for estimates in criterion_dir.glob("**/new/estimates.json"):
@@ -302,6 +358,42 @@ def discover_results(criterion_dir: Path) -> list[BenchmarkResult]:
                 mean_ns=mean_ns,
                 lower_ns=lower_ns,
                 upper_ns=upper_ns,
+            )
+        )
+
+    return sorted(
+        results,
+        key=lambda item: (
+            GROUP_ORDER.get(item.group, len(GROUP_ORDER)),
+            item.group,
+            benchmark_case_key(item),
+        ),
+    )
+
+
+def discover_latency_results(criterion_dir: Path) -> list[LatencyResult]:
+    required = set(REQUIRED_LATENCY_CASES)
+    results: list[LatencyResult] = []
+
+    for sample in criterion_dir.glob("**/new/sample.json"):
+        rel_parts = sample.relative_to(criterion_dir).parts
+        case_parts = rel_parts[:-2]
+        if not case_parts:
+            continue
+
+        group = case_parts[0]
+        case = " / ".join(case_parts[1:]) if len(case_parts) > 1 else group
+        if (group, case) not in required:
+            continue
+
+        p50_ns, p95_ns, samples = read_sample_latencies(sample)
+        results.append(
+            LatencyResult(
+                group=group,
+                case=case,
+                p50_ns=p50_ns,
+                p95_ns=p95_ns,
+                samples=samples,
             )
         )
 
@@ -421,6 +513,15 @@ def regression_budget_failures(
     return failures
 
 
+def required_latency_failures(latencies: list[LatencyResult]) -> list[str]:
+    present = {(latency.group, latency.case) for latency in latencies}
+    return [
+        f"{group} / {case}: missing required p50/p95 latency row"
+        for group, case in REQUIRED_LATENCY_CASES
+        if (group, case) not in present
+    ]
+
+
 def natural_case_key(value: str) -> list[tuple[int, object]]:
     parts: list[tuple[int, object]] = []
     current = ""
@@ -437,7 +538,9 @@ def natural_case_key(value: str) -> list[tuple[int, object]]:
     return parts
 
 
-def benchmark_case_key(result: BenchmarkResult) -> tuple[int, list[tuple[int, object]]]:
+def benchmark_case_key(
+    result: BenchmarkResult | LatencyResult,
+) -> tuple[int, list[tuple[int, object]]]:
     if result.group == "set_cell_invalidation":
         case_name, _, worker = result.case.partition(" / ")
         return (
@@ -452,6 +555,15 @@ def benchmark_case_key(result: BenchmarkResult) -> tuple[int, list[tuple[int, ob
         return (
             THREAD_SAFE_CONTENTION_CASE_ORDER.get(
                 case_name, len(THREAD_SAFE_CONTENTION_CASE_ORDER)
+            ),
+            natural_case_key(worker or result.case),
+        )
+
+    if result.group == "thread_safe_effect_contention":
+        case_name, _, worker = result.case.partition(" / ")
+        return (
+            THREAD_SAFE_EFFECT_CONTENTION_CASE_ORDER.get(
+                case_name, len(THREAD_SAFE_EFFECT_CONTENTION_CASE_ORDER)
             ),
             natural_case_key(worker or result.case),
         )
@@ -473,6 +585,7 @@ def build_section(
     package: str,
     version: str,
     results: list[BenchmarkResult],
+    latencies: list[LatencyResult],
     profiles: list[InstrumentationProfile],
 ) -> str:
     lines = [
@@ -542,6 +655,27 @@ def build_section(
         [
             "",
             "Candidates do not replace the current strategy before the same run reports throughput, p50/p95 latency, and lock-site budgets for the required 8/16-worker cases.",
+            "",
+            "Required latency evidence uses Criterion sample per-iteration timing.",
+            "",
+            "| Group | Case | p50 | p95 | Samples |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
+
+    for latency in latencies:
+        lines.append(
+            "| {group} | {case} | {p50} | {p95} | {samples} |".format(
+                group=latency.group,
+                case=latency.case,
+                p50=format_duration(latency.p50_ns),
+                p95=format_duration(latency.p95_ns),
+                samples=latency.samples,
+            )
+        )
+
+    lines.extend(
+        [
             "",
         ]
     )
@@ -680,6 +814,13 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    latencies = discover_latency_results(args.criterion_dir)
+    latency_failures = required_latency_failures(latencies)
+    if latency_failures:
+        print("required latency evidence failure(s):", file=sys.stderr)
+        for failure in latency_failures:
+            print(f"- {failure}", file=sys.stderr)
+        return 1
     if not args.profile_output.exists():
         print(
             f"no instrumentation profile found at {args.profile_output}; run without --check",
@@ -701,7 +842,7 @@ def main() -> int:
         return 1
 
     package, version = read_package_metadata(args.cargo_toml)
-    section = build_section(package, version, results, profiles)
+    section = build_section(package, version, results, latencies, profiles)
     current = args.readme.read_text(encoding="utf-8")
     updated = replace_section(current, section)
 

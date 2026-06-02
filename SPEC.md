@@ -478,6 +478,10 @@ Required benchmark scenarios:
   - independent per-worker roots and computed slots
   - read-mostly waiters with one writer and many readers
   - batched write bursts over per-worker cell groups
+- `ThreadSafeContext` effect-heavy contention at 8 and 16 workers, split into:
+  - effect queue coalescing across batched worker writes
+  - effect cleanup execution during concurrent cell updates
+  - nested batch flushes that schedule computed-effect dependencies
 - `ThreadSafeContext` synchronization model checking with the optional `loom` feature
 
 The optional `instrumentation` feature adds `instrumentation_snapshot()` and
@@ -513,17 +517,20 @@ generated README section between
 `<!-- benchmark-results:start -->` and `<!-- benchmark-results:end -->`.
 The generated section must include the current Cargo package version, the
 refresh command, the Criterion baseline comparison workflow, one timing row for
-each required benchmark scenario above, and instrumentation rows covering
+each required benchmark scenario above, p50/p95 Criterion sample latency rows
+for the required 8/16-worker same-slot, independent-slot, read-mostly,
+batched-write, and effect-heavy cases, and instrumentation rows covering
 recomputes, duplicate speculative recomputes, dependency edge churn, effect
 queue depth, node allocations, lock wait/hold time, and per-operation
 `ThreadSafeContext` lock attribution for every 1/2/4/8/16-worker contention
 matrix profile and every `set_cell` invalidation isolation profile. The generated
 section must also publish regression budgets for the slow contention profiles and
 their lock-site acquisition totals. `--check` verifies that the README section is
-already current without rewriting it and fails when any instrumentation profile
-exceeds its lock-acquisition budget; `--no-run` reuses existing Criterion estimate
-files for a report-only refresh after a manual baseline comparison run while
-refreshing the instrumentation CSV unless it is also running in check mode.
+already current without rewriting it and fails when required p50/p95 latency
+rows are missing or any instrumentation profile exceeds its lock-acquisition
+budget; `--no-run` reuses existing Criterion estimate files for a report-only
+refresh after a manual baseline comparison run while refreshing the
+instrumentation CSV unless it is also running in check mode.
 
 ## Differences from lazily-zig
 

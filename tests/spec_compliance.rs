@@ -654,6 +654,7 @@ mod benchmark_report_harness {
             "effect_flushing",
             "batch_storms",
             "thread_safe_contention",
+            "thread_safe_effect_contention",
             "profile_instrumentation",
         ] {
             assert!(
@@ -672,6 +673,8 @@ mod benchmark_report_harness {
         assert!(section.contains("Budgets use deterministic lock acquisition counts"));
         assert!(section.contains("Synchronization strategy adoption gate"));
         assert!(section.contains("Required p50/p95 latency evidence"));
+        assert!(section.contains("Required latency evidence uses Criterion sample"));
+        assert!(section.contains("| Group | Case | p50 | p95 | Samples |"));
         assert!(section.contains("current_std_mutex_condvar"));
         assert!(section.contains("narrower_condvar_wakeups"));
         assert!(section.contains("parking_lot_style_parking"));
@@ -688,6 +691,9 @@ mod benchmark_report_harness {
             "independent_slots / 16",
             "read_mostly_waiters / 16",
             "batched_write_bursts / 16",
+            "queue_coalescing / 16",
+            "cleanup_execution / 16",
+            "batch_flush / 16",
         ] {
             assert!(
                 section.contains(expected),
@@ -727,6 +733,11 @@ mod benchmark_report_harness {
         assert!(UPDATE_SCRIPT.contains("REGRESSION_BUDGETS"));
         assert!(UPDATE_SCRIPT.contains("regression_budget_failures"));
         assert!(UPDATE_SCRIPT.contains("instrumentation regression budget failure"));
+        assert!(UPDATE_SCRIPT.contains("REQUIRED_LATENCY_CASES"));
+        assert!(UPDATE_SCRIPT.contains("discover_latency_results"));
+        assert!(UPDATE_SCRIPT.contains("required_latency_failures"));
+        assert!(UPDATE_SCRIPT.contains("required latency evidence failure"));
+        assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention"));
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_queue_coalescing_16"));
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_cleanup_execution_16"));
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_batch_flush_16"));
