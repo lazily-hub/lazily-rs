@@ -191,6 +191,37 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
     ),
 )
 
+SYNC_STRATEGY_ADOPTION_GATE: tuple[tuple[str, str, str, str, str], ...] = (
+    (
+        "current_std_mutex_condvar",
+        "baseline",
+        "thread_safe_contention and thread_safe_effect_contention at 8/16 workers",
+        "p50/p95 latency for same-slot, read-mostly, batch, and effect-heavy cases",
+        "must stay within current lock-site budgets and Loom safety coverage",
+    ),
+    (
+        "narrower_condvar_wakeups",
+        "adopted for per-slot recompute waiters",
+        "same-slot write/read and read-mostly waiter throughput at 8/16 workers",
+        "p50/p95 latency for waiter wakeup handoff and stale-completion retry",
+        "must not regress effect queue, cleanup, or batch flush budgets",
+    ),
+    (
+        "parking_lot_style_parking",
+        "candidate only",
+        "same contention matrix measured against current_std_mutex_condvar",
+        "p50/p95 latency for parking/unparking under 8/16 workers",
+        "requires no worse lock-site budgets plus a deadlock/starvation model",
+    ),
+    (
+        "targeted_cas",
+        "candidate only",
+        "fresh cached reads and independent-slot throughput at 8/16 workers",
+        "p50/p95 latency for revision validation fallback and publish races",
+        "requires unchanged effect/batch/disposal budgets plus Loom/Shuttle proof",
+    ),
+)
+
 
 def run(command: list[str]) -> None:
     print("$ " + " ".join(command), flush=True)
@@ -488,6 +519,29 @@ def build_section(
         [
             "",
             "Budgets use deterministic lock acquisition counts instead of elapsed wait/hold time.",
+            "",
+            "Synchronization strategy adoption gate:",
+            "",
+            "| Strategy | Status | Required throughput evidence | Required p50/p95 latency evidence | Lock-site and safety gate |",
+            "|---|---|---|---|---|",
+        ]
+    )
+
+    for strategy, status, throughput, latency, gate in SYNC_STRATEGY_ADOPTION_GATE:
+        lines.append(
+            "| {strategy} | {status} | {throughput} | {latency} | {gate} |".format(
+                strategy=strategy,
+                status=status,
+                throughput=throughput,
+                latency=latency,
+                gate=gate,
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "Candidates do not replace the current strategy before the same run reports throughput, p50/p95 latency, and lock-site budgets for the required 8/16-worker cases.",
             "",
         ]
     )

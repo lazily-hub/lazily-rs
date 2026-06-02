@@ -670,6 +670,12 @@ mod benchmark_report_harness {
         assert!(section.contains("Regression budgets enforced by"));
         assert!(section.contains("Max lock acquisitions"));
         assert!(section.contains("Budgets use deterministic lock acquisition counts"));
+        assert!(section.contains("Synchronization strategy adoption gate"));
+        assert!(section.contains("Required p50/p95 latency evidence"));
+        assert!(section.contains("current_std_mutex_condvar"));
+        assert!(section.contains("narrower_condvar_wakeups"));
+        assert!(section.contains("parking_lot_style_parking"));
+        assert!(section.contains("targeted_cas"));
         assert!(section.contains("get_refresh"));
         assert!(section.contains("set_cell_invalidation"));
 
@@ -724,6 +730,7 @@ mod benchmark_report_harness {
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_queue_coalescing_16"));
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_cleanup_execution_16"));
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_batch_flush_16"));
+        assert!(UPDATE_SCRIPT.contains("SYNC_STRATEGY_ADOPTION_GATE"));
         assert!(UPDATE_SCRIPT.contains("--check"));
         assert!(UPDATE_SCRIPT.contains("benchmark-results:start"));
     }
@@ -759,6 +766,13 @@ mod storage_strategy_evaluation {
             "cleanup execution",
             "nested batch flush behavior",
             "deterministic lock-site budgets",
+            "Synchronization strategy comparison",
+            "std::sync",
+            "Condvar wakeups",
+            "parking_lot",
+            "style parking",
+            "targeted CAS",
+            "throughput plus p50/p95 latency",
             "waiter-counted handoff",
             "notify_one",
             "waiter-counted handoff wakeup draining",
@@ -784,6 +798,8 @@ mod storage_strategy_evaluation {
             "thread_safe_effect_contention_queue_coalescing_16",
             "thread_safe_effect_contention_cleanup_execution_16",
             "thread_safe_effect_contention_batch_flush_16",
+            "Synchronization strategy adoption gate",
+            "Required p50/p95 latency evidence",
             "ThreadSafe lock attribution for contention profiles",
         ] {
             assert!(
