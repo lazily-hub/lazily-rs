@@ -649,6 +649,7 @@ mod benchmark_report_harness {
             "cached_reads",
             "cold_first_get",
             "dependency_fan_out",
+            "set_cell_invalidation",
             "memo_equality_suppression",
             "effect_flushing",
             "batch_storms",
@@ -670,6 +671,10 @@ mod benchmark_report_harness {
         assert!(section.contains("set_cell_invalidation"));
 
         for expected in [
+            "high_fan_out / 512",
+            "same_slot_contention / 16",
+            "independent_slot_contention / 16",
+            "batched_write_bursts / 16",
             "same_slot_write_read / 16",
             "independent_slots / 16",
             "read_mostly_waiters / 16",
@@ -686,6 +691,10 @@ mod benchmark_report_harness {
             "context_fan_out_32",
             "context_batch_storm_64",
             "thread_safe_first_get_2",
+            "thread_safe_set_cell_invalidation_high_fan_out_512",
+            "thread_safe_set_cell_invalidation_same_slot_contention_16",
+            "thread_safe_set_cell_invalidation_independent_slot_contention_16",
+            "thread_safe_set_cell_invalidation_batched_write_bursts_16",
             "thread_safe_contention_same_slot_write_read_16",
             "thread_safe_contention_independent_slots_16",
             "thread_safe_contention_read_mostly_waiters_16",
@@ -699,6 +708,7 @@ mod benchmark_report_harness {
 
         assert!(CARGO_TOML.contains("name = \"instrumentation_profile\""));
         assert!(UPDATE_SCRIPT.contains("lazily-instrumentation-profile.csv"));
+        assert!(UPDATE_SCRIPT.contains("SET_CELL_INVALIDATION_CASE_ORDER"));
         assert!(UPDATE_SCRIPT.contains("--check"));
         assert!(UPDATE_SCRIPT.contains("benchmark-results:start"));
     }

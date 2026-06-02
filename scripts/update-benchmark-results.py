@@ -25,11 +25,18 @@ GROUP_ORDER = {
     "cached_reads": 0,
     "cold_first_get": 1,
     "dependency_fan_out": 2,
-    "memo_equality_suppression": 3,
-    "effect_flushing": 4,
-    "batch_storms": 5,
-    "thread_safe_contention": 6,
-    "profile_instrumentation": 7,
+    "set_cell_invalidation": 3,
+    "memo_equality_suppression": 4,
+    "effect_flushing": 5,
+    "batch_storms": 6,
+    "thread_safe_contention": 7,
+    "profile_instrumentation": 8,
+}
+SET_CELL_INVALIDATION_CASE_ORDER = {
+    "high_fan_out": 0,
+    "same_slot_contention": 1,
+    "independent_slot_contention": 2,
+    "batched_write_bursts": 3,
 }
 THREAD_SAFE_CONTENTION_CASE_ORDER = {
     "same_slot_write_read": 0,
@@ -243,6 +250,15 @@ def natural_case_key(value: str) -> list[tuple[int, object]]:
 
 
 def benchmark_case_key(result: BenchmarkResult) -> tuple[int, list[tuple[int, object]]]:
+    if result.group == "set_cell_invalidation":
+        case_name, _, worker = result.case.partition(" / ")
+        return (
+            SET_CELL_INVALIDATION_CASE_ORDER.get(
+                case_name, len(SET_CELL_INVALIDATION_CASE_ORDER)
+            ),
+            natural_case_key(worker or result.case),
+        )
+
     if result.group == "thread_safe_contention":
         case_name, _, worker = result.case.partition(" / ")
         return (
@@ -343,6 +359,7 @@ def build_section(
         (profile, attribution)
         for profile in profiles
         if profile.profile.startswith("thread_safe_contention_")
+        or profile.profile.startswith("thread_safe_set_cell_invalidation_")
         for attribution in profile.lock_attribution
         if attribution.lock_acquisitions > 0
     ]

@@ -388,6 +388,11 @@ Required benchmark scenarios:
 - Memo equality suppression where an equal intermediate value prevents downstream recomputation
 - Effect flushing after dependency mutation
 - Batch storms that coalesce many writes into one invalidation/effect flush boundary
+- `ThreadSafeContext` `set_cell` invalidation isolation, split into:
+  - high fan-out changed-cell invalidation without dependent reads
+  - same-root/same-slot write contention without dependent reads
+  - independent per-worker roots and slots without dependent reads
+  - batched write bursts over per-worker cell groups without dependent reads
 - `ThreadSafeContext` contention at 1, 2, 4, 8, and 16 workers, split into:
   - same-root/same-slot write plus read contention
   - independent per-worker roots and computed slots
@@ -432,8 +437,9 @@ each required benchmark scenario above, and instrumentation rows covering
 recomputes, duplicate speculative recomputes, dependency edge churn, effect
 queue depth, node allocations, lock wait/hold time, and per-operation
 `ThreadSafeContext` lock attribution for every 1/2/4/8/16-worker contention
-matrix profile. `--check` verifies that the README section is already current without
-rewriting it; `--no-run` reuses existing Criterion estimate files for a
+matrix profile and every `set_cell` invalidation isolation profile. `--check`
+verifies that the README section is already current without rewriting it;
+`--no-run` reuses existing Criterion estimate files for a
 report-only refresh after a manual baseline comparison run while refreshing the
 instrumentation CSV unless it is also running in check mode.
 

@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use lazily::{
     CellHandle, Context, InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeContext,
-    ThreadSafeLockSiteSnapshot,
+    ThreadSafeLockSite, ThreadSafeLockSiteSnapshot,
 };
 
 const FAN_OUT_WIDTH: usize = 32;
+const SET_CELL_INVALIDATION_FAN_OUT: usize = 512;
 const BATCH_STORM_CELLS: usize = 64;
 const CONTENTION_ITERS_PER_WORKER: usize = 16;
 const CONTENTION_WORKERS: [usize; 5] = [1, 2, 4, 8, 16];
@@ -24,11 +25,24 @@ enum ThreadSafeContentionCase {
     BatchedWriteBursts,
 }
 
+#[derive(Clone, Copy)]
+enum ThreadSafeSetCellInvalidationCase {
+    SameSlotContention,
+    IndependentSlotContention,
+    BatchedWriteBursts,
+}
+
 const THREAD_SAFE_CONTENTION_CASES: [ThreadSafeContentionCase; 4] = [
     ThreadSafeContentionCase::SameSlotWriteRead,
     ThreadSafeContentionCase::IndependentSlots,
     ThreadSafeContentionCase::ReadMostlyWaiters,
     ThreadSafeContentionCase::BatchedWriteBursts,
+];
+
+const THREAD_SAFE_SET_CELL_INVALIDATION_CASES: [ThreadSafeSetCellInvalidationCase; 3] = [
+    ThreadSafeSetCellInvalidationCase::SameSlotContention,
+    ThreadSafeSetCellInvalidationCase::IndependentSlotContention,
+    ThreadSafeSetCellInvalidationCase::BatchedWriteBursts,
 ];
 
 impl ThreadSafeContentionCase {
@@ -38,6 +52,18 @@ impl ThreadSafeContentionCase {
             ThreadSafeContentionCase::IndependentSlots => "independent_slots",
             ThreadSafeContentionCase::ReadMostlyWaiters => "read_mostly_waiters",
             ThreadSafeContentionCase::BatchedWriteBursts => "batched_write_bursts",
+        }
+    }
+}
+
+impl ThreadSafeSetCellInvalidationCase {
+    fn as_str(self) -> &'static str {
+        match self {
+            ThreadSafeSetCellInvalidationCase::SameSlotContention => "same_slot_contention",
+            ThreadSafeSetCellInvalidationCase::IndependentSlotContention => {
+                "independent_slot_contention"
+            }
+            ThreadSafeSetCellInvalidationCase::BatchedWriteBursts => "batched_write_bursts",
         }
     }
 }
@@ -53,6 +79,22 @@ max_effect_queue_depth,lock_acquisitions,lock_wait_nanos,lock_hold_nanos,lock_at
     emit("context_fan_out_32", context_fan_out());
     emit("context_batch_storm_64", context_batch_storm());
     emit("thread_safe_first_get_2", thread_safe_first_get());
+    emit(
+        "thread_safe_set_cell_invalidation_high_fan_out_512",
+        thread_safe_set_cell_invalidation_high_fan_out(),
+    );
+
+    for case in THREAD_SAFE_SET_CELL_INVALIDATION_CASES {
+        for workers in CONTENTION_WORKERS {
+            emit(
+                &format!(
+                    "thread_safe_set_cell_invalidation_{}_{workers}",
+                    case.as_str()
+                ),
+                thread_safe_set_cell_invalidation(case, workers),
+            );
+        }
+    }
 
     for case in THREAD_SAFE_CONTENTION_CASES {
         for workers in CONTENTION_WORKERS {
@@ -216,6 +258,79 @@ fn thread_safe_first_get() -> InstrumentationSnapshot {
     ctx.instrumentation_snapshot()
 }
 
+fn thread_safe_set_cell_invalidation_high_fan_out() -> ProfileResult {
+    let ctx = ThreadSafeContext::new();
+    let root = ctx.cell(0usize);
+    let slots = (0..SET_CELL_INVALIDATION_FAN_OUT)
+        .map(|offset| ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(offset)))
+        .collect::<Vec<_>>();
+
+    for slot in &slots {
+        black_box(ctx.get(slot));
+    }
+
+    ctx.reset_instrumentation();
+    ctx.set_cell(&root, 1);
+    black_box(slots.len());
+
+    thread_safe_set_cell_profile_result(ctx)
+}
+
+fn thread_safe_set_cell_invalidation(
+    case: ThreadSafeSetCellInvalidationCase,
+    workers: usize,
+) -> ProfileResult {
+    match case {
+        ThreadSafeSetCellInvalidationCase::SameSlotContention => {
+            thread_safe_set_cell_invalidation_profile(
+                workers,
+                run_thread_safe_same_slot_set_cell_invalidation,
+            )
+        }
+        ThreadSafeSetCellInvalidationCase::IndependentSlotContention => {
+            thread_safe_set_cell_invalidation_profile(
+                workers,
+                run_thread_safe_independent_slot_set_cell_invalidation,
+            )
+        }
+        ThreadSafeSetCellInvalidationCase::BatchedWriteBursts => {
+            thread_safe_set_cell_invalidation_profile(
+                workers,
+                run_thread_safe_batched_set_cell_invalidation,
+            )
+        }
+    }
+}
+
+fn thread_safe_set_cell_invalidation_profile(
+    workers: usize,
+    run: fn(&ThreadSafeContext, usize) -> usize,
+) -> ProfileResult {
+    let ctx = ThreadSafeContext::new();
+    ctx.reset_instrumentation();
+    let total = run(&ctx, workers);
+    black_box(total);
+
+    thread_safe_set_cell_profile_result(ctx)
+}
+
+fn thread_safe_set_cell_profile_result(ctx: ThreadSafeContext) -> ProfileResult {
+    let snapshot = ctx.instrumentation_snapshot();
+    let lock_profile = ctx.lock_profile_snapshot();
+    assert!(snapshot.lock_acquisitions > 0);
+    assert_eq!(snapshot.duplicate_speculative_recomputes, 0);
+    assert!(
+        lock_profile.iter().any(|site| {
+            site.site == ThreadSafeLockSite::SetCellInvalidation && site.lock_acquisitions > 0
+        }),
+        "set_cell invalidation profiles must record set_cell_invalidation lock attribution"
+    );
+    ProfileResult {
+        snapshot,
+        lock_profile: Some(lock_profile),
+    }
+}
+
 fn thread_safe_contention(case: ThreadSafeContentionCase, workers: usize) -> ProfileResult {
     match case {
         ThreadSafeContentionCase::SameSlotWriteRead => {
@@ -249,6 +364,154 @@ fn thread_safe_contention_profile(
         snapshot,
         lock_profile: Some(ctx.lock_profile_snapshot()),
     }
+}
+
+fn run_thread_safe_same_slot_set_cell_invalidation(
+    ctx: &ThreadSafeContext,
+    workers: usize,
+) -> usize {
+    let root = ctx.cell(1usize);
+    let value = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
+    black_box(ctx.get(&value));
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    let next = worker
+                        .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
+                        .wrapping_add(iter);
+                    worker_ctx.set_cell(&root, black_box(next));
+                    sum = sum.wrapping_add(next);
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let total = threads
+        .into_iter()
+        .map(|worker| worker.join().expect("invalidation worker should finish"))
+        .fold(0usize, usize::wrapping_add);
+    total.wrapping_add(ctx.get_cell(&root))
+}
+
+fn run_thread_safe_independent_slot_set_cell_invalidation(
+    ctx: &ThreadSafeContext,
+    workers: usize,
+) -> usize {
+    let roots = (0..workers)
+        .map(|worker| ctx.cell(worker))
+        .collect::<Vec<_>>();
+    let values = roots
+        .iter()
+        .map(|root| {
+            let root = *root;
+            ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+        })
+        .collect::<Vec<_>>();
+    for value in &values {
+        black_box(ctx.get(value));
+    }
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let root = roots[worker];
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    let next = worker
+                        .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
+                        .wrapping_add(iter);
+                    worker_ctx.set_cell(&root, black_box(next));
+                    sum = sum.wrapping_add(next);
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("invalidation worker should finish"))
+        .fold(0usize, usize::wrapping_add)
+}
+
+fn run_thread_safe_batched_set_cell_invalidation(ctx: &ThreadSafeContext, workers: usize) -> usize {
+    let worker_cells = (0..workers)
+        .map(|worker| {
+            (0..CONTENTION_BATCH_CELLS_PER_WORKER)
+                .map(|offset| {
+                    ctx.cell(
+                        worker
+                            .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                            .wrapping_add(offset),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let all_cells = worker_cells
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<CellHandle<usize>>>();
+    let total = ctx.computed(move |ctx| {
+        all_cells
+            .iter()
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+    });
+    black_box(ctx.get(&total));
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let cells = worker_cells[worker].clone();
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    worker_ctx.batch(|ctx| {
+                        for (offset, cell) in cells.iter().enumerate() {
+                            let next = worker
+                                .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
+                                .wrapping_add(iter)
+                                .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                                .wrapping_add(offset);
+                            ctx.set_cell(cell, black_box(next));
+                            sum = sum.wrapping_add(next);
+                        }
+                    });
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("invalidation worker should finish"))
+        .fold(0usize, usize::wrapping_add)
 }
 
 fn run_thread_safe_same_slot_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
