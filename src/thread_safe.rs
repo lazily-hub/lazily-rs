@@ -22,7 +22,7 @@ type ThreadSafeCleanup = dyn FnOnce() + Send;
 type ThreadSafeEffectFn =
     dyn Fn(&ThreadSafeContext) -> Option<Box<ThreadSafeCleanup>> + Send + Sync;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ThreadSafeContextId(usize);
 
 struct ThreadSafeTrackingFrame {
@@ -32,8 +32,25 @@ struct ThreadSafeTrackingFrame {
     dependencies: HashSet<SlotId>,
 }
 
+#[derive(Default)]
+struct ThreadSafeBatchChanges {
+    cells: HashSet<SlotId>,
+    cell_clears: HashSet<SlotId>,
+    slots: HashSet<SlotId>,
+}
+
+struct ThreadSafeBatchFrame {
+    context_id: ThreadSafeContextId,
+    changes: ThreadSafeBatchChanges,
+}
+
 thread_local! {
     static THREAD_SAFE_TRACKING_STACK: RefCell<Vec<ThreadSafeTrackingFrame>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    static THREAD_SAFE_BATCH_STACK: RefCell<Vec<ThreadSafeBatchFrame>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -111,6 +128,47 @@ fn track_dependency(context_id: ThreadSafeContextId, dependency_id: SlotId) -> O
             }
         }
         None
+    })
+}
+
+fn push_batch_frame(context_id: ThreadSafeContextId) {
+    THREAD_SAFE_BATCH_STACK.with(|stack| {
+        stack.borrow_mut().push(ThreadSafeBatchFrame {
+            context_id,
+            changes: ThreadSafeBatchChanges::default(),
+        });
+    });
+}
+
+fn pop_batch_frame(context_id: ThreadSafeContextId) -> ThreadSafeBatchChanges {
+    THREAD_SAFE_BATCH_STACK.with(|stack| {
+        let frame = stack
+            .borrow_mut()
+            .pop()
+            .expect("ThreadSafeContext batch frame stack underflow");
+        assert_eq!(
+            frame.context_id, context_id,
+            "ThreadSafeContext batch frame mismatch"
+        );
+        frame.changes
+    })
+}
+
+fn queue_batch_change<F>(context_id: ThreadSafeContextId, apply: F) -> bool
+where
+    F: FnOnce(&mut ThreadSafeBatchChanges),
+{
+    THREAD_SAFE_BATCH_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let Some(frame) = stack
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.context_id == context_id)
+        else {
+            return false;
+        };
+        apply(&mut frame.changes);
+        true
     })
 }
 
@@ -581,11 +639,13 @@ pub struct ThreadSafeContext {
 
 struct BatchGuard {
     ctx: ThreadSafeContext,
+    context_id: ThreadSafeContextId,
 }
 
 impl Drop for BatchGuard {
     fn drop(&mut self) {
-        self.ctx.finish_batch();
+        let changes = pop_batch_frame(self.context_id);
+        self.ctx.finish_batch(changes);
     }
 }
 
@@ -1318,6 +1378,10 @@ impl ThreadSafeContext {
             return;
         }
 
+        if self.queue_batched_cell(handle.id) {
+            return;
+        }
+
         let should_flush = if let Some(should_flush) =
             self.try_invalidate_cell_dependents_fast(handle.id, &fast_path)
         {
@@ -1446,6 +1510,7 @@ impl ThreadSafeContext {
     where
         F: FnOnce(&ThreadSafeContext) -> R,
     {
+        let context_id = self.context_id();
         {
             let mut state = self.lock_state();
             state.batch_depth += 1;
@@ -1453,14 +1518,21 @@ impl ThreadSafeContext {
                 .batch_depth
                 .store(state.batch_depth, Ordering::Release);
         }
-        let _guard = BatchGuard { ctx: self.clone() };
+        push_batch_frame(context_id);
+        let _guard = BatchGuard {
+            ctx: self.clone(),
+            context_id,
+        };
         run(self)
     }
 
-    fn finish_batch(&self) {
+    fn finish_batch(&self, changes: ThreadSafeBatchChanges) {
         let should_flush = {
             let mut state = self.lock_state();
             assert!(state.batch_depth > 0, "finish_batch called without batch");
+            state.batched_cells.extend(changes.cells);
+            state.batched_cell_clears.extend(changes.cell_clears);
+            state.batched_slots.extend(changes.slots);
             state.batch_depth -= 1;
             self.inner
                 .batch_depth
@@ -1475,6 +1547,24 @@ impl ThreadSafeContext {
 
     fn is_batching(&self) -> bool {
         self.read_state().batch_depth > 0
+    }
+
+    fn queue_batched_cell(&self, id: SlotId) -> bool {
+        queue_batch_change(self.context_id(), |changes| {
+            changes.cells.insert(id);
+        })
+    }
+
+    fn queue_batched_cell_clear(&self, id: SlotId) -> bool {
+        queue_batch_change(self.context_id(), |changes| {
+            changes.cell_clears.insert(id);
+        })
+    }
+
+    fn queue_batched_slot_clear(&self, id: SlotId) -> bool {
+        queue_batch_change(self.context_id(), |changes| {
+            changes.slots.insert(id);
+        })
     }
 
     fn flush_batched_invalidations(&self) {
@@ -1689,6 +1779,10 @@ impl ThreadSafeContext {
     }
 
     fn clear_slot(&self, id: SlotId) {
+        if self.queue_batched_slot_clear(id) {
+            return;
+        }
+
         let should_clear = {
             let mut state = self.lock_state();
             if state.batch_depth > 0 {
@@ -1721,6 +1815,10 @@ impl ThreadSafeContext {
 
     /// Clear all dependent slots without changing the cell value.
     pub fn clear_cell_dependents<T>(&self, handle: &CellHandle<T>) {
+        if self.queue_batched_cell_clear(handle.id) {
+            return;
+        }
+
         let should_flush = {
             let mut state = self.lock_state();
             if state.batch_depth > 0 {

@@ -732,6 +732,8 @@ mod storage_strategy_evaluation {
             "read-mostly cached-value sidecar",
             "per-slot recompute/value-publish sidecar",
             "per-node dependent frontier sidecars",
+            "thread-local batch frames",
+            "local batch-frame prototype",
             "fast-frontier fallback while dependency discovery is active",
             "dirty same-slot contention",
             "Do not replace the single graph lock with sharded storage",
@@ -1247,6 +1249,54 @@ mod benchmark_instrumentation {
                 worker.wrapping_mul(iters).wrapping_add(iters - 1) + 1
             );
         }
+    }
+
+    /// SPEC: same-thread `ThreadSafeContext` batches keep changed cells in a
+    /// local batch frame and take one graph invalidation lock at batch exit.
+    #[test]
+    fn thread_safe_batch_queues_same_thread_writes_before_graph_flush() {
+        let ctx = ThreadSafeContext::new();
+        let cells = [
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+        ];
+        let total = ctx.computed(move |ctx| {
+            cells
+                .iter()
+                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+        });
+
+        assert_eq!(ctx.get(&total), 0);
+        ctx.reset_instrumentation();
+
+        ctx.batch(|ctx| {
+            for (offset, cell) in cells.iter().enumerate() {
+                ctx.set_cell(cell, offset + 1);
+            }
+
+            assert_eq!(
+                lock_site(ctx, ThreadSafeLockSite::SetCellInvalidation).lock_acquisitions,
+                0,
+                "same-thread batch writes should queue without per-write graph invalidation locks"
+            );
+            assert!(
+                ctx.is_set(&total),
+                "dependent slot should remain cached until the batch exits"
+            );
+        });
+
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::SetCellInvalidation).lock_acquisitions,
+            1,
+            "batch exit should apply one coalesced graph invalidation flush"
+        );
+        assert!(
+            !ctx.is_set(&total),
+            "batch exit should make the dependent slot stale"
+        );
+        assert_eq!(ctx.get(&total), 10);
     }
 
     /// SPEC: in-flight recompute notifications are scoped to the slot that

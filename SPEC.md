@@ -165,6 +165,7 @@ ctx.batch(|ctx| {
 - **Changed cells:** `ctx.set_cell()` still updates the cell value immediately, but dependent dirty marking is queued until batch exit
 - **Explicit clears:** `slot.clear(&ctx)` and `cell.clear_dependents(&ctx)` are queued until batch exit
 - **Coalescing:** Repeated updates to the same cell or clears of the same slot queue one invalidation root
+- **Thread-safe local batching:** same-thread `ThreadSafeContext` batch writes buffer changed cells and clears in a thread-local batch frame, then merge that frame into the graph-owned batch queue at batch exit; cross-thread writes during another active batch still fall back to the graph-owned queue
 - **Effect flushing:** Effects scheduled by batched invalidation rerun after the batch invalidation pass and coalesce duplicate schedules
 - **Reads during a batch:** Direct `ctx.get_cell()` reads see the latest cell value immediately; dependent slot reads keep their pre-batch cached value until dirty marking flushes at batch exit
 
@@ -261,8 +262,9 @@ Lock strategy evaluation:
 - `ThreadSafeContext` uses read-mostly per-slot cached-value sidecars for fresh
   cached reads, a per-slot recompute/value-publish sidecar for in-flight
   same-slot waiters, and per-node dependent frontier sidecars for slot-only
-  changed-cell invalidation; dependency graph mutations still require the
-  context mutex
+  changed-cell invalidation; same-thread batches use thread-local batch frames to
+  coalesce changed-cell queueing before the graph-owned batch flush; dependency
+  graph mutations still require the context mutex
 - `ThreadSafeContext` uses per-slot sidecar recompute `Condvar`s for in-flight waiters. Those Condvars guard only per-slot in-flight/revision/cache-visibility state and must not mutate dependency graph state independently of the context mutex
 - The read-mostly prototype is benchmark-gated by the 1/2/4/8/16-worker `same_slot_write_read`, `independent_slots`, `read_mostly_waiters`, and `batched_write_bursts` matrix after the `#lazybatch1` and `#lazybatch2` invalidation/read-churn fixes
 - The dependent-frontier sidecar prototype is benchmark-gated by
@@ -271,6 +273,11 @@ Lock strategy evaluation:
   should reduce `set_cell_invalidation` graph-lock acquisitions for independent
   slot-only roots without changing effect, batch, or dynamic-dependency
   semantics.
+- The local batch-frame prototype is benchmark-gated by `set_cell_invalidation /
+  batched_write_bursts` and `thread_safe_contention / batched_write_bursts` at 8
+  and 16 workers. It should reduce per-write graph queueing during same-thread
+  batches while preserving one coalesced dirty/effect flush at the outermost
+  batch exit.
 - Versioned optimistic reads are deferred for the current erased-value storage. A lock-free read path would need independently retained value snapshots plus atomic dirty/revision validation. Any such path must prove that a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
 - The current sidecar `Mutex`/`Condvar` waiter path and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, stale in-flight completion and retry, read-mostly waiter handoff, invalidation during compute, fast-frontier fallback while dependency discovery is active, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
