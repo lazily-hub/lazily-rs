@@ -332,15 +332,23 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn finish_recompute(&self) {
-        {
+        let notify_waiter = {
             let mut recompute = self.lock_recompute_state();
             recompute.computing = false;
+            recompute.waiters > 0
+        };
+        if notify_waiter {
+            self.recompute_condvar.notify_one();
         }
-        self.recompute_condvar.notify_all();
     }
 
     fn wait_for_recompute(&self) -> ThreadSafeRecomputeResult {
         let mut recompute = self.lock_recompute_state();
+        let mut registered_waiter = false;
+        if recompute.computing {
+            recompute.waiters = recompute.waiters.saturating_add(1);
+            registered_waiter = true;
+        }
         while recompute.computing {
             recompute = self
                 .recompute_condvar
@@ -348,9 +356,24 @@ impl ThreadSafeSlotFastPath {
                 .expect("ThreadSafeContext slot recompute mutex poisoned while waiting");
         }
 
+        let notify_next_waiter = if registered_waiter {
+            debug_assert!(recompute.waiters > 0);
+            recompute.waiters -= 1;
+            recompute.waiters > 0
+        } else {
+            false
+        };
         if recompute.has_value && !recompute.dirty && !recompute.force_recompute {
+            drop(recompute);
+            if notify_next_waiter {
+                self.recompute_condvar.notify_one();
+            }
             ThreadSafeRecomputeResult::Fresh(false)
         } else {
+            drop(recompute);
+            if notify_next_waiter {
+                self.recompute_condvar.notify_one();
+            }
             ThreadSafeRecomputeResult::Stale
         }
     }
@@ -385,6 +408,7 @@ struct ThreadSafeSlotRecomputeState {
     dirty: bool,
     force_recompute: bool,
     computing: bool,
+    waiters: usize,
     revision: u64,
 }
 

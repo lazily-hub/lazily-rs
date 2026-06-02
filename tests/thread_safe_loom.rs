@@ -76,6 +76,7 @@ struct ReadMostlyRecomputeState {
     dirty: bool,
     force_recompute: bool,
     computing: bool,
+    waiters: usize,
     revision: u64,
 }
 
@@ -528,17 +529,49 @@ impl ReadMostlyGraph {
         state.revision = state.revision.wrapping_add(1);
         state.dirty = true;
         state.force_recompute = true;
-        let mut recompute = self.recompute.lock().expect("model mutex poisoned");
-        assert!(recompute.computing);
-        recompute.computing = false;
-        recompute.revision = state.revision;
-        recompute.dirty = true;
-        recompute.force_recompute = true;
-        self.recompute_waiters.notify_all();
+        let notify_waiter = {
+            let mut recompute = self.recompute.lock().expect("model mutex poisoned");
+            assert!(recompute.computing);
+            recompute.computing = false;
+            recompute.revision = state.revision;
+            recompute.dirty = true;
+            recompute.force_recompute = true;
+            recompute.waiters > 0
+        };
+        if notify_waiter {
+            self.recompute_waiters.notify_one();
+        }
+    }
+
+    fn finish_fresh_compute(&self) {
+        let mut state = self.state.lock().expect("model mutex poisoned");
+        assert!(state.computing);
+        state.computing = false;
+        let notify_waiter = {
+            let mut recompute = self.recompute.lock().expect("model mutex poisoned");
+            assert!(recompute.computing);
+            recompute.computing = false;
+            recompute.has_value = true;
+            recompute.dirty = false;
+            recompute.force_recompute = false;
+            recompute.waiters > 0
+        };
+        if notify_waiter {
+            self.recompute_waiters.notify_one();
+        }
+    }
+
+    fn recompute_waiters(&self) -> usize {
+        self.recompute.lock().expect("model mutex poisoned").waiters
     }
 
     fn wait_for_in_flight(&self) -> WaitOutcome {
         let mut recompute = self.recompute.lock().expect("model mutex poisoned");
+        let mut registered_waiter = false;
+        if recompute.computing {
+            recompute.waiters = recompute.waiters.saturating_add(1);
+            registered_waiter = true;
+        }
         while recompute.computing {
             recompute = self
                 .recompute_waiters
@@ -546,11 +579,23 @@ impl ReadMostlyGraph {
                 .expect("model mutex poisoned while waiting");
         }
 
-        if recompute.has_value && !recompute.dirty && !recompute.force_recompute {
+        let notify_next_waiter = if registered_waiter {
+            assert!(recompute.waiters > 0);
+            recompute.waiters -= 1;
+            recompute.waiters > 0
+        } else {
+            false
+        };
+        let outcome = if recompute.has_value && !recompute.dirty && !recompute.force_recompute {
             WaitOutcome::Fresh
         } else {
             WaitOutcome::Stale
+        };
+        drop(recompute);
+        if notify_next_waiter {
+            self.recompute_waiters.notify_one();
         }
+        outcome
     }
 }
 
@@ -837,6 +882,36 @@ fn read_mostly_waiter_sidecar_prevents_missed_stale_completion() {
 
         waiter.join().expect("waiter thread should finish");
         finisher.join().expect("finisher thread should finish");
+    });
+}
+
+#[test]
+fn recompute_handoff_notification_drains_multiple_waiters() {
+    loom::model(|| {
+        let graph = Arc::new(ReadMostlyGraph::default());
+        graph.seed_computing();
+
+        let first_waiter = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || assert_eq!(graph.wait_for_in_flight(), WaitOutcome::Fresh))
+        };
+        let second_waiter = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || assert_eq!(graph.wait_for_in_flight(), WaitOutcome::Fresh))
+        };
+
+        while graph.recompute_waiters() < 2 {
+            thread::yield_now();
+        }
+
+        graph.finish_fresh_compute();
+        first_waiter
+            .join()
+            .expect("first waiter thread should finish");
+        second_waiter
+            .join()
+            .expect("second waiter thread should finish");
+        assert_eq!(graph.recompute_waiters(), 0);
     });
 }
 

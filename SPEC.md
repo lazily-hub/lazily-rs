@@ -244,6 +244,7 @@ Locking model:
 - Concurrent first access and dirty same-slot contention share one in-flight computation for the current slot revision; waiters check the per-slot recompute sidecar before the `get_refresh`/`publish` graph-lock path, park on that slot's notification primitive, then return the published cache or retry if an invalidation makes the in-flight result stale
 - Recompute waiters observe the per-slot in-flight/revision state while holding the sidecar mutex, then park on the same sidecar `Condvar`. Finishers publish value and dirty-state sidecar updates before clearing the in-flight bit and notifying, so a stale in-flight completion cannot be missed.
 - Recompute notifications are scoped to the slot that finished. A completion for one in-flight slot must not wake waiters parked behind another in-flight slot.
+- Per-slot recompute wakeups use a waiter-counted handoff instead of `notify_all`: the finisher calls `notify_one` when waiters exist, and each awakened waiter notifies the next parked waiter after observing the completed sidecar state. This drains all waiters without a completion-wide wakeup stampede.
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
 - The outermost thread-safe batch exit must collect dependents for all changed cells and apply one coalesced frontier invalidation, so a shared dependent reached through many changed cells is marked dirty and advances revision once per batch flush
@@ -266,7 +267,7 @@ Lock strategy evaluation:
   changed-cell invalidation; same-thread batches use thread-local batch frames to
   coalesce changed-cell queueing before the graph-owned batch flush; dependency
   graph mutations still require the context mutex
-- `ThreadSafeContext` uses per-slot sidecar recompute `Condvar`s for in-flight waiters. Those Condvars guard only per-slot in-flight/revision/cache-visibility state and must not mutate dependency graph state independently of the context mutex
+- `ThreadSafeContext` uses per-slot sidecar recompute `Condvar`s for in-flight waiters. Those Condvars guard only per-slot in-flight/revision/cache-visibility state, use waiter-counted `notify_one` handoff wakeups to avoid broad `notify_all` contention, and must not mutate dependency graph state independently of the context mutex
 - The read-mostly prototype is benchmark-gated by the 1/2/4/8/16-worker `same_slot_write_read`, `independent_slots`, `read_mostly_waiters`, and `batched_write_bursts` matrix after the `#lazybatch1` and `#lazybatch2` invalidation/read-churn fixes
 - The dependent-frontier sidecar prototype is benchmark-gated by
   `thread_safe_contention / independent_slots` and
@@ -281,7 +282,7 @@ Lock strategy evaluation:
   batch exit.
 - Versioned optimistic reads are deferred for the current erased-value storage. A lock-free read path would need independently retained value snapshots plus atomic dirty/revision validation. Any such path must prove that a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
-- The current sidecar `Mutex`/`Condvar` waiter path and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, stale in-flight completion and retry, read-mostly waiter handoff, invalidation during compute, fast-frontier fallback while dependency discovery is active, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
+- The current sidecar `Mutex`/`Condvar` waiter path and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, invalidation during compute, fast-frontier fallback while dependency discovery is active, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
 Sharded/versioned storage evaluation:
