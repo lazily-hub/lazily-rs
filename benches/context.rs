@@ -13,6 +13,33 @@ const MEMO_CHAIN_DEPTH: usize = 32;
 const BATCH_STORM_CELLS: usize = 64;
 const THREAD_WORKERS: [usize; 5] = [1, 2, 4, 8, 16];
 const CONTENTION_ITERS_PER_WORKER: usize = 128;
+const CONTENTION_BATCH_CELLS_PER_WORKER: usize = 4;
+
+#[derive(Clone, Copy)]
+enum ThreadSafeContentionCase {
+    SameSlotWriteRead,
+    IndependentSlots,
+    ReadMostlyWaiters,
+    BatchedWriteBursts,
+}
+
+const THREAD_SAFE_CONTENTION_CASES: [ThreadSafeContentionCase; 4] = [
+    ThreadSafeContentionCase::SameSlotWriteRead,
+    ThreadSafeContentionCase::IndependentSlots,
+    ThreadSafeContentionCase::ReadMostlyWaiters,
+    ThreadSafeContentionCase::BatchedWriteBursts,
+];
+
+impl ThreadSafeContentionCase {
+    fn as_str(self) -> &'static str {
+        match self {
+            ThreadSafeContentionCase::SameSlotWriteRead => "same_slot_write_read",
+            ThreadSafeContentionCase::IndependentSlots => "independent_slots",
+            ThreadSafeContentionCase::ReadMostlyWaiters => "read_mostly_waiters",
+            ThreadSafeContentionCase::BatchedWriteBursts => "batched_write_bursts",
+        }
+    }
+}
 
 fn setup_context_fan_out(width: usize) -> (Context, CellHandle<usize>, Vec<SlotHandle<usize>>) {
     let ctx = Context::new();
@@ -112,7 +139,24 @@ fn setup_thread_safe_batch_storm(
     (ctx, cells, sink)
 }
 
-fn run_thread_safe_contention(workers: usize) -> usize {
+fn run_thread_safe_contention(case: ThreadSafeContentionCase, workers: usize) -> usize {
+    match case {
+        ThreadSafeContentionCase::SameSlotWriteRead => {
+            run_thread_safe_same_slot_contention(workers)
+        }
+        ThreadSafeContentionCase::IndependentSlots => {
+            run_thread_safe_independent_slot_contention(workers)
+        }
+        ThreadSafeContentionCase::ReadMostlyWaiters => {
+            run_thread_safe_read_mostly_contention(workers)
+        }
+        ThreadSafeContentionCase::BatchedWriteBursts => {
+            run_thread_safe_batched_write_bursts(workers)
+        }
+    }
+}
+
+fn run_thread_safe_same_slot_contention(workers: usize) -> usize {
     let ctx = ThreadSafeContext::new();
     let root = ctx.cell(1usize);
     let value = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
@@ -134,6 +178,150 @@ fn run_thread_safe_contention(workers: usize) -> usize {
                         .wrapping_add(iter);
                     worker_ctx.set_cell(&root, black_box(next));
                     sum = sum.wrapping_add(worker_ctx.get(&value));
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("contention worker should finish"))
+        .fold(0usize, usize::wrapping_add)
+}
+
+fn run_thread_safe_independent_slot_contention(workers: usize) -> usize {
+    let ctx = ThreadSafeContext::new();
+    let roots = (0..workers)
+        .map(|worker| ctx.cell(worker))
+        .collect::<Vec<_>>();
+    let values = roots
+        .iter()
+        .map(|root| {
+            let root = *root;
+            ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+        })
+        .collect::<Vec<_>>();
+    for value in &values {
+        black_box(ctx.get(value));
+    }
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let root = roots[worker];
+            let value = values[worker];
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    let next = worker
+                        .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
+                        .wrapping_add(iter);
+                    worker_ctx.set_cell(&root, black_box(next));
+                    sum = sum.wrapping_add(worker_ctx.get(&value));
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("contention worker should finish"))
+        .fold(0usize, usize::wrapping_add)
+}
+
+fn run_thread_safe_read_mostly_contention(workers: usize) -> usize {
+    let ctx = ThreadSafeContext::new();
+    let root = ctx.cell(1usize);
+    let value = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
+    black_box(ctx.get(&value));
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    if worker == 0 {
+                        worker_ctx.set_cell(&root, black_box(iter));
+                    }
+                    sum = sum.wrapping_add(worker_ctx.get(&value));
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("contention worker should finish"))
+        .fold(0usize, usize::wrapping_add)
+}
+
+fn run_thread_safe_batched_write_bursts(workers: usize) -> usize {
+    let ctx = ThreadSafeContext::new();
+    let worker_cells = (0..workers)
+        .map(|worker| {
+            (0..CONTENTION_BATCH_CELLS_PER_WORKER)
+                .map(|offset| {
+                    ctx.cell(
+                        worker
+                            .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                            .wrapping_add(offset),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let all_cells = worker_cells
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<CellHandle<usize>>>();
+    let total = ctx.computed(move |ctx| {
+        all_cells
+            .iter()
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+    });
+    black_box(ctx.get(&total));
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let cells = worker_cells[worker].clone();
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    worker_ctx.batch(|ctx| {
+                        for (offset, cell) in cells.iter().enumerate() {
+                            let next = worker
+                                .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
+                                .wrapping_add(iter)
+                                .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                                .wrapping_add(offset);
+                            ctx.set_cell(cell, black_box(next));
+                        }
+                    });
+                    sum = sum.wrapping_add(worker_ctx.get(&total));
                 }
 
                 sum
@@ -356,14 +544,21 @@ fn bench_thread_safe_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("thread_safe_contention");
     group.sample_size(10);
 
-    for workers in THREAD_WORKERS {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(workers),
-            &workers,
-            |b, &workers| {
-                b.iter(|| black_box(run_thread_safe_contention(black_box(workers))));
-            },
-        );
+    for case in THREAD_SAFE_CONTENTION_CASES {
+        for workers in THREAD_WORKERS {
+            group.bench_with_input(
+                BenchmarkId::new(case.as_str(), workers),
+                &(case, workers),
+                |b, &(case, workers)| {
+                    b.iter(|| {
+                        black_box(run_thread_safe_contention(
+                            black_box(case),
+                            black_box(workers),
+                        ))
+                    });
+                },
+            );
+        }
     }
 
     group.finish();

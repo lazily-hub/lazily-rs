@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use lazily::{
-    Context, InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeContext,
+    CellHandle, Context, InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeContext,
     ThreadSafeLockSiteSnapshot,
 };
 
@@ -14,6 +14,33 @@ const FAN_OUT_WIDTH: usize = 32;
 const BATCH_STORM_CELLS: usize = 64;
 const CONTENTION_ITERS_PER_WORKER: usize = 16;
 const CONTENTION_WORKERS: [usize; 5] = [1, 2, 4, 8, 16];
+const CONTENTION_BATCH_CELLS_PER_WORKER: usize = 4;
+
+#[derive(Clone, Copy)]
+enum ThreadSafeContentionCase {
+    SameSlotWriteRead,
+    IndependentSlots,
+    ReadMostlyWaiters,
+    BatchedWriteBursts,
+}
+
+const THREAD_SAFE_CONTENTION_CASES: [ThreadSafeContentionCase; 4] = [
+    ThreadSafeContentionCase::SameSlotWriteRead,
+    ThreadSafeContentionCase::IndependentSlots,
+    ThreadSafeContentionCase::ReadMostlyWaiters,
+    ThreadSafeContentionCase::BatchedWriteBursts,
+];
+
+impl ThreadSafeContentionCase {
+    fn as_str(self) -> &'static str {
+        match self {
+            ThreadSafeContentionCase::SameSlotWriteRead => "same_slot_write_read",
+            ThreadSafeContentionCase::IndependentSlots => "independent_slots",
+            ThreadSafeContentionCase::ReadMostlyWaiters => "read_mostly_waiters",
+            ThreadSafeContentionCase::BatchedWriteBursts => "batched_write_bursts",
+        }
+    }
+}
 
 fn main() {
     println!(
@@ -27,11 +54,13 @@ max_effect_queue_depth,lock_acquisitions,lock_wait_nanos,lock_hold_nanos,lock_at
     emit("context_batch_storm_64", context_batch_storm());
     emit("thread_safe_first_get_2", thread_safe_first_get());
 
-    for workers in CONTENTION_WORKERS {
-        emit(
-            &format!("thread_safe_contention_{workers}"),
-            thread_safe_contention(workers),
-        );
+    for case in THREAD_SAFE_CONTENTION_CASES {
+        for workers in CONTENTION_WORKERS {
+            emit(
+                &format!("thread_safe_contention_{}_{workers}", case.as_str()),
+                thread_safe_contention(case, workers),
+            );
+        }
     }
 }
 
@@ -187,10 +216,42 @@ fn thread_safe_first_get() -> InstrumentationSnapshot {
     ctx.instrumentation_snapshot()
 }
 
-fn thread_safe_contention(workers: usize) -> ProfileResult {
+fn thread_safe_contention(case: ThreadSafeContentionCase, workers: usize) -> ProfileResult {
+    match case {
+        ThreadSafeContentionCase::SameSlotWriteRead => {
+            thread_safe_contention_profile(workers, run_thread_safe_same_slot_contention)
+        }
+        ThreadSafeContentionCase::IndependentSlots => {
+            thread_safe_contention_profile(workers, run_thread_safe_independent_slot_contention)
+        }
+        ThreadSafeContentionCase::ReadMostlyWaiters => {
+            thread_safe_contention_profile(workers, run_thread_safe_read_mostly_contention)
+        }
+        ThreadSafeContentionCase::BatchedWriteBursts => {
+            thread_safe_contention_profile(workers, run_thread_safe_batched_write_bursts)
+        }
+    }
+}
+
+fn thread_safe_contention_profile(
+    workers: usize,
+    run: fn(&ThreadSafeContext, usize) -> usize,
+) -> ProfileResult {
     let ctx = ThreadSafeContext::new();
     ctx.reset_instrumentation();
+    let total = run(&ctx, workers);
+    black_box(total);
 
+    let snapshot = ctx.instrumentation_snapshot();
+    assert!(snapshot.lock_acquisitions > 0);
+    assert_eq!(snapshot.duplicate_speculative_recomputes, 0);
+    ProfileResult {
+        snapshot,
+        lock_profile: Some(ctx.lock_profile_snapshot()),
+    }
+}
+
+fn run_thread_safe_same_slot_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
     let root = ctx.cell(1usize);
     let value = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
     black_box(ctx.get(&value));
@@ -219,17 +280,149 @@ fn thread_safe_contention(workers: usize) -> ProfileResult {
         })
         .collect::<Vec<_>>();
 
-    let total = threads
+    threads
         .into_iter()
         .map(|worker| worker.join().expect("contention worker should finish"))
-        .fold(0usize, usize::wrapping_add);
-    black_box(total);
+        .fold(0usize, usize::wrapping_add)
+}
 
-    let snapshot = ctx.instrumentation_snapshot();
-    assert!(snapshot.lock_acquisitions > 0);
-    assert_eq!(snapshot.duplicate_speculative_recomputes, 0);
-    ProfileResult {
-        snapshot,
-        lock_profile: Some(ctx.lock_profile_snapshot()),
+fn run_thread_safe_independent_slot_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
+    let roots = (0..workers)
+        .map(|worker| ctx.cell(worker))
+        .collect::<Vec<_>>();
+    let values = roots
+        .iter()
+        .map(|root| {
+            let root = *root;
+            ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+        })
+        .collect::<Vec<_>>();
+    for value in &values {
+        black_box(ctx.get(value));
     }
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let root = roots[worker];
+            let value = values[worker];
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    let next = worker
+                        .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
+                        .wrapping_add(iter);
+                    worker_ctx.set_cell(&root, black_box(next));
+                    sum = sum.wrapping_add(worker_ctx.get(&value));
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("contention worker should finish"))
+        .fold(0usize, usize::wrapping_add)
+}
+
+fn run_thread_safe_read_mostly_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
+    let root = ctx.cell(1usize);
+    let value = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
+    black_box(ctx.get(&value));
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    if worker == 0 {
+                        worker_ctx.set_cell(&root, black_box(iter));
+                    }
+                    sum = sum.wrapping_add(worker_ctx.get(&value));
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("contention worker should finish"))
+        .fold(0usize, usize::wrapping_add)
+}
+
+fn run_thread_safe_batched_write_bursts(ctx: &ThreadSafeContext, workers: usize) -> usize {
+    let worker_cells = (0..workers)
+        .map(|worker| {
+            (0..CONTENTION_BATCH_CELLS_PER_WORKER)
+                .map(|offset| {
+                    ctx.cell(
+                        worker
+                            .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                            .wrapping_add(offset),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let all_cells = worker_cells
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<CellHandle<usize>>>();
+    let total = ctx.computed(move |ctx| {
+        all_cells
+            .iter()
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+    });
+    black_box(ctx.get(&total));
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let cells = worker_cells[worker].clone();
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+
+                for iter in 0..CONTENTION_ITERS_PER_WORKER {
+                    worker_ctx.batch(|ctx| {
+                        for (offset, cell) in cells.iter().enumerate() {
+                            let next = worker
+                                .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
+                                .wrapping_add(iter)
+                                .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                                .wrapping_add(offset);
+                            ctx.set_cell(cell, black_box(next));
+                        }
+                    });
+                    sum = sum.wrapping_add(worker_ctx.get(&total));
+                }
+
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("contention worker should finish"))
+        .fold(0usize, usize::wrapping_add)
 }

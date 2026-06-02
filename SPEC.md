@@ -357,7 +357,7 @@ Implementation notes:
 - **Single-threaded fast path:** `Context` uses `RefCell` interior mutability with no mutex overhead
 - **Contiguous local storage:** `Context` indexes nodes directly by `SlotId` to avoid hash-map lookup and churn in the single-threaded fast path
 - **Explicit thread-safe path:** `ThreadSafeContext` uses a context-level lock and `Send + Sync` bounds for shared reactive graphs
-- **Performance tracking:** Criterion benchmarks cover both `Context` and `ThreadSafeContext` for cached reads, cold first access, dependency fan-out, memo equality suppression, effect flushing, and batch storms; `ThreadSafeContext` also tracks 1/2/4/8/16-worker contention.
+- **Performance tracking:** Criterion benchmarks cover both `Context` and `ThreadSafeContext` for cached reads, cold first access, dependency fan-out, memo equality suppression, effect flushing, and batch storms; `ThreadSafeContext` also tracks a 1/2/4/8/16-worker contention matrix that separates hot shared-slot writes, independent per-worker slots, read-mostly waiters, and batched write bursts.
 - **Benchmark instrumentation:** The optional `instrumentation` feature exposes lightweight counters for recompute starts, duplicate speculative thread-safe computes, dependency edge churn, effect queue depth, reactive node allocations, aggregate `ThreadSafeContext` lock wait/hold timing, and per-operation thread-safe lock attribution.
 
 ## Performance Benchmarks
@@ -374,7 +374,11 @@ Required benchmark scenarios:
 - Memo equality suppression where an equal intermediate value prevents downstream recomputation
 - Effect flushing after dependency mutation
 - Batch storms that coalesce many writes into one invalidation/effect flush boundary
-- `ThreadSafeContext` contention at 1, 2, 4, 8, and 16 workers
+- `ThreadSafeContext` contention at 1, 2, 4, 8, and 16 workers, split into:
+  - same-root/same-slot write plus read contention
+  - independent per-worker roots and computed slots
+  - read-mostly waiters with one writer and many readers
+  - batched write bursts over per-worker cell groups
 - `ThreadSafeContext` synchronization model checking with the optional `loom` feature
 
 The optional `instrumentation` feature adds `instrumentation_snapshot()` and
@@ -413,8 +417,8 @@ refresh command, the Criterion baseline comparison workflow, one timing row for
 each required benchmark scenario above, and instrumentation rows covering
 recomputes, duplicate speculative recomputes, dependency edge churn, effect
 queue depth, node allocations, lock wait/hold time, and per-operation
-`ThreadSafeContext` lock attribution for the 1/2/4/8/16-worker contention
-profiles. `--check` verifies that the README section is already current without
+`ThreadSafeContext` lock attribution for every 1/2/4/8/16-worker contention
+matrix profile. `--check` verifies that the README section is already current without
 rewriting it; `--no-run` reuses existing Criterion estimate files for a
 report-only refresh after a manual baseline comparison run while refreshing the
 instrumentation CSV unless it is also running in check mode.

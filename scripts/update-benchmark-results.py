@@ -31,6 +31,12 @@ GROUP_ORDER = {
     "thread_safe_contention": 6,
     "profile_instrumentation": 7,
 }
+THREAD_SAFE_CONTENTION_CASE_ORDER = {
+    "same_slot_write_read": 0,
+    "independent_slots": 1,
+    "read_mostly_waiters": 2,
+    "batched_write_bursts": 3,
+}
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,8 @@ def discover_results(criterion_dir: Path) -> list[BenchmarkResult]:
 
         group = case_parts[0]
         case = " / ".join(case_parts[1:]) if len(case_parts) > 1 else group
+        if group == "thread_safe_contention" and case.isdigit():
+            continue
         mean_ns, lower_ns, upper_ns = read_estimate(estimates)
         results.append(
             BenchmarkResult(
@@ -151,7 +159,7 @@ def discover_results(criterion_dir: Path) -> list[BenchmarkResult]:
         key=lambda item: (
             GROUP_ORDER.get(item.group, len(GROUP_ORDER)),
             item.group,
-            natural_case_key(item.case),
+            benchmark_case_key(item),
         ),
     )
 
@@ -218,20 +226,33 @@ def parse_lock_attribution(value: str) -> tuple[LockAttribution, ...]:
     return tuple(sites)
 
 
-def natural_case_key(value: str) -> list[object]:
-    parts: list[object] = []
+def natural_case_key(value: str) -> list[tuple[int, object]]:
+    parts: list[tuple[int, object]] = []
     current = ""
     for char in value:
         if char.isdigit():
             current += char
         else:
             if current:
-                parts.append(int(current))
+                parts.append((0, int(current)))
                 current = ""
-            parts.append(char)
+            parts.append((1, char))
     if current:
-        parts.append(int(current))
+        parts.append((0, int(current)))
     return parts
+
+
+def benchmark_case_key(result: BenchmarkResult) -> tuple[int, list[tuple[int, object]]]:
+    if result.group == "thread_safe_contention":
+        case_name, _, worker = result.case.partition(" / ")
+        return (
+            THREAD_SAFE_CONTENTION_CASE_ORDER.get(
+                case_name, len(THREAD_SAFE_CONTENTION_CASE_ORDER)
+            ),
+            natural_case_key(worker or result.case),
+        )
+
+    return (0, natural_case_key(result.case))
 
 
 def format_duration(ns: float) -> str:
@@ -385,10 +406,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.no_run:
+    if args.check:
+        pass
+    elif not args.no_run:
         run(["cargo", "bench", "--features", "instrumentation"])
         run_instrumentation_profile(args.profile_output)
-    elif not args.check:
+    else:
         run_instrumentation_profile(args.profile_output)
 
     results = discover_results(args.criterion_dir)

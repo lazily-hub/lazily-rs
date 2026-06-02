@@ -632,11 +632,26 @@ mod benchmark_report_harness {
         assert!(section.contains("set_cell_invalidation"));
 
         for expected in [
+            "same_slot_write_read / 16",
+            "independent_slots / 16",
+            "read_mostly_waiters / 16",
+            "batched_write_bursts / 16",
+        ] {
+            assert!(
+                section.contains(expected),
+                "README benchmark section should include contention matrix case {expected}"
+            );
+        }
+
+        for expected in [
             "context_memo_effect",
             "context_fan_out_32",
             "context_batch_storm_64",
             "thread_safe_first_get_2",
-            "thread_safe_contention_16",
+            "thread_safe_contention_same_slot_write_read_16",
+            "thread_safe_contention_independent_slots_16",
+            "thread_safe_contention_read_mostly_waiters_16",
+            "thread_safe_contention_batched_write_bursts_16",
         ] {
             assert!(
                 section.contains(expected),
