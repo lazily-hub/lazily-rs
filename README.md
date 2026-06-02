@@ -190,7 +190,9 @@ finished slot. Fresh cached gets clone the cached value under one graph lock
 without recursively validating unchanged dependencies. Broader RwLock,
 sharded-lock, or CAS variants should wait for lock wait/hold benchmark evidence
 and a Loom or Shuttle safety model for stale in-flight completion, invalidation
-during compute, effect scheduling/disposal, and re-entrant callbacks.
+during compute, effect scheduling/disposal, and re-entrant callbacks. A
+lock-free versioned optimistic read path is deferred until cached values can be
+retained independently of the mutex-protected erased-value storage.
 
 ## Benchmark Results
 

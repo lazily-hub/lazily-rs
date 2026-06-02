@@ -837,6 +837,37 @@ mod benchmark_instrumentation {
         );
     }
 
+    /// SPEC: the cached get fast path must still observe invalidation from
+    /// another thread before returning; future optimistic reads need the same
+    /// visibility guarantee.
+    #[test]
+    fn thread_safe_cached_get_revalidates_after_cross_thread_invalidation() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(40usize);
+        let answer = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(2));
+
+        assert_eq!(ctx.get(&answer), 42);
+        ctx.reset_instrumentation();
+
+        let writer_ctx = ctx.clone();
+        let writer = thread::spawn(move || {
+            writer_ctx.set_cell(&root, 41);
+        });
+        writer.join().expect("writer should finish");
+
+        assert_eq!(ctx.get(&answer), 43);
+
+        let snapshot = ctx.instrumentation_snapshot();
+        assert_eq!(
+            snapshot.slot_recomputes, 1,
+            "invalidated cached get should recompute before returning"
+        );
+        assert!(
+            lock_site(&ctx, ThreadSafeLockSite::GetRefresh).lock_acquisitions > 1,
+            "invalidated cached get must not return through the one-lock fresh path"
+        );
+    }
+
     /// SPEC: in-flight thread-safe recompute waiters park instead of repeatedly
     /// reacquiring the graph lock while another thread owns the computation.
     #[test]
