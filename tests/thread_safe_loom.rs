@@ -61,6 +61,21 @@ struct ModelGraph {
     recompute_waiters: Condvar,
 }
 
+#[derive(Debug, Default)]
+struct ScopedWakeState {
+    slot_a_computing: bool,
+    slot_b_computing: bool,
+    slot_b_waiting: bool,
+    slot_b_reacquires: usize,
+}
+
+#[derive(Debug, Default)]
+struct ScopedWakeGraph {
+    state: Mutex<ScopedWakeState>,
+    slot_a_waiters: Condvar,
+    slot_b_waiters: Condvar,
+}
+
 impl ModelGraph {
     fn begin_compute(&self) -> ComputeStart {
         let mut state = self.state.lock().expect("model mutex poisoned");
@@ -209,6 +224,54 @@ impl ModelGraph {
     }
 }
 
+impl ScopedWakeGraph {
+    fn start_both_slots(&self) {
+        let mut state = self.state.lock().expect("model mutex poisoned");
+        state.slot_a_computing = true;
+        state.slot_b_computing = true;
+    }
+
+    fn slot_b_waiting(&self) -> bool {
+        self.state
+            .lock()
+            .expect("model mutex poisoned")
+            .slot_b_waiting
+    }
+
+    fn finish_slot_a(&self) {
+        let mut state = self.state.lock().expect("model mutex poisoned");
+        assert!(state.slot_a_computing);
+        state.slot_a_computing = false;
+        self.slot_a_waiters.notify_all();
+    }
+
+    fn finish_slot_b(&self) {
+        let mut state = self.state.lock().expect("model mutex poisoned");
+        assert!(state.slot_b_computing);
+        state.slot_b_computing = false;
+        self.slot_b_waiters.notify_all();
+    }
+
+    fn wait_for_slot_b(&self) {
+        let mut state = self.state.lock().expect("model mutex poisoned");
+        while state.slot_b_computing {
+            state.slot_b_waiting = true;
+            state = self
+                .slot_b_waiters
+                .wait(state)
+                .expect("model mutex poisoned while waiting");
+            state.slot_b_reacquires = state.slot_b_reacquires.saturating_add(1);
+        }
+    }
+
+    fn slot_b_reacquires(&self) -> usize {
+        self.state
+            .lock()
+            .expect("model mutex poisoned")
+            .slot_b_reacquires
+    }
+}
+
 #[test]
 fn concurrent_first_get_shares_one_in_flight_compute() {
     loom::model(|| {
@@ -245,6 +308,35 @@ fn concurrent_first_get_shares_one_in_flight_compute() {
         assert!(!state.computing);
         assert!(!state.dirty);
         assert!(!state.force_recompute);
+    });
+}
+
+#[test]
+fn scoped_slot_notification_does_not_wake_unrelated_waiter() {
+    loom::model(|| {
+        let graph = Arc::new(ScopedWakeGraph::default());
+        graph.start_both_slots();
+
+        let waiter_b = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || graph.wait_for_slot_b())
+        };
+
+        while !graph.slot_b_waiting() {
+            thread::yield_now();
+        }
+
+        graph.finish_slot_a();
+        thread::yield_now();
+        assert_eq!(
+            graph.slot_b_reacquires(),
+            0,
+            "slot B waiter should not reacquire after slot A completion"
+        );
+
+        graph.finish_slot_b();
+        waiter_b.join().expect("slot B waiter thread should finish");
+        assert_eq!(graph.slot_b_reacquires(), 1);
     });
 }
 

@@ -129,6 +129,7 @@ struct ThreadSafeSlotNode {
     equals: Option<Arc<ThreadSafeEqualsFn>>,
     dependencies: HashSet<SlotId>,
     dependents: HashSet<SlotId>,
+    recompute_waiters: Arc<Condvar>,
     dirty: bool,
     force_recompute: bool,
     computing: bool,
@@ -175,7 +176,6 @@ struct ThreadSafeState {
 
 struct ThreadSafeInner {
     state: Mutex<ThreadSafeState>,
-    recompute_waiters: Condvar,
     #[cfg(feature = "instrumentation")]
     lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation,
 }
@@ -184,7 +184,6 @@ impl Default for ThreadSafeInner {
     fn default() -> Self {
         Self {
             state: Mutex::new(ThreadSafeState::default()),
-            recompute_waiters: Condvar::new(),
             #[cfg(feature = "instrumentation")]
             lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation::default(),
         }
@@ -523,6 +522,7 @@ impl ThreadSafeContext {
             equals,
             dependencies: HashSet::new(),
             dependents: HashSet::new(),
+            recompute_waiters: Arc::new(Condvar::new()),
             dirty: false,
             force_recompute: false,
             computing: false,
@@ -667,7 +667,8 @@ impl ThreadSafeContext {
                     }
                 };
                 slot.computing = false;
-                self.inner.recompute_waiters.notify_all();
+                let recompute_waiters = Arc::clone(&slot.recompute_waiters);
+                recompute_waiters.notify_all();
                 recompute_guard.active = false;
 
                 if slot.revision != start_revision {
@@ -722,16 +723,24 @@ impl ThreadSafeContext {
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::InFlightWait);
         let mut state = self.lock_state();
         loop {
-            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&id) else {
-                return ThreadSafeRecomputeResult::Fresh(false);
+            let recompute_waiters = {
+                let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&id) else {
+                    return ThreadSafeRecomputeResult::Fresh(false);
+                };
+                if slot.computing {
+                    Some(Arc::clone(&slot.recompute_waiters))
+                } else if slot.value.is_some() && !slot.dirty && !slot.force_recompute {
+                    return ThreadSafeRecomputeResult::Fresh(false);
+                } else {
+                    return ThreadSafeRecomputeResult::Stale;
+                }
             };
-            if slot.computing {
-                state = self.wait_for_recompute_notification(state);
-            } else if slot.value.is_some() && !slot.dirty && !slot.force_recompute {
-                return ThreadSafeRecomputeResult::Fresh(false);
-            } else {
-                return ThreadSafeRecomputeResult::Stale;
-            }
+            state = self.wait_for_recompute_notification(
+                state,
+                recompute_waiters
+                    .as_ref()
+                    .expect("waiters should be present"),
+            );
         }
     }
 
@@ -739,9 +748,9 @@ impl ThreadSafeContext {
     fn wait_for_recompute_notification<'a>(
         &self,
         state: MutexGuard<'a, ThreadSafeState>,
+        recompute_waiters: &Condvar,
     ) -> MutexGuard<'a, ThreadSafeState> {
-        self.inner
-            .recompute_waiters
+        recompute_waiters
             .wait(state)
             .expect("ThreadSafeContext mutex poisoned while waiting")
     }
@@ -750,8 +759,9 @@ impl ThreadSafeContext {
     fn wait_for_recompute_notification<'a>(
         &self,
         state: ProfiledMutexGuard<'a>,
+        recompute_waiters: &Condvar,
     ) -> ProfiledMutexGuard<'a> {
-        state.wait_on(&self.inner.recompute_waiters)
+        state.wait_on(recompute_waiters)
     }
 
     fn finish_slot_recompute(&self, id: SlotId) {
@@ -760,7 +770,8 @@ impl ThreadSafeContext {
         let mut state = self.lock_state();
         if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) {
             slot.computing = false;
-            self.inner.recompute_waiters.notify_all();
+            let recompute_waiters = Arc::clone(&slot.recompute_waiters);
+            recompute_waiters.notify_all();
         }
     }
 

@@ -868,6 +868,96 @@ mod benchmark_instrumentation {
         assert_eq!(waiting_worker.join().expect("worker should finish"), 42);
     }
 
+    /// SPEC: in-flight recompute notifications are scoped to the slot that
+    /// finished, so unrelated in-flight slot waiters stay parked.
+    #[test]
+    fn thread_safe_in_flight_waiters_are_scoped_to_finished_slot() {
+        let ctx = ThreadSafeContext::new();
+        let root_a = ctx.cell(40usize);
+        let root_b = ctx.cell(100usize);
+        let gate_a = Arc::new(AtomicUsize::new(0));
+        let gate_b = Arc::new(AtomicUsize::new(0));
+        let gate_a_for_slot = Arc::clone(&gate_a);
+        let gate_b_for_slot = Arc::clone(&gate_b);
+        let value_a = ctx.computed(move |ctx| {
+            gate_a_for_slot.store(1, Ordering::SeqCst);
+            while gate_a_for_slot.load(Ordering::SeqCst) == 1 {
+                thread::yield_now();
+            }
+            ctx.get_cell(&root_a).wrapping_add(2)
+        });
+        let value_b = ctx.computed(move |ctx| {
+            gate_b_for_slot.store(1, Ordering::SeqCst);
+            while gate_b_for_slot.load(Ordering::SeqCst) == 1 {
+                thread::yield_now();
+            }
+            ctx.get_cell(&root_b).wrapping_add(2)
+        });
+
+        let computing_a_ctx = ctx.clone();
+        let computing_a = thread::spawn(move || computing_a_ctx.get(&value_a));
+        let computing_b_ctx = ctx.clone();
+        let computing_b = thread::spawn(move || computing_b_ctx.get(&value_b));
+        while gate_a.load(Ordering::SeqCst) != 1 || gate_b.load(Ordering::SeqCst) != 1 {
+            thread::yield_now();
+        }
+
+        ctx.reset_instrumentation();
+        let waiter_a_done = Arc::new(AtomicUsize::new(0));
+        let waiter_b_done = Arc::new(AtomicUsize::new(0));
+
+        let waiter_a_ctx = ctx.clone();
+        let waiter_a_done_for_thread = Arc::clone(&waiter_a_done);
+        let waiter_a = thread::spawn(move || {
+            waiter_a_done_for_thread.store(waiter_a_ctx.get(&value_a), Ordering::SeqCst);
+        });
+        let waiter_b_ctx = ctx.clone();
+        let waiter_b_done_for_thread = Arc::clone(&waiter_b_done);
+        let waiter_b = thread::spawn(move || {
+            waiter_b_done_for_thread.store(waiter_b_ctx.get(&value_b), Ordering::SeqCst);
+        });
+
+        for _ in 0..100_000 {
+            if lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions >= 2 {
+                break;
+            }
+            thread::yield_now();
+        }
+        let parked_acquisitions =
+            lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions;
+        assert!(
+            parked_acquisitions >= 2,
+            "both slot waiters should enter the in-flight wait path before release"
+        );
+
+        gate_a.store(2, Ordering::SeqCst);
+        while waiter_a_done.load(Ordering::SeqCst) == 0 {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(10));
+
+        let after_a_release = lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions;
+        assert_eq!(
+            waiter_b_done.load(Ordering::SeqCst),
+            0,
+            "the second slot waiter should remain blocked while its compute is still in flight"
+        );
+        assert!(
+            after_a_release <= parked_acquisitions + 1,
+            "finishing slot A should only wake slot A's waiter; \
+             saw {after_a_release} in-flight acquisitions from baseline {parked_acquisitions}"
+        );
+
+        gate_b.store(2, Ordering::SeqCst);
+
+        assert_eq!(computing_a.join().expect("worker should finish"), 42);
+        assert_eq!(waiter_a.join().expect("waiter should finish"), ());
+        assert_eq!(waiter_a_done.load(Ordering::SeqCst), 42);
+        assert_eq!(computing_b.join().expect("worker should finish"), 102);
+        assert_eq!(waiter_b.join().expect("waiter should finish"), ());
+        assert_eq!(waiter_b_done.load(Ordering::SeqCst), 102);
+    }
+
     /// SPEC: Thread-safe recompute preserves unchanged dependency edges instead
     /// of removing and re-adding them on every recompute.
     #[test]
