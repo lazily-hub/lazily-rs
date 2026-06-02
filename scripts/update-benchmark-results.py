@@ -55,6 +55,15 @@ class InstrumentationProfile:
     lock_acquisitions: int
     lock_wait_nanos: int
     lock_hold_nanos: int
+    lock_attribution: tuple["LockAttribution", ...]
+
+
+@dataclass(frozen=True)
+class LockAttribution:
+    site: str
+    lock_acquisitions: int
+    lock_wait_nanos: int
+    lock_hold_nanos: int
 
 
 def run(command: list[str]) -> None:
@@ -182,9 +191,31 @@ def read_instrumentation_profiles(path: Path) -> list[InstrumentationProfile]:
                     lock_acquisitions=int(row["lock_acquisitions"]),
                     lock_wait_nanos=int(row["lock_wait_nanos"]),
                     lock_hold_nanos=int(row["lock_hold_nanos"]),
+                    lock_attribution=parse_lock_attribution(
+                        row.get("lock_attribution", "")
+                    ),
                 )
             )
     return rows
+
+
+def parse_lock_attribution(value: str) -> tuple[LockAttribution, ...]:
+    if not value:
+        return ()
+
+    sites: list[LockAttribution] = []
+    for item in value.split("|"):
+        site, counters = item.split("=", 1)
+        acquisitions, wait_nanos, hold_nanos = counters.split(":", 2)
+        sites.append(
+            LockAttribution(
+                site=site,
+                lock_acquisitions=int(acquisitions),
+                lock_wait_nanos=int(wait_nanos),
+                lock_hold_nanos=int(hold_nanos),
+            )
+        )
+    return tuple(sites)
 
 
 def natural_case_key(value: str) -> list[object]:
@@ -286,6 +317,34 @@ def build_section(
                 lock_hold=format_duration(profile.lock_hold_nanos),
             )
         )
+
+    attribution_rows = [
+        (profile, attribution)
+        for profile in profiles
+        if profile.profile.startswith("thread_safe_contention_")
+        for attribution in profile.lock_attribution
+        if attribution.lock_acquisitions > 0
+    ]
+    if attribution_rows:
+        lines.extend(
+            [
+                "",
+                "ThreadSafe lock attribution for contention profiles:",
+                "",
+                "| Profile | Site | Lock acquisitions | Lock wait | Lock hold |",
+                "|---|---|---:|---:|---:|",
+            ]
+        )
+        for profile, attribution in attribution_rows:
+            lines.append(
+                "| {profile} | {site} | {locks} | {lock_wait} | {lock_hold} |".format(
+                    profile=profile.profile,
+                    site=attribution.site,
+                    locks=attribution.lock_acquisitions,
+                    lock_wait=format_duration(attribution.lock_wait_nanos),
+                    lock_hold=format_duration(attribution.lock_hold_nanos),
+                )
+            )
 
     lines.extend(["", END_MARKER])
     return "\n".join(lines)

@@ -5,7 +5,10 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
-use lazily::{Context, InstrumentationSnapshot, ThreadSafeContext};
+use lazily::{
+    Context, InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeContext,
+    ThreadSafeLockSiteSnapshot,
+};
 
 const FAN_OUT_WIDTH: usize = 32;
 const BATCH_STORM_CELLS: usize = 64;
@@ -16,7 +19,7 @@ fn main() {
     println!(
         "profile,node_allocations,slot_recomputes,duplicate_speculative_recomputes,\
 dependency_edges_added,dependency_edges_removed,effect_queue_pushes,\
-max_effect_queue_depth,lock_acquisitions,lock_wait_nanos,lock_hold_nanos"
+max_effect_queue_depth,lock_acquisitions,lock_wait_nanos,lock_hold_nanos,lock_attribution"
     );
 
     emit("context_memo_effect", context_memo_effect());
@@ -32,9 +35,25 @@ max_effect_queue_depth,lock_acquisitions,lock_wait_nanos,lock_hold_nanos"
     }
 }
 
-fn emit(profile: &str, snapshot: InstrumentationSnapshot) {
+struct ProfileResult {
+    snapshot: InstrumentationSnapshot,
+    lock_profile: Option<[ThreadSafeLockSiteSnapshot; THREAD_SAFE_LOCK_SITE_COUNT]>,
+}
+
+impl From<InstrumentationSnapshot> for ProfileResult {
+    fn from(snapshot: InstrumentationSnapshot) -> Self {
+        Self {
+            snapshot,
+            lock_profile: None,
+        }
+    }
+}
+
+fn emit(profile: &str, result: impl Into<ProfileResult>) {
+    let result = result.into();
+    let snapshot = result.snapshot;
     println!(
-        "{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{}",
         profile,
         snapshot.node_allocations,
         snapshot.slot_recomputes,
@@ -45,8 +64,31 @@ fn emit(profile: &str, snapshot: InstrumentationSnapshot) {
         snapshot.max_effect_queue_depth,
         snapshot.lock_acquisitions,
         snapshot.lock_wait_nanos,
-        snapshot.lock_hold_nanos
+        snapshot.lock_hold_nanos,
+        format_lock_attribution(result.lock_profile.as_ref())
     );
+}
+
+fn format_lock_attribution(
+    lock_profile: Option<&[ThreadSafeLockSiteSnapshot; THREAD_SAFE_LOCK_SITE_COUNT]>,
+) -> String {
+    let Some(lock_profile) = lock_profile else {
+        return String::new();
+    };
+
+    lock_profile
+        .iter()
+        .map(|site| {
+            format!(
+                "{}={}:{}:{}",
+                site.site.as_str(),
+                site.lock_acquisitions,
+                site.lock_wait_nanos,
+                site.lock_hold_nanos
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn context_memo_effect() -> InstrumentationSnapshot {
@@ -145,7 +187,7 @@ fn thread_safe_first_get() -> InstrumentationSnapshot {
     ctx.instrumentation_snapshot()
 }
 
-fn thread_safe_contention(workers: usize) -> InstrumentationSnapshot {
+fn thread_safe_contention(workers: usize) -> ProfileResult {
     let ctx = ThreadSafeContext::new();
     ctx.reset_instrumentation();
 
@@ -186,5 +228,8 @@ fn thread_safe_contention(workers: usize) -> InstrumentationSnapshot {
     let snapshot = ctx.instrumentation_snapshot();
     assert!(snapshot.lock_acquisitions > 0);
     assert_eq!(snapshot.duplicate_speculative_recomputes, 0);
-    snapshot
+    ProfileResult {
+        snapshot,
+        lock_profile: Some(ctx.lock_profile_snapshot()),
+    }
 }

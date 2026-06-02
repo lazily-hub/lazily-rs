@@ -627,6 +627,9 @@ mod benchmark_report_harness {
         assert!(section.contains("cargo bench --features instrumentation"));
         assert!(section.contains("Instrumentation snapshots"));
         assert!(section.contains("Duplicate recomputes"));
+        assert!(section.contains("ThreadSafe lock attribution"));
+        assert!(section.contains("get_refresh"));
+        assert!(section.contains("set_cell_invalidation"));
 
         for expected in [
             "context_memo_effect",
@@ -655,6 +658,7 @@ mod benchmark_report_harness {
 #[cfg(feature = "instrumentation")]
 mod benchmark_instrumentation {
     use super::*;
+    use lazily::ThreadSafeLockSite;
 
     /// SPEC: The optional instrumentation feature exposes lightweight counters
     /// for benchmark diagnostics without changing the public reactive semantics.
@@ -701,9 +705,18 @@ mod benchmark_instrumentation {
     fn thread_safe_instrumentation_tracks_dedup_and_locks() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(40usize);
-        let barrier = Arc::new(Barrier::new(2));
+        let gate = Arc::new(AtomicUsize::new(0));
+        let compute_runs = Arc::new(AtomicUsize::new(0));
+        let gate_for_slot = Arc::clone(&gate);
+        let compute_runs_for_slot = Arc::clone(&compute_runs);
         let answer = ctx.computed(move |ctx| {
-            thread::sleep(Duration::from_millis(10));
+            let run = compute_runs_for_slot.fetch_add(1, Ordering::SeqCst) + 1;
+            if run == 1 {
+                gate_for_slot.store(1, Ordering::SeqCst);
+                while gate_for_slot.load(Ordering::SeqCst) == 1 {
+                    thread::yield_now();
+                }
+            }
             ctx.get_cell(&root).wrapping_add(2)
         });
 
@@ -715,25 +728,32 @@ mod benchmark_instrumentation {
 
         ctx.reset_instrumentation();
 
-        let workers = (0..2)
-            .map(|_| {
-                let ctx = ctx.clone();
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    barrier.wait();
-                    ctx.get(&answer)
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for worker in workers {
-            assert_eq!(worker.join().expect("worker should finish"), 42);
+        let computing_ctx = ctx.clone();
+        let computing_worker = thread::spawn(move || computing_ctx.get(&answer));
+        while gate.load(Ordering::SeqCst) != 1 {
+            thread::yield_now();
         }
 
+        let waiting_ctx = ctx.clone();
+        let waiting_worker = thread::spawn(move || waiting_ctx.get(&answer));
+        for _ in 0..100_000 {
+            if lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions > 0 {
+                break;
+            }
+            thread::yield_now();
+        }
+        gate.store(2, Ordering::SeqCst);
+
+        assert_eq!(computing_worker.join().expect("worker should finish"), 42);
+        assert_eq!(waiting_worker.join().expect("worker should finish"), 42);
+
+        ctx.set_cell(&root, 41);
+        assert_eq!(ctx.get(&answer), 43);
+
         let snapshot = ctx.instrumentation_snapshot();
-        assert_eq!(
-            snapshot.slot_recomputes, 1,
-            "contending first-get callers should share one computation"
+        assert!(
+            snapshot.slot_recomputes >= 2,
+            "first get plus invalidation should recompute at least twice"
         );
         assert_eq!(
             snapshot.duplicate_speculative_recomputes, 0,
@@ -747,6 +767,43 @@ mod benchmark_instrumentation {
             snapshot.lock_acquisitions > 0,
             "thread-safe operations should acquire the graph lock"
         );
+
+        let profile = ctx.lock_profile_snapshot();
+        let profiled_acquisitions = profile
+            .iter()
+            .map(|site| site.lock_acquisitions)
+            .sum::<u64>();
+        assert_eq!(
+            profiled_acquisitions, snapshot.lock_acquisitions,
+            "per-site lock acquisitions should sum to the aggregate counter"
+        );
+
+        for expected_site in [
+            ThreadSafeLockSite::GetRefresh,
+            ThreadSafeLockSite::DependencyEdge,
+            ThreadSafeLockSite::SetCellInvalidation,
+            ThreadSafeLockSite::Publish,
+            ThreadSafeLockSite::InFlightWait,
+        ] {
+            let site = profile
+                .iter()
+                .find(|site| site.site == expected_site)
+                .expect("lock site should be present");
+            assert!(
+                site.lock_acquisitions > 0,
+                "{expected_site:?} should record lock acquisitions"
+            );
+        }
+    }
+
+    fn lock_site(
+        ctx: &ThreadSafeContext,
+        site: ThreadSafeLockSite,
+    ) -> lazily::ThreadSafeLockSiteSnapshot {
+        ctx.lock_profile_snapshot()
+            .into_iter()
+            .find(|snapshot| snapshot.site == site)
+            .expect("lock site should be present")
     }
 }
 

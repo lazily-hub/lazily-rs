@@ -355,7 +355,7 @@ Implementation notes:
 - **Contiguous local storage:** `Context` indexes nodes directly by `SlotId` to avoid hash-map lookup and churn in the single-threaded fast path
 - **Explicit thread-safe path:** `ThreadSafeContext` uses a context-level lock and `Send + Sync` bounds for shared reactive graphs
 - **Performance tracking:** Criterion benchmarks cover both `Context` and `ThreadSafeContext` for cached reads, cold first access, dependency fan-out, memo equality suppression, effect flushing, and batch storms; `ThreadSafeContext` also tracks 1/2/4/8/16-worker contention.
-- **Benchmark instrumentation:** The optional `instrumentation` feature exposes lightweight counters for recompute starts, duplicate speculative thread-safe computes, dependency edge churn, effect queue depth, reactive node allocations, and `ThreadSafeContext` lock wait/hold timing.
+- **Benchmark instrumentation:** The optional `instrumentation` feature exposes lightweight counters for recompute starts, duplicate speculative thread-safe computes, dependency edge churn, effect queue depth, reactive node allocations, aggregate `ThreadSafeContext` lock wait/hold timing, and per-operation thread-safe lock attribution.
 
 ## Performance Benchmarks
 
@@ -384,6 +384,14 @@ The optional `instrumentation` feature adds `instrumentation_snapshot()` and
 - Effect queue pushes and maximum pending queue depth
 - `ThreadSafeContext` graph-lock acquisitions plus total wait and hold nanoseconds
 
+`ThreadSafeContext::lock_profile_snapshot()` returns per-operation graph-lock
+counters for the thread-safe path. The buckets are intentionally high-level:
+unattributed/other work, `get` refresh, dependency edge add/remove, `set_cell`
+invalidation, recompute publication, and in-flight recompute waiting. The bucket
+acquisition counts must sum to the aggregate `lock_acquisitions` counter so
+profile consumers can attribute contention without losing the stable summary
+fields.
+
 The instrumentation profile bench lives in `benches/profile.rs` and is gated
 behind `required-features = ["instrumentation"]`; compile it with
 `cargo bench --features instrumentation --no-run`.
@@ -399,11 +407,12 @@ The generated section must include the current Cargo package version, the
 refresh command, the Criterion baseline comparison workflow, one timing row for
 each required benchmark scenario above, and instrumentation rows covering
 recomputes, duplicate speculative recomputes, dependency edge churn, effect
-queue depth, node allocations, and lock wait/hold time. `--check` verifies that
-the README section is already current without rewriting it; `--no-run` reuses
-existing Criterion estimate files for a report-only refresh after a manual
-baseline comparison run while refreshing the instrumentation CSV unless it is
-also running in check mode.
+queue depth, node allocations, lock wait/hold time, and per-operation
+`ThreadSafeContext` lock attribution for the 1/2/4/8/16-worker contention
+profiles. `--check` verifies that the README section is already current without
+rewriting it; `--no-run` reuses existing Criterion estimate files for a
+report-only refresh after a manual baseline comparison run while refreshing the
+instrumentation CSV unless it is also running in check mode.
 
 ## Differences from lazily-zig
 

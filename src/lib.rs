@@ -46,6 +46,9 @@ pub use cell::CellHandle;
 pub use context::Context;
 pub use effect::{EffectCallbackResult, EffectHandle};
 #[cfg(feature = "instrumentation")]
-pub use instrumentation::InstrumentationSnapshot;
+pub use instrumentation::{
+    InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeLockSite,
+    ThreadSafeLockSiteSnapshot,
+};
 pub use slot::SlotHandle;
 pub use thread_safe::{ThreadSafeContext, ThreadSafeEffectCallbackResult};

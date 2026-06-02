@@ -10,6 +10,8 @@ use std::time::Instant;
 use crate::cell::CellHandle;
 use crate::context::SlotId;
 use crate::effect::EffectHandle;
+#[cfg(feature = "instrumentation")]
+use crate::instrumentation::ThreadSafeLockSite;
 use crate::slot::SlotHandle;
 
 type ThreadSafeAny = dyn Any + Send + Sync;
@@ -30,6 +32,12 @@ struct ThreadSafeTrackingFrame {
 
 thread_local! {
     static THREAD_SAFE_TRACKING_STACK: RefCell<Vec<ThreadSafeTrackingFrame>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(feature = "instrumentation")]
+thread_local! {
+    static THREAD_SAFE_LOCK_SITE_STACK: RefCell<Vec<ThreadSafeLockSite>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -61,6 +69,37 @@ fn current_tracking_frame(context_id: ThreadSafeContextId) -> Option<SlotId> {
             .rev()
             .find(|frame| frame.context_id == context_id)
             .map(|frame| frame.node_id)
+    })
+}
+
+#[cfg(feature = "instrumentation")]
+struct ThreadSafeLockSiteGuard;
+
+#[cfg(feature = "instrumentation")]
+impl Drop for ThreadSafeLockSiteGuard {
+    fn drop(&mut self) {
+        THREAD_SAFE_LOCK_SITE_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+#[cfg(feature = "instrumentation")]
+fn push_thread_safe_lock_site(site: ThreadSafeLockSite) -> ThreadSafeLockSiteGuard {
+    THREAD_SAFE_LOCK_SITE_STACK.with(|stack| {
+        stack.borrow_mut().push(site);
+    });
+    ThreadSafeLockSiteGuard
+}
+
+#[cfg(feature = "instrumentation")]
+fn current_thread_safe_lock_site() -> ThreadSafeLockSite {
+    THREAD_SAFE_LOCK_SITE_STACK.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .copied()
+            .unwrap_or(ThreadSafeLockSite::Other)
     })
 }
 
@@ -125,6 +164,7 @@ struct ThreadSafeInner {
 struct ProfiledMutexGuard<'a> {
     guard: MutexGuard<'a, ThreadSafeState>,
     lock_instrumentation: &'a crate::instrumentation::ThreadSafeLockInstrumentation,
+    site: ThreadSafeLockSite,
     acquired_at: Instant,
 }
 
@@ -148,7 +188,7 @@ impl DerefMut for ProfiledMutexGuard<'_> {
 impl Drop for ProfiledMutexGuard<'_> {
     fn drop(&mut self) {
         self.lock_instrumentation
-            .record_lock_hold(self.acquired_at.elapsed());
+            .record_lock_hold(self.site, self.acquired_at.elapsed());
     }
 }
 
@@ -243,6 +283,7 @@ impl ThreadSafeContext {
 
     #[cfg(feature = "instrumentation")]
     fn lock_state(&self) -> ProfiledMutexGuard<'_> {
+        let site = current_thread_safe_lock_site();
         let wait_started = Instant::now();
         let guard = self
             .inner
@@ -251,10 +292,11 @@ impl ThreadSafeContext {
             .expect("ThreadSafeContext mutex poisoned");
         self.inner
             .lock_instrumentation
-            .record_lock_wait(wait_started.elapsed());
+            .record_lock_wait(site, wait_started.elapsed());
         ProfiledMutexGuard {
             guard,
             lock_instrumentation: &self.inner.lock_instrumentation,
+            site,
             acquired_at: Instant::now(),
         }
     }
@@ -275,6 +317,8 @@ impl ThreadSafeContext {
             return;
         }
 
+        #[cfg(feature = "instrumentation")]
+        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::DependencyEdge);
         #[cfg(feature = "instrumentation")]
         let mut edge_added = false;
         let mut state = self.lock_state();
@@ -322,6 +366,8 @@ impl ThreadSafeContext {
     }
 
     fn remove_dependent_edge(&self, dependency_id: SlotId, dependent_id: SlotId) {
+        #[cfg(feature = "instrumentation")]
+        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::DependencyEdge);
         #[cfg(feature = "instrumentation")]
         let mut edge_removed = false;
         let mut state = self.lock_state();
@@ -454,6 +500,8 @@ impl ThreadSafeContext {
     }
 
     fn refresh_slot(&self, id: SlotId) -> bool {
+        #[cfg(feature = "instrumentation")]
+        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
         let dependencies: Vec<SlotId> = {
             let state = self.lock_state();
             match state.nodes.get(&id) {
@@ -506,6 +554,8 @@ impl ThreadSafeContext {
 
     fn recompute_slot_now(&self, id: SlotId) -> ThreadSafeRecomputeResult {
         let (compute, old_dependencies, was_unset, start_revision) = {
+            #[cfg(feature = "instrumentation")]
+            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
             let mut state = self.lock_state();
             let result = {
                 let slot = match state.nodes.get_mut(&id) {
@@ -545,6 +595,8 @@ impl ThreadSafeContext {
         drop(_tracking);
 
         {
+            #[cfg(feature = "instrumentation")]
+            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
             let mut state = self.lock_state();
             let slot = match state.nodes.get_mut(&id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot,
@@ -594,6 +646,8 @@ impl ThreadSafeContext {
     fn wait_for_slot_recompute(&self, id: SlotId) -> ThreadSafeRecomputeResult {
         loop {
             {
+                #[cfg(feature = "instrumentation")]
+                let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::InFlightWait);
                 let state = self.lock_state();
                 let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&id) else {
                     return ThreadSafeRecomputeResult::Fresh(false);
@@ -612,6 +666,8 @@ impl ThreadSafeContext {
     }
 
     fn finish_slot_recompute(&self, id: SlotId) {
+        #[cfg(feature = "instrumentation")]
+        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
         let mut state = self.lock_state();
         if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) {
             slot.computing = false;
@@ -660,6 +716,8 @@ impl ThreadSafeContext {
         T: PartialEq + Send + Sync + 'static,
     {
         let should_flush = {
+            #[cfg(feature = "instrumentation")]
+            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::SetCellInvalidation);
             let mut state = self.lock_state();
             let changed = match state.nodes.get(&handle.id) {
                 Some(ThreadSafeNode::Cell(cell)) => {
@@ -725,6 +783,8 @@ impl ThreadSafeContext {
 
     fn flush_batched_invalidations(&self) {
         {
+            #[cfg(feature = "instrumentation")]
+            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::SetCellInvalidation);
             let mut state = self.lock_state();
             let cells = state.batched_cells.drain().collect::<Vec<_>>();
             let cell_clears = state.batched_cell_clears.drain().collect::<Vec<_>>();
@@ -1108,6 +1168,15 @@ impl ThreadSafeContext {
             .lock_instrumentation
             .apply_to_snapshot(&mut snapshot);
         snapshot
+    }
+
+    /// Return ThreadSafeContext graph-lock counters grouped by operation.
+    #[cfg(feature = "instrumentation")]
+    pub fn lock_profile_snapshot(
+        &self,
+    ) -> [crate::instrumentation::ThreadSafeLockSiteSnapshot;
+        crate::instrumentation::THREAD_SAFE_LOCK_SITE_COUNT] {
+        self.inner.lock_instrumentation.site_snapshots()
     }
 
     /// Reset benchmark instrumentation counters to zero.

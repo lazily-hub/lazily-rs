@@ -154,7 +154,7 @@ the getter retries before returning a fresh value.
 - Interior mutability via `RefCell` (single-threaded)
 - Thread-local tracking stack for automatic dependency discovery
 - Zero mandatory runtime dependencies in the default library surface
-- Optional `instrumentation` feature for benchmark counters and lock timing
+- Optional `instrumentation` feature for benchmark counters, lock timing, and thread-safe lock attribution
 
 ## Threading Roadmap
 
@@ -209,27 +209,27 @@ Criterion estimates are local mean wall-clock time per iteration.
 
 | Group | Case | Mean | 95% CI |
 |---|---|---:|---:|
-| cached_reads | context | 11.635 ns | 11.596 ns - 11.674 ns |
-| cached_reads | thread_safe_context | 471.875 ns | 471.015 ns - 472.762 ns |
-| cold_first_get | context | 107.377 ns | 104.238 ns - 110.862 ns |
-| cold_first_get | thread_safe_context | 823.912 ns | 816.863 ns - 833.017 ns |
-| dependency_fan_out | context / 32 | 4.935 us | 4.530 us - 5.496 us |
-| dependency_fan_out | context / 256 | 37.440 us | 33.902 us - 41.877 us |
-| dependency_fan_out | thread_safe_context / 32 | 34.515 us | 33.622 us - 35.419 us |
-| dependency_fan_out | thread_safe_context / 256 | 266.995 us | 263.035 us - 271.231 us |
-| memo_equality_suppression | context | 5.018 us | 4.360 us - 5.940 us |
-| memo_equality_suppression | thread_safe_context | 18.783 us | 17.893 us - 19.753 us |
-| effect_flushing | context | 87.028 ns | 86.829 ns - 87.243 ns |
-| effect_flushing | thread_safe_context | 1.143 us | 1.141 us - 1.146 us |
-| batch_storms | context / 64 | 3.519 us | 3.505 us - 3.533 us |
-| batch_storms | thread_safe_context / 64 | 30.051 us | 29.948 us - 30.181 us |
-| thread_safe_contention | 1 | 195.991 us | 194.986 us - 197.020 us |
-| thread_safe_contention | 2 | 717.286 us | 705.980 us - 730.787 us |
-| thread_safe_contention | 4 | 2.028 ms | 1.848 ms - 2.192 ms |
-| thread_safe_contention | 8 | 6.379 ms | 5.720 ms - 7.064 ms |
-| thread_safe_contention | 16 | 23.670 ms | 23.305 ms - 23.992 ms |
-| profile_instrumentation | context_snapshot | 417.989 ns | 413.923 ns - 422.213 ns |
-| profile_instrumentation | thread_safe_snapshot | 295.156 us | 293.889 us - 296.346 us |
+| cached_reads | context | 11.477 ns | 11.462 ns - 11.492 ns |
+| cached_reads | thread_safe_context | 541.954 ns | 535.156 ns - 552.626 ns |
+| cold_first_get | context | 148.229 ns | 129.799 ns - 170.864 ns |
+| cold_first_get | thread_safe_context | 939.592 ns | 932.338 ns - 946.645 ns |
+| dependency_fan_out | context / 32 | 5.302 us | 4.893 us - 5.679 us |
+| dependency_fan_out | context / 256 | 48.500 us | 43.916 us - 53.555 us |
+| dependency_fan_out | thread_safe_context / 32 | 39.433 us | 38.457 us - 40.423 us |
+| dependency_fan_out | thread_safe_context / 256 | 415.214 us | 386.182 us - 443.927 us |
+| memo_equality_suppression | context | 6.858 us | 6.013 us - 7.678 us |
+| memo_equality_suppression | thread_safe_context | 23.413 us | 21.970 us - 24.837 us |
+| effect_flushing | context | 90.136 ns | 89.843 ns - 90.462 ns |
+| effect_flushing | thread_safe_context | 1.339 us | 1.316 us - 1.366 us |
+| batch_storms | context / 64 | 3.856 us | 3.628 us - 4.138 us |
+| batch_storms | thread_safe_context / 64 | 33.552 us | 33.506 us - 33.599 us |
+| thread_safe_contention | 1 | 224.896 us | 217.414 us - 237.908 us |
+| thread_safe_contention | 2 | 814.329 us | 789.289 us - 845.507 us |
+| thread_safe_contention | 4 | 2.114 ms | 2.047 ms - 2.178 ms |
+| thread_safe_contention | 8 | 7.167 ms | 6.765 ms - 7.623 ms |
+| thread_safe_contention | 16 | 26.407 ms | 24.743 ms - 27.761 ms |
+| profile_instrumentation | context_snapshot | 432.221 ns | 417.167 ns - 457.023 ns |
+| profile_instrumentation | thread_safe_snapshot | 348.653 us | 311.290 us - 395.873 us |
 
 Instrumentation snapshots are single local profile runs captured by
 `examples/instrumentation_profile.rs`.
@@ -239,12 +239,46 @@ Instrumentation snapshots are single local profile runs captured by
 | context_memo_effect | 4 | 3 | 0 | 4 | 1 | 2 | 1 | 0 | 0.000 ns | 0.000 ns |
 | context_fan_out_32 | 33 | 64 | 0 | 64 | 32 | 0 | 0 | 0 | 0.000 ns | 0.000 ns |
 | context_batch_storm_64 | 65 | 0 | 0 | 128 | 64 | 2 | 1 | 0 | 0.000 ns | 0.000 ns |
-| thread_safe_first_get_2 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 636 | 43.430 us | 129.491 us |
-| thread_safe_contention_1 | 2 | 17 | 0 | 17 | 16 | 0 | 0 | 203 | 8.080 us | 86.551 us |
-| thread_safe_contention_2 | 2 | 24 | 0 | 24 | 23 | 0 | 0 | 430 | 349.411 us | 196.361 us |
-| thread_safe_contention_4 | 2 | 52 | 0 | 52 | 51 | 0 | 0 | 1356 | 3.249 ms | 536.081 us |
-| thread_safe_contention_8 | 2 | 93 | 0 | 93 | 92 | 0 | 0 | 4201 | 20.905 ms | 1.396 ms |
-| thread_safe_contention_16 | 2 | 171 | 0 | 171 | 170 | 0 | 0 | 14504 | 138.001 ms | 4.020 ms |
+| thread_safe_first_get_2 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 658 | 30.610 us | 112.941 us |
+| thread_safe_contention_1 | 2 | 17 | 0 | 17 | 16 | 0 | 0 | 203 | 6.170 us | 65.331 us |
+| thread_safe_contention_2 | 2 | 19 | 0 | 19 | 18 | 0 | 0 | 381 | 139.101 us | 107.951 us |
+| thread_safe_contention_4 | 2 | 49 | 0 | 49 | 48 | 0 | 0 | 1294 | 3.317 ms | 481.921 us |
+| thread_safe_contention_8 | 2 | 87 | 0 | 87 | 86 | 0 | 0 | 3151 | 14.890 ms | 1.042 ms |
+| thread_safe_contention_16 | 2 | 141 | 0 | 141 | 140 | 0 | 0 | 10082 | 99.083 ms | 2.668 ms |
+
+ThreadSafe lock attribution for contention profiles:
+
+| Profile | Site | Lock acquisitions | Lock wait | Lock hold |
+|---|---|---:|---:|---:|
+| thread_safe_contention_1 | other | 53 | 1.670 us | 6.041 us |
+| thread_safe_contention_1 | get_refresh | 67 | 1.940 us | 12.120 us |
+| thread_safe_contention_1 | dependency_edge | 33 | 970.000 ns | 18.840 us |
+| thread_safe_contention_1 | set_cell_invalidation | 16 | 600.000 ns | 16.900 us |
+| thread_safe_contention_1 | publish | 34 | 990.000 ns | 11.430 us |
+| thread_safe_contention_2 | other | 87 | 32.761 us | 8.120 us |
+| thread_safe_contention_2 | get_refresh | 115 | 31.300 us | 21.670 us |
+| thread_safe_contention_2 | dependency_edge | 37 | 15.150 us | 19.930 us |
+| thread_safe_contention_2 | set_cell_invalidation | 32 | 19.540 us | 33.051 us |
+| thread_safe_contention_2 | publish | 53 | 15.690 us | 15.760 us |
+| thread_safe_contention_2 | in_flight_wait | 57 | 24.660 us | 9.420 us |
+| thread_safe_contention_4 | other | 194 | 511.286 us | 23.940 us |
+| thread_safe_contention_4 | get_refresh | 225 | 613.017 us | 73.430 us |
+| thread_safe_contention_4 | dependency_edge | 97 | 290.411 us | 75.481 us |
+| thread_safe_contention_4 | set_cell_invalidation | 64 | 199.140 us | 108.650 us |
+| thread_safe_contention_4 | publish | 148 | 267.671 us | 71.490 us |
+| thread_safe_contention_4 | in_flight_wait | 566 | 1.435 ms | 128.930 us |
+| thread_safe_contention_8 | other | 379 | 2.026 ms | 56.450 us |
+| thread_safe_contention_8 | get_refresh | 397 | 1.451 ms | 119.340 us |
+| thread_safe_contention_8 | dependency_edge | 173 | 998.424 us | 155.981 us |
+| thread_safe_contention_8 | set_cell_invalidation | 128 | 687.187 us | 183.641 us |
+| thread_safe_contention_8 | publish | 294 | 849.755 us | 138.461 us |
+| thread_safe_contention_8 | in_flight_wait | 1780 | 8.878 ms | 387.803 us |
+| thread_safe_contention_16 | other | 726 | 7.000 ms | 94.830 us |
+| thread_safe_contention_16 | get_refresh | 751 | 6.361 ms | 221.452 us |
+| thread_safe_contention_16 | dependency_edge | 281 | 3.490 ms | 206.080 us |
+| thread_safe_contention_16 | set_cell_invalidation | 256 | 3.125 ms | 357.223 us |
+| thread_safe_contention_16 | publish | 552 | 3.182 ms | 219.422 us |
+| thread_safe_contention_16 | in_flight_wait | 7516 | 75.925 ms | 1.569 ms |
 
 <!-- benchmark-results:end -->
 

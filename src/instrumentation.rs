@@ -1,5 +1,61 @@
 use std::time::Duration;
 
+pub const THREAD_SAFE_LOCK_SITE_COUNT: usize = 6;
+
+/// High-level operation buckets for ThreadSafeContext graph-lock profiling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThreadSafeLockSite {
+    #[default]
+    Other,
+    GetRefresh,
+    DependencyEdge,
+    SetCellInvalidation,
+    Publish,
+    InFlightWait,
+}
+
+impl ThreadSafeLockSite {
+    pub const ALL: [ThreadSafeLockSite; THREAD_SAFE_LOCK_SITE_COUNT] = [
+        ThreadSafeLockSite::Other,
+        ThreadSafeLockSite::GetRefresh,
+        ThreadSafeLockSite::DependencyEdge,
+        ThreadSafeLockSite::SetCellInvalidation,
+        ThreadSafeLockSite::Publish,
+        ThreadSafeLockSite::InFlightWait,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ThreadSafeLockSite::Other => "other",
+            ThreadSafeLockSite::GetRefresh => "get_refresh",
+            ThreadSafeLockSite::DependencyEdge => "dependency_edge",
+            ThreadSafeLockSite::SetCellInvalidation => "set_cell_invalidation",
+            ThreadSafeLockSite::Publish => "publish",
+            ThreadSafeLockSite::InFlightWait => "in_flight_wait",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            ThreadSafeLockSite::Other => 0,
+            ThreadSafeLockSite::GetRefresh => 1,
+            ThreadSafeLockSite::DependencyEdge => 2,
+            ThreadSafeLockSite::SetCellInvalidation => 3,
+            ThreadSafeLockSite::Publish => 4,
+            ThreadSafeLockSite::InFlightWait => 5,
+        }
+    }
+}
+
+/// Per-operation ThreadSafeContext graph-lock counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadSafeLockSiteSnapshot {
+    pub site: ThreadSafeLockSite,
+    pub lock_acquisitions: u64,
+    pub lock_wait_nanos: u64,
+    pub lock_hold_nanos: u64,
+}
+
 /// Lightweight counters for benchmarking and profiling reactive graph behavior.
 ///
 /// These counters are available behind the `instrumentation` feature. They are
@@ -81,23 +137,31 @@ pub(crate) struct ThreadSafeLockInstrumentation {
     lock_acquisitions: std::sync::atomic::AtomicU64,
     lock_wait_nanos: std::sync::atomic::AtomicU64,
     lock_hold_nanos: std::sync::atomic::AtomicU64,
+    site_lock_acquisitions: [std::sync::atomic::AtomicU64; THREAD_SAFE_LOCK_SITE_COUNT],
+    site_lock_wait_nanos: [std::sync::atomic::AtomicU64; THREAD_SAFE_LOCK_SITE_COUNT],
+    site_lock_hold_nanos: [std::sync::atomic::AtomicU64; THREAD_SAFE_LOCK_SITE_COUNT],
 }
 
 impl ThreadSafeLockInstrumentation {
-    pub(crate) fn record_lock_wait(&self, wait: Duration) {
+    pub(crate) fn record_lock_wait(&self, site: ThreadSafeLockSite, wait: Duration) {
+        let site_idx = site.index();
+        let wait_nanos = duration_as_saturating_nanos(wait);
         self.lock_acquisitions
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.lock_wait_nanos.fetch_add(
-            duration_as_saturating_nanos(wait),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        self.lock_wait_nanos
+            .fetch_add(wait_nanos, std::sync::atomic::Ordering::Relaxed);
+        self.site_lock_acquisitions[site_idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.site_lock_wait_nanos[site_idx]
+            .fetch_add(wait_nanos, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub(crate) fn record_lock_hold(&self, hold: Duration) {
-        self.lock_hold_nanos.fetch_add(
-            duration_as_saturating_nanos(hold),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+    pub(crate) fn record_lock_hold(&self, site: ThreadSafeLockSite, hold: Duration) {
+        let site_idx = site.index();
+        let hold_nanos = duration_as_saturating_nanos(hold);
+        self.lock_hold_nanos
+            .fetch_add(hold_nanos, std::sync::atomic::Ordering::Relaxed);
+        self.site_lock_hold_nanos[site_idx]
+            .fetch_add(hold_nanos, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn apply_to_snapshot(&self, snapshot: &mut InstrumentationSnapshot) {
@@ -112,6 +176,20 @@ impl ThreadSafeLockInstrumentation {
             .load(std::sync::atomic::Ordering::Relaxed);
     }
 
+    pub(crate) fn site_snapshots(
+        &self,
+    ) -> [ThreadSafeLockSiteSnapshot; THREAD_SAFE_LOCK_SITE_COUNT] {
+        std::array::from_fn(|idx| ThreadSafeLockSiteSnapshot {
+            site: ThreadSafeLockSite::ALL[idx],
+            lock_acquisitions: self.site_lock_acquisitions[idx]
+                .load(std::sync::atomic::Ordering::Relaxed),
+            lock_wait_nanos: self.site_lock_wait_nanos[idx]
+                .load(std::sync::atomic::Ordering::Relaxed),
+            lock_hold_nanos: self.site_lock_hold_nanos[idx]
+                .load(std::sync::atomic::Ordering::Relaxed),
+        })
+    }
+
     pub(crate) fn reset(&self) {
         self.lock_acquisitions
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -119,6 +197,11 @@ impl ThreadSafeLockInstrumentation {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.lock_hold_nanos
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        for idx in 0..THREAD_SAFE_LOCK_SITE_COUNT {
+            self.site_lock_acquisitions[idx].store(0, std::sync::atomic::Ordering::Relaxed);
+            self.site_lock_wait_nanos[idx].store(0, std::sync::atomic::Ordering::Relaxed);
+            self.site_lock_hold_nanos[idx].store(0, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
