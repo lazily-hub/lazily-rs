@@ -723,16 +723,19 @@ mod storage_strategy_evaluation {
     const SPEC: &str = include_str!("../SPEC.md");
 
     /// SPEC: sharded or versioned ThreadSafeContext storage is benchmark-gated
-    /// by the isolated set_cell invalidation matrix, not adopted directly from
-    /// the frontier prototype.
+    /// by the contention matrix, not adopted directly from the read-mostly
+    /// cached-value prototype.
     #[test]
     fn sharded_storage_evaluation_is_benchmark_gated() {
         for expected in [
             "Sharded/versioned storage evaluation",
-            "global graph mutex remains the measured",
-            "Do not replace the mutex-first graph with sharded storage",
+            "read-mostly cached-value sidecar",
+            "Do not replace the single graph lock with sharded storage",
             "Do not use versioned optimistic reads as the next invalidation optimization",
-            "set_cell_invalidation",
+            "same_slot_write_read",
+            "independent_slots",
+            "read_mostly_waiters",
+            "batched_write_bursts",
         ] {
             assert!(
                 SPEC.contains(expected),
@@ -762,6 +765,7 @@ mod storage_strategy_evaluation {
 mod benchmark_instrumentation {
     use super::*;
     use lazily::ThreadSafeLockSite;
+    use std::sync::atomic::AtomicBool;
 
     /// SPEC: The optional instrumentation feature exposes lightweight counters
     /// for benchmark diagnostics without changing the public reactive semantics.
@@ -899,11 +903,10 @@ mod benchmark_instrumentation {
         }
     }
 
-    /// SPEC: a fresh cached thread-safe get combines freshness validation and
-    /// value cloning under one graph lock instead of recursively refreshing
-    /// unchanged dependencies.
+    /// SPEC: a fresh cached thread-safe get uses the per-slot fast path instead
+    /// of taking the graph lock or recursively refreshing unchanged dependencies.
     #[test]
-    fn thread_safe_cached_get_uses_one_get_refresh_lock() {
+    fn thread_safe_cached_get_bypasses_get_refresh_graph_lock() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(40usize);
         let answer = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(2));
@@ -920,8 +923,85 @@ mod benchmark_instrumentation {
         );
         assert_eq!(
             lock_site(&ctx, ThreadSafeLockSite::GetRefresh).lock_acquisitions,
-            1,
-            "fresh cached get should clone under one GetRefresh lock"
+            0,
+            "fresh cached get should clone from the per-slot fast path without a GetRefresh graph lock"
+        );
+    }
+
+    /// SPEC: fresh cached thread-safe gets use a per-slot read guard, so
+    /// independent readers can clone the cached value concurrently without
+    /// entering write-side graph mutation.
+    #[test]
+    fn thread_safe_cached_get_allows_concurrent_fresh_readers() {
+        #[derive(Debug)]
+        struct BlockingClone {
+            active_clones: Arc<AtomicUsize>,
+            max_active_clones: Arc<AtomicUsize>,
+            release: Arc<AtomicBool>,
+        }
+
+        impl Clone for BlockingClone {
+            fn clone(&self) -> Self {
+                let active = self.active_clones.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active_clones.fetch_max(active, Ordering::SeqCst);
+                while !self.release.load(Ordering::SeqCst)
+                    && self.max_active_clones.load(Ordering::SeqCst) < 2
+                {
+                    thread::yield_now();
+                }
+                self.active_clones.fetch_sub(1, Ordering::SeqCst);
+                Self {
+                    active_clones: Arc::clone(&self.active_clones),
+                    max_active_clones: Arc::clone(&self.max_active_clones),
+                    release: Arc::clone(&self.release),
+                }
+            }
+        }
+
+        let ctx = ThreadSafeContext::new();
+        let active_clones = Arc::new(AtomicUsize::new(0));
+        let max_active_clones = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(true));
+        let value = ctx.computed({
+            let active_clones = Arc::clone(&active_clones);
+            let max_active_clones = Arc::clone(&max_active_clones);
+            let release = Arc::clone(&release);
+            move |_| BlockingClone {
+                active_clones: Arc::clone(&active_clones),
+                max_active_clones: Arc::clone(&max_active_clones),
+                release: Arc::clone(&release),
+            }
+        });
+
+        let _ = ctx.get(&value);
+        active_clones.store(0, Ordering::SeqCst);
+        max_active_clones.store(0, Ordering::SeqCst);
+        release.store(false, Ordering::SeqCst);
+
+        let first_ctx = ctx.clone();
+        let first = thread::spawn(move || first_ctx.get(&value));
+        let second_ctx = ctx.clone();
+        let second = thread::spawn(move || second_ctx.get(&value));
+
+        for _ in 0..100_000 {
+            if max_active_clones.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            thread::yield_now();
+        }
+        release.store(true, Ordering::SeqCst);
+
+        let _ = first.join().expect("first reader should finish");
+        let _ = second.join().expect("second reader should finish");
+        assert_eq!(
+            max_active_clones.load(Ordering::SeqCst),
+            2,
+            "fresh readers should share the per-slot fast path instead of serializing behind the graph lock"
+        );
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::DependencyEdge).lock_acquisitions,
+            0,
+            "untracked fresh reads should not mutate dependency edges"
         );
     }
 
@@ -952,7 +1032,7 @@ mod benchmark_instrumentation {
         );
         assert!(
             lock_site(&ctx, ThreadSafeLockSite::GetRefresh).lock_acquisitions > 1,
-            "invalidated cached get must not return through the one-lock fresh path"
+            "invalidated cached get must not return through the graph-lock-free fresh path"
         );
     }
 

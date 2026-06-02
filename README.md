@@ -183,16 +183,17 @@ those need the separate `AsyncContext` design captured in `SPEC.md`, including
 in-flight future deduplication, stale completion handling, cleanup ordering, and
 separate `Send` versus `LocalSet` surfaces.
 
-`ThreadSafeContext` intentionally keeps a mutex-first graph lock. In-flight
-recompute waiters use per-slot sidecar `Condvar`s so they can park while the
-compute owner runs user code, and a completion only wakes waiters for that
-finished slot. Fresh cached gets clone the cached value under one graph lock
-without recursively validating unchanged dependencies. Broader RwLock,
-sharded-lock, or CAS variants should wait for lock wait/hold benchmark evidence
-and a Loom or Shuttle safety model for stale in-flight completion, invalidation
-during compute, effect scheduling/disposal, and re-entrant callbacks. A
-lock-free versioned optimistic read path is deferred until cached values can be
-retained independently of the mutex-protected erased-value storage.
+`ThreadSafeContext` intentionally keeps one mutex-backed graph lock while
+fresh cached slot reads use a per-slot read-mostly cached-value sidecar.
+Dependency edges, dirty/revision state, cached-value publication, batching, and
+effect queues still mutate under the graph mutex. In-flight recompute waiters
+use per-slot generation `Condvar` sidecars so they can park while the compute
+owner runs user code, and a completion only wakes waiters for that finished
+slot. Sharded-lock or CAS variants should wait for lock wait/hold benchmark
+evidence and a Loom or Shuttle safety model for stale in-flight completion,
+invalidation during compute, effect scheduling/disposal, and re-entrant
+callbacks. A lock-free versioned optimistic read path is deferred until cached
+values can be retained independently of graph-protected erased-value storage.
 
 ## Benchmark Results
 
