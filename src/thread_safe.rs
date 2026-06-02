@@ -535,6 +535,181 @@ struct ThreadSafeInvalidationRoot {
 }
 
 #[derive(Default)]
+struct ThreadSafeInvalidationPlan {
+    slots_to_mark: HashMap<SlotId, bool>,
+    slot_order: Vec<SlotId>,
+    slots_to_clear: HashSet<SlotId>,
+    clear_slot_order: Vec<SlotId>,
+    effects_to_schedule: HashMap<SlotId, bool>,
+    effect_order: Vec<SlotId>,
+}
+
+impl ThreadSafeInvalidationPlan {
+    fn from_roots_locked<I>(state: &ThreadSafeState, roots: I) -> Self
+    where
+        I: IntoIterator<Item = ThreadSafeInvalidationRoot>,
+    {
+        let mut queue = VecDeque::new();
+        let mut requested_force = HashMap::new();
+        for root in roots {
+            ThreadSafeContext::enqueue_invalidation_root(&mut queue, &mut requested_force, root);
+        }
+
+        let mut plan = Self::default();
+        let mut simulated_slots = HashMap::<SlotId, (bool, bool)>::new();
+
+        while let Some(root) = queue.pop_front() {
+            let Some(force_recompute) = requested_force.get(&root.id).copied() else {
+                continue;
+            };
+            if root.force_recompute != force_recompute {
+                continue;
+            }
+
+            let dependents = match state.nodes.get(&root.id) {
+                Some(ThreadSafeNode::Slot(slot)) => {
+                    let (dirty, force_state) = simulated_slots
+                        .get(&root.id)
+                        .copied()
+                        .unwrap_or((slot.dirty, slot.force_recompute));
+                    let should_propagate = !dirty || (force_recompute && !force_state);
+                    simulated_slots.insert(root.id, (true, force_state || force_recompute));
+
+                    plan.add_slot_mark(root.id, force_recompute);
+
+                    if should_propagate {
+                        sorted_slot_ids(slot.dependents.iter().copied())
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Some(ThreadSafeNode::Effect(_)) => {
+                    plan.add_effect_schedule(root.id, force_recompute);
+                    Vec::new()
+                }
+                Some(ThreadSafeNode::Cell(_)) | None => Vec::new(),
+            };
+
+            for dependent_id in dependents {
+                ThreadSafeContext::enqueue_invalidation_root(
+                    &mut queue,
+                    &mut requested_force,
+                    ThreadSafeInvalidationRoot {
+                        id: dependent_id,
+                        force_recompute: false,
+                    },
+                );
+            }
+        }
+
+        plan
+    }
+
+    fn from_clear_roots_locked<I>(state: &ThreadSafeState, roots: I) -> Self
+    where
+        I: IntoIterator<Item = SlotId>,
+    {
+        let mut plan = Self::default();
+        let mut queue = roots.into_iter().collect::<VecDeque<_>>();
+        let mut visited_slots = HashSet::new();
+
+        while let Some(id) = queue.pop_front() {
+            match state.nodes.get(&id) {
+                Some(ThreadSafeNode::Slot(slot)) => {
+                    if !visited_slots.insert(id) {
+                        continue;
+                    }
+                    if slot.value.is_none() && !slot.dirty {
+                        continue;
+                    }
+                    plan.add_slot_clear(id);
+                    for dependent_id in sorted_slot_ids(slot.dependents.iter().copied()) {
+                        queue.push_back(dependent_id);
+                    }
+                }
+                Some(ThreadSafeNode::Effect(_)) => {
+                    plan.add_effect_schedule(id, true);
+                }
+                Some(ThreadSafeNode::Cell(_)) | None => {}
+            }
+        }
+
+        plan
+    }
+
+    fn apply_locked(self, state: &mut ThreadSafeState) {
+        for id in self.clear_slot_order {
+            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
+                continue;
+            };
+            slot.value = None;
+            slot.dirty = false;
+            slot.force_recompute = false;
+            slot.revision = slot.revision.wrapping_add(1);
+            slot.fast_path.clear();
+        }
+
+        for id in self.slot_order {
+            if self.slots_to_clear.contains(&id) {
+                continue;
+            }
+            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
+                continue;
+            };
+            slot.revision = slot.revision.wrapping_add(1);
+            slot.dirty = true;
+            if self.slots_to_mark.get(&id).copied().unwrap_or(false) {
+                slot.force_recompute = true;
+            }
+            slot.fast_path.mark_dirty(slot.force_recompute);
+        }
+
+        for id in self.effect_order {
+            ThreadSafeContext::schedule_effect_locked(
+                state,
+                id,
+                self.effects_to_schedule.get(&id).copied().unwrap_or(false),
+            );
+        }
+    }
+
+    fn add_slot_mark(&mut self, id: SlotId, force_recompute: bool) {
+        match self.slots_to_mark.get_mut(&id) {
+            Some(force) => *force |= force_recompute,
+            None => {
+                self.slots_to_mark.insert(id, force_recompute);
+                self.slot_order.push(id);
+            }
+        }
+    }
+
+    fn add_slot_clear(&mut self, id: SlotId) {
+        if self.slots_to_clear.insert(id) {
+            self.clear_slot_order.push(id);
+        }
+    }
+
+    fn add_effect_schedule(&mut self, id: SlotId, force: bool) {
+        match self.effects_to_schedule.get_mut(&id) {
+            Some(existing_force) => *existing_force |= force,
+            None => {
+                self.effects_to_schedule.insert(id, force);
+                self.effect_order.push(id);
+            }
+        }
+    }
+}
+
+fn sorted_slot_ids<I>(ids: I) -> Vec<SlotId>
+where
+    I: IntoIterator<Item = SlotId>,
+{
+    let mut ids = ids.into_iter().collect::<Vec<_>>();
+    ids.sort_by_key(|id| id.0);
+    ids
+}
+
+#[derive(Default)]
 struct ThreadSafeState {
     nodes: HashMap<SlotId, ThreadSafeNode>,
     next_id: u64,
@@ -1928,142 +2103,14 @@ impl ThreadSafeContext {
     where
         I: IntoIterator<Item = ThreadSafeInvalidationRoot>,
     {
-        let mut queue = VecDeque::new();
-        let mut requested_force = HashMap::new();
-        for root in roots {
-            Self::enqueue_invalidation_root(&mut queue, &mut requested_force, root);
-        }
-
-        let mut simulated_slots = HashMap::<SlotId, (bool, bool)>::new();
-        let mut slots_to_mark = HashMap::<SlotId, bool>::new();
-        let mut slot_order = Vec::new();
-        let mut effects_to_schedule = HashMap::<SlotId, bool>::new();
-        let mut effect_order = Vec::new();
-
-        while let Some(root) = queue.pop_front() {
-            let Some(force_recompute) = requested_force.get(&root.id).copied() else {
-                continue;
-            };
-            if root.force_recompute != force_recompute {
-                continue;
-            }
-
-            let dependents = match state.nodes.get(&root.id) {
-                Some(ThreadSafeNode::Slot(slot)) => {
-                    let (dirty, force_state) = simulated_slots
-                        .get(&root.id)
-                        .copied()
-                        .unwrap_or((slot.dirty, slot.force_recompute));
-                    let should_propagate = !dirty || (force_recompute && !force_state);
-                    simulated_slots.insert(root.id, (true, force_state || force_recompute));
-
-                    match slots_to_mark.get_mut(&root.id) {
-                        Some(force) => *force |= force_recompute,
-                        None => {
-                            slots_to_mark.insert(root.id, force_recompute);
-                            slot_order.push(root.id);
-                        }
-                    }
-
-                    if should_propagate {
-                        slot.dependents.iter().copied().collect::<Vec<_>>()
-                    } else {
-                        Vec::new()
-                    }
-                }
-                Some(ThreadSafeNode::Effect(_)) => {
-                    match effects_to_schedule.get_mut(&root.id) {
-                        Some(force) => *force |= force_recompute,
-                        None => {
-                            effects_to_schedule.insert(root.id, force_recompute);
-                            effect_order.push(root.id);
-                        }
-                    }
-                    Vec::new()
-                }
-                Some(ThreadSafeNode::Cell(_)) | None => Vec::new(),
-            };
-
-            for dependent_id in dependents {
-                Self::enqueue_invalidation_root(
-                    &mut queue,
-                    &mut requested_force,
-                    ThreadSafeInvalidationRoot {
-                        id: dependent_id,
-                        force_recompute: false,
-                    },
-                );
-            }
-        }
-
-        for id in slot_order {
-            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
-                continue;
-            };
-            slot.revision = slot.revision.wrapping_add(1);
-            slot.dirty = true;
-            if slots_to_mark.get(&id).copied().unwrap_or(false) {
-                slot.force_recompute = true;
-            }
-            slot.fast_path.mark_dirty(slot.force_recompute);
-        }
-
-        for id in effect_order {
-            Self::schedule_effect_locked(
-                state,
-                id,
-                effects_to_schedule.get(&id).copied().unwrap_or(false),
-            );
-        }
+        ThreadSafeInvalidationPlan::from_roots_locked(state, roots).apply_locked(state);
     }
 
     fn clear_frontier_locked<I>(state: &mut ThreadSafeState, roots: I)
     where
         I: IntoIterator<Item = SlotId>,
     {
-        let mut queue = roots.into_iter().collect::<VecDeque<_>>();
-        let mut visited_slots = HashSet::new();
-        let mut slots_to_clear = Vec::new();
-        let mut effects_to_schedule = HashSet::new();
-        let mut effect_order = Vec::new();
-
-        while let Some(id) = queue.pop_front() {
-            match state.nodes.get(&id) {
-                Some(ThreadSafeNode::Slot(slot)) => {
-                    if !visited_slots.insert(id) {
-                        continue;
-                    }
-                    if slot.value.is_none() && !slot.dirty {
-                        continue;
-                    }
-                    slots_to_clear.push(id);
-                    for dependent_id in slot.dependents.iter().copied() {
-                        queue.push_back(dependent_id);
-                    }
-                }
-                Some(ThreadSafeNode::Effect(_)) => {
-                    if effects_to_schedule.insert(id) {
-                        effect_order.push(id);
-                    }
-                }
-                Some(ThreadSafeNode::Cell(_)) | None => {}
-            }
-        }
-
-        for id in slots_to_clear {
-            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
-                continue;
-            };
-            slot.value = None;
-            slot.dirty = false;
-            slot.force_recompute = false;
-            slot.revision = slot.revision.wrapping_add(1);
-            slot.fast_path.clear();
-        }
-
-        for id in effect_order {
-            Self::schedule_effect_locked(state, id, true);
-        }
+        ThreadSafeInvalidationPlan::from_clear_roots_locked(state, roots).apply_locked(state);
     }
 
     /// Check whether a slot currently has a cached, fresh value.
@@ -2166,6 +2213,121 @@ mod tests {
 
     fn pending_effect_count(ctx: &ThreadSafeContext) -> usize {
         ctx.lock_state().pending_effects.len()
+    }
+
+    #[test]
+    fn invalidation_plan_snapshots_frontier_before_apply() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(0usize);
+        let left = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
+        let right = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(2));
+        let joined = ctx.computed(move |ctx| ctx.get(&left).wrapping_add(ctx.get(&right)));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_for_effect = Arc::clone(&runs);
+        let effect = ctx.effect(move |ctx| {
+            runs_for_effect.fetch_add(1, Ordering::SeqCst);
+            let _ = ctx.get(&joined);
+        });
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(ctx.get(&joined), 3);
+
+        let plan = {
+            let state = ctx.lock_state();
+            let roots = ThreadSafeContext::dependents_locked(&state, root.id)
+                .into_iter()
+                .map(|id| ThreadSafeInvalidationRoot {
+                    id,
+                    force_recompute: true,
+                });
+            let plan = ThreadSafeInvalidationPlan::from_roots_locked(&state, roots);
+            let planned_slots = plan.slot_order.iter().copied().collect::<HashSet<_>>();
+            let expected_slots = [left.id, right.id, joined.id]
+                .into_iter()
+                .collect::<HashSet<_>>();
+
+            assert_eq!(planned_slots, expected_slots);
+            assert_eq!(plan.slots_to_mark.get(&left.id), Some(&true));
+            assert_eq!(plan.slots_to_mark.get(&right.id), Some(&true));
+            assert_eq!(plan.slots_to_mark.get(&joined.id), Some(&false));
+            assert_eq!(plan.effects_to_schedule.get(&effect.id), Some(&false));
+            match state.nodes.get(&joined.id) {
+                Some(ThreadSafeNode::Slot(slot)) => {
+                    assert!(!slot.dirty);
+                    assert!(!slot.force_recompute);
+                }
+                _ => panic!("joined should be a slot"),
+            }
+            plan
+        };
+
+        assert_eq!(slot_dirty_force(&ctx, &joined), (false, false));
+        assert!(!effect_is_scheduled(&ctx, &effect));
+
+        {
+            let mut state = ctx.lock_state();
+            plan.apply_locked(&mut state);
+        }
+
+        assert_eq!(slot_dirty_force(&ctx, &left), (true, true));
+        assert_eq!(slot_dirty_force(&ctx, &right), (true, true));
+        assert_eq!(slot_dirty_force(&ctx, &joined), (true, false));
+        assert!(effect_is_scheduled(&ctx, &effect));
+    }
+
+    #[test]
+    fn invalidation_plan_snapshots_hard_clears_before_apply() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(1usize);
+        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_mul(2));
+        let labeled = ctx.computed(move |ctx| ctx.get(&doubled).wrapping_add(1));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_for_effect = Arc::clone(&runs);
+        let effect = ctx.effect(move |ctx| {
+            runs_for_effect.fetch_add(1, Ordering::SeqCst);
+            let _ = ctx.get(&labeled);
+        });
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(ctx.get(&labeled), 3);
+        assert!(ctx.is_set(&doubled));
+        assert!(ctx.is_set(&labeled));
+
+        let plan = {
+            let state = ctx.lock_state();
+            let roots = ThreadSafeContext::dependents_locked(&state, root.id);
+            let plan = ThreadSafeInvalidationPlan::from_clear_roots_locked(&state, roots);
+            let planned_clears = plan
+                .clear_slot_order
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let expected_clears = [doubled.id, labeled.id].into_iter().collect::<HashSet<_>>();
+
+            assert_eq!(planned_clears, expected_clears);
+            assert_eq!(plan.effects_to_schedule.get(&effect.id), Some(&true));
+            match state.nodes.get(&labeled.id) {
+                Some(ThreadSafeNode::Slot(slot)) => {
+                    assert!(slot.value.is_some());
+                    assert!(!slot.dirty);
+                }
+                _ => panic!("labeled should be a slot"),
+            }
+            plan
+        };
+
+        assert!(ctx.is_set(&doubled));
+        assert!(ctx.is_set(&labeled));
+        assert!(!effect_is_scheduled(&ctx, &effect));
+
+        {
+            let mut state = ctx.lock_state();
+            plan.apply_locked(&mut state);
+        }
+
+        assert!(!ctx.is_set(&doubled));
+        assert!(!ctx.is_set(&labeled));
+        assert!(effect_is_scheduled(&ctx, &effect));
     }
 
     #[test]

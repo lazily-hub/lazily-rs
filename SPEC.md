@@ -250,15 +250,16 @@ Locking model:
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
 - The outermost thread-safe batch exit must collect dependents for all changed cells and apply one coalesced frontier invalidation, so a shared dependent reached through many changed cells is marked dirty and advances revision once per batch flush
-- Thread-safe invalidation uses an explicit frontier work queue under the graph
-  mutex instead of recursive dependent walks. Changed-cell and slot-value-change
-  roots snapshot dependent frontiers, coalesce duplicate slot ids in one
-  invalidation pass, preserve direct changed-value `force_recompute` upgrades
-  when a slot is reached through both direct and downstream paths, and then
-  apply dirty/revision/effect scheduling mutations at the same graph mutation
-  boundary. The frontier shape is partitionable for future bounded worker
-  traversal, but this prototype keeps application under the context mutex until
-  benchmark and model-checking evidence proves a parallel apply path safe.
+- Thread-safe invalidation uses an explicit `InvalidationPlan` computed from a
+  frontier work queue under the graph mutex instead of recursive dependent
+  walks. Changed-cell and slot-value-change roots snapshot dependent frontiers,
+  coalesce duplicate slot ids in one invalidation pass, preserve direct
+  changed-value `force_recompute` upgrades when a slot is reached through both
+  direct and downstream paths, snapshot hard-clear frontiers for explicit
+  slot/cell clears, then apply dirty, clear, revision, and effect-scheduling
+  mutations at the same graph mutation boundary. The plan shape is partitionable
+  for future bounded worker traversal, but this prototype keeps snapshot and application under the context mutex until benchmark and model-checking
+  evidence proves a parallel apply path safe.
 
 Lock strategy evaluation:
 
@@ -301,7 +302,7 @@ Lock strategy evaluation:
   re-entrant callbacks before release.
 - Fully lock-free cached reads are deferred for the current erased-value storage. The current versioned optimistic path still clones through the retained sidecar `Arc` snapshot and uses atomic dirty/revision validation to ensure a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
-- The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
+- The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
 Sharded/versioned storage evaluation:

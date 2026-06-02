@@ -143,6 +143,14 @@ struct FrontierRoot {
     force_recompute: bool,
 }
 
+#[derive(Debug, Default)]
+struct FrontierInvalidationPlan {
+    left_force: Option<bool>,
+    right_force: Option<bool>,
+    join_force: Option<bool>,
+    schedule_effect: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct FrontierSnapshot {
     batch_depth: usize,
@@ -196,6 +204,126 @@ impl FrontierState {
             stale_compute_discards: self.stale_compute_discards,
             join_revision: self.join_revision,
             effect_scheduled: self.effect_scheduled,
+        }
+    }
+}
+
+impl FrontierInvalidationPlan {
+    fn changed_cell_locked(state: &FrontierState) -> Self {
+        let mut plan = Self::default();
+        let mut queue = VecDeque::new();
+        let mut requested_force = HashMap::new();
+        let mut left_state = (state.left_dirty, state.left_force_recompute);
+        let mut right_state = (state.right_dirty, state.right_force_recompute);
+        let mut join_state = (state.join_dirty, state.join_force_recompute);
+
+        FrontierGraph::enqueue_root(
+            &mut queue,
+            &mut requested_force,
+            FrontierRoot {
+                id: FrontierNode::Left,
+                force_recompute: true,
+            },
+        );
+        FrontierGraph::enqueue_root(
+            &mut queue,
+            &mut requested_force,
+            FrontierRoot {
+                id: FrontierNode::Right,
+                force_recompute: true,
+            },
+        );
+
+        while let Some(root) = queue.pop_front() {
+            let Some(force_recompute) = requested_force.get(&root.id).copied() else {
+                continue;
+            };
+            if root.force_recompute != force_recompute {
+                continue;
+            }
+
+            match root.id {
+                FrontierNode::Left => {
+                    if plan.add_slot_mark(&mut left_state, FrontierNode::Left, force_recompute) {
+                        FrontierGraph::enqueue_root(
+                            &mut queue,
+                            &mut requested_force,
+                            FrontierRoot {
+                                id: FrontierNode::Join,
+                                force_recompute: false,
+                            },
+                        );
+                    }
+                }
+                FrontierNode::Right => {
+                    if plan.add_slot_mark(&mut right_state, FrontierNode::Right, force_recompute) {
+                        FrontierGraph::enqueue_root(
+                            &mut queue,
+                            &mut requested_force,
+                            FrontierRoot {
+                                id: FrontierNode::Join,
+                                force_recompute: false,
+                            },
+                        );
+                    }
+                }
+                FrontierNode::Join => {
+                    if plan.add_slot_mark(&mut join_state, FrontierNode::Join, force_recompute) {
+                        FrontierGraph::enqueue_root(
+                            &mut queue,
+                            &mut requested_force,
+                            FrontierRoot {
+                                id: FrontierNode::Effect,
+                                force_recompute: false,
+                            },
+                        );
+                    }
+                }
+                FrontierNode::Effect => {
+                    plan.schedule_effect = true;
+                }
+            }
+        }
+
+        plan
+    }
+
+    fn add_slot_mark(
+        &mut self,
+        simulated: &mut (bool, bool),
+        id: FrontierNode,
+        force_recompute: bool,
+    ) -> bool {
+        let (dirty, force_state) = *simulated;
+        let should_propagate = !dirty || (force_recompute && !force_state);
+        *simulated = (true, force_state || force_recompute);
+
+        let slot_force = match id {
+            FrontierNode::Left => &mut self.left_force,
+            FrontierNode::Right => &mut self.right_force,
+            FrontierNode::Join => &mut self.join_force,
+            FrontierNode::Effect => unreachable!("effect is not a slot"),
+        };
+        *slot_force = Some(slot_force.unwrap_or(false) || force_recompute);
+
+        should_propagate
+    }
+
+    fn apply_locked(self, state: &mut FrontierState) {
+        state.invalidation_flushes = state.invalidation_flushes.saturating_add(1);
+
+        if let Some(force_recompute) = self.left_force {
+            FrontierGraph::mark_left(state, force_recompute);
+        }
+        if let Some(force_recompute) = self.right_force {
+            FrontierGraph::mark_right(state, force_recompute);
+        }
+        if let Some(force_recompute) = self.join_force {
+            FrontierGraph::mark_join(state, force_recompute);
+        }
+        if self.schedule_effect && !state.effect_scheduled {
+            state.effect_scheduled = true;
+            state.effect_queue_pushes = state.effect_queue_pushes.saturating_add(1);
         }
     }
 }
@@ -256,80 +384,7 @@ impl FrontierGraph {
     }
 
     fn apply_changed_cell_invalidation_locked(state: &mut FrontierState) {
-        state.invalidation_flushes = state.invalidation_flushes.saturating_add(1);
-
-        let mut queue = VecDeque::new();
-        let mut requested_force = HashMap::new();
-        Self::enqueue_root(
-            &mut queue,
-            &mut requested_force,
-            FrontierRoot {
-                id: FrontierNode::Left,
-                force_recompute: true,
-            },
-        );
-        Self::enqueue_root(
-            &mut queue,
-            &mut requested_force,
-            FrontierRoot {
-                id: FrontierNode::Right,
-                force_recompute: true,
-            },
-        );
-
-        while let Some(root) = queue.pop_front() {
-            let Some(force_recompute) = requested_force.get(&root.id).copied() else {
-                continue;
-            };
-            if root.force_recompute != force_recompute {
-                continue;
-            }
-
-            match root.id {
-                FrontierNode::Left => {
-                    if Self::mark_left(state, force_recompute) {
-                        Self::enqueue_root(
-                            &mut queue,
-                            &mut requested_force,
-                            FrontierRoot {
-                                id: FrontierNode::Join,
-                                force_recompute: false,
-                            },
-                        );
-                    }
-                }
-                FrontierNode::Right => {
-                    if Self::mark_right(state, force_recompute) {
-                        Self::enqueue_root(
-                            &mut queue,
-                            &mut requested_force,
-                            FrontierRoot {
-                                id: FrontierNode::Join,
-                                force_recompute: false,
-                            },
-                        );
-                    }
-                }
-                FrontierNode::Join => {
-                    if Self::mark_join(state, force_recompute) {
-                        Self::enqueue_root(
-                            &mut queue,
-                            &mut requested_force,
-                            FrontierRoot {
-                                id: FrontierNode::Effect,
-                                force_recompute: false,
-                            },
-                        );
-                    }
-                }
-                FrontierNode::Effect => {
-                    if !state.effect_scheduled {
-                        state.effect_scheduled = true;
-                        state.effect_queue_pushes = state.effect_queue_pushes.saturating_add(1);
-                    }
-                }
-            }
-        }
+        FrontierInvalidationPlan::changed_cell_locked(state).apply_locked(state);
     }
 
     fn enqueue_root(
@@ -863,7 +918,7 @@ fn fast_frontier_invalidation_falls_back_while_callback_discovers_dependency() {
 }
 
 #[test]
-fn frontier_invalidation_coalesces_batch_diamond_and_stale_compute() {
+fn invalidation_plan_coalesces_batch_diamond_and_stale_compute() {
     loom::model(|| {
         let graph = Arc::new(FrontierGraph::default());
         let compute = graph.begin_join_compute();

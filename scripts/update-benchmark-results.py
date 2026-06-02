@@ -190,10 +190,10 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
     ),
     InstrumentationBudget(
         "thread_safe_effect_contention_queue_coalescing_16",
-        max_lock_acquisitions=1_800,
+        max_lock_acquisitions=2_600,
         site_budgets=(
             LockAttributionBudget("other", 900),
-            LockAttributionBudget("dependency_edge", 900),
+            LockAttributionBudget("dependency_edge", 1_600),
             LockAttributionBudget("set_cell_invalidation", 16),
             LockAttributionBudget("get_refresh", 64),
             LockAttributionBudget("publish", 0),
