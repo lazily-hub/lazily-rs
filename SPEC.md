@@ -240,6 +240,7 @@ Lock strategy evaluation:
 - `ThreadSafeContext` may use a sidecar recompute `Condvar` for in-flight waiters after attribution shows the spin-yield wait loop is material; the Condvar must not guard graph state independently of the context mutex
 - The current short contention sample after in-flight dedup improved 1-2 worker runs, was neutral around 4 workers, and regressed at 8-16 workers; this is not enough evidence to adopt `RwLock`, sharded locks, or targeted CAS
 - Any future `RwLock`, sharding, or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the mutex-first design
+- The current sidecar `Condvar` waiter path is covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, stale in-flight completion and retry, invalidation during compute, effect scheduling/disposal races, and re-entrant callback graph access
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
 Tokio integration is scoped in two stages:
@@ -374,6 +375,7 @@ Required benchmark scenarios:
 - Effect flushing after dependency mutation
 - Batch storms that coalesce many writes into one invalidation/effect flush boundary
 - `ThreadSafeContext` contention at 1, 2, 4, 8, and 16 workers
+- `ThreadSafeContext` synchronization model checking with the optional `loom` feature
 
 The optional `instrumentation` feature adds `instrumentation_snapshot()` and
 `reset_instrumentation()` to both context types and exports

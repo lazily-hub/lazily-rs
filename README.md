@@ -163,6 +163,12 @@ the getter retries before returning a fresh value.
 `Send + Sync` when `T` is `Send + Sync`, and `EffectHandle` is also `Send + Sync`,
 but handles must be used with their owning context.
 
+Enable the optional `loom` feature to run the thread-safe synchronization model:
+
+```bash
+cargo test --features loom --test thread_safe_loom
+```
+
 Enable the optional `tokio` feature for sync-on-Tokio integration tests and the
 `tokio_sync` example:
 
