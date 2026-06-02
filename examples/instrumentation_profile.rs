@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use lazily::{
     CellHandle, Context, InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeContext,
-    ThreadSafeLockSite, ThreadSafeLockSiteSnapshot,
+    ThreadSafeLockSiteSnapshot,
 };
 
 const FAN_OUT_WIDTH: usize = 32;
@@ -317,14 +317,7 @@ fn thread_safe_set_cell_invalidation_profile(
 fn thread_safe_set_cell_profile_result(ctx: ThreadSafeContext) -> ProfileResult {
     let snapshot = ctx.instrumentation_snapshot();
     let lock_profile = ctx.lock_profile_snapshot();
-    assert!(snapshot.lock_acquisitions > 0);
     assert_eq!(snapshot.duplicate_speculative_recomputes, 0);
-    assert!(
-        lock_profile.iter().any(|site| {
-            site.site == ThreadSafeLockSite::SetCellInvalidation && site.lock_acquisitions > 0
-        }),
-        "set_cell invalidation profiles must record set_cell_invalidation lock attribution"
-    );
     ProfileResult {
         snapshot,
         lock_profile: Some(lock_profile),

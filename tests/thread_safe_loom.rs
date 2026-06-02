@@ -94,6 +94,20 @@ struct ScopedWakeGraph {
     slot_b_waiters: Condvar,
 }
 
+#[derive(Debug, Default)]
+struct FastFrontierState {
+    active_callbacks: usize,
+    dependency_registered: bool,
+    slot_dirty: bool,
+    fast_invalidations: usize,
+    fallback_invalidations: usize,
+}
+
+#[derive(Debug, Default)]
+struct FastFrontierGraph {
+    state: Mutex<FastFrontierState>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum FrontierNode {
     Left,
@@ -588,6 +602,41 @@ impl ScopedWakeGraph {
     }
 }
 
+impl FastFrontierGraph {
+    fn begin_callback(&self) {
+        let mut state = self.state.lock().expect("frontier mutex poisoned");
+        state.active_callbacks = state.active_callbacks.saturating_add(1);
+    }
+
+    fn register_dependency_and_finish_callback(&self) {
+        let mut state = self.state.lock().expect("frontier mutex poisoned");
+        assert!(state.active_callbacks > 0);
+        state.dependency_registered = true;
+        state.active_callbacks -= 1;
+    }
+
+    fn invalidate_changed_cell(&self) {
+        let mut state = self.state.lock().expect("frontier mutex poisoned");
+        if state.active_callbacks > 0 {
+            state.fallback_invalidations = state.fallback_invalidations.saturating_add(1);
+            state.slot_dirty = true;
+        } else {
+            state.fast_invalidations = state.fast_invalidations.saturating_add(1);
+            state.slot_dirty = true;
+        }
+    }
+
+    fn snapshot(&self) -> (bool, bool, usize, usize) {
+        let state = self.state.lock().expect("frontier mutex poisoned");
+        (
+            state.dependency_registered,
+            state.slot_dirty,
+            state.fast_invalidations,
+            state.fallback_invalidations,
+        )
+    }
+}
+
 #[test]
 fn concurrent_first_get_shares_one_in_flight_compute() {
     loom::model(|| {
@@ -653,6 +702,36 @@ fn scoped_slot_notification_does_not_wake_unrelated_waiter() {
         graph.finish_slot_b();
         waiter_b.join().expect("slot B waiter thread should finish");
         assert_eq!(graph.slot_b_reacquires(), 1);
+    });
+}
+
+#[test]
+fn fast_frontier_invalidation_falls_back_while_callback_discovers_dependency() {
+    loom::model(|| {
+        let graph = Arc::new(FastFrontierGraph::default());
+        graph.begin_callback();
+
+        let invalidator = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || graph.invalidate_changed_cell())
+        };
+        invalidator
+            .join()
+            .expect("invalidation thread should finish");
+        graph.register_dependency_and_finish_callback();
+
+        let (dependency_registered, slot_dirty, fast_invalidations, fallback_invalidations) =
+            graph.snapshot();
+        assert!(dependency_registered);
+        assert!(slot_dirty);
+        assert_eq!(
+            fast_invalidations, 0,
+            "fast sidecar invalidation must not run while dependency discovery is active"
+        );
+        assert_eq!(
+            fallback_invalidations, 1,
+            "active dependency discovery should force the graph-locked fallback"
+        );
     });
 }
 

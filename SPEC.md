@@ -228,6 +228,12 @@ Locking model:
 - Uses one context-level `Mutex` synchronization primitive for graph state before introducing finer-grained graph locks
 - Fresh cached slot reads use a per-slot read-mostly cached-value sidecar; dependency-edge changes, invalidation frontier application, batch queues, effect queues, and disposal remain graph mutex mutations
 - Each thread-safe slot also owns a per-slot recompute/value-publish sidecar for the cached-value visibility flags, in-flight bit, waiter `Condvar`, and revision used to reject stale callback results. Graph-state dirty/revision fields remain mirrored under the context mutex for dependency-frontier traversal and tests.
+- Cells and slots mirror their dependent frontiers into per-node sidecars keyed
+  by `SlotId`. Changed-cell invalidation may use these sidecars without taking
+  the context graph mutex only when no callback is actively discovering
+  dependencies, the context is not inside a batch, and the discovered frontier
+  contains slots only. Effect scheduling, batching, dynamic dependency discovery,
+  disposal, and any frontier that reaches an effect fall back to the graph mutex.
 - Do not hold the graph lock while running user compute callbacks, effect callbacks, or cleanup closures
 - Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
 - Slot refresh must avoid helper-level lock churn: a fresh cached get should clone the value through the per-slot fast path without taking a `get_refresh` graph lock or recursively validating unchanged dependencies, dependency refresh should not take a separate node-kind probe lock before recursively validating a dependency, cell dependencies should not be probed as refreshable slots, clean dirty flags should be folded into the refresh decision lock, and recompute must diff old/new dependency sets at publish so unchanged edges stay subscribed while only stale edges are removed
@@ -252,12 +258,22 @@ Locking model:
 Lock strategy evaluation:
 
 - Keep one context-level graph synchronization primitive until benchmark instrumentation shows a finer-grained design improves the relevant workload without trading off other contention cases
-- `ThreadSafeContext` uses a read-mostly per-slot cached-value prototype for fresh cached reads and a per-slot recompute/value-publish sidecar for in-flight same-slot waiters; dependency graph mutations still require the context mutex
+- `ThreadSafeContext` uses read-mostly per-slot cached-value sidecars for fresh
+  cached reads, a per-slot recompute/value-publish sidecar for in-flight
+  same-slot waiters, and per-node dependent frontier sidecars for slot-only
+  changed-cell invalidation; dependency graph mutations still require the
+  context mutex
 - `ThreadSafeContext` uses per-slot sidecar recompute `Condvar`s for in-flight waiters. Those Condvars guard only per-slot in-flight/revision/cache-visibility state and must not mutate dependency graph state independently of the context mutex
 - The read-mostly prototype is benchmark-gated by the 1/2/4/8/16-worker `same_slot_write_read`, `independent_slots`, `read_mostly_waiters`, and `batched_write_bursts` matrix after the `#lazybatch1` and `#lazybatch2` invalidation/read-churn fixes
+- The dependent-frontier sidecar prototype is benchmark-gated by
+  `thread_safe_contention / independent_slots` and
+  `set_cell_invalidation / independent_slot_contention` at 8 and 16 workers. It
+  should reduce `set_cell_invalidation` graph-lock acquisitions for independent
+  slot-only roots without changing effect, batch, or dynamic-dependency
+  semantics.
 - Versioned optimistic reads are deferred for the current erased-value storage. A lock-free read path would need independently retained value snapshots plus atomic dirty/revision validation. Any such path must prove that a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
-- The current sidecar `Mutex`/`Condvar` waiter path and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, stale in-flight completion and retry, read-mostly waiter handoff, invalidation during compute, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
+- The current sidecar `Mutex`/`Condvar` waiter path and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, stale in-flight completion and retry, read-mostly waiter handoff, invalidation during compute, fast-frontier fallback while dependency discovery is active, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
 Sharded/versioned storage evaluation:

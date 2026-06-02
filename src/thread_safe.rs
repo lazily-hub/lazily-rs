@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(feature = "instrumentation")]
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 #[cfg(feature = "instrumentation")]
 use std::time::Instant;
@@ -157,6 +157,12 @@ struct ThreadSafeSlotNode {
     revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadSafeDependentKind {
+    Slot,
+    Effect,
+}
+
 #[derive(Default)]
 struct ThreadSafeSlotFastPath {
     value: RwLock<Option<Arc<ThreadSafeAny>>>,
@@ -164,6 +170,7 @@ struct ThreadSafeSlotFastPath {
     force_recompute: AtomicBool,
     recompute: Mutex<ThreadSafeSlotRecomputeState>,
     recompute_condvar: Condvar,
+    dependents: Mutex<HashMap<SlotId, ThreadSafeDependentKind>>,
 }
 
 impl ThreadSafeSlotFastPath {
@@ -185,6 +192,15 @@ impl ThreadSafeSlotFastPath {
                     .expect("type mismatch in slot")
                     .clone()
             })
+    }
+
+    fn needs_refresh(&self) -> bool {
+        self.dirty.load(Ordering::Acquire) || self.force_recompute.load(Ordering::Acquire)
+    }
+
+    fn dirty_force(&self) -> (bool, bool) {
+        let recompute = self.lock_recompute_state();
+        (recompute.dirty, recompute.force_recompute)
     }
 
     fn store_value(&self, value: Option<Arc<ThreadSafeAny>>) {
@@ -280,6 +296,29 @@ impl ThreadSafeSlotFastPath {
             ThreadSafeRecomputeResult::Stale
         }
     }
+
+    fn insert_dependent(&self, dependent_id: SlotId, kind: ThreadSafeDependentKind) {
+        self.dependents
+            .lock()
+            .expect("ThreadSafeContext slot dependents mutex poisoned")
+            .insert(dependent_id, kind);
+    }
+
+    fn remove_dependent(&self, dependent_id: SlotId) {
+        self.dependents
+            .lock()
+            .expect("ThreadSafeContext slot dependents mutex poisoned")
+            .remove(&dependent_id);
+    }
+
+    fn dependents_snapshot(&self) -> Vec<(SlotId, ThreadSafeDependentKind)> {
+        self.dependents
+            .lock()
+            .expect("ThreadSafeContext slot dependents mutex poisoned")
+            .iter()
+            .map(|(id, kind)| (*id, *kind))
+            .collect()
+    }
 }
 
 #[derive(Default)]
@@ -297,8 +336,78 @@ struct ThreadSafeRecomputeStart {
 }
 
 struct ThreadSafeCellNode {
-    value: Box<ThreadSafeAny>,
     dependents: HashSet<SlotId>,
+    fast_path: Arc<ThreadSafeCellFastPath>,
+}
+
+struct ThreadSafeCellFastPath {
+    value: Mutex<Box<ThreadSafeAny>>,
+    dependents: Mutex<HashMap<SlotId, ThreadSafeDependentKind>>,
+}
+
+impl ThreadSafeCellFastPath {
+    fn new<T>(value: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        Self {
+            value: Mutex::new(Box::new(value)),
+            dependents: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.value
+            .lock()
+            .expect("ThreadSafeContext cell value mutex poisoned")
+            .downcast_ref::<T>()
+            .expect("type mismatch in cell")
+            .clone()
+    }
+
+    fn set_if_changed<T>(&self, new_value: T) -> bool
+    where
+        T: PartialEq + Send + Sync + 'static,
+    {
+        let mut value = self
+            .value
+            .lock()
+            .expect("ThreadSafeContext cell value mutex poisoned");
+        let old = value
+            .downcast_ref::<T>()
+            .expect("type mismatch in cell set");
+        if *old == new_value {
+            return false;
+        }
+        *value = Box::new(new_value);
+        true
+    }
+
+    fn insert_dependent(&self, dependent_id: SlotId, kind: ThreadSafeDependentKind) {
+        self.dependents
+            .lock()
+            .expect("ThreadSafeContext cell dependents mutex poisoned")
+            .insert(dependent_id, kind);
+    }
+
+    fn remove_dependent(&self, dependent_id: SlotId) {
+        self.dependents
+            .lock()
+            .expect("ThreadSafeContext cell dependents mutex poisoned")
+            .remove(&dependent_id);
+    }
+
+    fn dependents_snapshot(&self) -> Vec<(SlotId, ThreadSafeDependentKind)> {
+        self.dependents
+            .lock()
+            .expect("ThreadSafeContext cell dependents mutex poisoned")
+            .iter()
+            .map(|(id, kind)| (*id, *kind))
+            .collect()
+    }
 }
 
 struct ThreadSafeEffectNode {
@@ -348,6 +457,9 @@ struct ThreadSafeState {
 struct ThreadSafeInner {
     state: Mutex<ThreadSafeState>,
     slot_fast_paths: RwLock<HashMap<SlotId, Arc<ThreadSafeSlotFastPath>>>,
+    cell_fast_paths: RwLock<HashMap<SlotId, Arc<ThreadSafeCellFastPath>>>,
+    batch_depth: AtomicUsize,
+    active_callbacks: AtomicUsize,
     #[cfg(feature = "instrumentation")]
     lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation,
 }
@@ -357,6 +469,9 @@ impl Default for ThreadSafeInner {
         Self {
             state: Mutex::new(ThreadSafeState::default()),
             slot_fast_paths: RwLock::new(HashMap::new()),
+            cell_fast_paths: RwLock::new(HashMap::new()),
+            batch_depth: AtomicUsize::new(0),
+            active_callbacks: AtomicUsize::new(0),
             #[cfg(feature = "instrumentation")]
             lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation::default(),
         }
@@ -487,6 +602,16 @@ impl Drop for RecomputeGuard {
     }
 }
 
+struct CallbackActivityGuard {
+    inner: Arc<ThreadSafeInner>,
+}
+
+impl Drop for CallbackActivityGuard {
+    fn drop(&mut self) {
+        self.inner.active_callbacks.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 struct FlushGuard {
     ctx: ThreadSafeContext,
     active: bool,
@@ -596,6 +721,15 @@ impl ThreadSafeContext {
             .cloned()
     }
 
+    fn cell_fast_path(&self, id: SlotId) -> Option<Arc<ThreadSafeCellFastPath>> {
+        self.inner
+            .cell_fast_paths
+            .read()
+            .expect("ThreadSafeContext cell fast path registry poisoned")
+            .get(&id)
+            .cloned()
+    }
+
     fn try_read_fresh_slot_fast_path<T>(&self, id: SlotId) -> Option<T>
     where
         T: Clone + Send + Sync + 'static,
@@ -610,6 +744,63 @@ impl ThreadSafeContext {
             .unwrap_or(false)
     }
 
+    fn callbacks_active(&self) -> bool {
+        self.inner.active_callbacks.load(Ordering::Acquire) > 0
+    }
+
+    fn callback_activity(&self) -> CallbackActivityGuard {
+        self.inner.active_callbacks.fetch_add(1, Ordering::AcqRel);
+        CallbackActivityGuard {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn dependent_kind_locked(
+        state: &ThreadSafeState,
+        dependent_id: SlotId,
+    ) -> Option<ThreadSafeDependentKind> {
+        match state.nodes.get(&dependent_id) {
+            Some(ThreadSafeNode::Slot(_)) => Some(ThreadSafeDependentKind::Slot),
+            Some(ThreadSafeNode::Effect(_)) => Some(ThreadSafeDependentKind::Effect),
+            Some(ThreadSafeNode::Cell(_)) | None => None,
+        }
+    }
+
+    fn insert_dependent_sidecar_locked(
+        state: &ThreadSafeState,
+        dependency_id: SlotId,
+        dependent_id: SlotId,
+        dependent_kind: ThreadSafeDependentKind,
+    ) {
+        match state.nodes.get(&dependency_id) {
+            Some(ThreadSafeNode::Slot(slot)) => {
+                slot.fast_path
+                    .insert_dependent(dependent_id, dependent_kind);
+            }
+            Some(ThreadSafeNode::Cell(cell)) => {
+                cell.fast_path
+                    .insert_dependent(dependent_id, dependent_kind);
+            }
+            Some(ThreadSafeNode::Effect(_)) | None => {}
+        }
+    }
+
+    fn remove_dependent_sidecar_locked(
+        state: &ThreadSafeState,
+        dependency_id: SlotId,
+        dependent_id: SlotId,
+    ) {
+        match state.nodes.get(&dependency_id) {
+            Some(ThreadSafeNode::Slot(slot)) => {
+                slot.fast_path.remove_dependent(dependent_id);
+            }
+            Some(ThreadSafeNode::Cell(cell)) => {
+                cell.fast_path.remove_dependent(dependent_id);
+            }
+            Some(ThreadSafeNode::Effect(_)) | None => {}
+        }
+    }
+
     fn register_dependency(&self, dependency_id: SlotId, dependent_id: SlotId) {
         if dependency_id == dependent_id {
             return;
@@ -620,6 +811,7 @@ impl ThreadSafeContext {
         #[cfg(feature = "instrumentation")]
         let mut edge_added = false;
         let mut state = self.lock_state();
+        let dependent_kind = Self::dependent_kind_locked(&state, dependent_id);
         if let Some(node) = state.nodes.get_mut(&dependency_id) {
             match node {
                 ThreadSafeNode::Slot(slot) => {
@@ -656,6 +848,14 @@ impl ThreadSafeContext {
                 }
                 ThreadSafeNode::Cell(_) => {}
             }
+        }
+        if let Some(dependent_kind) = dependent_kind {
+            Self::insert_dependent_sidecar_locked(
+                &state,
+                dependency_id,
+                dependent_id,
+                dependent_kind,
+            );
         }
         #[cfg(feature = "instrumentation")]
         if edge_added {
@@ -704,6 +904,9 @@ impl ThreadSafeContext {
             Some(ThreadSafeNode::Cell(cell)) => cell.dependents.remove(&dependent_id),
             Some(ThreadSafeNode::Effect(_)) | None => false,
         };
+        if _edge_removed {
+            Self::remove_dependent_sidecar_locked(state, dependency_id, dependent_id);
+        }
 
         #[cfg(feature = "instrumentation")]
         if _edge_removed {
@@ -824,7 +1027,9 @@ impl ThreadSafeContext {
         let state = self.read_state();
         match state.nodes.get(&id) {
             Some(ThreadSafeNode::Slot(slot)) => {
-                if let (false, false, Some(value)) = (slot.dirty, slot.force_recompute, &slot.value)
+                if !slot.fast_path.needs_refresh()
+                    && let (false, false, Some(value)) =
+                        (slot.dirty, slot.force_recompute, &slot.value)
                 {
                     ThreadSafeSlotRead::Fresh(
                         value
@@ -899,7 +1104,11 @@ impl ThreadSafeContext {
                 _ => return false,
             };
 
-            if slot.value.is_none() || slot.force_recompute || dependency_changed {
+            if slot.value.is_none()
+                || slot.force_recompute
+                || slot.fast_path.needs_refresh()
+                || dependency_changed
+            {
                 true
             } else {
                 slot.dirty = false;
@@ -962,7 +1171,9 @@ impl ThreadSafeContext {
             id,
             old_dependencies.clone(),
         );
+        let _callback_activity = self.callback_activity();
         let result = compute(self);
+        drop(_callback_activity);
         let new_dependencies = _tracking.finish();
         let result = Arc::<ThreadSafeAny>::from(result);
 
@@ -1065,10 +1276,16 @@ impl ThreadSafeContext {
         T: PartialEq + Send + Sync + 'static,
     {
         let id = self.alloc_id();
+        let fast_path = Arc::new(ThreadSafeCellFastPath::new(value));
         let node = ThreadSafeCellNode {
-            value: Box::new(value),
             dependents: HashSet::new(),
+            fast_path: Arc::clone(&fast_path),
         };
+        self.inner
+            .cell_fast_paths
+            .write()
+            .expect("ThreadSafeContext cell fast path registry poisoned")
+            .insert(id, fast_path);
         self.lock_state()
             .nodes
             .insert(id, ThreadSafeNode::Cell(node));
@@ -1084,15 +1301,9 @@ impl ThreadSafeContext {
             self.register_dependency(handle.id, parent_id);
         }
 
-        let state = self.read_state();
-        if let Some(ThreadSafeNode::Cell(cell)) = state.nodes.get(&handle.id) {
-            cell.value
-                .downcast_ref::<T>()
-                .expect("type mismatch in cell")
-                .clone()
-        } else {
-            panic!("get_cell called on non-cell id");
-        }
+        self.cell_fast_path(handle.id)
+            .map(|fast_path| fast_path.get())
+            .unwrap_or_else(|| panic!("get_cell called on non-cell id"))
     }
 
     /// Set a cell value. Changed values invalidate dependents.
@@ -1100,40 +1311,134 @@ impl ThreadSafeContext {
     where
         T: PartialEq + Send + Sync + 'static,
     {
-        let should_flush = {
-            #[cfg(feature = "instrumentation")]
-            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::SetCellInvalidation);
-            let mut state = self.lock_state();
-            let changed = match state.nodes.get(&handle.id) {
-                Some(ThreadSafeNode::Cell(cell)) => {
-                    let old = cell
-                        .value
-                        .downcast_ref::<T>()
-                        .expect("type mismatch in cell set");
-                    *old != new_value
-                }
-                _ => panic!("set_cell on non-cell id"),
-            };
+        let fast_path = self
+            .cell_fast_path(handle.id)
+            .unwrap_or_else(|| panic!("set_cell on non-cell id"));
+        if !fast_path.set_if_changed(new_value) {
+            return;
+        }
 
-            if !changed {
-                return;
-            }
-
-            let batching = state.batch_depth > 0;
-            if let Some(ThreadSafeNode::Cell(cell)) = state.nodes.get_mut(&handle.id) {
-                cell.value = Box::new(new_value);
-            }
-            if batching {
-                state.batched_cells.insert(handle.id);
-            } else {
-                Self::invalidate_cell_dependents_locked(&mut state, handle.id);
-            }
-            !batching
+        let should_flush = if let Some(should_flush) =
+            self.try_invalidate_cell_dependents_fast(handle.id, &fast_path)
+        {
+            should_flush
+        } else {
+            self.invalidate_changed_cell_locked(handle.id)
         };
 
         if should_flush {
             self.flush_effects();
         }
+    }
+
+    fn invalidate_changed_cell_locked(&self, id: SlotId) -> bool {
+        #[cfg(feature = "instrumentation")]
+        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::SetCellInvalidation);
+        let mut state = self.lock_state();
+        match state.nodes.get(&id) {
+            Some(ThreadSafeNode::Cell(_)) => {}
+            _ => panic!("set_cell on non-cell id"),
+        }
+        let batching = state.batch_depth > 0;
+        if batching {
+            state.batched_cells.insert(id);
+        } else {
+            Self::invalidate_cell_dependents_locked(&mut state, id);
+        }
+        !batching
+    }
+
+    fn try_invalidate_cell_dependents_fast(
+        &self,
+        id: SlotId,
+        fast_path: &ThreadSafeCellFastPath,
+    ) -> Option<bool> {
+        if self.callbacks_active() {
+            return None;
+        }
+
+        if self.inner.batch_depth.load(Ordering::Acquire) > 0 {
+            let mut state = self.lock_state();
+            if state.batch_depth > 0 {
+                state.batched_cells.insert(id);
+                return Some(false);
+            }
+            return None;
+        }
+
+        let roots = fast_path
+            .dependents_snapshot()
+            .into_iter()
+            .map(|(id, kind)| (id, kind, true));
+        self.try_mark_slot_frontier_fast(roots)
+    }
+
+    fn try_mark_slot_frontier_fast<I>(&self, roots: I) -> Option<bool>
+    where
+        I: IntoIterator<Item = (SlotId, ThreadSafeDependentKind, bool)>,
+    {
+        let mut queue = VecDeque::new();
+        let mut requested_force = HashMap::new();
+        for (id, kind, force_recompute) in roots {
+            match kind {
+                ThreadSafeDependentKind::Slot => Self::enqueue_invalidation_root(
+                    &mut queue,
+                    &mut requested_force,
+                    ThreadSafeInvalidationRoot {
+                        id,
+                        force_recompute,
+                    },
+                ),
+                ThreadSafeDependentKind::Effect => return None,
+            }
+        }
+
+        let mut slots_to_mark = HashMap::<SlotId, bool>::new();
+        let mut slot_order = Vec::new();
+
+        while let Some(root) = queue.pop_front() {
+            let Some(force_recompute) = requested_force.get(&root.id).copied() else {
+                continue;
+            };
+            if root.force_recompute != force_recompute {
+                continue;
+            }
+
+            let fast_path = self.slot_fast_path(root.id)?;
+            let (dirty, force_state) = fast_path.dirty_force();
+            let should_propagate = !dirty || (force_recompute && !force_state);
+
+            match slots_to_mark.get_mut(&root.id) {
+                Some(force) => *force |= force_recompute,
+                None => {
+                    slots_to_mark.insert(root.id, force_recompute);
+                    slot_order.push(root.id);
+                }
+            }
+
+            if should_propagate {
+                for (dependent_id, dependent_kind) in fast_path.dependents_snapshot() {
+                    match dependent_kind {
+                        ThreadSafeDependentKind::Slot => Self::enqueue_invalidation_root(
+                            &mut queue,
+                            &mut requested_force,
+                            ThreadSafeInvalidationRoot {
+                                id: dependent_id,
+                                force_recompute: false,
+                            },
+                        ),
+                        ThreadSafeDependentKind::Effect => return None,
+                    }
+                }
+            }
+        }
+
+        for id in slot_order {
+            let force_recompute = slots_to_mark.get(&id).copied().unwrap_or(false);
+            self.slot_fast_path(id)?.mark_dirty(force_recompute);
+        }
+
+        Some(false)
     }
 
     /// Run several updates as one invalidation pass.
@@ -1144,6 +1449,9 @@ impl ThreadSafeContext {
         {
             let mut state = self.lock_state();
             state.batch_depth += 1;
+            self.inner
+                .batch_depth
+                .store(state.batch_depth, Ordering::Release);
         }
         let _guard = BatchGuard { ctx: self.clone() };
         run(self)
@@ -1154,6 +1462,9 @@ impl ThreadSafeContext {
             let mut state = self.lock_state();
             assert!(state.batch_depth > 0, "finish_batch called without batch");
             state.batch_depth -= 1;
+            self.inner
+                .batch_depth
+                .store(state.batch_depth, Ordering::Release);
             state.batch_depth == 0
         };
 
@@ -1336,7 +1647,9 @@ impl ThreadSafeContext {
         }
 
         let _tracking = push_tracking_frame(self.context_id(), id);
+        let _callback_activity = self.callback_activity();
         let next_cleanup = run(self);
+        drop(_callback_activity);
         drop(_tracking);
 
         let mut state = self.lock_state();
@@ -1625,7 +1938,7 @@ impl ThreadSafeContext {
     {
         let state = self.read_state();
         if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&handle.id) {
-            slot.value.is_some() && !slot.dirty
+            slot.value.is_some() && !slot.dirty && !slot.fast_path.needs_refresh()
         } else {
             false
         }

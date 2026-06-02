@@ -731,6 +731,8 @@ mod storage_strategy_evaluation {
             "Sharded/versioned storage evaluation",
             "read-mostly cached-value sidecar",
             "per-slot recompute/value-publish sidecar",
+            "per-node dependent frontier sidecars",
+            "fast-frontier fallback while dependency discovery is active",
             "dirty same-slot contention",
             "Do not replace the single graph lock with sharded storage",
             "Do not use versioned optimistic reads as the next invalidation optimization",
@@ -890,7 +892,6 @@ mod benchmark_instrumentation {
         for expected_site in [
             ThreadSafeLockSite::GetRefresh,
             ThreadSafeLockSite::DependencyEdge,
-            ThreadSafeLockSite::SetCellInvalidation,
             ThreadSafeLockSite::Publish,
             ThreadSafeLockSite::InFlightWait,
         ] {
@@ -903,6 +904,11 @@ mod benchmark_instrumentation {
                 "{expected_site:?} should record lock acquisitions"
             );
         }
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::SetCellInvalidation).lock_acquisitions,
+            0,
+            "slot-only changed-cell invalidation may stay on sidecar frontiers"
+        );
     }
 
     /// SPEC: a fresh cached thread-safe get uses the per-slot fast path instead
@@ -1178,6 +1184,69 @@ mod benchmark_instrumentation {
             2,
             "dirty same-slot contention should share one recompute after invalidation"
         );
+    }
+
+    /// SPEC: independent changed-cell invalidations may use per-node SlotId
+    /// sidecar frontiers instead of the context graph mutex when no callback is
+    /// discovering dependencies and the frontier contains only slots.
+    #[test]
+    fn thread_safe_independent_cell_invalidations_use_sharded_sidecars() {
+        let ctx = ThreadSafeContext::new();
+        let workers = 8usize;
+        let iters = 16usize;
+        let roots = (0..workers)
+            .map(|worker| ctx.cell(worker))
+            .collect::<Vec<_>>();
+        let values = roots
+            .iter()
+            .map(|root| {
+                let root = *root;
+                ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+            })
+            .collect::<Vec<_>>();
+
+        for (worker, value) in values.iter().enumerate() {
+            assert_eq!(ctx.get(value), worker + 1);
+        }
+        ctx.reset_instrumentation();
+
+        let barrier = Arc::new(Barrier::new(workers));
+        let threads = (0..workers)
+            .map(|worker| {
+                let ctx = ctx.clone();
+                let barrier = Arc::clone(&barrier);
+                let root = roots[worker];
+                thread::spawn(move || {
+                    barrier.wait();
+                    for iter in 0..iters {
+                        ctx.set_cell(&root, worker.wrapping_mul(iters).wrapping_add(iter));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().expect("independent setter should finish");
+        }
+
+        let set_cell_locks = lock_site(&ctx, ThreadSafeLockSite::SetCellInvalidation);
+        assert_eq!(
+            set_cell_locks.lock_acquisitions, 0,
+            "slot-only independent cell invalidations should stay on per-node sidecars"
+        );
+
+        for value in &values {
+            assert!(
+                !ctx.is_set(value),
+                "sidecar invalidation should make cached slots stale before graph refresh"
+            );
+        }
+        for (worker, value) in values.iter().enumerate() {
+            assert_eq!(
+                ctx.get(value),
+                worker.wrapping_mul(iters).wrapping_add(iters - 1) + 1
+            );
+        }
     }
 
     /// SPEC: in-flight recompute notifications are scoped to the slot that
