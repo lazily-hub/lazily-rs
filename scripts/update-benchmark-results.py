@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import subprocess
 import sys
@@ -19,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
 START_MARKER = "<!-- benchmark-results:start -->"
 END_MARKER = "<!-- benchmark-results:end -->"
 INSERT_BEFORE = "\n## Multi-Language\n"
+DEFAULT_PROFILE_OUTPUT = Path("target/lazily-instrumentation-profile.csv")
 GROUP_ORDER = {
     "cached_reads": 0,
     "cold_first_get": 1,
@@ -38,6 +40,21 @@ class BenchmarkResult:
     mean_ns: float
     lower_ns: float
     upper_ns: float
+
+
+@dataclass(frozen=True)
+class InstrumentationProfile:
+    profile: str
+    node_allocations: int
+    slot_recomputes: int
+    duplicate_speculative_recomputes: int
+    dependency_edges_added: int
+    dependency_edges_removed: int
+    effect_queue_pushes: int
+    max_effect_queue_depth: int
+    lock_acquisitions: int
+    lock_wait_nanos: int
+    lock_hold_nanos: int
 
 
 def run(command: list[str]) -> None:
@@ -130,6 +147,46 @@ def discover_results(criterion_dir: Path) -> list[BenchmarkResult]:
     )
 
 
+def run_instrumentation_profile(output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "cargo",
+        "run",
+        "--example",
+        "instrumentation_profile",
+        "--features",
+        "instrumentation",
+        "--quiet",
+    ]
+    print("$ " + " ".join(command), flush=True)
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    output.write_text(result.stdout, encoding="utf-8")
+
+
+def read_instrumentation_profiles(path: Path) -> list[InstrumentationProfile]:
+    rows: list[InstrumentationProfile] = []
+    with path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            rows.append(
+                InstrumentationProfile(
+                    profile=row["profile"],
+                    node_allocations=int(row["node_allocations"]),
+                    slot_recomputes=int(row["slot_recomputes"]),
+                    duplicate_speculative_recomputes=int(
+                        row["duplicate_speculative_recomputes"]
+                    ),
+                    dependency_edges_added=int(row["dependency_edges_added"]),
+                    dependency_edges_removed=int(row["dependency_edges_removed"]),
+                    effect_queue_pushes=int(row["effect_queue_pushes"]),
+                    max_effect_queue_depth=int(row["max_effect_queue_depth"]),
+                    lock_acquisitions=int(row["lock_acquisitions"]),
+                    lock_wait_nanos=int(row["lock_wait_nanos"]),
+                    lock_hold_nanos=int(row["lock_hold_nanos"]),
+                )
+            )
+    return rows
+
+
 def natural_case_key(value: str) -> list[object]:
     parts: list[object] = []
     current = ""
@@ -156,7 +213,12 @@ def format_duration(ns: float) -> str:
     return f"{ns:.3f} ns"
 
 
-def build_section(package: str, version: str, results: list[BenchmarkResult]) -> str:
+def build_section(
+    package: str,
+    version: str,
+    results: list[BenchmarkResult],
+    profiles: list[InstrumentationProfile],
+) -> str:
     lines = [
         START_MARKER,
         f"Generated for package `{package}` version `{version}`.",
@@ -195,6 +257,36 @@ def build_section(package: str, version: str, results: list[BenchmarkResult]) ->
             )
         )
 
+    lines.extend(
+        [
+            "",
+            "Instrumentation snapshots are single local profile runs captured by",
+            "`examples/instrumentation_profile.rs`.",
+            "",
+            "| Profile | Alloc | Recomputes | Duplicate recomputes | Edges + | Edges - | Effect pushes | Max queue | Lock acquisitions | Lock wait | Lock hold |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+
+    for profile in profiles:
+        lines.append(
+            "| {profile} | {alloc} | {recomputes} | {duplicates} | {edges_added} | "
+            "{edges_removed} | {effect_pushes} | {max_queue} | {locks} | "
+            "{lock_wait} | {lock_hold} |".format(
+                profile=profile.profile,
+                alloc=profile.node_allocations,
+                recomputes=profile.slot_recomputes,
+                duplicates=profile.duplicate_speculative_recomputes,
+                edges_added=profile.dependency_edges_added,
+                edges_removed=profile.dependency_edges_removed,
+                effect_pushes=profile.effect_queue_pushes,
+                max_queue=profile.max_effect_queue_depth,
+                locks=profile.lock_acquisitions,
+                lock_wait=format_duration(profile.lock_wait_nanos),
+                lock_hold=format_duration(profile.lock_hold_nanos),
+            )
+        )
+
     lines.extend(["", END_MARKER])
     return "\n".join(lines)
 
@@ -226,10 +318,19 @@ def main() -> int:
         default=Path("target/criterion"),
         type=Path,
     )
+    parser.add_argument(
+        "--profile-output",
+        default=DEFAULT_PROFILE_OUTPUT,
+        type=Path,
+        help="CSV path for instrumentation profile snapshots",
+    )
     args = parser.parse_args()
 
     if not args.no_run:
         run(["cargo", "bench", "--features", "instrumentation"])
+        run_instrumentation_profile(args.profile_output)
+    elif not args.check:
+        run_instrumentation_profile(args.profile_output)
 
     results = discover_results(args.criterion_dir)
     if not results:
@@ -238,9 +339,22 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if not args.profile_output.exists():
+        print(
+            f"no instrumentation profile found at {args.profile_output}; run without --check",
+            file=sys.stderr,
+        )
+        return 2
+    profiles = read_instrumentation_profiles(args.profile_output)
+    if not profiles:
+        print(
+            f"no instrumentation profile rows found in {args.profile_output}",
+            file=sys.stderr,
+        )
+        return 2
 
     package, version = read_package_metadata(args.cargo_toml)
-    section = build_section(package, version, results)
+    section = build_section(package, version, results, profiles)
     current = args.readme.read_text(encoding="utf-8")
     updated = replace_section(current, section)
 

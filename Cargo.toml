@@ -23,6 +23,10 @@ criterion = "0.8"
 name = "tokio_sync"
 required-features = ["tokio"]
 
+[[example]]
+name = "instrumentation_profile"
+required-features = ["instrumentation"]
+
 [[bench]]
 name = "context"
 harness = false

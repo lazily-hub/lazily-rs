@@ -625,6 +625,24 @@ mod benchmark_report_harness {
 
         assert!(section.contains("python3 scripts/update-benchmark-results.py"));
         assert!(section.contains("cargo bench --features instrumentation"));
+        assert!(section.contains("Instrumentation snapshots"));
+        assert!(section.contains("Duplicate recomputes"));
+
+        for expected in [
+            "context_memo_effect",
+            "context_fan_out_32",
+            "context_batch_storm_64",
+            "thread_safe_first_get_2",
+            "thread_safe_contention_16",
+        ] {
+            assert!(
+                section.contains(expected),
+                "README benchmark section should include instrumentation row {expected}"
+            );
+        }
+
+        assert!(CARGO_TOML.contains("name = \"instrumentation_profile\""));
+        assert!(UPDATE_SCRIPT.contains("lazily-instrumentation-profile.csv"));
         assert!(UPDATE_SCRIPT.contains("--check"));
         assert!(UPDATE_SCRIPT.contains("benchmark-results:start"));
     }

@@ -231,6 +231,21 @@ Criterion estimates are local mean wall-clock time per iteration.
 | profile_instrumentation | context_snapshot | 417.989 ns | 413.923 ns - 422.213 ns |
 | profile_instrumentation | thread_safe_snapshot | 295.156 us | 293.889 us - 296.346 us |
 
+Instrumentation snapshots are single local profile runs captured by
+`examples/instrumentation_profile.rs`.
+
+| Profile | Alloc | Recomputes | Duplicate recomputes | Edges + | Edges - | Effect pushes | Max queue | Lock acquisitions | Lock wait | Lock hold |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| context_memo_effect | 4 | 3 | 0 | 4 | 1 | 2 | 1 | 0 | 0.000 ns | 0.000 ns |
+| context_fan_out_32 | 33 | 64 | 0 | 64 | 32 | 0 | 0 | 0 | 0.000 ns | 0.000 ns |
+| context_batch_storm_64 | 65 | 0 | 0 | 128 | 64 | 2 | 1 | 0 | 0.000 ns | 0.000 ns |
+| thread_safe_first_get_2 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 636 | 43.430 us | 129.491 us |
+| thread_safe_contention_1 | 2 | 17 | 0 | 17 | 16 | 0 | 0 | 203 | 8.080 us | 86.551 us |
+| thread_safe_contention_2 | 2 | 24 | 0 | 24 | 23 | 0 | 0 | 430 | 349.411 us | 196.361 us |
+| thread_safe_contention_4 | 2 | 52 | 0 | 52 | 51 | 0 | 0 | 1356 | 3.249 ms | 536.081 us |
+| thread_safe_contention_8 | 2 | 93 | 0 | 93 | 92 | 0 | 0 | 4201 | 20.905 ms | 1.396 ms |
+| thread_safe_contention_16 | 2 | 171 | 0 | 171 | 170 | 0 | 0 | 14504 | 138.001 ms | 4.020 ms |
+
 <!-- benchmark-results:end -->
 
 ## Multi-Language

@@ -391,14 +391,19 @@ behind `required-features = ["instrumentation"]`; compile it with
 The benchmark report harness lives at
 `scripts/update-benchmark-results.py`. It runs
 `cargo bench --features instrumentation`, reads Criterion estimate files from
-`target/criterion`, and rewrites the generated README section between
+`target/criterion`, captures `examples/instrumentation_profile.rs` counter
+snapshots in `target/lazily-instrumentation-profile.csv`, and rewrites the
+generated README section between
 `<!-- benchmark-results:start -->` and `<!-- benchmark-results:end -->`.
 The generated section must include the current Cargo package version, the
-refresh command, the Criterion baseline comparison workflow, and one row for
-each required benchmark scenario above. `--check` verifies that the README
-section is already current without rewriting it; `--no-run` reuses existing
-Criterion estimate files for a report-only refresh after a manual baseline
-comparison run.
+refresh command, the Criterion baseline comparison workflow, one timing row for
+each required benchmark scenario above, and instrumentation rows covering
+recomputes, duplicate speculative recomputes, dependency edge churn, effect
+queue depth, node allocations, and lock wait/hold time. `--check` verifies that
+the README section is already current without rewriting it; `--no-run` reuses
+existing Criterion estimate files for a report-only refresh after a manual
+baseline comparison run while refreshing the instrumentation CSV unless it is
+also running in check mode.
 
 ## Differences from lazily-zig
 
