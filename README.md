@@ -197,7 +197,7 @@ retained independently of the mutex-protected erased-value storage.
 ## Benchmark Results
 
 <!-- benchmark-results:start -->
-Generated for package `lazily` version `0.4.0`.
+Generated for package `lazily` version `0.5.0`.
 
 Environment: `rustc 1.94.0 (4a4ef493e 2026-03-02)` on `x86_64-unknown-linux-gnu`.
 
