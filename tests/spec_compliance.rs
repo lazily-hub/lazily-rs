@@ -210,6 +210,44 @@ mod threading_contract {
         assert_eq!(ctx.get(&doubled), 10);
     }
 
+    /// SPEC: frontier invalidation coalesces duplicate slot paths but still
+    /// upgrades a duplicated direct cell dependency to force recomputation.
+    #[test]
+    fn thread_safe_frontier_invalidation_preserves_direct_force_recompute() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(0i32);
+        let stable = ctx.memo(move |ctx| {
+            ctx.get_cell(&root);
+            0i32
+        });
+        let compute_count = Arc::new(AtomicUsize::new(0));
+        let compute_count_for_slot = Arc::clone(&compute_count);
+        let mixed = ctx.computed(move |ctx| {
+            compute_count_for_slot.fetch_add(1, Ordering::SeqCst);
+            ctx.get(&stable);
+            ctx.get_cell(&root)
+        });
+
+        assert_eq!(ctx.get(&mixed), 0);
+
+        let worker_ctx = ctx.clone();
+        let worker = thread::spawn(move || {
+            worker_ctx.set_cell(&root, 1);
+        });
+        worker.join().expect("worker should finish");
+
+        assert_eq!(
+            ctx.get(&mixed),
+            1,
+            "direct cell reads must force recompute even when an equal memo path also reaches the slot"
+        );
+        assert_eq!(
+            compute_count.load(Ordering::SeqCst),
+            2,
+            "slot should recompute once for the changed cell after duplicate frontier coalescing"
+        );
+    }
+
     /// SPEC: the graph lock is not held while user compute callbacks run, so
     /// callbacks may re-enter the same context through nested `get` calls.
     #[test]

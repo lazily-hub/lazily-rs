@@ -234,6 +234,15 @@ Locking model:
 - Recompute notifications are scoped to the slot that finished. A completion for one in-flight slot must not wake waiters parked behind another in-flight slot.
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
+- Thread-safe invalidation uses an explicit frontier work queue under the graph
+  mutex instead of recursive dependent walks. Changed-cell and slot-value-change
+  roots snapshot dependent frontiers, coalesce duplicate slot ids in one
+  invalidation pass, preserve direct changed-value `force_recompute` upgrades
+  when a slot is reached through both direct and downstream paths, and then
+  apply dirty/revision/effect scheduling mutations at the same graph mutation
+  boundary. The frontier shape is partitionable for future bounded worker
+  traversal, but this prototype keeps application under the context mutex until
+  benchmark and model-checking evidence proves a parallel apply path safe.
 
 Lock strategy evaluation:
 
@@ -341,6 +350,9 @@ Implementation notes:
 - `cell.clear_dependents(&ctx)` → clear all dependent slots without changing cell value
 - `ctx.batch()` → queue changed cells and explicit slot/cell clears, then flush queued roots when the outermost batch exits
 - Slot invalidation → preserve cached value as dirty → validate/recompute on next `ctx.get()` access
+- Thread-safe slot invalidation walks an explicit coalesced frontier, so diamond
+  paths mark each reachable slot at most once per invalidation pass unless a
+  later direct changed-value path upgrades that slot to forced recompute
 - If a dirty `ctx.memo()` slot recomputes to an equal value, downstream dirty slots become fresh without recomputing
 - Slot clearing → remove cached value → hard-clear dependents recursively
 - Effects rerun after the invalidation pass if any tracked dependency invalidated

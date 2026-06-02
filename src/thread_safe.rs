@@ -164,6 +164,12 @@ enum ThreadSafeSlotRead<T> {
     Refresh(Vec<SlotId>),
 }
 
+#[derive(Clone, Copy)]
+struct ThreadSafeInvalidationRoot {
+    id: SlotId,
+    force_recompute: bool,
+}
+
 #[derive(Default)]
 struct ThreadSafeState {
     nodes: HashMap<SlotId, ThreadSafeNode>,
@@ -1130,24 +1136,7 @@ impl ThreadSafeContext {
     }
 
     fn clear_slot_now_locked(state: &mut ThreadSafeState, id: SlotId) {
-        let dependents = {
-            if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) {
-                if slot.value.is_none() && !slot.dirty {
-                    return;
-                }
-                slot.value = None;
-                slot.dirty = false;
-                slot.force_recompute = false;
-                slot.revision = slot.revision.wrapping_add(1);
-                slot.dependents.iter().copied().collect::<Vec<_>>()
-            } else {
-                return;
-            }
-        };
-
-        for dependent_id in dependents {
-            Self::clear_dependent_locked(state, dependent_id);
-        }
+        Self::clear_frontier_locked(state, [id]);
     }
 
     fn clear_slot_now(&self, id: SlotId) {
@@ -1174,96 +1163,194 @@ impl ThreadSafeContext {
     }
 
     fn invalidate_cell_dependents_locked(state: &mut ThreadSafeState, id: SlotId) {
-        let dependents = {
-            match state.nodes.get(&id) {
-                Some(ThreadSafeNode::Cell(cell)) => cell.dependents.iter().copied().collect(),
-                _ => Vec::new(),
-            }
-        };
-
-        for dependent_id in dependents {
-            Self::invalidate_dependent_from_changed_value_locked(state, dependent_id);
-        }
+        let roots =
+            Self::dependents_locked(state, id)
+                .into_iter()
+                .map(|id| ThreadSafeInvalidationRoot {
+                    id,
+                    force_recompute: true,
+                });
+        Self::invalidate_frontier_locked(state, roots);
     }
 
     fn clear_cell_dependents_locked(state: &mut ThreadSafeState, id: SlotId) {
-        let dependents = {
-            match state.nodes.get(&id) {
-                Some(ThreadSafeNode::Cell(cell)) => cell.dependents.iter().copied().collect(),
-                _ => Vec::new(),
-            }
-        };
-
-        for dependent_id in dependents {
-            Self::clear_dependent_locked(state, dependent_id);
-        }
-    }
-
-    fn clear_dependent_locked(state: &mut ThreadSafeState, id: SlotId) {
-        let is_effect = matches!(state.nodes.get(&id), Some(ThreadSafeNode::Effect(_)));
-
-        if is_effect {
-            Self::schedule_effect_locked(state, id, true);
-        } else {
-            Self::clear_slot_now_locked(state, id);
-        }
-    }
-
-    fn invalidate_dependent_from_changed_value_locked(state: &mut ThreadSafeState, id: SlotId) {
-        let is_effect = matches!(state.nodes.get(&id), Some(ThreadSafeNode::Effect(_)));
-
-        if is_effect {
-            Self::schedule_effect_locked(state, id, true);
-        } else {
-            Self::mark_slot_dirty_locked(state, id, true);
-        }
+        Self::clear_frontier_locked(state, Self::dependents_locked(state, id));
     }
 
     fn notify_slot_value_changed_locked(state: &mut ThreadSafeState, id: SlotId) {
-        let dependents = {
-            match state.nodes.get(&id) {
-                Some(ThreadSafeNode::Slot(slot)) => slot.dependents.iter().copied().collect(),
-                _ => Vec::new(),
-            }
-        };
+        let roots =
+            Self::dependents_locked(state, id)
+                .into_iter()
+                .map(|id| ThreadSafeInvalidationRoot {
+                    id,
+                    force_recompute: true,
+                });
+        Self::invalidate_frontier_locked(state, roots);
+    }
 
-        for dependent_id in dependents {
-            Self::invalidate_dependent_from_changed_value_locked(state, dependent_id);
+    fn dependents_locked(state: &ThreadSafeState, id: SlotId) -> Vec<SlotId> {
+        match state.nodes.get(&id) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.iter().copied().collect(),
+            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.iter().copied().collect(),
+            Some(ThreadSafeNode::Effect(_)) | None => Vec::new(),
         }
     }
 
-    fn mark_slot_dirty_locked(state: &mut ThreadSafeState, id: SlotId, force_recompute: bool) {
-        let (dependents, should_propagate) = {
-            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
-                return;
-            };
-            let should_propagate = !slot.dirty || (force_recompute && !slot.force_recompute);
-            slot.revision = slot.revision.wrapping_add(1);
-            slot.dirty = true;
-            if force_recompute {
-                slot.force_recompute = true;
+    fn enqueue_invalidation_root(
+        queue: &mut VecDeque<ThreadSafeInvalidationRoot>,
+        requested_force: &mut HashMap<SlotId, bool>,
+        root: ThreadSafeInvalidationRoot,
+    ) {
+        match requested_force.get_mut(&root.id) {
+            Some(force_recompute) if root.force_recompute && !*force_recompute => {
+                *force_recompute = true;
+                queue.push_back(root);
             }
-            (
-                slot.dependents.iter().copied().collect::<Vec<_>>(),
-                should_propagate,
-            )
-        };
+            Some(_) => {}
+            None => {
+                requested_force.insert(root.id, root.force_recompute);
+                queue.push_back(root);
+            }
+        }
+    }
 
-        if !should_propagate {
-            return;
+    fn invalidate_frontier_locked<I>(state: &mut ThreadSafeState, roots: I)
+    where
+        I: IntoIterator<Item = ThreadSafeInvalidationRoot>,
+    {
+        let mut queue = VecDeque::new();
+        let mut requested_force = HashMap::new();
+        for root in roots {
+            Self::enqueue_invalidation_root(&mut queue, &mut requested_force, root);
         }
 
-        for dependent_id in dependents {
-            let is_effect = matches!(
-                state.nodes.get(&dependent_id),
-                Some(ThreadSafeNode::Effect(_))
-            );
+        let mut simulated_slots = HashMap::<SlotId, (bool, bool)>::new();
+        let mut slots_to_mark = HashMap::<SlotId, bool>::new();
+        let mut slot_order = Vec::new();
+        let mut effects_to_schedule = HashMap::<SlotId, bool>::new();
+        let mut effect_order = Vec::new();
 
-            if is_effect {
-                Self::schedule_effect_locked(state, dependent_id, false);
-            } else {
-                Self::mark_slot_dirty_locked(state, dependent_id, false);
+        while let Some(root) = queue.pop_front() {
+            let Some(force_recompute) = requested_force.get(&root.id).copied() else {
+                continue;
+            };
+            if root.force_recompute != force_recompute {
+                continue;
             }
+
+            let dependents = match state.nodes.get(&root.id) {
+                Some(ThreadSafeNode::Slot(slot)) => {
+                    let (dirty, force_state) = simulated_slots
+                        .get(&root.id)
+                        .copied()
+                        .unwrap_or((slot.dirty, slot.force_recompute));
+                    let should_propagate = !dirty || (force_recompute && !force_state);
+                    simulated_slots.insert(root.id, (true, force_state || force_recompute));
+
+                    match slots_to_mark.get_mut(&root.id) {
+                        Some(force) => *force |= force_recompute,
+                        None => {
+                            slots_to_mark.insert(root.id, force_recompute);
+                            slot_order.push(root.id);
+                        }
+                    }
+
+                    if should_propagate {
+                        slot.dependents.iter().copied().collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Some(ThreadSafeNode::Effect(_)) => {
+                    match effects_to_schedule.get_mut(&root.id) {
+                        Some(force) => *force |= force_recompute,
+                        None => {
+                            effects_to_schedule.insert(root.id, force_recompute);
+                            effect_order.push(root.id);
+                        }
+                    }
+                    Vec::new()
+                }
+                Some(ThreadSafeNode::Cell(_)) | None => Vec::new(),
+            };
+
+            for dependent_id in dependents {
+                Self::enqueue_invalidation_root(
+                    &mut queue,
+                    &mut requested_force,
+                    ThreadSafeInvalidationRoot {
+                        id: dependent_id,
+                        force_recompute: false,
+                    },
+                );
+            }
+        }
+
+        for id in slot_order {
+            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
+                continue;
+            };
+            slot.revision = slot.revision.wrapping_add(1);
+            slot.dirty = true;
+            if slots_to_mark.get(&id).copied().unwrap_or(false) {
+                slot.force_recompute = true;
+            }
+        }
+
+        for id in effect_order {
+            Self::schedule_effect_locked(
+                state,
+                id,
+                effects_to_schedule.get(&id).copied().unwrap_or(false),
+            );
+        }
+    }
+
+    fn clear_frontier_locked<I>(state: &mut ThreadSafeState, roots: I)
+    where
+        I: IntoIterator<Item = SlotId>,
+    {
+        let mut queue = roots.into_iter().collect::<VecDeque<_>>();
+        let mut visited_slots = HashSet::new();
+        let mut slots_to_clear = Vec::new();
+        let mut effects_to_schedule = HashSet::new();
+        let mut effect_order = Vec::new();
+
+        while let Some(id) = queue.pop_front() {
+            match state.nodes.get(&id) {
+                Some(ThreadSafeNode::Slot(slot)) => {
+                    if !visited_slots.insert(id) {
+                        continue;
+                    }
+                    if slot.value.is_none() && !slot.dirty {
+                        continue;
+                    }
+                    slots_to_clear.push(id);
+                    for dependent_id in slot.dependents.iter().copied() {
+                        queue.push_back(dependent_id);
+                    }
+                }
+                Some(ThreadSafeNode::Effect(_)) => {
+                    if effects_to_schedule.insert(id) {
+                        effect_order.push(id);
+                    }
+                }
+                Some(ThreadSafeNode::Cell(_)) | None => {}
+            }
+        }
+
+        for id in slots_to_clear {
+            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
+                continue;
+            };
+            slot.value = None;
+            slot.dirty = false;
+            slot.force_recompute = false;
+            slot.revision = slot.revision.wrapping_add(1);
+        }
+
+        for id in effect_order {
+            Self::schedule_effect_locked(state, id, true);
         }
     }
 
