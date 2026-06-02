@@ -231,6 +231,12 @@ Locking model:
 - Fresh cached slot reads use a per-slot read-mostly cached-value sidecar; dependency-edge changes, invalidation frontier application, batch queues, effect queues, and disposal remain graph mutex mutations
 - Read-mostly cached slot access is versioned optimistically: the getter loads a per-slot atomic cache revision before cloning the retained cached `Arc`, then validates the revision and dirty/force flags again after the clone. Any concurrent invalidation, clear, or value publish changes the revision and forces the getter onto the graph-validated refresh path.
 - Each thread-safe slot also owns a per-slot recompute/value-publish sidecar for the cached-value visibility flags, in-flight bit, waiter `Condvar`, and revision used to reject stale callback results. Graph-state dirty/revision fields remain mirrored under the context mutex for dependency-frontier traversal and tests.
+- Each thread-safe slot sidecar mirrors a per-slot dependency summary: the
+  current dependency ids plus a slot-dependency count. A cell-only dirty refresh
+  may claim the SlotId-partitioned recompute sidecar, snapshot old dependencies,
+  and skip the graph-locked `get_refresh` dependency scan. The owner still takes
+  the final `publish` graph mutation to diff dynamic dependencies, publish the
+  value, notify dependents, and reject stale in-flight revisions.
 - Cells and slots mirror their dependent frontiers into per-node sidecars keyed
   by `SlotId`. Changed-cell invalidation may use these sidecars without taking
   the context graph mutex only when no callback is actively discovering
@@ -266,10 +272,11 @@ Lock strategy evaluation:
 - Keep one context-level graph synchronization primitive until benchmark instrumentation shows a finer-grained design improves the relevant workload without trading off other contention cases
 - `ThreadSafeContext` uses read-mostly per-slot cached-value sidecars for fresh
   cached reads, a per-slot recompute/value-publish sidecar for in-flight
-  same-slot waiters, and per-node dependent frontier sidecars for slot-only
-  changed-cell invalidation; same-thread batches use thread-local batch frames to
-  coalesce changed-cell queueing before the graph-owned batch flush; dependency
-  graph mutations still require the context mutex
+  same-slot waiters, a per-slot dependency summary for cell-only dirty refresh
+  routing, and per-node dependent frontier sidecars for slot-only changed-cell
+  invalidation; same-thread batches use thread-local batch frames to coalesce
+  changed-cell queueing before the graph-owned batch flush; dependency graph
+  mutations still require the context mutex
 - The read-mostly cached-value sidecar is an optimistic validation path, not a
   lock-free graph replacement. Its atomic cache revision rejects mid-read
   invalidation and mid-read publish races, then falls back to the existing

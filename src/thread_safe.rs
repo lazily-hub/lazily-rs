@@ -205,7 +205,6 @@ fn current_thread_safe_lock_site() -> ThreadSafeLockSite {
 
 struct ThreadSafeSlotNode {
     value: Option<Arc<ThreadSafeAny>>,
-    compute: Arc<ThreadSafeComputeFn>,
     equals: Option<Arc<ThreadSafeEqualsFn>>,
     dependencies: HashSet<SlotId>,
     dependents: HashSet<SlotId>,
@@ -221,18 +220,40 @@ enum ThreadSafeDependentKind {
     Effect,
 }
 
-#[derive(Default)]
 struct ThreadSafeSlotFastPath {
     value: RwLock<Option<Arc<ThreadSafeAny>>>,
     cache_revision: AtomicU64,
     dirty: AtomicBool,
     force_recompute: AtomicBool,
+    compute: Arc<ThreadSafeComputeFn>,
+    dependencies: Mutex<HashSet<SlotId>>,
+    slot_dependency_count: AtomicUsize,
     recompute: Mutex<ThreadSafeSlotRecomputeState>,
     recompute_condvar: Condvar,
     dependents: Mutex<HashMap<SlotId, ThreadSafeDependentKind>>,
 }
 
 impl ThreadSafeSlotFastPath {
+    fn new(compute: Arc<ThreadSafeComputeFn>, initial_dependencies: HashSet<SlotId>) -> Self {
+        let slot_dependency_count = initial_dependencies.len();
+        Self {
+            value: RwLock::new(None),
+            cache_revision: AtomicU64::default(),
+            dirty: AtomicBool::default(),
+            force_recompute: AtomicBool::default(),
+            compute,
+            dependencies: Mutex::new(initial_dependencies),
+            slot_dependency_count: AtomicUsize::new(slot_dependency_count),
+            recompute: Mutex::new(ThreadSafeSlotRecomputeState::default()),
+            recompute_condvar: Condvar::new(),
+            dependents: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn compute(&self) -> Arc<ThreadSafeComputeFn> {
+        Arc::clone(&self.compute)
+    }
+
     fn read_fresh<T>(&self) -> Option<T>
     where
         T: Clone + Send + Sync + 'static,
@@ -265,6 +286,10 @@ impl ThreadSafeSlotFastPath {
 
     fn needs_refresh(&self) -> bool {
         self.dirty.load(Ordering::Acquire) || self.force_recompute.load(Ordering::Acquire)
+    }
+
+    fn needs_refresh_without_slot_dependencies(&self) -> bool {
+        self.needs_refresh() && self.slot_dependency_count.load(Ordering::Acquire) == 0
     }
 
     fn dirty_force(&self) -> (bool, bool) {
@@ -388,6 +413,35 @@ impl ThreadSafeSlotFastPath {
                 self.recompute_condvar.notify_one();
             }
             ThreadSafeRecomputeResult::Stale
+        }
+    }
+
+    fn dependencies_snapshot(&self) -> HashSet<SlotId> {
+        self.dependencies
+            .lock()
+            .expect("ThreadSafeContext slot dependencies mutex poisoned")
+            .clone()
+    }
+
+    fn insert_dependency(&self, dependency_id: SlotId, dependency_is_slot: bool) {
+        let inserted = self
+            .dependencies
+            .lock()
+            .expect("ThreadSafeContext slot dependencies mutex poisoned")
+            .insert(dependency_id);
+        if inserted && dependency_is_slot {
+            self.slot_dependency_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn remove_dependency(&self, dependency_id: SlotId, dependency_is_slot: bool) {
+        let removed = self
+            .dependencies
+            .lock()
+            .expect("ThreadSafeContext slot dependencies mutex poisoned")
+            .remove(&dependency_id);
+        if removed && dependency_is_slot {
+            self.slot_dependency_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
 
@@ -1016,6 +1070,12 @@ impl ThreadSafeContext {
             .unwrap_or(false)
     }
 
+    fn slot_needs_refresh_without_slot_dependencies(&self, id: SlotId) -> bool {
+        self.slot_fast_path(id)
+            .map(|fast_path| fast_path.needs_refresh_without_slot_dependencies())
+            .unwrap_or(false)
+    }
+
     fn callbacks_active(&self) -> bool {
         self.inner.active_callbacks.load(Ordering::Acquire) > 0
     }
@@ -1083,6 +1143,10 @@ impl ThreadSafeContext {
         #[cfg(feature = "instrumentation")]
         let mut edge_added = false;
         let mut state = self.lock_state();
+        let dependency_is_slot = matches!(
+            state.nodes.get(&dependency_id),
+            Some(ThreadSafeNode::Slot(_))
+        );
         let dependent_kind = Self::dependent_kind_locked(&state, dependent_id);
         if let Some(node) = state.nodes.get_mut(&dependency_id) {
             match node {
@@ -1099,13 +1163,15 @@ impl ThreadSafeContext {
         if let Some(node) = state.nodes.get_mut(&dependent_id) {
             match node {
                 ThreadSafeNode::Slot(parent) => {
+                    let inserted = parent.dependencies.insert(dependency_id);
+                    if inserted {
+                        parent
+                            .fast_path
+                            .insert_dependency(dependency_id, dependency_is_slot);
+                    }
                     #[cfg(feature = "instrumentation")]
                     {
-                        edge_added = parent.dependencies.insert(dependency_id);
-                    }
-                    #[cfg(not(feature = "instrumentation"))]
-                    {
-                        parent.dependencies.insert(dependency_id);
+                        edge_added = inserted;
                     }
                 }
                 ThreadSafeNode::Effect(parent) => {
@@ -1159,8 +1225,19 @@ impl ThreadSafeContext {
         dependent_id: SlotId,
         dependency_id: SlotId,
     ) -> bool {
+        let dependency_is_slot = matches!(
+            state.nodes.get(&dependency_id),
+            Some(ThreadSafeNode::Slot(_))
+        );
         match state.nodes.get_mut(&dependent_id) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependencies.remove(&dependency_id),
+            Some(ThreadSafeNode::Slot(slot)) => {
+                let removed = slot.dependencies.remove(&dependency_id);
+                if removed {
+                    slot.fast_path
+                        .remove_dependency(dependency_id, dependency_is_slot);
+                }
+                removed
+            }
             Some(ThreadSafeNode::Effect(effect)) => effect.dependencies.remove(&dependency_id),
             Some(ThreadSafeNode::Cell(_)) | None => false,
         }
@@ -1232,10 +1309,14 @@ impl ThreadSafeContext {
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
     {
         let id = self.alloc_id();
-        let fast_path = Arc::new(ThreadSafeSlotFastPath::default());
+        let compute: Arc<ThreadSafeComputeFn> =
+            Arc::new(move |ctx: &ThreadSafeContext| Box::new(compute(ctx)));
+        let fast_path = Arc::new(ThreadSafeSlotFastPath::new(
+            Arc::clone(&compute),
+            HashSet::new(),
+        ));
         let node = ThreadSafeSlotNode {
             value: None,
-            compute: Arc::new(move |ctx| Box::new(compute(ctx))),
             equals,
             dependencies: HashSet::new(),
             dependents: HashSet::new(),
@@ -1274,6 +1355,11 @@ impl ThreadSafeContext {
         loop {
             if self.slot_recompute_in_flight(id) {
                 let _ = self.wait_for_slot_recompute(id);
+                continue;
+            }
+
+            if self.slot_needs_refresh_without_slot_dependencies(id) {
+                let _ = self.recompute_slot_now(id);
                 continue;
             }
 
@@ -1331,6 +1417,13 @@ impl ThreadSafeContext {
     fn refresh_slot(&self, id: SlotId) -> bool {
         if self.slot_recompute_in_flight(id) {
             return match self.wait_for_slot_recompute(id) {
+                ThreadSafeRecomputeResult::Fresh(changed) => changed,
+                ThreadSafeRecomputeResult::Stale => self.refresh_slot(id),
+            };
+        }
+
+        if self.slot_needs_refresh_without_slot_dependencies(id) {
+            return match self.recompute_slot_now(id) {
                 ThreadSafeRecomputeResult::Fresh(changed) => changed,
                 ThreadSafeRecomputeResult::Stale => self.refresh_slot(id),
             };
@@ -1407,32 +1500,14 @@ impl ThreadSafeContext {
             return self.wait_for_slot_recompute(id);
         }
 
-        let (compute, old_dependencies, recompute_start, fast_path) = {
-            #[cfg(feature = "instrumentation")]
-            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
-            let mut state = self.lock_state();
-            let result = {
-                let slot = match state.nodes.get_mut(&id) {
-                    Some(ThreadSafeNode::Slot(slot)) => slot,
-                    _ => panic!("get_slot called on non-slot id"),
-                };
-                let Some(recompute_start) = slot.fast_path.begin_recompute() else {
-                    drop(state);
-                    return self.wait_for_slot_recompute(id);
-                };
-                (
-                    Arc::clone(&slot.compute),
-                    slot.dependencies.clone(),
-                    recompute_start,
-                    Arc::clone(&slot.fast_path),
-                )
-            };
-            #[cfg(feature = "instrumentation")]
-            {
-                state.instrumentation.record_slot_recompute();
-            }
-            result
+        let fast_path = self
+            .slot_fast_path(id)
+            .unwrap_or_else(|| panic!("get_slot called on non-slot id"));
+        let Some(recompute_start) = fast_path.begin_recompute() else {
+            return self.wait_for_slot_recompute(id);
         };
+        let compute = fast_path.compute();
+        let old_dependencies = fast_path.dependencies_snapshot();
         let mut recompute_guard = RecomputeGuard {
             fast_path: Arc::clone(&fast_path),
             active: true,
@@ -1453,6 +1528,10 @@ impl ThreadSafeContext {
             #[cfg(feature = "instrumentation")]
             let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
             let mut state = self.lock_state();
+            #[cfg(feature = "instrumentation")]
+            {
+                state.instrumentation.record_slot_recompute();
+            }
             {
                 let slot = match state.nodes.get_mut(&id) {
                     Some(ThreadSafeNode::Slot(slot)) => slot,

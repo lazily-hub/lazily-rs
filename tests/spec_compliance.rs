@@ -768,6 +768,9 @@ mod storage_strategy_evaluation {
             "mid-read optimistic validation fallback",
             "Optimistic cached reads fall back",
             "per-slot recompute/value-publish sidecar",
+            "per-slot dependency summary",
+            "cell-only dirty refresh",
+            "SlotId-partitioned recompute sidecar",
             "per-node dependent frontier sidecars",
             "explicit `InvalidationPlan`",
             "snapshot hard-clear frontiers",
@@ -1079,8 +1082,8 @@ mod benchmark_instrumentation {
     }
 
     /// SPEC: the cached get fast path must still observe invalidation from
-    /// another thread before returning; future optimistic reads need the same
-    /// visibility guarantee.
+    /// another thread before returning, while cell-only dirty slots can bypass
+    /// the graph-locked refresh decision.
     #[test]
     fn thread_safe_cached_get_revalidates_after_cross_thread_invalidation() {
         let ctx = ThreadSafeContext::new();
@@ -1103,9 +1106,15 @@ mod benchmark_instrumentation {
             snapshot.slot_recomputes, 1,
             "invalidated cached get should recompute before returning"
         );
-        assert!(
-            lock_site(&ctx, ThreadSafeLockSite::GetRefresh).lock_acquisitions > 1,
-            "invalidated cached get must not return through the graph-lock-free fresh path"
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::GetRefresh).lock_acquisitions,
+            0,
+            "cell-only invalidated cached get should recompute from the per-slot dependency summary"
+        );
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::Publish).lock_acquisitions,
+            1,
+            "cell-only invalidated cached get should need only the final publish graph mutation"
         );
     }
 
@@ -1314,6 +1323,49 @@ mod benchmark_instrumentation {
         }
     }
 
+    /// SPEC: independent cell-only dirty slots use their per-slot dependency
+    /// summaries to bypass the graph-locked refresh decision, then publish each
+    /// recompute through one final graph mutation.
+    #[test]
+    fn thread_safe_independent_cell_only_refreshes_skip_get_refresh_locks() {
+        let ctx = ThreadSafeContext::new();
+        let workers = 8usize;
+        let roots = (0..workers)
+            .map(|worker| ctx.cell(worker))
+            .collect::<Vec<_>>();
+        let values = roots
+            .iter()
+            .map(|root| {
+                let root = *root;
+                ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+            })
+            .collect::<Vec<_>>();
+
+        for (worker, value) in values.iter().enumerate() {
+            assert_eq!(ctx.get(value), worker + 1);
+        }
+
+        for (worker, root) in roots.iter().enumerate() {
+            ctx.set_cell(root, worker + 10);
+        }
+        ctx.reset_instrumentation();
+
+        for (worker, value) in values.iter().enumerate() {
+            assert_eq!(ctx.get(value), worker + 11);
+        }
+
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::GetRefresh).lock_acquisitions,
+            0,
+            "cell-only independent refreshes should use per-slot dependency summaries"
+        );
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::Publish).lock_acquisitions,
+            workers as u64,
+            "each independent slot should take only its final publish mutation"
+        );
+    }
+
     /// SPEC: same-thread `ThreadSafeContext` batches keep changed cells in a
     /// local batch frame and take one graph invalidation lock at batch exit.
     #[test]
@@ -1486,11 +1538,17 @@ mod benchmark_instrumentation {
         );
 
         let get_refresh_locks = lock_site(&ctx, ThreadSafeLockSite::GetRefresh);
-        assert!(
-            get_refresh_locks.lock_acquisitions <= 3,
-            "forced recompute of a cell-only total should only read, decide, then return fresh; \
+        assert_eq!(
+            get_refresh_locks.lock_acquisitions, 0,
+            "forced recompute of a cell-only total should skip graph get_refresh locks; \
              saw {} get_refresh acquisitions",
             get_refresh_locks.lock_acquisitions
+        );
+
+        let publish_locks = lock_site(&ctx, ThreadSafeLockSite::Publish);
+        assert_eq!(
+            publish_locks.lock_acquisitions, 1,
+            "forced recompute of a cell-only total should only take the final publish lock"
         );
     }
 

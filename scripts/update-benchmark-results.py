@@ -148,21 +148,21 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
     ),
     InstrumentationBudget(
         "thread_safe_contention_same_slot_write_read_16",
-        max_lock_acquisitions=1_600,
+        max_lock_acquisitions=1_000,
         site_budgets=(
-            LockAttributionBudget("get_refresh", 700),
-            LockAttributionBudget("publish", 450),
-            LockAttributionBudget("in_flight_wait", 500),
+            LockAttributionBudget("get_refresh", 160),
+            LockAttributionBudget("publish", 256),
+            LockAttributionBudget("in_flight_wait", 700),
             LockAttributionBudget("set_cell_invalidation", 32),
         ),
     ),
     InstrumentationBudget(
         "thread_safe_contention_independent_slots_16",
-        max_lock_acquisitions=1_500,
+        max_lock_acquisitions=700,
         site_budgets=(
             LockAttributionBudget("other", 160),
-            LockAttributionBudget("get_refresh", 700),
-            LockAttributionBudget("publish", 700),
+            LockAttributionBudget("get_refresh", 64),
+            LockAttributionBudget("publish", 320),
             LockAttributionBudget("dependency_edge", 16),
             LockAttributionBudget("set_cell_invalidation", 64),
         ),

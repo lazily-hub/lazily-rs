@@ -116,6 +116,17 @@ impl Default for OptimisticReadGraph {
 }
 
 #[derive(Debug, Default)]
+struct PartitionedRefreshGraph {
+    revision: AtomicUsize,
+    dirty: AtomicBool,
+    slot_dependency_count: AtomicUsize,
+    sidecar_refreshes: AtomicUsize,
+    graph_refreshes: AtomicUsize,
+    stale_finishes: AtomicUsize,
+    publish_lock: Mutex<()>,
+}
+
+#[derive(Debug, Default)]
 struct FastFrontierState {
     active_callbacks: usize,
     dependency_registered: bool,
@@ -768,6 +779,42 @@ impl OptimisticReadGraph {
     }
 }
 
+impl PartitionedRefreshGraph {
+    fn insert_slot_dependency(&self) {
+        self.slot_dependency_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn remove_slot_dependency(&self) {
+        self.slot_dependency_count.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    fn invalidate(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    fn refresh_after_invalidation(&self) {
+        if !self.dirty.load(Ordering::Acquire) {
+            return;
+        }
+
+        let start_revision = self.revision.load(Ordering::Acquire);
+        if self.slot_dependency_count.load(Ordering::Acquire) == 0 {
+            self.sidecar_refreshes.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.graph_refreshes.fetch_add(1, Ordering::AcqRel);
+        }
+
+        thread::yield_now();
+        let _publish = self.publish_lock.lock().expect("publish mutex poisoned");
+        if self.revision.load(Ordering::Acquire) != start_revision {
+            self.stale_finishes.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        self.dirty.store(false, Ordering::Release);
+    }
+}
+
 impl FastFrontierGraph {
     fn begin_callback(&self) {
         let mut state = self.state.lock().expect("frontier mutex poisoned");
@@ -816,6 +863,55 @@ fn optimistic_cached_read_rejects_mid_read_invalidation() {
 
         graph.publish(2);
         assert_eq!(graph.read_fresh(), Some(2));
+    });
+}
+
+#[test]
+fn partitioned_cell_only_refresh_preserves_dynamic_dependency_and_stale_races() {
+    loom::model(|| {
+        let graph = Arc::new(PartitionedRefreshGraph::default());
+        graph.invalidate();
+
+        let dependency_editor = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || {
+                graph.insert_slot_dependency();
+                thread::yield_now();
+                graph.remove_slot_dependency();
+            })
+        };
+        let refresher = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || {
+                graph.refresh_after_invalidation();
+            })
+        };
+        let invalidator = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || {
+                thread::yield_now();
+                graph.invalidate();
+            })
+        };
+
+        dependency_editor
+            .join()
+            .expect("dependency editor should finish");
+        refresher.join().expect("refresher should finish");
+        invalidator.join().expect("invalidator should finish");
+
+        let sidecar_refreshes = graph.sidecar_refreshes.load(Ordering::Acquire);
+        let graph_refreshes = graph.graph_refreshes.load(Ordering::Acquire);
+        assert!(
+            sidecar_refreshes + graph_refreshes <= 1,
+            "one refresh attempt should choose exactly one route"
+        );
+        if graph.stale_finishes.load(Ordering::Acquire) > 0 {
+            assert!(
+                graph.dirty.load(Ordering::Acquire),
+                "stale sidecar or graph refresh completion must leave the slot dirty"
+            );
+        }
     });
 }
 
