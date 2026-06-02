@@ -796,6 +796,41 @@ mod benchmark_instrumentation {
         }
     }
 
+    /// SPEC: Thread-safe recompute batches stale dependency edge removal into
+    /// the publish mutation instead of taking one graph lock per removed edge.
+    #[test]
+    fn thread_safe_recompute_batches_dependency_edge_removal_locks() {
+        let ctx = ThreadSafeContext::new();
+        let cells = [
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+        ];
+        let total = ctx.computed(move |ctx| {
+            cells
+                .iter()
+                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+        });
+
+        assert_eq!(ctx.get(&total), 0);
+        ctx.reset_instrumentation();
+
+        ctx.set_cell(&cells[0], 1);
+        assert_eq!(ctx.get(&total), 1);
+
+        let snapshot = ctx.instrumentation_snapshot();
+        assert_eq!(snapshot.dependency_edges_removed, cells.len() as u64);
+        assert_eq!(snapshot.dependency_edges_added, cells.len() as u64);
+
+        let dependency_edge_locks = lock_site(&ctx, ThreadSafeLockSite::DependencyEdge);
+        assert_eq!(
+            dependency_edge_locks.lock_acquisitions,
+            cells.len() as u64,
+            "stale edge removal should be batched into the recompute publish lock"
+        );
+    }
+
     fn lock_site(
         ctx: &ThreadSafeContext,
         site: ThreadSafeLockSite,

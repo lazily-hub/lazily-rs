@@ -368,37 +368,43 @@ impl ThreadSafeContext {
     fn remove_dependent_edge(&self, dependency_id: SlotId, dependent_id: SlotId) {
         #[cfg(feature = "instrumentation")]
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::DependencyEdge);
-        #[cfg(feature = "instrumentation")]
-        let mut edge_removed = false;
         let mut state = self.lock_state();
-        if let Some(node) = state.nodes.get_mut(&dependency_id) {
-            match node {
-                ThreadSafeNode::Slot(slot) => {
-                    #[cfg(feature = "instrumentation")]
-                    {
-                        edge_removed = slot.dependents.remove(&dependent_id);
-                    }
-                    #[cfg(not(feature = "instrumentation"))]
-                    {
-                        slot.dependents.remove(&dependent_id);
-                    }
-                }
-                ThreadSafeNode::Cell(cell) => {
-                    #[cfg(feature = "instrumentation")]
-                    {
-                        edge_removed = cell.dependents.remove(&dependent_id);
-                    }
-                    #[cfg(not(feature = "instrumentation"))]
-                    {
-                        cell.dependents.remove(&dependent_id);
-                    }
-                }
-                ThreadSafeNode::Effect(_) => {}
-            }
+        Self::remove_dependent_edge_locked(&mut state, dependency_id, dependent_id);
+    }
+
+    fn remove_dependent_edges_locked<I>(
+        state: &mut ThreadSafeState,
+        dependency_ids: I,
+        dependent_id: SlotId,
+    ) where
+        I: IntoIterator<Item = SlotId>,
+    {
+        for dependency_id in dependency_ids {
+            Self::remove_dependent_edge_locked(state, dependency_id, dependent_id);
         }
+    }
+
+    fn remove_dependent_edge_locked(
+        state: &mut ThreadSafeState,
+        dependency_id: SlotId,
+        dependent_id: SlotId,
+    ) {
+        let edge_removed = match state.nodes.get_mut(&dependency_id) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.remove(&dependent_id),
+            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.remove(&dependent_id),
+            Some(ThreadSafeNode::Effect(_)) | None => false,
+        };
+
         #[cfg(feature = "instrumentation")]
         if edge_removed {
             state.instrumentation.record_dependency_edge_removed();
+        }
+    }
+
+    fn drain_slot_dependencies_locked(state: &mut ThreadSafeState, id: SlotId) -> Vec<SlotId> {
+        match state.nodes.get_mut(&id) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependencies.drain().collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -484,6 +490,8 @@ impl ThreadSafeContext {
         loop {
             self.refresh_slot(id);
 
+            #[cfg(feature = "instrumentation")]
+            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
             let state = self.lock_state();
             match state.nodes.get(&id) {
                 Some(ThreadSafeNode::Slot(slot)) => {
@@ -512,22 +520,28 @@ impl ThreadSafeContext {
 
         let mut dependency_changed = false;
         for dependency_id in dependencies {
-            if self.is_slot_node(dependency_id) && self.refresh_slot(dependency_id) {
+            if self.refresh_slot(dependency_id) {
                 dependency_changed = true;
             }
         }
 
         let needs_recompute = {
-            let state = self.lock_state();
-            let slot = match state.nodes.get(&id) {
+            let mut state = self.lock_state();
+            let slot = match state.nodes.get_mut(&id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot,
                 _ => return false,
             };
-            slot.value.is_none() || slot.force_recompute || dependency_changed
+
+            if slot.value.is_none() || slot.force_recompute || dependency_changed {
+                true
+            } else {
+                slot.dirty = false;
+                slot.force_recompute = false;
+                false
+            }
         };
 
         if !needs_recompute {
-            self.clear_slot_dirty_flags(id);
             return false;
         }
 
@@ -539,21 +553,8 @@ impl ThreadSafeContext {
         }
     }
 
-    fn is_slot_node(&self, id: SlotId) -> bool {
-        let state = self.lock_state();
-        matches!(state.nodes.get(&id), Some(ThreadSafeNode::Slot(_)))
-    }
-
-    fn clear_slot_dirty_flags(&self, id: SlotId) {
-        let mut state = self.lock_state();
-        if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) {
-            slot.dirty = false;
-            slot.force_recompute = false;
-        }
-    }
-
     fn recompute_slot_now(&self, id: SlotId) -> ThreadSafeRecomputeResult {
-        let (compute, old_dependencies, was_unset, start_revision) = {
+        let (compute, was_unset, start_revision) = {
             #[cfg(feature = "instrumentation")]
             let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
             let mut state = self.lock_state();
@@ -569,11 +570,12 @@ impl ThreadSafeContext {
                 slot.computing = true;
                 (
                     Arc::clone(&slot.compute),
-                    slot.dependencies.drain().collect::<Vec<_>>(),
                     slot.value.is_none(),
                     slot.revision,
                 )
             };
+            let old_dependencies = Self::drain_slot_dependencies_locked(&mut state, id);
+            Self::remove_dependent_edges_locked(&mut state, old_dependencies, id);
             #[cfg(feature = "instrumentation")]
             {
                 state.instrumentation.record_slot_recompute();
@@ -585,10 +587,6 @@ impl ThreadSafeContext {
             id,
             active: true,
         };
-
-        for dependency_id in old_dependencies {
-            self.remove_dependent_edge(dependency_id, id);
-        }
 
         let _tracking = push_tracking_frame(self.context_id(), id);
         let result = compute(self);
@@ -969,9 +967,9 @@ impl ThreadSafeContext {
             return true;
         }
 
-        dependencies.into_iter().any(|dependency_id| {
-            self.is_slot_node(dependency_id) && self.refresh_slot(dependency_id)
-        })
+        dependencies
+            .into_iter()
+            .any(|dependency_id| self.refresh_slot(dependency_id))
     }
 
     /// Hard-clear a slot and recursively clear dependents.
