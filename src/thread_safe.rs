@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(feature = "instrumentation")]
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 #[cfg(feature = "instrumentation")]
 use std::time::Instant;
@@ -224,6 +224,7 @@ enum ThreadSafeDependentKind {
 #[derive(Default)]
 struct ThreadSafeSlotFastPath {
     value: RwLock<Option<Arc<ThreadSafeAny>>>,
+    cache_revision: AtomicU64,
     dirty: AtomicBool,
     force_recompute: AtomicBool,
     recompute: Mutex<ThreadSafeSlotRecomputeState>,
@@ -236,11 +237,13 @@ impl ThreadSafeSlotFastPath {
     where
         T: Clone + Send + Sync + 'static,
     {
+        let cache_revision = self.cache_revision.load(Ordering::Acquire);
         if self.dirty.load(Ordering::Acquire) || self.force_recompute.load(Ordering::Acquire) {
             return None;
         }
 
-        self.value
+        let value = self
+            .value
             .read()
             .expect("ThreadSafeContext slot fast path rwlock poisoned")
             .as_ref()
@@ -249,7 +252,15 @@ impl ThreadSafeSlotFastPath {
                     .downcast_ref::<T>()
                     .expect("type mismatch in slot")
                     .clone()
-            })
+            });
+        if self.cache_revision.load(Ordering::Acquire) != cache_revision
+            || self.dirty.load(Ordering::Acquire)
+            || self.force_recompute.load(Ordering::Acquire)
+        {
+            return None;
+        }
+
+        value
     }
 
     fn needs_refresh(&self) -> bool {
@@ -266,6 +277,7 @@ impl ThreadSafeSlotFastPath {
             .value
             .write()
             .expect("ThreadSafeContext slot fast path rwlock poisoned") = value;
+        self.cache_revision.fetch_add(1, Ordering::AcqRel);
     }
 
     fn mark_dirty(&self, force_recompute: bool) {
@@ -275,6 +287,7 @@ impl ThreadSafeSlotFastPath {
             recompute.dirty = true;
             recompute.force_recompute |= force_recompute;
         }
+        self.cache_revision.fetch_add(1, Ordering::AcqRel);
         self.dirty.store(true, Ordering::Release);
         if force_recompute {
             self.force_recompute.store(true, Ordering::Release);

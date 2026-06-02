@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use loom::sync::{Arc, Condvar, Mutex};
 use loom::thread;
 
@@ -93,6 +94,25 @@ struct ScopedWakeGraph {
     state: Mutex<ScopedWakeState>,
     slot_a_waiters: Condvar,
     slot_b_waiters: Condvar,
+}
+
+#[derive(Debug)]
+struct OptimisticReadGraph {
+    value: Mutex<usize>,
+    cache_revision: AtomicUsize,
+    dirty: AtomicBool,
+    force_recompute: AtomicBool,
+}
+
+impl Default for OptimisticReadGraph {
+    fn default() -> Self {
+        Self {
+            value: Mutex::new(1),
+            cache_revision: AtomicUsize::new(0),
+            dirty: AtomicBool::new(false),
+            force_recompute: AtomicBool::new(false),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -647,6 +667,52 @@ impl ScopedWakeGraph {
     }
 }
 
+impl OptimisticReadGraph {
+    fn read_fresh(&self) -> Option<usize> {
+        let cache_revision = self.cache_revision.load(Ordering::Acquire);
+        if self.dirty.load(Ordering::Acquire) || self.force_recompute.load(Ordering::Acquire) {
+            return None;
+        }
+
+        let value = *self.value.lock().expect("value mutex poisoned");
+        if self.cache_revision.load(Ordering::Acquire) != cache_revision
+            || self.dirty.load(Ordering::Acquire)
+            || self.force_recompute.load(Ordering::Acquire)
+        {
+            return None;
+        }
+
+        Some(value)
+    }
+
+    fn read_with_mid_read_invalidation(&self) -> Option<usize> {
+        let cache_revision = self.cache_revision.load(Ordering::Acquire);
+        assert!(!self.dirty.load(Ordering::Acquire));
+        let value = *self.value.lock().expect("value mutex poisoned");
+        self.invalidate();
+        if self.cache_revision.load(Ordering::Acquire) != cache_revision
+            || self.dirty.load(Ordering::Acquire)
+            || self.force_recompute.load(Ordering::Acquire)
+        {
+            return None;
+        }
+
+        Some(value)
+    }
+
+    fn invalidate(&self) {
+        self.cache_revision.fetch_add(1, Ordering::AcqRel);
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    fn publish(&self, value: usize) {
+        *self.value.lock().expect("value mutex poisoned") = value;
+        self.cache_revision.fetch_add(1, Ordering::AcqRel);
+        self.force_recompute.store(false, Ordering::Release);
+        self.dirty.store(false, Ordering::Release);
+    }
+}
+
 impl FastFrontierGraph {
     fn begin_callback(&self) {
         let mut state = self.state.lock().expect("frontier mutex poisoned");
@@ -680,6 +746,22 @@ impl FastFrontierGraph {
             state.fallback_invalidations,
         )
     }
+}
+
+#[test]
+fn optimistic_cached_read_rejects_mid_read_invalidation() {
+    loom::model(|| {
+        let graph = OptimisticReadGraph::default();
+        assert_eq!(graph.read_with_mid_read_invalidation(), None);
+        assert_eq!(
+            graph.read_fresh(),
+            None,
+            "a read starting after completed invalidation must not return stale cache"
+        );
+
+        graph.publish(2);
+        assert_eq!(graph.read_fresh(), Some(2));
+    });
 }
 
 #[test]
