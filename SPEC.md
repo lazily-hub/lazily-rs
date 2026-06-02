@@ -286,6 +286,11 @@ Lock strategy evaluation:
   and 16 workers. It should reduce per-write graph queueing during same-thread
   batches while preserving one coalesced dirty/effect flush at the outermost
   batch exit.
+- Effect-heavy contention profiles gate any queue or batch synchronization
+  change. `thread_safe_effect_contention` isolates effect queue coalescing,
+  cleanup execution, and nested batch flush behavior at 8 and 16 workers with
+  deterministic lock-site budgets before a sharded graph-lock design can be
+  considered.
 - Fully lock-free cached reads are deferred for the current erased-value storage. The current versioned optimistic path still clones through the retained sidecar `Arc` snapshot and uses atomic dirty/revision validation to ensure a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
 - The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
@@ -317,9 +322,9 @@ Sharded/versioned storage evaluation:
 - The next storage experiment, if pursued, should be a benchmark-gated
   prototype rather than a replacement: shard independent `ThreadSafeState`
   mutation by stable node id, keep effect queue and batch flush as one
-  deterministic merge boundary, and require the isolated
-  `set_cell_invalidation` matrix plus Loom/Shuttle coverage to improve before
-  adopting it.
+  deterministic merge boundary, and require the isolated `thread_safe_effect_contention`
+  profiles, `set_cell_invalidation` matrix, and Loom/Shuttle coverage to improve
+  before adopting it.
 
 Tokio integration is scoped in two stages:
 

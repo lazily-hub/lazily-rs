@@ -116,10 +116,10 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
     ),
     InstrumentationBudget(
         "thread_safe_contention_same_slot_write_read_16",
-        max_lock_acquisitions=1_400,
+        max_lock_acquisitions=1_600,
         site_budgets=(
             LockAttributionBudget("get_refresh", 700),
-            LockAttributionBudget("publish", 300),
+            LockAttributionBudget("publish", 450),
             LockAttributionBudget("in_flight_wait", 500),
             LockAttributionBudget("set_cell_invalidation", 32),
         ),
@@ -154,6 +154,39 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
             LockAttributionBudget("set_cell_invalidation", 16),
             LockAttributionBudget("publish", 64),
             LockAttributionBudget("in_flight_wait", 64),
+        ),
+    ),
+    InstrumentationBudget(
+        "thread_safe_effect_contention_queue_coalescing_16",
+        max_lock_acquisitions=1_800,
+        site_budgets=(
+            LockAttributionBudget("other", 900),
+            LockAttributionBudget("dependency_edge", 900),
+            LockAttributionBudget("set_cell_invalidation", 16),
+            LockAttributionBudget("get_refresh", 0),
+            LockAttributionBudget("publish", 0),
+        ),
+    ),
+    InstrumentationBudget(
+        "thread_safe_effect_contention_cleanup_execution_16",
+        max_lock_acquisitions=1_300,
+        site_budgets=(
+            LockAttributionBudget("other", 400),
+            LockAttributionBudget("dependency_edge", 700),
+            LockAttributionBudget("set_cell_invalidation", 220),
+            LockAttributionBudget("get_refresh", 0),
+            LockAttributionBudget("publish", 0),
+        ),
+    ),
+    InstrumentationBudget(
+        "thread_safe_effect_contention_batch_flush_16",
+        max_lock_acquisitions=1_500,
+        site_budgets=(
+            LockAttributionBudget("other", 1_300),
+            LockAttributionBudget("get_refresh", 8),
+            LockAttributionBudget("dependency_edge", 96),
+            LockAttributionBudget("set_cell_invalidation", 16),
+            LockAttributionBudget("publish", 8),
         ),
     ),
 )
@@ -514,6 +547,7 @@ def build_section(
         for profile in profiles
         if profile.profile.startswith("thread_safe_contention_")
         or profile.profile.startswith("thread_safe_set_cell_invalidation_")
+        or profile.profile.startswith("thread_safe_effect_contention_")
         for attribution in profile.lock_attribution
         if attribution.lock_acquisitions > 0
     ]

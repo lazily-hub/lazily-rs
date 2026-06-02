@@ -702,6 +702,12 @@ mod benchmark_report_harness {
             "thread_safe_contention_independent_slots_16",
             "thread_safe_contention_read_mostly_waiters_16",
             "thread_safe_contention_batched_write_bursts_16",
+            "thread_safe_effect_contention_queue_coalescing_8",
+            "thread_safe_effect_contention_queue_coalescing_16",
+            "thread_safe_effect_contention_cleanup_execution_8",
+            "thread_safe_effect_contention_cleanup_execution_16",
+            "thread_safe_effect_contention_batch_flush_8",
+            "thread_safe_effect_contention_batch_flush_16",
         ] {
             assert!(
                 section.contains(expected),
@@ -715,6 +721,9 @@ mod benchmark_report_harness {
         assert!(UPDATE_SCRIPT.contains("REGRESSION_BUDGETS"));
         assert!(UPDATE_SCRIPT.contains("regression_budget_failures"));
         assert!(UPDATE_SCRIPT.contains("instrumentation regression budget failure"));
+        assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_queue_coalescing_16"));
+        assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_cleanup_execution_16"));
+        assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_batch_flush_16"));
         assert!(UPDATE_SCRIPT.contains("--check"));
         assert!(UPDATE_SCRIPT.contains("benchmark-results:start"));
     }
@@ -744,6 +753,12 @@ mod storage_strategy_evaluation {
             "per-node dependent frontier sidecars",
             "thread-local batch frames",
             "local batch-frame prototype",
+            "Effect-heavy contention profiles",
+            "thread_safe_effect_contention",
+            "effect queue coalescing",
+            "cleanup execution",
+            "nested batch flush behavior",
+            "deterministic lock-site budgets",
             "waiter-counted handoff",
             "notify_one",
             "waiter-counted handoff wakeup draining",
@@ -766,6 +781,9 @@ mod storage_strategy_evaluation {
             "set_cell_invalidation | independent_slot_contention / 16",
             "set_cell_invalidation | batched_write_bursts / 16",
             "thread_safe_set_cell_invalidation_independent_slot_contention_16",
+            "thread_safe_effect_contention_queue_coalescing_16",
+            "thread_safe_effect_contention_cleanup_execution_16",
+            "thread_safe_effect_contention_batch_flush_16",
             "ThreadSafe lock attribution for contention profiles",
         ] {
             assert!(
