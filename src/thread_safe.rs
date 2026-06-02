@@ -389,14 +389,14 @@ impl ThreadSafeContext {
         dependency_id: SlotId,
         dependent_id: SlotId,
     ) {
-        let edge_removed = match state.nodes.get_mut(&dependency_id) {
+        let _edge_removed = match state.nodes.get_mut(&dependency_id) {
             Some(ThreadSafeNode::Slot(slot)) => slot.dependents.remove(&dependent_id),
             Some(ThreadSafeNode::Cell(cell)) => cell.dependents.remove(&dependent_id),
             Some(ThreadSafeNode::Effect(_)) | None => false,
         };
 
         #[cfg(feature = "instrumentation")]
-        if edge_removed {
+        if _edge_removed {
             state.instrumentation.record_dependency_edge_removed();
         }
     }
