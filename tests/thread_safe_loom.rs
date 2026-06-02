@@ -1,5 +1,7 @@
 #![cfg(feature = "loom")]
 
+use std::collections::{HashMap, VecDeque};
+
 use loom::sync::{Arc, Condvar, Mutex};
 use loom::thread;
 
@@ -74,6 +76,256 @@ struct ScopedWakeGraph {
     state: Mutex<ScopedWakeState>,
     slot_a_waiters: Condvar,
     slot_b_waiters: Condvar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum FrontierNode {
+    Left,
+    Right,
+    Join,
+    Effect,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FrontierRoot {
+    id: FrontierNode,
+    force_recompute: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FrontierSnapshot {
+    batch_depth: usize,
+    queued_batch_invalidations: usize,
+    invalidation_flushes: usize,
+    left_dirty_marks: usize,
+    right_dirty_marks: usize,
+    join_dirty_marks: usize,
+    effect_queue_pushes: usize,
+    stale_compute_discards: usize,
+    join_revision: u64,
+    effect_scheduled: bool,
+}
+
+#[derive(Debug, Default)]
+struct FrontierState {
+    batch_depth: usize,
+    queued_batch_invalidations: usize,
+    invalidation_flushes: usize,
+    left_dirty: bool,
+    left_force_recompute: bool,
+    left_dirty_marks: usize,
+    right_dirty: bool,
+    right_force_recompute: bool,
+    right_dirty_marks: usize,
+    join_dirty: bool,
+    join_force_recompute: bool,
+    join_dirty_marks: usize,
+    join_revision: u64,
+    join_computing: bool,
+    effect_scheduled: bool,
+    effect_queue_pushes: usize,
+    stale_compute_discards: usize,
+}
+
+#[derive(Debug, Default)]
+struct FrontierGraph {
+    state: Mutex<FrontierState>,
+}
+
+impl FrontierState {
+    fn snapshot(&self) -> FrontierSnapshot {
+        FrontierSnapshot {
+            batch_depth: self.batch_depth,
+            queued_batch_invalidations: self.queued_batch_invalidations,
+            invalidation_flushes: self.invalidation_flushes,
+            left_dirty_marks: self.left_dirty_marks,
+            right_dirty_marks: self.right_dirty_marks,
+            join_dirty_marks: self.join_dirty_marks,
+            effect_queue_pushes: self.effect_queue_pushes,
+            stale_compute_discards: self.stale_compute_discards,
+            join_revision: self.join_revision,
+            effect_scheduled: self.effect_scheduled,
+        }
+    }
+}
+
+impl FrontierGraph {
+    fn begin_batch(&self) {
+        let mut state = self.state.lock().expect("frontier mutex poisoned");
+        state.batch_depth = state.batch_depth.saturating_add(1);
+    }
+
+    fn finish_batch(&self) {
+        let mut state = self.state.lock().expect("frontier mutex poisoned");
+        assert!(state.batch_depth > 0);
+        state.batch_depth -= 1;
+        if state.batch_depth == 0 && state.queued_batch_invalidations > 0 {
+            state.queued_batch_invalidations = 0;
+            Self::apply_changed_cell_invalidation_locked(&mut state);
+        }
+    }
+
+    fn set_cell_changed(&self) {
+        let mut state = self.state.lock().expect("frontier mutex poisoned");
+        if state.batch_depth > 0 {
+            state.queued_batch_invalidations = 1;
+        } else {
+            Self::apply_changed_cell_invalidation_locked(&mut state);
+        }
+    }
+
+    fn begin_join_compute(&self) -> ComputeStart {
+        let mut state = self.state.lock().expect("frontier mutex poisoned");
+        assert!(!state.join_computing);
+        state.join_computing = true;
+        ComputeStart {
+            revision: state.join_revision,
+        }
+    }
+
+    fn finish_join_compute(&self, start: ComputeStart) -> bool {
+        let mut state = self.state.lock().expect("frontier mutex poisoned");
+        assert!(state.join_computing);
+        state.join_computing = false;
+        if state.join_revision != start.revision {
+            state.stale_compute_discards = state.stale_compute_discards.saturating_add(1);
+            return false;
+        }
+
+        state.join_dirty = false;
+        state.join_force_recompute = false;
+        true
+    }
+
+    fn snapshot(&self) -> FrontierSnapshot {
+        self.state
+            .lock()
+            .expect("frontier mutex poisoned")
+            .snapshot()
+    }
+
+    fn apply_changed_cell_invalidation_locked(state: &mut FrontierState) {
+        state.invalidation_flushes = state.invalidation_flushes.saturating_add(1);
+
+        let mut queue = VecDeque::new();
+        let mut requested_force = HashMap::new();
+        Self::enqueue_root(
+            &mut queue,
+            &mut requested_force,
+            FrontierRoot {
+                id: FrontierNode::Left,
+                force_recompute: true,
+            },
+        );
+        Self::enqueue_root(
+            &mut queue,
+            &mut requested_force,
+            FrontierRoot {
+                id: FrontierNode::Right,
+                force_recompute: true,
+            },
+        );
+
+        while let Some(root) = queue.pop_front() {
+            let Some(force_recompute) = requested_force.get(&root.id).copied() else {
+                continue;
+            };
+            if root.force_recompute != force_recompute {
+                continue;
+            }
+
+            match root.id {
+                FrontierNode::Left => {
+                    if Self::mark_left(state, force_recompute) {
+                        Self::enqueue_root(
+                            &mut queue,
+                            &mut requested_force,
+                            FrontierRoot {
+                                id: FrontierNode::Join,
+                                force_recompute: false,
+                            },
+                        );
+                    }
+                }
+                FrontierNode::Right => {
+                    if Self::mark_right(state, force_recompute) {
+                        Self::enqueue_root(
+                            &mut queue,
+                            &mut requested_force,
+                            FrontierRoot {
+                                id: FrontierNode::Join,
+                                force_recompute: false,
+                            },
+                        );
+                    }
+                }
+                FrontierNode::Join => {
+                    if Self::mark_join(state, force_recompute) {
+                        Self::enqueue_root(
+                            &mut queue,
+                            &mut requested_force,
+                            FrontierRoot {
+                                id: FrontierNode::Effect,
+                                force_recompute: false,
+                            },
+                        );
+                    }
+                }
+                FrontierNode::Effect => {
+                    if !state.effect_scheduled {
+                        state.effect_scheduled = true;
+                        state.effect_queue_pushes = state.effect_queue_pushes.saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn enqueue_root(
+        queue: &mut VecDeque<FrontierRoot>,
+        requested_force: &mut HashMap<FrontierNode, bool>,
+        root: FrontierRoot,
+    ) {
+        match requested_force.get_mut(&root.id) {
+            Some(force_recompute) if root.force_recompute && !*force_recompute => {
+                *force_recompute = true;
+                queue.push_back(root);
+            }
+            Some(_) => {}
+            None => {
+                requested_force.insert(root.id, root.force_recompute);
+                queue.push_back(root);
+            }
+        }
+    }
+
+    fn mark_left(state: &mut FrontierState, force_recompute: bool) -> bool {
+        let should_propagate =
+            !state.left_dirty || (force_recompute && !state.left_force_recompute);
+        state.left_dirty = true;
+        state.left_force_recompute |= force_recompute;
+        state.left_dirty_marks = state.left_dirty_marks.saturating_add(1);
+        should_propagate
+    }
+
+    fn mark_right(state: &mut FrontierState, force_recompute: bool) -> bool {
+        let should_propagate =
+            !state.right_dirty || (force_recompute && !state.right_force_recompute);
+        state.right_dirty = true;
+        state.right_force_recompute |= force_recompute;
+        state.right_dirty_marks = state.right_dirty_marks.saturating_add(1);
+        should_propagate
+    }
+
+    fn mark_join(state: &mut FrontierState, force_recompute: bool) -> bool {
+        let should_propagate =
+            !state.join_dirty || (force_recompute && !state.join_force_recompute);
+        state.join_dirty = true;
+        state.join_force_recompute |= force_recompute;
+        state.join_revision = state.join_revision.wrapping_add(1);
+        state.join_dirty_marks = state.join_dirty_marks.saturating_add(1);
+        should_propagate
+    }
 }
 
 impl ModelGraph {
@@ -337,6 +589,54 @@ fn scoped_slot_notification_does_not_wake_unrelated_waiter() {
         graph.finish_slot_b();
         waiter_b.join().expect("slot B waiter thread should finish");
         assert_eq!(graph.slot_b_reacquires(), 1);
+    });
+}
+
+#[test]
+fn frontier_invalidation_coalesces_batch_diamond_and_stale_compute() {
+    loom::model(|| {
+        let graph = Arc::new(FrontierGraph::default());
+        let compute = graph.begin_join_compute();
+
+        graph.begin_batch();
+        graph.set_cell_changed();
+        graph.begin_batch();
+        graph.set_cell_changed();
+        graph.finish_batch();
+
+        let before_outer_flush = graph.snapshot();
+        assert_eq!(before_outer_flush.batch_depth, 1);
+        assert_eq!(before_outer_flush.queued_batch_invalidations, 1);
+        assert_eq!(before_outer_flush.invalidation_flushes, 0);
+        assert_eq!(before_outer_flush.left_dirty_marks, 0);
+        assert_eq!(before_outer_flush.right_dirty_marks, 0);
+        assert_eq!(before_outer_flush.join_dirty_marks, 0);
+        assert_eq!(before_outer_flush.effect_queue_pushes, 0);
+
+        graph.finish_batch();
+        let after_outer_flush = graph.snapshot();
+        assert_eq!(after_outer_flush.batch_depth, 0);
+        assert_eq!(after_outer_flush.queued_batch_invalidations, 0);
+        assert_eq!(after_outer_flush.invalidation_flushes, 1);
+        assert_eq!(after_outer_flush.left_dirty_marks, 1);
+        assert_eq!(after_outer_flush.right_dirty_marks, 1);
+        assert_eq!(
+            after_outer_flush.join_dirty_marks, 1,
+            "diamond paths should coalesce before the join slot is marked"
+        );
+        assert_eq!(
+            after_outer_flush.effect_queue_pushes, 1,
+            "diamond paths should enqueue the effect once"
+        );
+        assert!(after_outer_flush.effect_scheduled);
+        assert_eq!(after_outer_flush.join_revision, 1);
+
+        assert!(
+            !graph.finish_join_compute(compute),
+            "in-flight join compute that started before invalidation must be stale"
+        );
+        let after_stale_finish = graph.snapshot();
+        assert_eq!(after_stale_finish.stale_compute_discards, 1);
     });
 }
 
