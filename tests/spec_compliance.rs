@@ -730,6 +730,8 @@ mod storage_strategy_evaluation {
         for expected in [
             "Sharded/versioned storage evaluation",
             "read-mostly cached-value sidecar",
+            "per-slot recompute/value-publish sidecar",
+            "dirty same-slot contention",
             "Do not replace the single graph lock with sharded storage",
             "Do not use versioned optimistic reads as the next invalidation optimization",
             "same_slot_write_read",
@@ -1091,6 +1093,91 @@ mod benchmark_instrumentation {
 
         assert_eq!(computing_worker.join().expect("worker should finish"), 42);
         assert_eq!(waiting_worker.join().expect("worker should finish"), 42);
+    }
+
+    /// SPEC: dirty same-slot readers first check per-slot recompute state, so
+    /// waiters park behind the in-flight owner without taking the graph
+    /// `get_refresh` or `publish` locks.
+    #[test]
+    fn thread_safe_dirty_same_slot_waiters_bypass_graph_locks() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(40usize);
+        let gate = Arc::new(AtomicUsize::new(0));
+        let compute_runs = Arc::new(AtomicUsize::new(0));
+        let gate_for_slot = Arc::clone(&gate);
+        let compute_runs_for_slot = Arc::clone(&compute_runs);
+        let answer = ctx.computed(move |ctx| {
+            let run = compute_runs_for_slot.fetch_add(1, Ordering::SeqCst) + 1;
+            if run == 2 {
+                gate_for_slot.store(1, Ordering::SeqCst);
+                while gate_for_slot.load(Ordering::SeqCst) == 1 {
+                    thread::yield_now();
+                }
+            }
+            ctx.get_cell(&root).wrapping_add(2)
+        });
+
+        assert_eq!(ctx.get(&answer), 42);
+        ctx.set_cell(&root, 41);
+        ctx.reset_instrumentation();
+
+        let computing_ctx = ctx.clone();
+        let computing_worker = thread::spawn(move || computing_ctx.get(&answer));
+        while gate.load(Ordering::SeqCst) != 1 {
+            thread::yield_now();
+        }
+
+        let waiter_count = 4;
+        let waiters = (0..waiter_count)
+            .map(|_| {
+                let waiting_ctx = ctx.clone();
+                thread::spawn(move || waiting_ctx.get(&answer))
+            })
+            .collect::<Vec<_>>();
+
+        for _ in 0..100_000 {
+            if lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions
+                >= waiter_count as u64
+            {
+                break;
+            }
+            thread::yield_now();
+        }
+
+        assert!(
+            lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions
+                >= waiter_count as u64,
+            "all same-slot waiters should enter the per-slot in-flight path"
+        );
+        thread::sleep(Duration::from_millis(10));
+
+        let get_refresh_locks = lock_site(&ctx, ThreadSafeLockSite::GetRefresh);
+        assert!(
+            get_refresh_locks.lock_acquisitions <= 2,
+            "dirty same-slot waiters should not acquire get_refresh graph locks; \
+             saw {} acquisitions",
+            get_refresh_locks.lock_acquisitions
+        );
+
+        let publish_locks = lock_site(&ctx, ThreadSafeLockSite::Publish);
+        assert!(
+            publish_locks.lock_acquisitions <= 1,
+            "dirty same-slot waiters should not acquire publish graph locks before parking; \
+             saw {} acquisitions",
+            publish_locks.lock_acquisitions
+        );
+
+        gate.store(2, Ordering::SeqCst);
+
+        assert_eq!(computing_worker.join().expect("worker should finish"), 43);
+        for waiter in waiters {
+            assert_eq!(waiter.join().expect("waiter should finish"), 43);
+        }
+        assert_eq!(
+            compute_runs.load(Ordering::SeqCst),
+            2,
+            "dirty same-slot contention should share one recompute after invalidation"
+        );
     }
 
     /// SPEC: in-flight recompute notifications are scoped to the slot that

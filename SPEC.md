@@ -226,14 +226,15 @@ API bounds:
 Locking model:
 
 - Uses one context-level `Mutex` synchronization primitive for graph state before introducing finer-grained graph locks
-- Fresh cached slot reads may use a per-slot read-mostly cached-value sidecar; dependency-edge changes, dirty/revision state, cached-value publication, batch queues, effect queues, and disposal remain graph mutex mutations
+- Fresh cached slot reads use a per-slot read-mostly cached-value sidecar; dependency-edge changes, invalidation frontier application, batch queues, effect queues, and disposal remain graph mutex mutations
+- Each thread-safe slot also owns a per-slot recompute/value-publish sidecar for the cached-value visibility flags, in-flight bit, waiter `Condvar`, and revision used to reject stale callback results. Graph-state dirty/revision fields remain mirrored under the context mutex for dependency-frontier traversal and tests.
 - Do not hold the graph lock while running user compute callbacks, effect callbacks, or cleanup closures
 - Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
 - Slot refresh must avoid helper-level lock churn: a fresh cached get should clone the value through the per-slot fast path without taking a `get_refresh` graph lock or recursively validating unchanged dependencies, dependency refresh should not take a separate node-kind probe lock before recursively validating a dependency, cell dependencies should not be probed as refreshable slots, clean dirty flags should be folded into the refresh decision lock, and recompute must diff old/new dependency sets at publish so unchanged edges stay subscribed while only stale edges are removed
 - Recompute dependency tracking must skip graph-lock edge registration for dependencies already present in the slot's previous dependency set, while still eagerly registering newly discovered dependencies during the callback so concurrent invalidation can mark the in-flight result stale
 - Re-entrant user code must be able to call back into the same context without deadlocking
-- Concurrent first access shares one in-flight computation for the current slot revision; waiters park on that slot's recompute notification primitive, then return the published cache or retry if an invalidation makes the in-flight result stale
-- Recompute waiters observe the per-slot notification generation while holding the graph mutex, then park on the sidecar `Condvar` after releasing that mutex. Finishers advance the same generation while holding the graph mutex before notifying, so a stale in-flight completion cannot be missed.
+- Concurrent first access and dirty same-slot contention share one in-flight computation for the current slot revision; waiters check the per-slot recompute sidecar before the `get_refresh`/`publish` graph-lock path, park on that slot's notification primitive, then return the published cache or retry if an invalidation makes the in-flight result stale
+- Recompute waiters observe the per-slot in-flight/revision state while holding the sidecar mutex, then park on the same sidecar `Condvar`. Finishers publish value and dirty-state sidecar updates before clearing the in-flight bit and notifying, so a stale in-flight completion cannot be missed.
 - Recompute notifications are scoped to the slot that finished. A completion for one in-flight slot must not wake waiters parked behind another in-flight slot.
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
@@ -251,12 +252,12 @@ Locking model:
 Lock strategy evaluation:
 
 - Keep one context-level graph synchronization primitive until benchmark instrumentation shows a finer-grained design improves the relevant workload without trading off other contention cases
-- `ThreadSafeContext` uses a read-mostly per-slot cached-value prototype only for fresh cached reads; all graph mutations still require the context mutex
-- `ThreadSafeContext` may use per-slot sidecar recompute `Condvar`s for in-flight waiters after attribution shows the spin-yield wait loop is material; those Condvars carry only notification generations and must not guard graph state independently of the context mutex
+- `ThreadSafeContext` uses a read-mostly per-slot cached-value prototype for fresh cached reads and a per-slot recompute/value-publish sidecar for in-flight same-slot waiters; dependency graph mutations still require the context mutex
+- `ThreadSafeContext` uses per-slot sidecar recompute `Condvar`s for in-flight waiters. Those Condvars guard only per-slot in-flight/revision/cache-visibility state and must not mutate dependency graph state independently of the context mutex
 - The read-mostly prototype is benchmark-gated by the 1/2/4/8/16-worker `same_slot_write_read`, `independent_slots`, `read_mostly_waiters`, and `batched_write_bursts` matrix after the `#lazybatch1` and `#lazybatch2` invalidation/read-churn fixes
 - Versioned optimistic reads are deferred for the current erased-value storage. A lock-free read path would need independently retained value snapshots plus atomic dirty/revision validation. Any such path must prove that a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
-- The current sidecar generation/`Condvar` waiter path and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, stale in-flight completion and retry, read-mostly waiter generation handoff, invalidation during compute, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
+- The current sidecar `Mutex`/`Condvar` waiter path and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, stale in-flight completion and retry, read-mostly waiter handoff, invalidation during compute, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
 Sharded/versioned storage evaluation:
@@ -444,16 +445,16 @@ The optional `instrumentation` feature adds `instrumentation_snapshot()` and
 - Duplicate speculative `ThreadSafeContext` recomputes that lose publication races; this should remain zero when in-flight deduplication is effective
 - Dependency edges added and removed
 - Effect queue pushes and maximum pending queue depth
-- `ThreadSafeContext` graph-lock acquisitions plus total wait and hold nanoseconds
+- `ThreadSafeContext` lock/coordination acquisitions plus total wait and hold nanoseconds
 
-`ThreadSafeContext::lock_profile_snapshot()` returns per-operation graph-lock
-counters for the thread-safe path. The buckets are intentionally high-level:
-unattributed/other work, `get` refresh, dependency edge add/remove, `set_cell`
-invalidation, recompute publication, and in-flight recompute waiting. For the
-per-slot sidecar recompute `Condvar`s, the in-flight wait bucket records the
-parked wait and reacquire boundary. The bucket acquisition counts must sum to the aggregate
-`lock_acquisitions` counter so profile consumers can attribute contention
-without losing the stable summary fields.
+`ThreadSafeContext::lock_profile_snapshot()` returns per-operation lock and
+coordination counters for the thread-safe path. The buckets are intentionally
+high-level: unattributed/other work, `get` refresh, dependency edge add/remove,
+`set_cell` invalidation, recompute publication, and in-flight recompute waiting.
+For the per-slot sidecar recompute `Condvar`s, the in-flight wait bucket records
+the parked wait and reacquire boundary. The bucket acquisition counts must sum
+to the aggregate `lock_acquisitions` counter so profile consumers can attribute
+contention without losing the stable summary fields.
 
 The instrumentation profile bench lives in `benches/profile.rs` and is gated
 behind `required-features = ["instrumentation"]`; compile it with

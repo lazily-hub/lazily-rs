@@ -64,15 +64,19 @@ struct ModelGraph {
 }
 
 #[derive(Debug, Default)]
-struct GenerationWaiters {
-    generation: Mutex<u64>,
-    condvar: Condvar,
+struct ReadMostlyGraph {
+    state: Mutex<ModelState>,
+    recompute: Mutex<ReadMostlyRecomputeState>,
+    recompute_waiters: Condvar,
 }
 
 #[derive(Debug, Default)]
-struct ReadMostlyGraph {
-    state: Mutex<ModelState>,
-    recompute_waiters: GenerationWaiters,
+struct ReadMostlyRecomputeState {
+    has_value: bool,
+    dirty: bool,
+    force_recompute: bool,
+    computing: bool,
+    revision: u64,
 }
 
 #[derive(Debug, Default)]
@@ -488,23 +492,6 @@ impl ModelGraph {
     }
 }
 
-impl GenerationWaiters {
-    fn notify_all(&self) {
-        let mut generation = self.generation.lock().expect("model mutex poisoned");
-        *generation = generation.wrapping_add(1);
-        self.condvar.notify_all();
-    }
-
-    fn wait_until_changed(&self, mut generation: loom::sync::MutexGuard<'_, u64>, observed: u64) {
-        while *generation == observed {
-            generation = self
-                .condvar
-                .wait(generation)
-                .expect("model mutex poisoned while waiting");
-        }
-    }
-}
-
 impl ReadMostlyGraph {
     fn seed_computing(&self) {
         let mut state = self.state.lock().expect("model mutex poisoned");
@@ -512,6 +499,12 @@ impl ReadMostlyGraph {
         state.dirty = false;
         state.force_recompute = false;
         state.computing = true;
+        let mut recompute = self.recompute.lock().expect("model mutex poisoned");
+        recompute.has_value = true;
+        recompute.dirty = false;
+        recompute.force_recompute = false;
+        recompute.computing = true;
+        recompute.revision = state.revision;
     }
 
     fn finish_stale_compute(&self) {
@@ -521,30 +514,28 @@ impl ReadMostlyGraph {
         state.revision = state.revision.wrapping_add(1);
         state.dirty = true;
         state.force_recompute = true;
+        let mut recompute = self.recompute.lock().expect("model mutex poisoned");
+        assert!(recompute.computing);
+        recompute.computing = false;
+        recompute.revision = state.revision;
+        recompute.dirty = true;
+        recompute.force_recompute = true;
         self.recompute_waiters.notify_all();
     }
 
     fn wait_for_in_flight(&self) -> WaitOutcome {
-        loop {
-            let state = self.state.lock().expect("model mutex poisoned");
-            if state.computing {
-                let generation = self
-                    .recompute_waiters
-                    .generation
-                    .lock()
-                    .expect("model mutex poisoned");
-                let observed = *generation;
-                drop(state);
-                self.recompute_waiters
-                    .wait_until_changed(generation, observed);
-                continue;
-            }
+        let mut recompute = self.recompute.lock().expect("model mutex poisoned");
+        while recompute.computing {
+            recompute = self
+                .recompute_waiters
+                .wait(recompute)
+                .expect("model mutex poisoned while waiting");
+        }
 
-            if state.value.is_some() && !state.dirty && !state.force_recompute {
-                return WaitOutcome::Fresh;
-            }
-
-            return WaitOutcome::Stale;
+        if recompute.has_value && !recompute.dirty && !recompute.force_recompute {
+            WaitOutcome::Fresh
+        } else {
+            WaitOutcome::Stale
         }
     }
 }
@@ -744,7 +735,7 @@ fn stale_in_flight_completion_notifies_waiter_and_retries() {
 }
 
 #[test]
-fn read_mostly_waiter_generation_prevents_missed_stale_completion() {
+fn read_mostly_waiter_sidecar_prevents_missed_stale_completion() {
     loom::model(|| {
         let graph = Arc::new(ReadMostlyGraph::default());
         graph.seed_computing();

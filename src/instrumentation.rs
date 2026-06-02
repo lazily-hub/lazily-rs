@@ -2,7 +2,8 @@ use std::time::Duration;
 
 pub const THREAD_SAFE_LOCK_SITE_COUNT: usize = 6;
 
-/// High-level operation buckets for ThreadSafeContext graph-lock profiling.
+/// High-level operation buckets for ThreadSafeContext lock and coordination
+/// profiling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThreadSafeLockSite {
     #[default]
@@ -47,7 +48,7 @@ impl ThreadSafeLockSite {
     }
 }
 
-/// Per-operation ThreadSafeContext graph-lock counters.
+/// Per-operation ThreadSafeContext lock and coordination counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThreadSafeLockSiteSnapshot {
     pub site: ThreadSafeLockSite,
@@ -78,11 +79,11 @@ pub struct InstrumentationSnapshot {
     pub effect_queue_pushes: u64,
     /// Largest observed pending effect queue length after an insertion.
     pub max_effect_queue_depth: u64,
-    /// Number of profiled ThreadSafeContext graph-lock acquisitions.
+    /// Number of profiled ThreadSafeContext lock or coordination acquisitions.
     pub lock_acquisitions: u64,
-    /// Total nanoseconds spent waiting to acquire the ThreadSafeContext graph lock.
+    /// Total nanoseconds spent waiting to acquire profiled ThreadSafeContext locks.
     pub lock_wait_nanos: u64,
-    /// Total nanoseconds spent holding the ThreadSafeContext graph lock.
+    /// Total nanoseconds spent holding profiled ThreadSafeContext locks.
     pub lock_hold_nanos: u64,
 }
 

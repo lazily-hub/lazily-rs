@@ -151,11 +151,9 @@ struct ThreadSafeSlotNode {
     equals: Option<Arc<ThreadSafeEqualsFn>>,
     dependencies: HashSet<SlotId>,
     dependents: HashSet<SlotId>,
-    recompute_waiters: Arc<ThreadSafeRecomputeWaiters>,
     fast_path: Arc<ThreadSafeSlotFastPath>,
     dirty: bool,
     force_recompute: bool,
-    computing: bool,
     revision: u64,
 }
 
@@ -164,6 +162,8 @@ struct ThreadSafeSlotFastPath {
     value: RwLock<Option<Arc<ThreadSafeAny>>>,
     dirty: AtomicBool,
     force_recompute: AtomicBool,
+    recompute: Mutex<ThreadSafeSlotRecomputeState>,
+    recompute_condvar: Condvar,
 }
 
 impl ThreadSafeSlotFastPath {
@@ -195,51 +195,105 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn mark_dirty(&self, force_recompute: bool) {
+        {
+            let mut recompute = self.lock_recompute_state();
+            recompute.revision = recompute.revision.wrapping_add(1);
+            recompute.dirty = true;
+            recompute.force_recompute |= force_recompute;
+        }
         self.dirty.store(true, Ordering::Release);
         if force_recompute {
             self.force_recompute.store(true, Ordering::Release);
         }
     }
 
-    fn mark_fresh(&self) {
+    fn mark_fresh(&self, has_value: bool) {
+        {
+            let mut recompute = self.lock_recompute_state();
+            recompute.has_value = has_value;
+            recompute.dirty = false;
+            recompute.force_recompute = false;
+        }
         self.force_recompute.store(false, Ordering::Release);
         self.dirty.store(false, Ordering::Release);
     }
 
     fn clear(&self) {
         self.store_value(None);
+        {
+            let mut recompute = self.lock_recompute_state();
+            recompute.revision = recompute.revision.wrapping_add(1);
+            recompute.has_value = false;
+            recompute.dirty = false;
+            recompute.force_recompute = false;
+        }
         self.force_recompute.store(false, Ordering::Release);
         self.dirty.store(false, Ordering::Release);
+    }
+
+    fn lock_recompute_state(&self) -> MutexGuard<'_, ThreadSafeSlotRecomputeState> {
+        self.recompute
+            .lock()
+            .expect("ThreadSafeContext slot recompute mutex poisoned")
+    }
+
+    fn begin_recompute(&self) -> Option<ThreadSafeRecomputeStart> {
+        let mut recompute = self.lock_recompute_state();
+        if recompute.computing {
+            return None;
+        }
+        recompute.computing = true;
+        Some(ThreadSafeRecomputeStart {
+            revision: recompute.revision,
+            was_unset: !recompute.has_value,
+        })
+    }
+
+    fn recompute_in_flight(&self) -> bool {
+        self.lock_recompute_state().computing
+    }
+
+    fn current_recompute_revision(&self) -> u64 {
+        self.lock_recompute_state().revision
+    }
+
+    fn finish_recompute(&self) {
+        {
+            let mut recompute = self.lock_recompute_state();
+            recompute.computing = false;
+        }
+        self.recompute_condvar.notify_all();
+    }
+
+    fn wait_for_recompute(&self) -> ThreadSafeRecomputeResult {
+        let mut recompute = self.lock_recompute_state();
+        while recompute.computing {
+            recompute = self
+                .recompute_condvar
+                .wait(recompute)
+                .expect("ThreadSafeContext slot recompute mutex poisoned while waiting");
+        }
+
+        if recompute.has_value && !recompute.dirty && !recompute.force_recompute {
+            ThreadSafeRecomputeResult::Fresh(false)
+        } else {
+            ThreadSafeRecomputeResult::Stale
+        }
     }
 }
 
 #[derive(Default)]
-struct ThreadSafeRecomputeWaiters {
-    generation: Mutex<u64>,
-    condvar: Condvar,
+struct ThreadSafeSlotRecomputeState {
+    has_value: bool,
+    dirty: bool,
+    force_recompute: bool,
+    computing: bool,
+    revision: u64,
 }
 
-impl ThreadSafeRecomputeWaiters {
-    fn lock_generation(&self) -> MutexGuard<'_, u64> {
-        self.generation
-            .lock()
-            .expect("ThreadSafeContext recompute waiter mutex poisoned")
-    }
-
-    fn wait_until_changed(&self, mut generation: MutexGuard<'_, u64>, observed_generation: u64) {
-        while *generation == observed_generation {
-            generation = self
-                .condvar
-                .wait(generation)
-                .expect("ThreadSafeContext recompute waiter mutex poisoned while waiting");
-        }
-    }
-
-    fn notify_all(&self) {
-        let mut generation = self.lock_generation();
-        *generation = generation.wrapping_add(1);
-        self.condvar.notify_all();
-    }
+struct ThreadSafeRecomputeStart {
+    revision: u64,
+    was_unset: bool,
 }
 
 struct ThreadSafeCellNode {
@@ -421,15 +475,14 @@ impl Drop for BatchGuard {
 }
 
 struct RecomputeGuard {
-    ctx: ThreadSafeContext,
-    id: SlotId,
+    fast_path: Arc<ThreadSafeSlotFastPath>,
     active: bool,
 }
 
 impl Drop for RecomputeGuard {
     fn drop(&mut self) {
         if self.active {
-            self.ctx.finish_slot_recompute(self.id);
+            self.fast_path.finish_recompute();
         }
     }
 }
@@ -513,6 +566,16 @@ impl ThreadSafeContext {
         }
     }
 
+    #[cfg(feature = "instrumentation")]
+    fn record_coordination_lock(&self, site: ThreadSafeLockSite) {
+        self.inner
+            .lock_instrumentation
+            .record_lock_wait(site, std::time::Duration::ZERO);
+        self.inner
+            .lock_instrumentation
+            .record_lock_hold(site, std::time::Duration::ZERO);
+    }
+
     fn alloc_id(&self) -> SlotId {
         let mut state = self.lock_state();
         let slot_id = SlotId(state.next_id);
@@ -539,6 +602,12 @@ impl ThreadSafeContext {
     {
         self.slot_fast_path(id)
             .and_then(|fast_path| fast_path.read_fresh())
+    }
+
+    fn slot_recompute_in_flight(&self, id: SlotId) -> bool {
+        self.slot_fast_path(id)
+            .map(|fast_path| fast_path.recompute_in_flight())
+            .unwrap_or(false)
     }
 
     fn register_dependency(&self, dependency_id: SlotId, dependent_id: SlotId) {
@@ -695,11 +764,9 @@ impl ThreadSafeContext {
             equals,
             dependencies: HashSet::new(),
             dependents: HashSet::new(),
-            recompute_waiters: Arc::new(ThreadSafeRecomputeWaiters::default()),
             fast_path: Arc::clone(&fast_path),
             dirty: false,
             force_recompute: false,
-            computing: false,
             revision: 0,
         };
         self.inner
@@ -730,6 +797,11 @@ impl ThreadSafeContext {
         }
 
         loop {
+            if self.slot_recompute_in_flight(id) {
+                let _ = self.wait_for_slot_recompute(id);
+                continue;
+            }
+
             match self.read_slot_or_dependencies(id) {
                 ThreadSafeSlotRead::Fresh(value) => return value,
                 ThreadSafeSlotRead::Refresh(dependencies) => {
@@ -780,6 +852,13 @@ impl ThreadSafeContext {
     }
 
     fn refresh_slot(&self, id: SlotId) -> bool {
+        if self.slot_recompute_in_flight(id) {
+            return match self.wait_for_slot_recompute(id) {
+                ThreadSafeRecomputeResult::Fresh(changed) => changed,
+                ThreadSafeRecomputeResult::Stale => self.refresh_slot(id),
+            };
+        }
+
         #[cfg(feature = "instrumentation")]
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
         let dependencies: Vec<SlotId> = {
@@ -825,7 +904,7 @@ impl ThreadSafeContext {
             } else {
                 slot.dirty = false;
                 slot.force_recompute = false;
-                slot.fast_path.mark_fresh();
+                slot.fast_path.mark_fresh(true);
                 false
             }
         };
@@ -843,7 +922,11 @@ impl ThreadSafeContext {
     }
 
     fn recompute_slot_now(&self, id: SlotId) -> ThreadSafeRecomputeResult {
-        let (compute, old_dependencies, was_unset, start_revision) = {
+        if self.slot_recompute_in_flight(id) {
+            return self.wait_for_slot_recompute(id);
+        }
+
+        let (compute, old_dependencies, recompute_start, fast_path) = {
             #[cfg(feature = "instrumentation")]
             let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
             let mut state = self.lock_state();
@@ -852,16 +935,15 @@ impl ThreadSafeContext {
                     Some(ThreadSafeNode::Slot(slot)) => slot,
                     _ => panic!("get_slot called on non-slot id"),
                 };
-                if slot.computing {
+                let Some(recompute_start) = slot.fast_path.begin_recompute() else {
                     drop(state);
                     return self.wait_for_slot_recompute(id);
-                }
-                slot.computing = true;
+                };
                 (
                     Arc::clone(&slot.compute),
                     slot.dependencies.clone(),
-                    slot.value.is_none(),
-                    slot.revision,
+                    recompute_start,
+                    Arc::clone(&slot.fast_path),
                 )
             };
             #[cfg(feature = "instrumentation")]
@@ -871,8 +953,7 @@ impl ThreadSafeContext {
             result
         };
         let mut recompute_guard = RecomputeGuard {
-            ctx: self.clone(),
-            id,
+            fast_path: Arc::clone(&fast_path),
             active: true,
         };
 
@@ -894,15 +975,14 @@ impl ThreadSafeContext {
                     Some(ThreadSafeNode::Slot(slot)) => slot,
                     _ => {
                         recompute_guard.active = false;
+                        fast_path.finish_recompute();
                         return ThreadSafeRecomputeResult::Fresh(false);
                     }
                 };
-                slot.computing = false;
-                let recompute_waiters = Arc::clone(&slot.recompute_waiters);
-                recompute_waiters.notify_all();
-                recompute_guard.active = false;
 
-                if slot.revision != start_revision {
+                if slot.fast_path.current_recompute_revision() != recompute_start.revision {
+                    slot.fast_path.finish_recompute();
+                    recompute_guard.active = false;
                     return ThreadSafeRecomputeResult::Stale;
                 }
             }
@@ -914,79 +994,69 @@ impl ThreadSafeContext {
                 &new_dependencies,
             );
 
-            let slot = match state.nodes.get_mut(&id) {
-                Some(ThreadSafeNode::Slot(slot)) => slot,
-                _ => return ThreadSafeRecomputeResult::Fresh(false),
-            };
-            if was_unset && slot.value.is_some() && !slot.dirty && !slot.force_recompute {
-                #[cfg(feature = "instrumentation")]
+            let (publish_fast_path, duplicate_speculative, notify_dependents, changed) = {
+                let slot = match state.nodes.get_mut(&id) {
+                    Some(ThreadSafeNode::Slot(slot)) => slot,
+                    _ => {
+                        recompute_guard.active = false;
+                        fast_path.finish_recompute();
+                        return ThreadSafeRecomputeResult::Fresh(false);
+                    }
+                };
+                let publish_fast_path = Arc::clone(&slot.fast_path);
+                if recompute_start.was_unset
+                    && slot.value.is_some()
+                    && !slot.dirty
+                    && !slot.force_recompute
                 {
-                    state
-                        .instrumentation
-                        .record_duplicate_speculative_recompute();
+                    (publish_fast_path, true, false, false)
+                } else {
+                    let had_value = slot.value.is_some();
+                    let unchanged = match (&slot.value, &slot.equals) {
+                        (Some(old), Some(equals)) => equals(old.as_ref(), result.as_ref()),
+                        _ => false,
+                    };
+                    slot.dirty = false;
+                    slot.force_recompute = false;
+                    if unchanged {
+                        (publish_fast_path, false, false, false)
+                    } else {
+                        slot.value = Some(Arc::clone(&result));
+                        publish_fast_path.store_value(Some(result));
+                        (publish_fast_path, false, had_value, had_value)
+                    }
                 }
+            };
+
+            if duplicate_speculative {
+                #[cfg(feature = "instrumentation")]
+                state
+                    .instrumentation
+                    .record_duplicate_speculative_recompute();
+                publish_fast_path.mark_fresh(true);
+                publish_fast_path.finish_recompute();
+                recompute_guard.active = false;
                 return ThreadSafeRecomputeResult::Fresh(false);
             }
 
-            let had_value = slot.value.is_some();
-            let unchanged = match (&slot.value, &slot.equals) {
-                (Some(old), Some(equals)) => equals(old.as_ref(), result.as_ref()),
-                _ => false,
-            };
-            slot.dirty = false;
-            slot.force_recompute = false;
-            if unchanged {
-                slot.fast_path.mark_fresh();
-                ThreadSafeRecomputeResult::Fresh(false)
-            } else {
-                slot.value = Some(Arc::clone(&result));
-                slot.fast_path.store_value(Some(result));
-                slot.fast_path.mark_fresh();
-                if had_value {
-                    Self::notify_slot_value_changed_locked(&mut state, id);
-                    ThreadSafeRecomputeResult::Fresh(true)
-                } else {
-                    ThreadSafeRecomputeResult::Fresh(false)
-                }
+            if notify_dependents {
+                Self::notify_slot_value_changed_locked(&mut state, id);
             }
+            publish_fast_path.mark_fresh(true);
+            publish_fast_path.finish_recompute();
+            recompute_guard.active = false;
+            ThreadSafeRecomputeResult::Fresh(changed)
         }
     }
 
     fn wait_for_slot_recompute(&self, id: SlotId) -> ThreadSafeRecomputeResult {
         #[cfg(feature = "instrumentation")]
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::InFlightWait);
-        loop {
-            let state = self.read_state();
-            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&id) else {
-                return ThreadSafeRecomputeResult::Fresh(false);
-            };
-
-            if slot.computing {
-                let recompute_waiters = Arc::clone(&slot.recompute_waiters);
-                let generation = recompute_waiters.lock_generation();
-                let observed_generation = *generation;
-                drop(state);
-                recompute_waiters.wait_until_changed(generation, observed_generation);
-                continue;
-            }
-
-            if slot.value.is_some() && !slot.dirty && !slot.force_recompute {
-                return ThreadSafeRecomputeResult::Fresh(false);
-            }
-
-            return ThreadSafeRecomputeResult::Stale;
-        }
-    }
-
-    fn finish_slot_recompute(&self, id: SlotId) {
         #[cfg(feature = "instrumentation")]
-        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::Publish);
-        let mut state = self.lock_state();
-        if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) {
-            slot.computing = false;
-            let recompute_waiters = Arc::clone(&slot.recompute_waiters);
-            recompute_waiters.notify_all();
-        }
+        self.record_coordination_lock(ThreadSafeLockSite::InFlightWait);
+        self.slot_fast_path(id)
+            .map(|fast_path| fast_path.wait_for_recompute())
+            .unwrap_or(ThreadSafeRecomputeResult::Fresh(false))
     }
 
     /// Create a mutable thread-safe cell.
@@ -1578,7 +1648,8 @@ impl ThreadSafeContext {
         snapshot
     }
 
-    /// Return ThreadSafeContext graph-lock counters grouped by operation.
+    /// Return ThreadSafeContext lock and coordination counters grouped by
+    /// operation.
     #[cfg(feature = "instrumentation")]
     pub fn lock_profile_snapshot(
         &self,
