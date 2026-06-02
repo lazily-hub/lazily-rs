@@ -715,7 +715,47 @@ mod benchmark_report_harness {
 }
 
 // ============================================================================
-// 1d. Benchmark Instrumentation
+// 1e. Storage Strategy Evaluation
+// ============================================================================
+
+mod storage_strategy_evaluation {
+    const README: &str = include_str!("../README.md");
+    const SPEC: &str = include_str!("../SPEC.md");
+
+    /// SPEC: sharded or versioned ThreadSafeContext storage is benchmark-gated
+    /// by the isolated set_cell invalidation matrix, not adopted directly from
+    /// the frontier prototype.
+    #[test]
+    fn sharded_storage_evaluation_is_benchmark_gated() {
+        for expected in [
+            "Sharded/versioned storage evaluation",
+            "global graph mutex remains the measured",
+            "Do not replace the mutex-first graph with sharded storage",
+            "Do not use versioned optimistic reads as the next invalidation optimization",
+            "set_cell_invalidation",
+        ] {
+            assert!(
+                SPEC.contains(expected),
+                "SPEC should document storage evaluation evidence: {expected}"
+            );
+        }
+
+        for expected in [
+            "set_cell_invalidation | independent_slot_contention / 16",
+            "set_cell_invalidation | batched_write_bursts / 16",
+            "thread_safe_set_cell_invalidation_independent_slot_contention_16",
+            "ThreadSafe lock attribution for contention profiles",
+        ] {
+            assert!(
+                README.contains(expected),
+                "README benchmark report should expose storage evaluation evidence: {expected}"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// 1f. Benchmark Instrumentation
 // ============================================================================
 
 #[cfg(feature = "instrumentation")]

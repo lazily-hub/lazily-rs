@@ -254,6 +254,37 @@ Lock strategy evaluation:
 - The current sidecar `Condvar` waiter path and frontier invalidation safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, stale in-flight completion and retry, invalidation during compute, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
+Sharded/versioned storage evaluation:
+
+- After the frontier invalidation prototype, the `set_cell_invalidation`
+  benchmark and instrumentation rows are the gate for storage changes. The
+  1/2/4/8/16-worker isolated profiles show the `set_cell_invalidation`
+  lock-attribution bucket accumulating substantial wait/hold time even for
+  independent per-worker roots, so the global graph mutex remains the measured
+  bottleneck for independent invalidation workloads rather than recursive
+  traversal or duplicate dirty marking.
+- Do not replace the mutex-first graph with sharded storage in the current
+  implementation. Sharding may help independent roots and slots, but it does
+  not remove serialization for same-root writes, shared aggregate slots, effect
+  queues, batch-depth accounting, disposal, or dynamic dependency edge changes.
+  A shard design must first define shard ownership for dependency edges that
+  cross shards, a deterministic merge/apply order for dirty/revision/effect
+  mutations, and a Loom or Shuttle model for deadlock-free multi-shard
+  invalidation and disposal.
+- Do not use versioned optimistic reads as the next invalidation optimization.
+  Versioned reads target fresh cached `get` latency, while the isolated
+  `set_cell_invalidation` profiles attribute the current invalidation pressure
+  to write-side graph mutation. Any future optimistic read path still needs
+  independently retained value snapshots plus atomic dirty/revision validation
+  so a `get` starting after a cross-thread invalidation cannot return the
+  pre-invalidation cached value.
+- The next storage experiment, if pursued, should be a benchmark-gated
+  prototype rather than a replacement: shard independent `ThreadSafeState`
+  mutation by stable node id, keep effect queue and batch flush as one
+  deterministic merge boundary, and require the isolated
+  `set_cell_invalidation` matrix plus Loom/Shuttle coverage to improve before
+  adopting it.
+
 Tokio integration is scoped in two stages:
 
 1. Synchronous thread-safe sharing first: `ThreadSafeContext` should work inside
