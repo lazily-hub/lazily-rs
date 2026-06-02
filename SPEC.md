@@ -496,11 +496,13 @@ each required benchmark scenario above, and instrumentation rows covering
 recomputes, duplicate speculative recomputes, dependency edge churn, effect
 queue depth, node allocations, lock wait/hold time, and per-operation
 `ThreadSafeContext` lock attribution for every 1/2/4/8/16-worker contention
-matrix profile and every `set_cell` invalidation isolation profile. `--check`
-verifies that the README section is already current without rewriting it;
-`--no-run` reuses existing Criterion estimate files for a
-report-only refresh after a manual baseline comparison run while refreshing the
-instrumentation CSV unless it is also running in check mode.
+matrix profile and every `set_cell` invalidation isolation profile. The generated
+section must also publish regression budgets for the slow contention profiles and
+their lock-site acquisition totals. `--check` verifies that the README section is
+already current without rewriting it and fails when any instrumentation profile
+exceeds its lock-acquisition budget; `--no-run` reuses existing Criterion estimate
+files for a report-only refresh after a manual baseline comparison run while
+refreshing the instrumentation CSV unless it is also running in check mode.
 
 ## Differences from lazily-zig
 

@@ -79,6 +79,86 @@ class LockAttribution:
     lock_hold_nanos: int
 
 
+@dataclass(frozen=True)
+class LockAttributionBudget:
+    site: str
+    max_lock_acquisitions: int
+
+
+@dataclass(frozen=True)
+class InstrumentationBudget:
+    profile: str
+    max_lock_acquisitions: int
+    site_budgets: tuple[LockAttributionBudget, ...] = ()
+
+
+REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
+    InstrumentationBudget(
+        "thread_safe_set_cell_invalidation_independent_slot_contention_16",
+        max_lock_acquisitions=192,
+        site_budgets=(
+            LockAttributionBudget("set_cell_invalidation", 0),
+            LockAttributionBudget("dependency_edge", 16),
+            LockAttributionBudget("get_refresh", 32),
+            LockAttributionBudget("publish", 32),
+        ),
+    ),
+    InstrumentationBudget(
+        "thread_safe_set_cell_invalidation_batched_write_bursts_16",
+        max_lock_acquisitions=900,
+        site_budgets=(
+            LockAttributionBudget("other", 800),
+            LockAttributionBudget("set_cell_invalidation", 16),
+            LockAttributionBudget("dependency_edge", 64),
+            LockAttributionBudget("get_refresh", 2),
+            LockAttributionBudget("publish", 2),
+        ),
+    ),
+    InstrumentationBudget(
+        "thread_safe_contention_same_slot_write_read_16",
+        max_lock_acquisitions=1_400,
+        site_budgets=(
+            LockAttributionBudget("get_refresh", 700),
+            LockAttributionBudget("publish", 300),
+            LockAttributionBudget("in_flight_wait", 500),
+            LockAttributionBudget("set_cell_invalidation", 32),
+        ),
+    ),
+    InstrumentationBudget(
+        "thread_safe_contention_independent_slots_16",
+        max_lock_acquisitions=1_500,
+        site_budgets=(
+            LockAttributionBudget("other", 160),
+            LockAttributionBudget("get_refresh", 700),
+            LockAttributionBudget("publish", 700),
+            LockAttributionBudget("dependency_edge", 16),
+            LockAttributionBudget("set_cell_invalidation", 64),
+        ),
+    ),
+    InstrumentationBudget(
+        "thread_safe_contention_read_mostly_waiters_16",
+        max_lock_acquisitions=256,
+        site_budgets=(
+            LockAttributionBudget("get_refresh", 128),
+            LockAttributionBudget("publish", 64),
+            LockAttributionBudget("in_flight_wait", 64),
+        ),
+    ),
+    InstrumentationBudget(
+        "thread_safe_contention_batched_write_bursts_16",
+        max_lock_acquisitions=950,
+        site_budgets=(
+            LockAttributionBudget("other", 800),
+            LockAttributionBudget("get_refresh", 128),
+            LockAttributionBudget("dependency_edge", 64),
+            LockAttributionBudget("set_cell_invalidation", 16),
+            LockAttributionBudget("publish", 64),
+            LockAttributionBudget("in_flight_wait", 64),
+        ),
+    ),
+)
+
+
 def run(command: list[str]) -> None:
     print("$ " + " ".join(command), flush=True)
     subprocess.run(command, check=True)
@@ -233,6 +313,50 @@ def parse_lock_attribution(value: str) -> tuple[LockAttribution, ...]:
     return tuple(sites)
 
 
+def lock_attribution_by_site(profile: InstrumentationProfile) -> dict[str, int]:
+    return {
+        attribution.site: attribution.lock_acquisitions
+        for attribution in profile.lock_attribution
+    }
+
+
+def regression_budget_failures(
+    profiles: list[InstrumentationProfile],
+) -> list[str]:
+    by_profile = {profile.profile: profile for profile in profiles}
+    failures: list[str] = []
+
+    for budget in REGRESSION_BUDGETS:
+        profile = by_profile.get(budget.profile)
+        if profile is None:
+            failures.append(f"{budget.profile}: missing instrumentation profile")
+            continue
+
+        if profile.lock_acquisitions > budget.max_lock_acquisitions:
+            failures.append(
+                "{profile}: lock_acquisitions {actual} > budget {budget}".format(
+                    profile=budget.profile,
+                    actual=profile.lock_acquisitions,
+                    budget=budget.max_lock_acquisitions,
+                )
+            )
+
+        by_site = lock_attribution_by_site(profile)
+        for site_budget in budget.site_budgets:
+            actual = by_site.get(site_budget.site, 0)
+            if actual > site_budget.max_lock_acquisitions:
+                failures.append(
+                    "{profile}: {site} lock_acquisitions {actual} > budget {budget}".format(
+                        profile=budget.profile,
+                        site=site_budget.site,
+                        actual=actual,
+                        budget=site_budget.max_lock_acquisitions,
+                    )
+                )
+
+    return failures
+
+
 def natural_case_key(value: str) -> list[tuple[int, object]]:
     parts: list[tuple[int, object]] = []
     current = ""
@@ -308,11 +432,41 @@ def build_section(
         "python3 scripts/update-benchmark-results.py --no-run",
         "```",
         "",
-        "Criterion estimates are local mean wall-clock time per iteration.",
+        "Regression budgets enforced by `python3 scripts/update-benchmark-results.py --check`:",
         "",
-        "| Group | Case | Mean | 95% CI |",
-        "|---|---|---:|---:|",
+        "| Profile | Max lock acquisitions | Site lock budgets |",
+        "|---|---:|---|",
     ]
+
+    for budget in REGRESSION_BUDGETS:
+        site_budgets = ", ".join(
+            f"{site.site}<={site.max_lock_acquisitions}"
+            for site in budget.site_budgets
+        )
+        lines.append(
+            "| {profile} | {max_locks} | {site_budgets} |".format(
+                profile=budget.profile,
+                max_locks=budget.max_lock_acquisitions,
+                site_budgets=site_budgets or "-",
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "Budgets use deterministic lock acquisition counts instead of elapsed wait/hold time.",
+            "",
+        ]
+    )
+
+    lines.extend(
+        [
+            "Criterion estimates are local mean wall-clock time per iteration.",
+            "",
+            "| Group | Case | Mean | 95% CI |",
+            "|---|---|---:|---:|",
+        ]
+    )
 
     for result in results:
         lines.append(
@@ -451,6 +605,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    budget_failures = regression_budget_failures(profiles)
+    if budget_failures:
+        print("instrumentation regression budget failure(s):", file=sys.stderr)
+        for failure in budget_failures:
+            print(f"- {failure}", file=sys.stderr)
+        return 1
 
     package, version = read_package_metadata(args.cargo_toml)
     section = build_section(package, version, results, profiles)

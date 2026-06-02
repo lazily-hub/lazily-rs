@@ -667,6 +667,9 @@ mod benchmark_report_harness {
         assert!(section.contains("Instrumentation snapshots"));
         assert!(section.contains("Duplicate recomputes"));
         assert!(section.contains("ThreadSafe lock attribution"));
+        assert!(section.contains("Regression budgets enforced by"));
+        assert!(section.contains("Max lock acquisitions"));
+        assert!(section.contains("Budgets use deterministic lock acquisition counts"));
         assert!(section.contains("get_refresh"));
         assert!(section.contains("set_cell_invalidation"));
 
@@ -709,6 +712,9 @@ mod benchmark_report_harness {
         assert!(CARGO_TOML.contains("name = \"instrumentation_profile\""));
         assert!(UPDATE_SCRIPT.contains("lazily-instrumentation-profile.csv"));
         assert!(UPDATE_SCRIPT.contains("SET_CELL_INVALIDATION_CASE_ORDER"));
+        assert!(UPDATE_SCRIPT.contains("REGRESSION_BUDGETS"));
+        assert!(UPDATE_SCRIPT.contains("regression_budget_failures"));
+        assert!(UPDATE_SCRIPT.contains("instrumentation regression budget failure"));
         assert!(UPDATE_SCRIPT.contains("--check"));
         assert!(UPDATE_SCRIPT.contains("benchmark-results:start"));
     }
