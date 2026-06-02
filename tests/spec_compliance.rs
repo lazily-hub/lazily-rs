@@ -811,6 +811,32 @@ mod benchmark_instrumentation {
         }
     }
 
+    /// SPEC: a fresh cached thread-safe get combines freshness validation and
+    /// value cloning under one graph lock instead of recursively refreshing
+    /// unchanged dependencies.
+    #[test]
+    fn thread_safe_cached_get_uses_one_get_refresh_lock() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(40usize);
+        let answer = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(2));
+
+        assert_eq!(ctx.get(&answer), 42);
+        ctx.reset_instrumentation();
+
+        assert_eq!(ctx.get(&answer), 42);
+
+        let snapshot = ctx.instrumentation_snapshot();
+        assert_eq!(
+            snapshot.slot_recomputes, 0,
+            "fresh cached get should not recompute"
+        );
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::GetRefresh).lock_acquisitions,
+            1,
+            "fresh cached get should clone under one GetRefresh lock"
+        );
+    }
+
     /// SPEC: in-flight thread-safe recompute waiters park instead of repeatedly
     /// reacquiring the graph lock while another thread owns the computation.
     #[test]

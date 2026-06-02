@@ -159,6 +159,11 @@ enum ThreadSafeRecomputeResult {
     Stale,
 }
 
+enum ThreadSafeSlotRead<T> {
+    Fresh(T),
+    Refresh(Vec<SlotId>),
+}
+
 #[derive(Default)]
 struct ThreadSafeState {
     nodes: HashMap<SlotId, ThreadSafeNode>,
@@ -551,22 +556,37 @@ impl ThreadSafeContext {
         }
 
         loop {
-            self.refresh_slot(id);
+            match self.read_slot_or_dependencies(id) {
+                ThreadSafeSlotRead::Fresh(value) => return value,
+                ThreadSafeSlotRead::Refresh(dependencies) => {
+                    self.refresh_slot_with_dependencies(id, dependencies);
+                }
+            }
+        }
+    }
 
-            #[cfg(feature = "instrumentation")]
-            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
-            let state = self.lock_state();
-            match state.nodes.get(&id) {
-                Some(ThreadSafeNode::Slot(slot)) => {
-                    if let Some(value) = &slot.value {
-                        return value
+    fn read_slot_or_dependencies<T>(&self, id: SlotId) -> ThreadSafeSlotRead<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        #[cfg(feature = "instrumentation")]
+        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
+        let state = self.lock_state();
+        match state.nodes.get(&id) {
+            Some(ThreadSafeNode::Slot(slot)) => {
+                if let (false, false, Some(value)) = (slot.dirty, slot.force_recompute, &slot.value)
+                {
+                    ThreadSafeSlotRead::Fresh(
+                        value
                             .downcast_ref::<T>()
                             .expect("type mismatch in slot")
-                            .clone();
-                    }
+                            .clone(),
+                    )
+                } else {
+                    ThreadSafeSlotRead::Refresh(slot.dependencies.iter().copied().collect())
                 }
-                _ => panic!("get_slot called on non-slot id"),
             }
+            _ => panic!("get_slot called on non-slot id"),
         }
     }
 
@@ -581,6 +601,10 @@ impl ThreadSafeContext {
             }
         };
 
+        self.refresh_slot_with_dependencies(id, dependencies)
+    }
+
+    fn refresh_slot_with_dependencies(&self, id: SlotId, dependencies: Vec<SlotId>) -> bool {
         let mut dependency_changed = false;
         for dependency_id in dependencies {
             if self.refresh_slot(dependency_id) {
@@ -589,6 +613,8 @@ impl ThreadSafeContext {
         }
 
         let needs_recompute = {
+            #[cfg(feature = "instrumentation")]
+            let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
             let mut state = self.lock_state();
             let slot = match state.nodes.get_mut(&id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot,
