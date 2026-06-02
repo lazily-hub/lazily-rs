@@ -796,6 +796,63 @@ mod benchmark_instrumentation {
         }
     }
 
+    /// SPEC: in-flight thread-safe recompute waiters park instead of repeatedly
+    /// reacquiring the graph lock while another thread owns the computation.
+    #[test]
+    fn thread_safe_in_flight_wait_parks_until_recompute_finishes() {
+        let ctx = ThreadSafeContext::new();
+        let root = ctx.cell(40usize);
+        let gate = Arc::new(AtomicUsize::new(0));
+        let compute_runs = Arc::new(AtomicUsize::new(0));
+        let gate_for_slot = Arc::clone(&gate);
+        let compute_runs_for_slot = Arc::clone(&compute_runs);
+        let answer = ctx.computed(move |ctx| {
+            let run = compute_runs_for_slot.fetch_add(1, Ordering::SeqCst) + 1;
+            if run == 1 {
+                gate_for_slot.store(1, Ordering::SeqCst);
+                while gate_for_slot.load(Ordering::SeqCst) == 1 {
+                    thread::yield_now();
+                }
+            }
+            ctx.get_cell(&root).wrapping_add(2)
+        });
+
+        let computing_ctx = ctx.clone();
+        let computing_worker = thread::spawn(move || computing_ctx.get(&answer));
+        while gate.load(Ordering::SeqCst) != 1 {
+            thread::yield_now();
+        }
+
+        ctx.reset_instrumentation();
+
+        let waiting_ctx = ctx.clone();
+        let waiting_worker = thread::spawn(move || waiting_ctx.get(&answer));
+        for _ in 0..100_000 {
+            if lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions > 0 {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert!(
+            lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions > 0,
+            "waiter should enter the in-flight recompute path before the compute is released"
+        );
+
+        thread::sleep(Duration::from_millis(10));
+        let parked_acquisitions =
+            lock_site(&ctx, ThreadSafeLockSite::InFlightWait).lock_acquisitions;
+        assert!(
+            parked_acquisitions <= 4,
+            "parked waiter should not spin-acquire the graph lock while compute is in flight; \
+             saw {parked_acquisitions} acquisitions"
+        );
+
+        gate.store(2, Ordering::SeqCst);
+
+        assert_eq!(computing_worker.join().expect("worker should finish"), 42);
+        assert_eq!(waiting_worker.join().expect("worker should finish"), 42);
+    }
+
     /// SPEC: Thread-safe recompute preserves unchanged dependency edges instead
     /// of removing and re-adding them on every recompute.
     #[test]

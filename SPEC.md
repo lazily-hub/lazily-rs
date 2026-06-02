@@ -230,15 +230,16 @@ Locking model:
 - Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
 - Slot refresh must avoid helper-level lock churn: dependency refresh should not take a separate node-kind probe lock before recursively validating a dependency, clean dirty flags should be folded into the refresh decision lock, and recompute must diff old/new dependency sets at publish so unchanged edges stay subscribed while only stale edges are removed
 - Re-entrant user code must be able to call back into the same context without deadlocking
-- Concurrent first access shares one in-flight computation for the current slot revision; waiters return the published cache or retry if an invalidation makes the in-flight result stale
+- Concurrent first access shares one in-flight computation for the current slot revision; waiters park on the recompute notification primitive, then return the published cache or retry if an invalidation makes the in-flight result stale
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
 
 Lock strategy evaluation:
 
-- Keep the context-level `Mutex` as the only graph synchronization primitive until benchmark instrumentation shows lock wait/hold time dominates the relevant workload
+- Keep the context-level `Mutex` as the graph synchronization primitive until benchmark instrumentation shows lock wait/hold time dominates the relevant workload
+- `ThreadSafeContext` may use a sidecar recompute `Condvar` for in-flight waiters after attribution shows the spin-yield wait loop is material; the Condvar must not guard graph state independently of the context mutex
 - The current short contention sample after in-flight dedup improved 1-2 worker runs, was neutral around 4 workers, and regressed at 8-16 workers; this is not enough evidence to adopt `RwLock`, sharded locks, or targeted CAS
-- Any future `RwLock`, sharding, `Condvar`, or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the mutex-first design
+- Any future `RwLock`, sharding, or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the mutex-first design
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
 Tokio integration is scoped in two stages:
@@ -388,10 +389,11 @@ The optional `instrumentation` feature adds `instrumentation_snapshot()` and
 `ThreadSafeContext::lock_profile_snapshot()` returns per-operation graph-lock
 counters for the thread-safe path. The buckets are intentionally high-level:
 unattributed/other work, `get` refresh, dependency edge add/remove, `set_cell`
-invalidation, recompute publication, and in-flight recompute waiting. The bucket
-acquisition counts must sum to the aggregate `lock_acquisitions` counter so
-profile consumers can attribute contention without losing the stable summary
-fields.
+invalidation, recompute publication, and in-flight recompute waiting. For the
+sidecar recompute `Condvar`, the in-flight wait bucket records the parked wait
+and reacquire boundary. The bucket acquisition counts must sum to the aggregate
+`lock_acquisitions` counter so profile consumers can attribute contention
+without losing the stable summary fields.
 
 The instrumentation profile bench lives in `benches/profile.rs` and is gated
 behind `required-features = ["instrumentation"]`; compile it with

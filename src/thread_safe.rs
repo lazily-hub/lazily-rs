@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(feature = "instrumentation")]
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(feature = "instrumentation")]
 use std::time::Instant;
 
@@ -173,19 +173,51 @@ struct ThreadSafeState {
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
 
-#[derive(Default)]
 struct ThreadSafeInner {
     state: Mutex<ThreadSafeState>,
+    recompute_waiters: Condvar,
     #[cfg(feature = "instrumentation")]
     lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation,
 }
 
+impl Default for ThreadSafeInner {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ThreadSafeState::default()),
+            recompute_waiters: Condvar::new(),
+            #[cfg(feature = "instrumentation")]
+            lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation::default(),
+        }
+    }
+}
+
 #[cfg(feature = "instrumentation")]
 struct ProfiledMutexGuard<'a> {
-    guard: MutexGuard<'a, ThreadSafeState>,
+    guard: Option<MutexGuard<'a, ThreadSafeState>>,
     lock_instrumentation: &'a crate::instrumentation::ThreadSafeLockInstrumentation,
     site: ThreadSafeLockSite,
     acquired_at: Instant,
+}
+
+#[cfg(feature = "instrumentation")]
+impl<'a> ProfiledMutexGuard<'a> {
+    fn wait_on(mut self, condvar: &Condvar) -> Self {
+        self.lock_instrumentation
+            .record_lock_hold(self.site, self.acquired_at.elapsed());
+        let guard = self
+            .guard
+            .take()
+            .expect("profiled mutex guard missing while waiting");
+        let wait_started = Instant::now();
+        let guard = condvar
+            .wait(guard)
+            .expect("ThreadSafeContext mutex poisoned while waiting");
+        self.lock_instrumentation
+            .record_lock_wait(self.site, wait_started.elapsed());
+        self.guard = Some(guard);
+        self.acquired_at = Instant::now();
+        self
+    }
 }
 
 #[cfg(feature = "instrumentation")]
@@ -193,22 +225,28 @@ impl Deref for ProfiledMutexGuard<'_> {
     type Target = ThreadSafeState;
 
     fn deref(&self) -> &Self::Target {
-        &self.guard
+        self.guard
+            .as_ref()
+            .expect("profiled mutex guard missing during deref")
     }
 }
 
 #[cfg(feature = "instrumentation")]
 impl DerefMut for ProfiledMutexGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.guard
+        self.guard
+            .as_mut()
+            .expect("profiled mutex guard missing during mutable deref")
     }
 }
 
 #[cfg(feature = "instrumentation")]
 impl Drop for ProfiledMutexGuard<'_> {
     fn drop(&mut self) {
-        self.lock_instrumentation
-            .record_lock_hold(self.site, self.acquired_at.elapsed());
+        if self.guard.is_some() {
+            self.lock_instrumentation
+                .record_lock_hold(self.site, self.acquired_at.elapsed());
+        }
     }
 }
 
@@ -314,7 +352,7 @@ impl ThreadSafeContext {
             .lock_instrumentation
             .record_lock_wait(site, wait_started.elapsed());
         ProfiledMutexGuard {
-            guard,
+            guard: Some(guard),
             lock_instrumentation: &self.inner.lock_instrumentation,
             site,
             acquired_at: Instant::now(),
@@ -629,6 +667,7 @@ impl ThreadSafeContext {
                     }
                 };
                 slot.computing = false;
+                self.inner.recompute_waiters.notify_all();
                 recompute_guard.active = false;
 
                 if slot.revision != start_revision {
@@ -679,25 +718,40 @@ impl ThreadSafeContext {
     }
 
     fn wait_for_slot_recompute(&self, id: SlotId) -> ThreadSafeRecomputeResult {
+        #[cfg(feature = "instrumentation")]
+        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::InFlightWait);
+        let mut state = self.lock_state();
         loop {
-            {
-                #[cfg(feature = "instrumentation")]
-                let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::InFlightWait);
-                let state = self.lock_state();
-                let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&id) else {
-                    return ThreadSafeRecomputeResult::Fresh(false);
-                };
-                if slot.computing {
-                    // Prototype deduplication: avoid a broad lock redesign until
-                    // contention data justifies a Condvar/RwLock strategy.
-                } else if slot.value.is_some() && !slot.dirty && !slot.force_recompute {
-                    return ThreadSafeRecomputeResult::Fresh(false);
-                } else {
-                    return ThreadSafeRecomputeResult::Stale;
-                }
+            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&id) else {
+                return ThreadSafeRecomputeResult::Fresh(false);
+            };
+            if slot.computing {
+                state = self.wait_for_recompute_notification(state);
+            } else if slot.value.is_some() && !slot.dirty && !slot.force_recompute {
+                return ThreadSafeRecomputeResult::Fresh(false);
+            } else {
+                return ThreadSafeRecomputeResult::Stale;
             }
-            std::thread::yield_now();
         }
+    }
+
+    #[cfg(not(feature = "instrumentation"))]
+    fn wait_for_recompute_notification<'a>(
+        &self,
+        state: MutexGuard<'a, ThreadSafeState>,
+    ) -> MutexGuard<'a, ThreadSafeState> {
+        self.inner
+            .recompute_waiters
+            .wait(state)
+            .expect("ThreadSafeContext mutex poisoned while waiting")
+    }
+
+    #[cfg(feature = "instrumentation")]
+    fn wait_for_recompute_notification<'a>(
+        &self,
+        state: ProfiledMutexGuard<'a>,
+    ) -> ProfiledMutexGuard<'a> {
+        state.wait_on(&self.inner.recompute_waiters)
     }
 
     fn finish_slot_recompute(&self, id: SlotId) {
@@ -706,6 +760,7 @@ impl ThreadSafeContext {
         let mut state = self.lock_state();
         if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) {
             slot.computing = false;
+            self.inner.recompute_waiters.notify_all();
         }
     }
 
