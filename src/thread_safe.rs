@@ -923,15 +923,25 @@ impl ThreadSafeContext {
             let cell_clears = state.batched_cell_clears.drain().collect::<Vec<_>>();
             let slots = state.batched_slots.drain().collect::<Vec<_>>();
 
-            for cell_id in cells {
-                Self::invalidate_cell_dependents_locked(&mut state, cell_id);
-            }
-            for cell_id in cell_clears {
-                Self::clear_cell_dependents_locked(&mut state, cell_id);
-            }
-            for slot_id in slots {
-                Self::clear_slot_now_locked(&mut state, slot_id);
-            }
+            let invalidation_roots = cells
+                .into_iter()
+                .flat_map(|cell_id| {
+                    Self::dependents_locked(&state, cell_id)
+                        .into_iter()
+                        .map(|id| ThreadSafeInvalidationRoot {
+                            id,
+                            force_recompute: true,
+                        })
+                })
+                .collect::<Vec<_>>();
+            Self::invalidate_frontier_locked(&mut state, invalidation_roots);
+
+            let mut clear_roots = cell_clears
+                .into_iter()
+                .flat_map(|cell_id| Self::dependents_locked(&state, cell_id))
+                .collect::<Vec<_>>();
+            clear_roots.extend(slots);
+            Self::clear_frontier_locked(&mut state, clear_roots);
         }
         self.flush_effects();
     }
@@ -1405,5 +1415,118 @@ impl ThreadSafeContext {
             state.instrumentation.reset();
         }
         self.inner.lock_instrumentation.reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn slot_revision<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> u64
+    where
+        T: Send + Sync + 'static,
+    {
+        let state = ctx.lock_state();
+        match state.nodes.get(&handle.id) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.revision,
+            _ => panic!("slot_revision called on non-slot id"),
+        }
+    }
+
+    fn slot_dirty_force<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> (bool, bool)
+    where
+        T: Send + Sync + 'static,
+    {
+        let state = ctx.lock_state();
+        match state.nodes.get(&handle.id) {
+            Some(ThreadSafeNode::Slot(slot)) => (slot.dirty, slot.force_recompute),
+            _ => panic!("slot_dirty_force called on non-slot id"),
+        }
+    }
+
+    fn cell_dependents_len<T>(ctx: &ThreadSafeContext, handle: &CellHandle<T>) -> usize
+    where
+        T: Send + Sync + 'static,
+    {
+        let state = ctx.lock_state();
+        match state.nodes.get(&handle.id) {
+            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.len(),
+            _ => panic!("cell_dependents_len called on non-cell id"),
+        }
+    }
+
+    fn effect_is_scheduled(ctx: &ThreadSafeContext, handle: &EffectHandle) -> bool {
+        let state = ctx.lock_state();
+        state.scheduled_effects.contains(&handle.id)
+    }
+
+    fn pending_effect_count(ctx: &ThreadSafeContext) -> usize {
+        ctx.lock_state().pending_effects.len()
+    }
+
+    #[test]
+    fn batched_cell_invalidations_mark_shared_dependent_once() {
+        let ctx = ThreadSafeContext::new();
+        let cells = [
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+        ];
+        let total = ctx.computed(move |ctx| {
+            cells
+                .iter()
+                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+        });
+
+        assert_eq!(ctx.get(&total), 0);
+        assert_eq!(slot_revision(&ctx, &total), 0);
+
+        ctx.batch(|ctx| {
+            for (offset, cell) in cells.iter().enumerate() {
+                ctx.set_cell(cell, offset + 1);
+            }
+        });
+
+        assert_eq!(
+            slot_revision(&ctx, &total),
+            1,
+            "one batch should apply one coalesced dirty/revision mark to the shared frontier"
+        );
+        assert_eq!(slot_dirty_force(&ctx, &total), (true, true));
+        assert_eq!(ctx.get(&total), 10);
+        assert_eq!(
+            slot_revision(&ctx, &total),
+            1,
+            "recompute should publish the new value without additional invalidation marks"
+        );
+    }
+
+    #[test]
+    fn batched_cell_invalidations_schedule_shared_effect_once() {
+        let ctx = ThreadSafeContext::new();
+        let left = ctx.cell(0usize);
+        let right = ctx.cell(0usize);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_for_effect = Arc::clone(&runs);
+        let effect = ctx.effect(move |ctx| {
+            runs_for_effect.fetch_add(1, Ordering::SeqCst);
+            let _ = ctx.get_cell(&left);
+            let _ = ctx.get_cell(&right);
+        });
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(cell_dependents_len(&ctx, &left), 1);
+        assert_eq!(cell_dependents_len(&ctx, &right), 1);
+
+        ctx.batch(|ctx| {
+            ctx.set_cell(&left, 1);
+            ctx.set_cell(&right, 1);
+        });
+
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(pending_effect_count(&ctx), 0);
+        assert!(!effect_is_scheduled(&ctx, &effect));
     }
 }

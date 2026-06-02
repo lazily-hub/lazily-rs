@@ -234,6 +234,7 @@ Locking model:
 - Recompute notifications are scoped to the slot that finished. A completion for one in-flight slot must not wake waiters parked behind another in-flight slot.
 - If an upstream invalidation happens while a slot callback is running, the in-flight stale result is not published as fresh; the getter retries until it can return a value that matches the latest dependency state
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
+- The outermost thread-safe batch exit must collect dependents for all changed cells and apply one coalesced frontier invalidation, so a shared dependent reached through many changed cells is marked dirty and advances revision once per batch flush
 - Thread-safe invalidation uses an explicit frontier work queue under the graph
   mutex instead of recursive dependent walks. Changed-cell and slot-value-change
   roots snapshot dependent frontiers, coalesce duplicate slot ids in one
