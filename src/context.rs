@@ -18,7 +18,7 @@ type EqualsFn = dyn Fn(&dyn Any, &dyn Any) -> bool;
 type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
 
 /// Unique identifier for a reactive node (slot or cell).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SlotId(pub(crate) u64);
 
 #[cfg(not(feature = "vec_edges"))]

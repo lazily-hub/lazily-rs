@@ -2017,19 +2017,21 @@ impl ThreadSafeContext {
         let should_flush = {
             let mut state = self.lock_state();
             assert!(state.batch_depth > 0, "finish_batch called without batch");
-            for id in changes.cells {
-                edge_insert(&mut state.batched_cells, id);
-            }
-            for id in changes.cell_clears {
-                edge_insert(&mut state.batched_cell_clears, id);
-            }
-            for id in changes.slots {
-                edge_insert(&mut state.batched_slots, id);
-            }
+            state.batched_cells.extend(changes.cells);
+            state.batched_cell_clears.extend(changes.cell_clears);
+            state.batched_slots.extend(changes.slots);
             state.batch_depth -= 1;
             self.inner
                 .batch_depth
                 .store(state.batch_depth, Ordering::Release);
+            if state.batch_depth == 0 {
+                state.batched_cells.sort_unstable();
+                state.batched_cells.dedup();
+                state.batched_cell_clears.sort_unstable();
+                state.batched_cell_clears.dedup();
+                state.batched_slots.sort_unstable();
+                state.batched_slots.dedup();
+            }
             state.batch_depth == 0
         };
 
