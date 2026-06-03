@@ -87,18 +87,6 @@ impl Drop for TrackingGuard {
     }
 }
 
-fn push_tracking_frame(context_id: ThreadSafeContextId, node_id: SlotId) -> TrackingGuard {
-    THREAD_SAFE_TRACKING_STACK.with(|stack| {
-        stack.borrow_mut().push(ThreadSafeTrackingFrame {
-            context_id,
-            node_id,
-            known_dependencies: HashSet::new(),
-            dependencies: HashSet::new(),
-        });
-    });
-    TrackingGuard { active: true }
-}
-
 fn push_tracking_frame_with_known_dependencies(
     context_id: ThreadSafeContextId,
     node_id: SlotId,
@@ -1964,12 +1952,6 @@ impl ThreadSafeContext {
         }
     }
 
-    fn remove_pending_effect(&self, id: SlotId) {
-        let mut state = self.lock_state();
-        state.pending_effects.retain(|queued| *queued != id);
-        state.scheduled_effects.remove(&id);
-    }
-
     fn flush_effects(&self) {
         {
             let mut state = self.lock_state();
@@ -2006,34 +1988,44 @@ impl ThreadSafeContext {
         if !self.effect_should_run(id) {
             return;
         }
-        self.remove_pending_effect(id);
 
         let (run, old_dependencies, cleanup) = {
             let mut state = self.lock_state();
+            state.pending_effects.retain(|queued| *queued != id);
+            state.scheduled_effects.remove(&id);
             let effect = match state.nodes.get_mut(&id) {
                 Some(ThreadSafeNode::Effect(effect)) => effect,
                 _ => return,
             };
-            let old_dependencies = effect.dependencies.drain().collect::<Vec<_>>();
+            let old_dependencies = effect.dependencies.clone();
             let cleanup = effect.cleanup.take();
             effect.force_run = false;
             (Arc::clone(&effect.run), old_dependencies, cleanup)
         };
 
-        for dependency_id in old_dependencies {
-            self.remove_dependent_edge(dependency_id, id);
-        }
         if let Some(cleanup) = cleanup {
             cleanup();
         }
 
-        let _tracking = push_tracking_frame(self.context_id(), id);
+        let _tracking = push_tracking_frame_with_known_dependencies(
+            self.context_id(),
+            id,
+            old_dependencies.clone(),
+        );
         let _callback_activity = self.callback_activity();
         let next_cleanup = run(self);
         drop(_callback_activity);
-        drop(_tracking);
+        let new_dependencies = _tracking.finish();
 
         let mut state = self.lock_state();
+        if matches!(state.nodes.get(&id), Some(ThreadSafeNode::Effect(_))) {
+            Self::remove_stale_dependencies_locked(
+                &mut state,
+                id,
+                &old_dependencies,
+                &new_dependencies,
+            );
+        }
         if let Some(ThreadSafeNode::Effect(effect)) = state.nodes.get_mut(&id) {
             effect.cleanup = next_cleanup;
         } else if let Some(cleanup) = next_cleanup {

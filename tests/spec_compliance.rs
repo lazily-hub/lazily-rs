@@ -1004,6 +1004,62 @@ mod benchmark_instrumentation {
         );
     }
 
+    /// SPEC: thread-safe effect reruns preserve unchanged dependency edges and
+    /// skip redundant edge-registration locks.
+    #[test]
+    fn thread_safe_effect_rerun_preserves_unchanged_dependency_edges() {
+        let ctx = ThreadSafeContext::new();
+        let cells = [
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+            ctx.cell(0usize),
+        ];
+        let runs = Arc::new(AtomicUsize::new(0));
+        let sink = Arc::new(AtomicUsize::new(0));
+        let effect_cells = cells;
+        let runs_for_effect = Arc::clone(&runs);
+        let sink_for_effect = Arc::clone(&sink);
+        let _effect = ctx.effect(move |ctx| {
+            runs_for_effect.fetch_add(1, Ordering::SeqCst);
+            let total = effect_cells
+                .iter()
+                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)));
+            sink_for_effect.store(total, Ordering::SeqCst);
+        });
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        ctx.reset_instrumentation();
+
+        ctx.batch(|ctx| {
+            for (index, cell) in cells.iter().enumerate() {
+                ctx.set_cell(cell, index + 1);
+            }
+        });
+
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(sink.load(Ordering::SeqCst), 10);
+
+        let snapshot = ctx.instrumentation_snapshot();
+        assert_eq!(
+            snapshot.dependency_edges_removed, 0,
+            "stable effect dependencies should stay subscribed across rerun"
+        );
+        assert_eq!(
+            snapshot.dependency_edges_added, 0,
+            "stable effect dependencies should not be re-added during rerun"
+        );
+        assert_eq!(
+            lock_site(&ctx, ThreadSafeLockSite::DependencyEdge).lock_acquisitions,
+            0,
+            "stable effect dependencies should not take dependency-edge graph locks"
+        );
+        assert_eq!(
+            snapshot.effect_queue_pushes, 1,
+            "batched invalidation should coalesce the shared effect queue push"
+        );
+    }
+
     /// SPEC: fresh cached thread-safe gets use a per-slot read guard, so
     /// independent readers can clone the cached value concurrently without
     /// entering write-side graph mutation.
