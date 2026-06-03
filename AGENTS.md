@@ -24,10 +24,10 @@ Lazy reactive primitives library for Rust.
 ## Commands
 
 ```bash
-cargo test          # Run all tests (81 integration/spec tests + 2 doctests)
-cargo test --features tokio  # Include Tokio sync integration tests
-cargo clippy        # Lint
-cargo build         # Build
+make check           # Run fmt, clippy, build, default tests, tokio tests, loom tests, and benchmark result checks
+make test-tokio      # Include Tokio sync integration tests
+make test-loom       # Run thread-safe Loom model tests
+make benchmark-check # Verify generated benchmark results and instrumentation budgets
 ```
 
 ## Related Projects

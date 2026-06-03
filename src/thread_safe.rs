@@ -1797,6 +1797,7 @@ impl ThreadSafeContext {
             }
         }
 
+        #[cfg(feature = "instrumentation")]
         let dirty_marks = slot_order.len();
         for id in slot_order {
             let force_recompute = slots_to_mark.get(&id).copied().unwrap_or(false);

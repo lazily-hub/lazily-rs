@@ -17,6 +17,17 @@ Values are **lazy**: dependents are marked dirty on invalidation but only valida
 `ctx.memo()` Slots use a memo guard: if recomputation produces the same value, downstream dirty caches and effects are left alone.
 Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect reruns happen once after the outermost batch exits.
 
+## Development
+
+Run the local CI-equivalent suite with:
+
+```bash
+make check
+```
+
+The Makefile also exposes focused targets such as `make test-tokio`,
+`make test-loom`, `make benchmark-check`, and `make benchmark-update`.
+
 ## Usage
 
 ```rust
