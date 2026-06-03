@@ -860,6 +860,7 @@ struct ThreadSafeState {
     batched_cells: EdgeVec,
     batched_cell_clears: EdgeVec,
     batched_slots: EdgeVec,
+    dependent_scratch: Vec<SlotId>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
@@ -899,6 +900,17 @@ impl ThreadSafeState {
     fn is_effect_scheduled(&self, id: SlotId) -> bool {
         let idx = id.0 as usize;
         idx < self.scheduled_effects.len() && self.scheduled_effects[idx]
+    }
+
+    fn fill_dependent_scratch(&mut self, id: SlotId) {
+        self.dependent_scratch.clear();
+        let idx = id.0 as usize;
+        let deps: &[SlotId] = match self.nodes.get(idx).and_then(|opt| opt.as_ref()) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.as_slice(),
+            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.as_slice(),
+            _ => return,
+        };
+        self.dependent_scratch.extend_from_slice(deps);
     }
 }
 
@@ -2032,23 +2044,24 @@ impl ThreadSafeContext {
                 .into_iter()
                 .collect::<Vec<_>>();
 
-            let invalidation_roots = cells
-                .into_iter()
-                .flat_map(|cell_id| {
-                    Self::dependents_locked(&state, cell_id)
-                        .into_iter()
-                        .map(|id| ThreadSafeInvalidationRoot {
-                            id,
-                            force_recompute: true,
-                        })
-                })
-                .collect::<Vec<_>>();
+            let mut invalidation_roots = Vec::new();
+            for cell_id in &cells {
+                state.fill_dependent_scratch(*cell_id);
+                for &id in &state.dependent_scratch {
+                    invalidation_roots.push(ThreadSafeInvalidationRoot {
+                        id,
+                        force_recompute: true,
+                    });
+                }
+            }
             Self::invalidate_frontier_locked(&mut state, invalidation_roots);
 
-            let mut clear_roots = cell_clears
-                .into_iter()
-                .flat_map(|cell_id| Self::dependents_locked(&state, cell_id))
-                .collect::<Vec<_>>();
+            let mut clear_roots = Vec::new();
+            for cell_id in &cell_clears {
+                state.fill_dependent_scratch(*cell_id);
+                let deps = state.dependent_scratch.clone();
+                clear_roots.extend(deps);
+            }
             clear_roots.extend(slots);
             Self::clear_frontier_locked(&mut state, clear_roots);
         }
@@ -2303,31 +2316,38 @@ impl ThreadSafeContext {
     }
 
     fn invalidate_cell_dependents_locked(state: &mut ThreadSafeState, id: SlotId) {
-        let roots =
-            Self::dependents_locked(state, id)
-                .into_iter()
-                .map(|id| ThreadSafeInvalidationRoot {
-                    id,
-                    force_recompute: true,
-                });
+        state.fill_dependent_scratch(id);
+        let roots: Vec<_> = state
+            .dependent_scratch
+            .iter()
+            .map(|&id| ThreadSafeInvalidationRoot {
+                id,
+                force_recompute: true,
+            })
+            .collect();
         Self::invalidate_frontier_locked(state, roots);
     }
 
     fn clear_cell_dependents_locked(state: &mut ThreadSafeState, id: SlotId) {
-        Self::clear_frontier_locked(state, Self::dependents_locked(state, id));
+        state.fill_dependent_scratch(id);
+        let deps: Vec<SlotId> = state.dependent_scratch.clone();
+        Self::clear_frontier_locked(state, deps);
     }
 
     fn notify_slot_value_changed_locked(state: &mut ThreadSafeState, id: SlotId) {
-        let roots =
-            Self::dependents_locked(state, id)
-                .into_iter()
-                .map(|id| ThreadSafeInvalidationRoot {
-                    id,
-                    force_recompute: true,
-                });
+        state.fill_dependent_scratch(id);
+        let roots: Vec<_> = state
+            .dependent_scratch
+            .iter()
+            .map(|&id| ThreadSafeInvalidationRoot {
+                id,
+                force_recompute: true,
+            })
+            .collect();
         Self::invalidate_frontier_locked(state, roots);
     }
 
+    #[cfg(test)]
     fn dependents_locked(state: &ThreadSafeState, id: SlotId) -> EdgeVec {
         match state.get_node(id) {
             Some(ThreadSafeNode::Slot(slot)) => slot.dependents.clone(),
