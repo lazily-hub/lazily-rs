@@ -11,7 +11,7 @@ use crate::effect::{EffectCallbackResult, EffectHandle};
 use crate::slot::SlotHandle;
 
 /// Type alias for the erased compute function stored in slots.
-type ComputeFn = dyn Fn(&Context) -> Box<dyn Any>;
+type ComputeFn = dyn Fn(&Context) -> Rc<dyn Any>;
 /// Type alias for the erased equality function stored in slots.
 type EqualsFn = dyn Fn(&dyn Any, &dyn Any) -> bool;
 /// Type alias for the erased effect callback stored in effects.
@@ -73,7 +73,7 @@ pub(crate) fn current_tracking_frame() -> Option<SlotId> {
 
 pub(crate) struct SlotNode {
     /// The cached value, if set.
-    pub(crate) value: Option<Box<dyn Any>>,
+    pub(crate) value: Option<Rc<dyn Any>>,
     /// The compute closure (type-erased).
     pub(crate) compute: Rc<ComputeFn>,
     /// Type-erased equality for memoizing recomputed values.
@@ -89,7 +89,7 @@ pub(crate) struct SlotNode {
 }
 
 pub(crate) struct CellNode {
-    pub(crate) value: Box<dyn Any>,
+    pub(crate) value: Rc<dyn Any>,
     /// Slots that depend on this cell.
     pub(crate) dependents: EdgeVec,
 }
@@ -344,7 +344,7 @@ impl Context {
         let id = self.alloc_id();
         let node = SlotNode {
             value: None,
-            compute: Rc::new(move |ctx| Box::new(compute(ctx))),
+            compute: Rc::new(move |ctx| Rc::new(compute(ctx))),
             equals,
             dependencies: EdgeVec::new(),
             dependents: EdgeVec::new(),
@@ -507,7 +507,7 @@ impl Context {
     pub fn cell<T: PartialEq + 'static>(&self, value: T) -> CellHandle<T> {
         let id = self.alloc_id();
         let node = CellNode {
-            value: Box::new(value),
+            value: Rc::new(value),
             dependents: EdgeVec::new(),
         };
         self.insert_node(id, Node::Cell(node));
@@ -534,7 +534,7 @@ impl Context {
             {
                 let mut inner = self.inner.borrow_mut();
                 if let Some(Node::Cell(c)) = Self::get_node_mut(&mut inner.nodes, handle.id) {
-                    c.value = Box::new(new_value);
+                    c.value = Rc::new(new_value);
                 }
             }
             if self.is_batching() {
