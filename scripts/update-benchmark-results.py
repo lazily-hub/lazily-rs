@@ -273,6 +273,23 @@ SYNC_STRATEGY_ADOPTION_GATE: tuple[tuple[str, str, str, str, str], ...] = (
     ),
 )
 
+WATCH_ITEM_AB_CHECKS: tuple[tuple[str, str, str, str, str], ...] = (
+    (
+        "cached ThreadSafeContext read latency",
+        "a8b6fc3 vs c917401",
+        "cargo bench --features instrumentation --bench context -- cached_reads/thread_safe_context",
+        "73.48 ns baseline vs 73.20 ns current on warm-cache repeat",
+        "no tuning; the archived 56.5 ns row did not reproduce under controlled A/B",
+    ),
+    (
+        "effect cleanup contention at 16 workers",
+        "a8b6fc3 vs c917401",
+        "cargo bench --features instrumentation --bench context -- thread_safe_effect_contention/cleanup_execution/16",
+        "2.31 ms baseline vs 2.43 ms current on warm-cache repeat with overlapping CIs",
+        "keep watching; Criterion reported no statistically significant change",
+    ),
+)
+
 
 def run(command: list[str]) -> None:
     print("$ " + " ".join(command), flush=True)
@@ -693,6 +710,27 @@ def build_section(
             "Candidates do not replace the current strategy before the same run reports throughput, p50/p95 latency, and lock-site budgets for the required 8/16-worker cases.",
             "",
             "Required latency evidence uses Criterion sample per-iteration timing.",
+            "",
+            "Watch-item A/B follow-up:",
+            "",
+            "| Watch item | Baseline/current refs | Focused command | Controlled rerun result | Decision |",
+            "|---|---|---|---|---|",
+        ]
+    )
+
+    for item, refs, command, result, decision in WATCH_ITEM_AB_CHECKS:
+        lines.append(
+            "| {item} | {refs} | `{command}` | {result} | {decision} |".format(
+                item=item,
+                refs=refs,
+                command=command,
+                result=result,
+                decision=decision,
+            )
+        )
+
+    lines.extend(
+        [
             "",
             "| Group | Case | p50 | p95 | Samples |",
             "|---|---|---:|---:|---:|",

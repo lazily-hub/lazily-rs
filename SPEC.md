@@ -318,6 +318,13 @@ Lock strategy evaluation:
   effect-heavy cases, stay within lock-site budgets, and carry Loom/Shuttle
   proof for stale completion, effect scheduling/disposal, batch flush, and
   re-entrant callbacks before release.
+- Benchmark watch items from generated README deltas must be confirmed with a
+  controlled A/B rerun before tuning. The rerun should use the same benchmark
+  filter on the same host/toolchain when possible, isolate baseline and current
+  code in clean worktrees or Criterion baselines, and record whether the signal
+  reproduces. If confidence intervals overlap or Criterion reports no
+  statistically significant change, document the watch item and avoid
+  speculative synchronization changes.
 - Fully lock-free cached reads are deferred for the current erased-value storage. The current versioned optimistic path still clones through the retained sidecar `Arc` snapshot and uses atomic dirty/revision validation to ensure a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
 - The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, dynamic dependency switch/disposal cleanup, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
