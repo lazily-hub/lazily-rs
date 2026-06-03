@@ -37,6 +37,135 @@ type DependentEdgeVec = SmallVec<[(SlotId, ThreadSafeDependentKind); 4]>;
 #[cfg(feature = "vec_edges")]
 type DependentEdgeVec = Vec<(SlotId, ThreadSafeDependentKind)>;
 
+const HYBRID_THRESHOLD: usize = 16;
+
+#[cfg(test)]
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+#[cfg(test)]
+impl<L, R> Iterator for Either<L, R>
+where
+    L: Iterator,
+    R: Iterator<Item = L::Item>,
+{
+    type Item = L::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Left(l) => l.next(),
+            Self::Right(r) => r.next(),
+        }
+    }
+}
+
+enum HybridMap<V> {
+    Small(Vec<(SlotId, V)>),
+    Large(HashMap<SlotId, V>),
+}
+
+impl<V> Default for HybridMap<V> {
+    fn default() -> Self {
+        Self::Small(Vec::new())
+    }
+}
+
+impl<V> HybridMap<V> {
+    fn get(&self, id: SlotId) -> Option<&V> {
+        match self {
+            Self::Small(vec) => vec.iter().find(|(sid, _)| *sid == id).map(|(_, v)| v),
+            Self::Large(map) => map.get(&id),
+        }
+    }
+
+    fn get_mut(&mut self, id: SlotId) -> Option<&mut V> {
+        match self {
+            Self::Small(vec) => vec.iter_mut().find(|(sid, _)| *sid == id).map(|(_, v)| v),
+            Self::Large(map) => map.get_mut(&id),
+        }
+    }
+
+    fn push(&mut self, id: SlotId, value: V) {
+        match self {
+            Self::Small(vec) => {
+                vec.push((id, value));
+                if vec.len() > HYBRID_THRESHOLD {
+                    *self = Self::Large(vec.drain(..).collect());
+                }
+            }
+            Self::Large(map) => {
+                map.insert(id, value);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = (SlotId, &V)> {
+        match self {
+            Self::Small(vec) => Either::Left(vec.iter().map(|(id, v)| (*id, v))),
+            Self::Large(map) => Either::Right(map.iter().map(|(id, v)| (*id, v))),
+        }
+    }
+
+    fn into_entries(self) -> Vec<(SlotId, V)> {
+        match self {
+            Self::Small(vec) => vec,
+            Self::Large(map) => map.into_iter().collect(),
+        }
+    }
+}
+
+enum HybridSet {
+    Small(Vec<SlotId>),
+    Large(HashSet<SlotId>),
+}
+
+impl Default for HybridSet {
+    fn default() -> Self {
+        Self::Small(Vec::new())
+    }
+}
+
+impl HybridSet {
+    fn contains(&self, id: SlotId) -> bool {
+        match self {
+            Self::Small(vec) => vec.contains(&id),
+            Self::Large(set) => set.contains(&id),
+        }
+    }
+
+    fn insert(&mut self, id: SlotId) -> bool {
+        match self {
+            Self::Small(vec) => {
+                if vec.contains(&id) {
+                    return false;
+                }
+                vec.push(id);
+                if vec.len() > HYBRID_THRESHOLD {
+                    *self = Self::Large(vec.drain(..).collect());
+                }
+                true
+            }
+            Self::Large(set) => set.insert(id),
+        }
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = SlotId> {
+        match self {
+            Self::Small(vec) => Either::Left(vec.iter().copied()),
+            Self::Large(set) => Either::Right(set.iter().copied()),
+        }
+    }
+
+    fn into_entries(self) -> Vec<SlotId> {
+        match self {
+            Self::Small(vec) => vec,
+            Self::Large(set) => set.into_iter().collect(),
+        }
+    }
+}
 fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
     if edges.contains(&id) {
         false
@@ -575,9 +704,9 @@ struct ThreadSafeInvalidationRoot {
 
 #[derive(Default)]
 struct ThreadSafeInvalidationPlan {
-    slot_marks: Vec<(SlotId, bool)>,
-    slot_clears: Vec<SlotId>,
-    effect_schedules: Vec<(SlotId, bool)>,
+    slot_marks: HybridMap<bool>,
+    slot_clears: HybridSet,
+    effect_schedules: HybridMap<bool>,
 }
 
 impl ThreadSafeInvalidationPlan {
@@ -586,33 +715,32 @@ impl ThreadSafeInvalidationPlan {
         I: IntoIterator<Item = ThreadSafeInvalidationRoot>,
     {
         let mut queue = VecDeque::new();
-        let mut requested_force: Vec<(SlotId, bool)> = Vec::new();
+        let mut requested_force: HybridMap<bool> = HybridMap::default();
         for root in roots {
             Self::enqueue_root(&mut queue, &mut requested_force, root);
         }
 
         let mut plan = Self::default();
-        let mut simulated_slots: Vec<(SlotId, (bool, bool))> = Vec::new();
+        let mut simulated_slots: HybridMap<(bool, bool)> = HybridMap::default();
 
         while let Some(root) = queue.pop_front() {
-            let force_recompute = match Self::find_force(&requested_force, root.id) {
-                Some(f) if root.force_recompute == f => f,
+            let force_recompute = match requested_force.get(root.id) {
+                Some(f) if root.force_recompute == *f => *f,
                 _ => continue,
             };
 
             let dependents = match state.get_node(root.id) {
                 Some(ThreadSafeNode::Slot(slot)) => {
-                    let (dirty, force_state) = match Self::find_simulated(&simulated_slots, root.id)
-                    {
-                        Some(state) => state,
+                    let (dirty, force_state) = match simulated_slots.get(root.id) {
+                        Some(s) => *s,
                         None => (slot.dirty, slot.force_recompute),
                     };
                     let should_propagate = !dirty || (force_recompute && !force_state);
-                    Self::set_simulated(
-                        &mut simulated_slots,
-                        root.id,
-                        (true, force_state || force_recompute),
-                    );
+                    if let Some(sim) = simulated_slots.get_mut(root.id) {
+                        *sim = (true, force_state || force_recompute);
+                    } else {
+                        simulated_slots.push(root.id, (true, force_state || force_recompute));
+                    }
 
                     plan.add_slot_mark(root.id, force_recompute);
 
@@ -650,15 +778,15 @@ impl ThreadSafeInvalidationPlan {
     {
         let mut plan = Self::default();
         let mut queue = roots.into_iter().collect::<VecDeque<_>>();
-        let mut visited_slots: Vec<SlotId> = Vec::new();
+        let mut visited_slots: HybridSet = HybridSet::default();
 
         while let Some(id) = queue.pop_front() {
             match state.get_node(id) {
                 Some(ThreadSafeNode::Slot(slot)) => {
-                    if visited_slots.contains(&id) {
+                    if visited_slots.contains(id) {
                         continue;
                     }
-                    visited_slots.push(id);
+                    visited_slots.insert(id);
                     if slot.value.is_none() && !slot.dirty {
                         continue;
                     }
@@ -678,7 +806,12 @@ impl ThreadSafeInvalidationPlan {
     }
 
     fn apply_locked(self, state: &mut ThreadSafeState) {
-        for id in &self.slot_clears {
+        let slot_clears = self.slot_clears.into_entries();
+        let slot_marks = self.slot_marks.into_entries();
+        let effect_schedules = self.effect_schedules.into_entries();
+        let clear_set: HashSet<SlotId> = slot_clears.iter().copied().collect();
+
+        for id in &slot_clears {
             let Some(ThreadSafeNode::Slot(slot)) = state.get_node_mut(*id) else {
                 continue;
             };
@@ -691,16 +824,16 @@ impl ThreadSafeInvalidationPlan {
 
         #[cfg(feature = "instrumentation")]
         let mut dirty_epoch_advances = 0usize;
-        for &(id, force_recompute) in &self.slot_marks {
-            if self.slot_clears.contains(&id) {
+        for (id, force_recompute) in &slot_marks {
+            if clear_set.contains(id) {
                 continue;
             }
-            let Some(ThreadSafeNode::Slot(slot)) = state.get_node_mut(id) else {
+            let Some(ThreadSafeNode::Slot(slot)) = state.get_node_mut(*id) else {
                 continue;
             };
             slot.revision = slot.revision.wrapping_add(1);
             slot.dirty = true;
-            if force_recompute {
+            if *force_recompute {
                 slot.force_recompute = true;
             }
             slot.fast_path.mark_dirty(slot.force_recompute);
@@ -716,62 +849,46 @@ impl ThreadSafeInvalidationPlan {
                 .record_dirty_epoch_advances(dirty_epoch_advances);
         }
 
-        for &(id, force) in &self.effect_schedules {
-            ThreadSafeContext::schedule_effect_locked(state, id, force);
+        for (id, force) in &effect_schedules {
+            ThreadSafeContext::schedule_effect_locked(state, *id, *force);
         }
     }
 
     fn add_slot_mark(&mut self, id: SlotId, force_recompute: bool) {
-        if let Some((_, force)) = self.slot_marks.iter_mut().find(|(sid, _)| *sid == id) {
-            *force |= force_recompute;
+        if let Some(force) = self.slot_marks.get_mut(id) {
+            if force_recompute {
+                *force = true;
+            }
         } else {
-            self.slot_marks.push((id, force_recompute));
+            self.slot_marks.push(id, force_recompute);
         }
     }
 
     fn add_slot_clear(&mut self, id: SlotId) {
-        if !self.slot_clears.contains(&id) {
-            self.slot_clears.push(id);
-        }
+        self.slot_clears.insert(id);
     }
 
     fn add_effect_schedule(&mut self, id: SlotId, force: bool) {
-        if let Some((_, existing_force)) =
-            self.effect_schedules.iter_mut().find(|(sid, _)| *sid == id)
-        {
-            *existing_force |= force;
+        if let Some(existing) = self.effect_schedules.get_mut(id) {
+            if force {
+                *existing = true;
+            }
         } else {
-            self.effect_schedules.push((id, force));
-        }
-    }
-
-    fn find_force(vec: &[(SlotId, bool)], id: SlotId) -> Option<bool> {
-        vec.iter().find(|(sid, _)| *sid == id).map(|(_, f)| *f)
-    }
-
-    fn find_simulated(vec: &[(SlotId, (bool, bool))], id: SlotId) -> Option<(bool, bool)> {
-        vec.iter()
-            .find(|(sid, _)| *sid == id)
-            .map(|(_, state)| *state)
-    }
-
-    fn set_simulated(vec: &mut Vec<(SlotId, (bool, bool))>, id: SlotId, value: (bool, bool)) {
-        if let Some((_, state)) = vec.iter_mut().find(|(sid, _)| *sid == id) {
-            *state = value;
-        } else {
-            vec.push((id, value));
+            self.effect_schedules.push(id, force);
         }
     }
 
     fn enqueue_root(
         queue: &mut VecDeque<ThreadSafeInvalidationRoot>,
-        force_vec: &mut Vec<(SlotId, bool)>,
+        force_map: &mut HybridMap<bool>,
         root: ThreadSafeInvalidationRoot,
     ) {
-        if let Some((_, force)) = force_vec.iter_mut().find(|(sid, _)| *sid == root.id) {
-            *force |= root.force_recompute;
+        if let Some(force) = force_map.get_mut(root.id) {
+            if root.force_recompute {
+                *force = true;
+            }
         } else {
-            force_vec.push((root.id, root.force_recompute));
+            force_map.push(root.id, root.force_recompute);
             queue.push_back(root);
         }
     }
@@ -2426,8 +2543,7 @@ mod tests {
                     force_recompute: true,
                 });
             let plan = ThreadSafeInvalidationPlan::from_roots_locked(&state, roots);
-            let planned_slots: HashSet<SlotId> =
-                plan.slot_marks.iter().map(|(id, _)| *id).collect();
+            let planned_slots: HashSet<SlotId> = plan.slot_marks.iter().map(|(id, _)| id).collect();
             let expected_slots = [left.id, right.id, joined.id]
                 .into_iter()
                 .collect::<HashSet<_>>();
@@ -2507,7 +2623,7 @@ mod tests {
             let state = ctx.lock_state();
             let roots = ThreadSafeContext::dependents_locked(&state, root.id);
             let plan = ThreadSafeInvalidationPlan::from_clear_roots_locked(&state, roots);
-            let planned_clears: HashSet<SlotId> = plan.slot_clears.iter().copied().collect();
+            let planned_clears: HashSet<SlotId> = plan.slot_clears.iter().collect();
             let expected_clears = [doubled.id, labeled.id].into_iter().collect::<HashSet<_>>();
 
             assert_eq!(planned_clears, expected_clears);
