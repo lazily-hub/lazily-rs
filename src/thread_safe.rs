@@ -79,9 +79,9 @@ struct ThreadSafeTrackingFrame {
 
 #[derive(Default)]
 struct ThreadSafeBatchChanges {
-    cells: HashSet<SlotId>,
-    cell_clears: HashSet<SlotId>,
-    slots: HashSet<SlotId>,
+    cells: EdgeVec,
+    cell_clears: EdgeVec,
+    slots: EdgeVec,
 }
 
 struct ThreadSafeBatchFrame {
@@ -831,9 +831,9 @@ struct ThreadSafeState {
     scheduled_effects: Vec<bool>,
     flushing_effects: bool,
     batch_depth: usize,
-    batched_cells: HashSet<SlotId>,
-    batched_cell_clears: HashSet<SlotId>,
-    batched_slots: HashSet<SlotId>,
+    batched_cells: EdgeVec,
+    batched_cell_clears: EdgeVec,
+    batched_slots: EdgeVec,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
@@ -1817,7 +1817,7 @@ impl ThreadSafeContext {
         }
         let batching = state.batch_depth > 0;
         if batching {
-            state.batched_cells.insert(id);
+            edge_insert(&mut state.batched_cells, id);
         } else {
             Self::invalidate_cell_dependents_locked(&mut state, id);
         }
@@ -1836,7 +1836,7 @@ impl ThreadSafeContext {
         if self.inner.batch_depth.load(Ordering::Acquire) > 0 {
             let mut state = self.lock_state();
             if state.batch_depth > 0 {
-                state.batched_cells.insert(id);
+                edge_insert(&mut state.batched_cells, id);
                 return Some(false);
             }
             return None;
@@ -1948,9 +1948,15 @@ impl ThreadSafeContext {
         let should_flush = {
             let mut state = self.lock_state();
             assert!(state.batch_depth > 0, "finish_batch called without batch");
-            state.batched_cells.extend(changes.cells);
-            state.batched_cell_clears.extend(changes.cell_clears);
-            state.batched_slots.extend(changes.slots);
+            for id in changes.cells {
+                edge_insert(&mut state.batched_cells, id);
+            }
+            for id in changes.cell_clears {
+                edge_insert(&mut state.batched_cell_clears, id);
+            }
+            for id in changes.slots {
+                edge_insert(&mut state.batched_slots, id);
+            }
             state.batch_depth -= 1;
             self.inner
                 .batch_depth
@@ -1969,19 +1975,19 @@ impl ThreadSafeContext {
 
     fn queue_batched_cell(&self, id: SlotId) -> bool {
         queue_batch_change(self.context_id(), |changes| {
-            changes.cells.insert(id);
+            edge_insert(&mut changes.cells, id);
         })
     }
 
     fn queue_batched_cell_clear(&self, id: SlotId) -> bool {
         queue_batch_change(self.context_id(), |changes| {
-            changes.cell_clears.insert(id);
+            edge_insert(&mut changes.cell_clears, id);
         })
     }
 
     fn queue_batched_slot_clear(&self, id: SlotId) -> bool {
         queue_batch_change(self.context_id(), |changes| {
-            changes.slots.insert(id);
+            edge_insert(&mut changes.slots, id);
         })
     }
 
@@ -1990,9 +1996,15 @@ impl ThreadSafeContext {
             #[cfg(feature = "instrumentation")]
             let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::SetCellInvalidation);
             let mut state = self.lock_state();
-            let cells = state.batched_cells.drain().collect::<Vec<_>>();
-            let cell_clears = state.batched_cell_clears.drain().collect::<Vec<_>>();
-            let slots = state.batched_slots.drain().collect::<Vec<_>>();
+            let cells = std::mem::take(&mut state.batched_cells)
+                .into_iter()
+                .collect::<Vec<_>>();
+            let cell_clears = std::mem::take(&mut state.batched_cell_clears)
+                .into_iter()
+                .collect::<Vec<_>>();
+            let slots = std::mem::take(&mut state.batched_slots)
+                .into_iter()
+                .collect::<Vec<_>>();
 
             let invalidation_roots = cells
                 .into_iter()
@@ -2215,7 +2227,7 @@ impl ThreadSafeContext {
         let should_clear = {
             let mut state = self.lock_state();
             if state.batch_depth > 0 {
-                state.batched_slots.insert(id);
+                edge_insert(&mut state.batched_slots, id);
                 false
             } else {
                 true
@@ -2251,7 +2263,7 @@ impl ThreadSafeContext {
         let should_flush = {
             let mut state = self.lock_state();
             if state.batch_depth > 0 {
-                state.batched_cell_clears.insert(handle.id);
+                edge_insert(&mut state.batched_cell_clears, handle.id);
                 false
             } else {
                 Self::clear_cell_dependents_locked(&mut state, handle.id);
