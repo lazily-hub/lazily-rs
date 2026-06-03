@@ -691,6 +691,8 @@ impl ThreadSafeInvalidationPlan {
             slot.fast_path.clear();
         }
 
+        #[cfg(feature = "instrumentation")]
+        let mut dirty_epoch_advances = 0usize;
         for id in self.slot_order {
             if self.slots_to_clear.contains(&id) {
                 continue;
@@ -704,6 +706,16 @@ impl ThreadSafeInvalidationPlan {
                 slot.force_recompute = true;
             }
             slot.fast_path.mark_dirty(slot.force_recompute);
+            #[cfg(feature = "instrumentation")]
+            {
+                dirty_epoch_advances = dirty_epoch_advances.saturating_add(1);
+            }
+        }
+        #[cfg(feature = "instrumentation")]
+        if dirty_epoch_advances > 0 {
+            state
+                .instrumentation
+                .record_dirty_epoch_advances(dirty_epoch_advances);
         }
 
         for id in self.effect_order {
@@ -774,6 +786,8 @@ struct ThreadSafeInner {
     active_callbacks: AtomicUsize,
     #[cfg(feature = "instrumentation")]
     lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation,
+    #[cfg(feature = "instrumentation")]
+    invalidation_instrumentation: crate::instrumentation::ThreadSafeInvalidationInstrumentation,
 }
 
 impl Default for ThreadSafeInner {
@@ -786,6 +800,9 @@ impl Default for ThreadSafeInner {
             active_callbacks: AtomicUsize::new(0),
             #[cfg(feature = "instrumentation")]
             lock_instrumentation: crate::instrumentation::ThreadSafeLockInstrumentation::default(),
+            #[cfg(feature = "instrumentation")]
+            invalidation_instrumentation:
+                crate::instrumentation::ThreadSafeInvalidationInstrumentation::default(),
         }
     }
 }
@@ -1666,6 +1683,10 @@ impl ThreadSafeContext {
         {
             should_flush
         } else {
+            #[cfg(feature = "instrumentation")]
+            self.inner
+                .invalidation_instrumentation
+                .record_sidecar_fallback();
             self.invalidate_changed_cell_locked(handle.id)
         };
 
@@ -1776,10 +1797,15 @@ impl ThreadSafeContext {
             }
         }
 
+        let dirty_marks = slot_order.len();
         for id in slot_order {
             let force_recompute = slots_to_mark.get(&id).copied().unwrap_or(false);
             self.slot_fast_path(id)?.mark_dirty(force_recompute);
         }
+        #[cfg(feature = "instrumentation")]
+        self.inner
+            .invalidation_instrumentation
+            .record_sidecar_frontier(dirty_marks);
 
         Some(false)
     }
@@ -2211,6 +2237,9 @@ impl ThreadSafeContext {
         self.inner
             .lock_instrumentation
             .apply_to_snapshot(&mut snapshot);
+        self.inner
+            .invalidation_instrumentation
+            .apply_to_snapshot(&mut snapshot);
         snapshot
     }
 
@@ -2236,6 +2265,7 @@ impl ThreadSafeContext {
             state.instrumentation.reset();
         }
         self.inner.lock_instrumentation.reset();
+        self.inner.invalidation_instrumentation.reset();
     }
 }
 

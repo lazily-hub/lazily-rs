@@ -18,6 +18,10 @@ fn consume_snapshot(snapshot: InstrumentationSnapshot) -> u64 {
         .wrapping_add(snapshot.lock_acquisitions)
         .wrapping_add(snapshot.lock_wait_nanos)
         .wrapping_add(snapshot.lock_hold_nanos)
+        .wrapping_add(snapshot.sidecar_invalidation_frontiers)
+        .wrapping_add(snapshot.sidecar_dirty_marks)
+        .wrapping_add(snapshot.sidecar_invalidation_fallbacks)
+        .wrapping_add(snapshot.dirty_epoch_advances)
 }
 
 fn context_profile_snapshot() -> InstrumentationSnapshot {

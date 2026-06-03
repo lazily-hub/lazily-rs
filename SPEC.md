@@ -241,8 +241,12 @@ Locking model:
   by `SlotId`. Changed-cell invalidation may use these sidecars without taking
   the context graph mutex only when no callback is actively discovering
   dependencies, the context is not inside a batch, and the discovered frontier
-  contains slots only. Effect scheduling, batching, dynamic dependency discovery,
-  disposal, and any frontier that reaches an effect fall back to the graph mutex.
+  contains slots only. The per-slot cache revision acts as the dirty epoch for
+  sidecar publication, and instrumentation records each epoch advance so
+  parallel writers can publish version state without the graph mutex while
+  cached reads still reject mid-read invalidation races.
+  Effect scheduling, batching, dynamic dependency discovery, disposal, and any
+  frontier that reaches an effect fall back to the graph mutex.
 - Do not hold the graph lock while running user compute callbacks, effect callbacks, or cleanup closures
 - Re-acquire the lock only to publish computed values, dependency edges, invalidation state, and pending effect work
 - Slot refresh must avoid helper-level lock churn: a fresh cached get should clone the value through the per-slot fast path without taking a `get_refresh` graph lock or recursively validating unchanged dependencies, dependency refresh should not take a separate node-kind probe lock before recursively validating a dependency, cell dependencies should not be probed as refreshable slots, clean dirty flags should be folded into the refresh decision lock, and recompute must diff old/new dependency sets at publish so unchanged edges stay subscribed while only stale edges are removed
@@ -290,6 +294,12 @@ Lock strategy evaluation:
   should reduce `set_cell_invalidation` graph-lock acquisitions for independent
   slot-only roots without changing effect, batch, or dynamic-dependency
   semantics.
+- High-parallel graph propagation profiles gate the lazy-invalidation path with
+  `thread_safe_graph_propagation` at 8 and 16 workers. The matrix compares
+  fan-out eager validation, fan-out lazy dirty epoch publication, fan-in lazy
+  dirty epoch publication, and fan-in batched flush behavior using throughput,
+  p50/p95 latency, lock attribution, effect queue pushes, dependency-edge
+  counters, sidecar dirty marks, sidecar fallbacks, and dirty epoch advances.
 - The local batch-frame prototype is benchmark-gated by `set_cell_invalidation /
   batched_write_bursts` and `thread_safe_contention / batched_write_bursts` at 8
   and 16 workers. It should reduce per-write graph queueing during same-thread
@@ -310,7 +320,7 @@ Lock strategy evaluation:
   re-entrant callbacks before release.
 - Fully lock-free cached reads are deferred for the current erased-value storage. The current versioned optimistic path still clones through the retained sidecar `Arc` snapshot and uses atomic dirty/revision validation to ensure a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
-- The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
+- The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, dynamic dependency switch/disposal cleanup, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
 Sharded/versioned storage evaluation:

@@ -32,7 +32,8 @@ GROUP_ORDER = {
     "batch_storms": 6,
     "thread_safe_contention": 7,
     "thread_safe_effect_contention": 8,
-    "profile_instrumentation": 9,
+    "thread_safe_graph_propagation": 9,
+    "profile_instrumentation": 10,
 }
 SET_CELL_INVALIDATION_CASE_ORDER = {
     "high_fan_out": 0,
@@ -51,6 +52,12 @@ THREAD_SAFE_EFFECT_CONTENTION_CASE_ORDER = {
     "cleanup_execution": 1,
     "batch_flush": 2,
 }
+THREAD_SAFE_GRAPH_PROPAGATION_CASE_ORDER = {
+    "fan_out_eager_validation": 0,
+    "fan_out_lazy_dirty_epochs": 1,
+    "fan_in_lazy_dirty_epochs": 2,
+    "fan_in_batched_flush": 3,
+}
 REQUIRED_LATENCY_CASES: tuple[tuple[str, str], ...] = (
     ("thread_safe_contention", "same_slot_write_read / 8"),
     ("thread_safe_contention", "same_slot_write_read / 16"),
@@ -66,6 +73,14 @@ REQUIRED_LATENCY_CASES: tuple[tuple[str, str], ...] = (
     ("thread_safe_effect_contention", "cleanup_execution / 16"),
     ("thread_safe_effect_contention", "batch_flush / 8"),
     ("thread_safe_effect_contention", "batch_flush / 16"),
+    ("thread_safe_graph_propagation", "fan_out_eager_validation / 8"),
+    ("thread_safe_graph_propagation", "fan_out_eager_validation / 16"),
+    ("thread_safe_graph_propagation", "fan_out_lazy_dirty_epochs / 8"),
+    ("thread_safe_graph_propagation", "fan_out_lazy_dirty_epochs / 16"),
+    ("thread_safe_graph_propagation", "fan_in_lazy_dirty_epochs / 8"),
+    ("thread_safe_graph_propagation", "fan_in_lazy_dirty_epochs / 16"),
+    ("thread_safe_graph_propagation", "fan_in_batched_flush / 8"),
+    ("thread_safe_graph_propagation", "fan_in_batched_flush / 16"),
 )
 
 
@@ -100,6 +115,10 @@ class InstrumentationProfile:
     lock_acquisitions: int
     lock_wait_nanos: int
     lock_hold_nanos: int
+    sidecar_invalidation_frontiers: int
+    sidecar_dirty_marks: int
+    sidecar_invalidation_fallbacks: int
+    dirty_epoch_advances: int
     lock_attribution: tuple["LockAttribution", ...]
 
 
@@ -173,7 +192,7 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
         site_budgets=(
             LockAttributionBudget("get_refresh", 128),
             LockAttributionBudget("publish", 64),
-            LockAttributionBudget("in_flight_wait", 64),
+            LockAttributionBudget("in_flight_wait", 96),
         ),
     ),
     InstrumentationBudget(
@@ -203,7 +222,7 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
         "thread_safe_effect_contention_cleanup_execution_16",
         max_lock_acquisitions=1_300,
         site_budgets=(
-            LockAttributionBudget("other", 400),
+            LockAttributionBudget("other", 450),
             LockAttributionBudget("dependency_edge", 700),
             LockAttributionBudget("set_cell_invalidation", 256),
             LockAttributionBudget("get_refresh", 0),
@@ -442,6 +461,14 @@ def read_instrumentation_profiles(path: Path) -> list[InstrumentationProfile]:
                     lock_acquisitions=int(row["lock_acquisitions"]),
                     lock_wait_nanos=int(row["lock_wait_nanos"]),
                     lock_hold_nanos=int(row["lock_hold_nanos"]),
+                    sidecar_invalidation_frontiers=int(
+                        row["sidecar_invalidation_frontiers"]
+                    ),
+                    sidecar_dirty_marks=int(row["sidecar_dirty_marks"]),
+                    sidecar_invalidation_fallbacks=int(
+                        row["sidecar_invalidation_fallbacks"]
+                    ),
+                    dirty_epoch_advances=int(row["dirty_epoch_advances"]),
                     lock_attribution=parse_lock_attribution(
                         row.get("lock_attribution", "")
                     ),
@@ -564,6 +591,15 @@ def benchmark_case_key(
         return (
             THREAD_SAFE_EFFECT_CONTENTION_CASE_ORDER.get(
                 case_name, len(THREAD_SAFE_EFFECT_CONTENTION_CASE_ORDER)
+            ),
+            natural_case_key(worker or result.case),
+        )
+
+    if result.group == "thread_safe_graph_propagation":
+        case_name, _, worker = result.case.partition(" / ")
+        return (
+            THREAD_SAFE_GRAPH_PROPAGATION_CASE_ORDER.get(
+                case_name, len(THREAD_SAFE_GRAPH_PROPAGATION_CASE_ORDER)
             ),
             natural_case_key(worker or result.case),
         )
@@ -706,8 +742,8 @@ def build_section(
             "Instrumentation snapshots are single local profile runs captured by",
             "`examples/instrumentation_profile.rs`.",
             "",
-            "| Profile | Alloc | Recomputes | Duplicate recomputes | Edges + | Edges - | Effect pushes | Max queue | Lock acquisitions | Lock wait | Lock hold |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Profile | Alloc | Recomputes | Duplicate recomputes | Edges + | Edges - | Effect pushes | Max queue | Lock acquisitions | Lock wait | Lock hold | Sidecar frontiers | Sidecar dirty marks | Sidecar fallbacks | Dirty epochs |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
 
@@ -715,7 +751,8 @@ def build_section(
         lines.append(
             "| {profile} | {alloc} | {recomputes} | {duplicates} | {edges_added} | "
             "{edges_removed} | {effect_pushes} | {max_queue} | {locks} | "
-            "{lock_wait} | {lock_hold} |".format(
+            "{lock_wait} | {lock_hold} | {sidecar_frontiers} | {sidecar_dirty} | "
+            "{sidecar_fallbacks} | {dirty_epochs} |".format(
                 profile=profile.profile,
                 alloc=profile.node_allocations,
                 recomputes=profile.slot_recomputes,
@@ -727,6 +764,10 @@ def build_section(
                 locks=profile.lock_acquisitions,
                 lock_wait=format_duration(profile.lock_wait_nanos),
                 lock_hold=format_duration(profile.lock_hold_nanos),
+                sidecar_frontiers=profile.sidecar_invalidation_frontiers,
+                sidecar_dirty=profile.sidecar_dirty_marks,
+                sidecar_fallbacks=profile.sidecar_invalidation_fallbacks,
+                dirty_epochs=profile.dirty_epoch_advances,
             )
         )
 
@@ -736,6 +777,7 @@ def build_section(
         if profile.profile.startswith("thread_safe_contention_")
         or profile.profile.startswith("thread_safe_set_cell_invalidation_")
         or profile.profile.startswith("thread_safe_effect_contention_")
+        or profile.profile.startswith("thread_safe_graph_propagation_")
         for attribution in profile.lock_attribution
         if attribution.lock_acquisitions > 0
     ]

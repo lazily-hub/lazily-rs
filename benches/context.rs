@@ -15,6 +15,8 @@ const THREAD_WORKERS: [usize; 5] = [1, 2, 4, 8, 16];
 const CONTENTION_ITERS_PER_WORKER: usize = 128;
 const CONTENTION_BATCH_CELLS_PER_WORKER: usize = 4;
 const SET_CELL_INVALIDATION_FAN_OUT: usize = 512;
+const GRAPH_PROPAGATION_WIDTH: usize = 32;
+const GRAPH_PROPAGATION_ITERS_PER_WORKER: usize = 64;
 
 #[derive(Clone, Copy)]
 enum ThreadSafeContentionCase {
@@ -29,6 +31,14 @@ enum ThreadSafeEffectContentionCase {
     QueueCoalescing,
     CleanupExecution,
     BatchFlush,
+}
+
+#[derive(Clone, Copy)]
+enum ThreadSafeGraphPropagationCase {
+    EagerFanOutValidation,
+    LazyFanOutDirtyEpochs,
+    LazyFanInDirtyEpochs,
+    BatchedFanInFlush,
 }
 
 const THREAD_SAFE_CONTENTION_CASES: [ThreadSafeContentionCase; 4] = [
@@ -57,6 +67,13 @@ const THREAD_SAFE_SET_CELL_INVALIDATION_CASES: [ThreadSafeSetCellInvalidationCas
     ThreadSafeSetCellInvalidationCase::SameSlotContention,
     ThreadSafeSetCellInvalidationCase::IndependentSlotContention,
     ThreadSafeSetCellInvalidationCase::BatchedWriteBursts,
+];
+
+const THREAD_SAFE_GRAPH_PROPAGATION_CASES: [ThreadSafeGraphPropagationCase; 4] = [
+    ThreadSafeGraphPropagationCase::EagerFanOutValidation,
+    ThreadSafeGraphPropagationCase::LazyFanOutDirtyEpochs,
+    ThreadSafeGraphPropagationCase::LazyFanInDirtyEpochs,
+    ThreadSafeGraphPropagationCase::BatchedFanInFlush,
 ];
 
 impl ThreadSafeContentionCase {
@@ -88,6 +105,17 @@ impl ThreadSafeSetCellInvalidationCase {
                 "independent_slot_contention"
             }
             ThreadSafeSetCellInvalidationCase::BatchedWriteBursts => "batched_write_bursts",
+        }
+    }
+}
+
+impl ThreadSafeGraphPropagationCase {
+    fn as_str(self) -> &'static str {
+        match self {
+            ThreadSafeGraphPropagationCase::EagerFanOutValidation => "fan_out_eager_validation",
+            ThreadSafeGraphPropagationCase::LazyFanOutDirtyEpochs => "fan_out_lazy_dirty_epochs",
+            ThreadSafeGraphPropagationCase::LazyFanInDirtyEpochs => "fan_in_lazy_dirty_epochs",
+            ThreadSafeGraphPropagationCase::BatchedFanInFlush => "fan_in_batched_flush",
         }
     }
 }
@@ -240,6 +268,236 @@ fn run_thread_safe_set_cell_invalidation_contention(
             run_thread_safe_batched_set_cell_invalidation(workers)
         }
     }
+}
+
+fn run_thread_safe_graph_propagation(
+    case: ThreadSafeGraphPropagationCase,
+    workers: usize,
+) -> usize {
+    match case {
+        ThreadSafeGraphPropagationCase::EagerFanOutValidation => {
+            run_thread_safe_fan_out_eager_validation(workers)
+        }
+        ThreadSafeGraphPropagationCase::LazyFanOutDirtyEpochs => {
+            run_thread_safe_fan_out_lazy_dirty_epochs(workers)
+        }
+        ThreadSafeGraphPropagationCase::LazyFanInDirtyEpochs => {
+            run_thread_safe_fan_in_lazy_dirty_epochs(workers)
+        }
+        ThreadSafeGraphPropagationCase::BatchedFanInFlush => {
+            run_thread_safe_fan_in_batched_flush(workers)
+        }
+    }
+}
+
+fn run_thread_safe_fan_out_eager_validation(workers: usize) -> usize {
+    let ctx = ThreadSafeContext::new();
+    let root = ctx.cell(0usize);
+    let slots = (0..GRAPH_PROPAGATION_WIDTH)
+        .map(|offset| ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(offset)))
+        .collect::<Vec<_>>();
+    let effect_slots = slots.clone();
+    let sink = Arc::new(AtomicUsize::new(0));
+    let sink_for_effect = Arc::clone(&sink);
+    let _effect = ctx.effect(move |ctx| {
+        let total = effect_slots
+            .iter()
+            .fold(0usize, |sum, slot| sum.wrapping_add(ctx.get(slot)));
+        sink_for_effect.store(total, Ordering::Relaxed);
+    });
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let sink = Arc::clone(&sink);
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+                for iter in 0..GRAPH_PROPAGATION_ITERS_PER_WORKER {
+                    let next = worker
+                        .wrapping_mul(GRAPH_PROPAGATION_ITERS_PER_WORKER)
+                        .wrapping_add(iter);
+                    worker_ctx.set_cell(&root, black_box(next));
+                    sum = sum.wrapping_add(sink.load(Ordering::Relaxed));
+                }
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("fan-out worker should finish"))
+        .fold(0usize, usize::wrapping_add)
+}
+
+fn run_thread_safe_fan_out_lazy_dirty_epochs(workers: usize) -> usize {
+    let ctx = ThreadSafeContext::new();
+    let root = ctx.cell(0usize);
+    let slots = (0..GRAPH_PROPAGATION_WIDTH)
+        .map(|offset| ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(offset)))
+        .collect::<Vec<_>>();
+    for slot in &slots {
+        black_box(ctx.get(slot));
+    }
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+                for iter in 0..GRAPH_PROPAGATION_ITERS_PER_WORKER {
+                    let next = worker
+                        .wrapping_mul(GRAPH_PROPAGATION_ITERS_PER_WORKER)
+                        .wrapping_add(iter);
+                    worker_ctx.set_cell(&root, black_box(next));
+                    sum = sum.wrapping_add(next);
+                }
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let written = threads
+        .into_iter()
+        .map(|worker| worker.join().expect("fan-out worker should finish"))
+        .fold(0usize, usize::wrapping_add);
+    slots
+        .iter()
+        .fold(written, |sum, slot| sum.wrapping_add(ctx.get(slot)))
+}
+
+fn run_thread_safe_fan_in_lazy_dirty_epochs(workers: usize) -> usize {
+    let ctx = ThreadSafeContext::new();
+    let mut roots = Vec::with_capacity(workers * CONTENTION_BATCH_CELLS_PER_WORKER);
+    for worker in 0..workers {
+        for offset in 0..CONTENTION_BATCH_CELLS_PER_WORKER {
+            roots.push(
+                ctx.cell(
+                    worker
+                        .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                        .wrapping_add(offset),
+                ),
+            );
+        }
+    }
+    let branches = roots
+        .iter()
+        .map(|root| {
+            let root = *root;
+            ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+        })
+        .collect::<Vec<_>>();
+    let total_branches = branches.clone();
+    let total = ctx.computed(move |ctx| {
+        total_branches
+            .iter()
+            .fold(0usize, |sum, slot| sum.wrapping_add(ctx.get(slot)))
+    });
+    black_box(ctx.get(&total));
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let worker_roots = roots[worker * CONTENTION_BATCH_CELLS_PER_WORKER
+                ..(worker + 1) * CONTENTION_BATCH_CELLS_PER_WORKER]
+                .to_vec();
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+                for iter in 0..GRAPH_PROPAGATION_ITERS_PER_WORKER {
+                    for (offset, root) in worker_roots.iter().enumerate() {
+                        let next = worker
+                            .wrapping_mul(GRAPH_PROPAGATION_ITERS_PER_WORKER)
+                            .wrapping_add(iter)
+                            .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                            .wrapping_add(offset);
+                        worker_ctx.set_cell(root, black_box(next));
+                        sum = sum.wrapping_add(next);
+                    }
+                }
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let written = threads
+        .into_iter()
+        .map(|worker| worker.join().expect("fan-in worker should finish"))
+        .fold(0usize, usize::wrapping_add);
+    written.wrapping_add(ctx.get(&total))
+}
+
+fn run_thread_safe_fan_in_batched_flush(workers: usize) -> usize {
+    let ctx = ThreadSafeContext::new();
+    let worker_cells = effect_worker_cells(&ctx, workers);
+    let all_cells = worker_cells
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<CellHandle<usize>>>();
+    let branches = all_cells
+        .iter()
+        .map(|cell| {
+            let cell = *cell;
+            ctx.computed(move |ctx| ctx.get_cell(&cell).wrapping_add(1))
+        })
+        .collect::<Vec<_>>();
+    let total_branches = branches.clone();
+    let total = ctx.computed(move |ctx| {
+        total_branches
+            .iter()
+            .fold(0usize, |sum, slot| sum.wrapping_add(ctx.get(slot)))
+    });
+    let sink = Arc::new(AtomicUsize::new(0));
+    let sink_for_effect = Arc::clone(&sink);
+    let _effect = ctx.effect(move |ctx| {
+        sink_for_effect.store(ctx.get(&total), Ordering::Relaxed);
+    });
+
+    let barrier = Arc::new(Barrier::new(workers));
+    let threads = (0..workers)
+        .map(|worker| {
+            let worker_ctx = ctx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            let cells = worker_cells[worker].clone();
+            let sink = Arc::clone(&sink);
+
+            thread::spawn(move || {
+                worker_barrier.wait();
+                let mut sum = 0usize;
+                for iter in 0..GRAPH_PROPAGATION_ITERS_PER_WORKER {
+                    worker_ctx.batch(|ctx| {
+                        for (offset, cell) in cells.iter().enumerate() {
+                            let next = worker
+                                .wrapping_mul(GRAPH_PROPAGATION_ITERS_PER_WORKER)
+                                .wrapping_add(iter)
+                                .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
+                                .wrapping_add(offset);
+                            ctx.set_cell(cell, black_box(next));
+                        }
+                    });
+                    sum = sum.wrapping_add(sink.load(Ordering::Relaxed));
+                }
+                sum
+            })
+        })
+        .collect::<Vec<_>>();
+
+    threads
+        .into_iter()
+        .map(|worker| worker.join().expect("fan-in worker should finish"))
+        .fold(0usize, usize::wrapping_add)
 }
 
 fn run_thread_safe_same_slot_contention(workers: usize) -> usize {
@@ -1058,6 +1316,30 @@ fn bench_thread_safe_effect_contention(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_thread_safe_graph_propagation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("thread_safe_graph_propagation");
+    group.sample_size(10);
+
+    for case in THREAD_SAFE_GRAPH_PROPAGATION_CASES {
+        for workers in EFFECT_THREAD_WORKERS {
+            group.bench_with_input(
+                BenchmarkId::new(case.as_str(), workers),
+                &(case, workers),
+                |b, &(case, workers)| {
+                    b.iter(|| {
+                        black_box(run_thread_safe_graph_propagation(
+                            black_box(case),
+                            black_box(workers),
+                        ))
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(20);
@@ -1070,6 +1352,7 @@ criterion_group!(
         bench_effect_flushing,
         bench_batch_storms,
         bench_thread_safe_contention,
-        bench_thread_safe_effect_contention
+        bench_thread_safe_effect_contention,
+        bench_thread_safe_graph_propagation
 );
 criterion_main!(benches);

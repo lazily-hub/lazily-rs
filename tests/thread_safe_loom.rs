@@ -140,6 +140,34 @@ struct FastFrontierGraph {
     state: Mutex<FastFrontierState>,
 }
 
+#[derive(Debug)]
+struct DynamicEffectState {
+    effect_present: bool,
+    subscribed_left: bool,
+    subscribed_right: bool,
+    effect_scheduled: bool,
+    cleanup_pending: bool,
+    cleanup_runs: usize,
+}
+
+impl Default for DynamicEffectState {
+    fn default() -> Self {
+        Self {
+            effect_present: true,
+            subscribed_left: true,
+            subscribed_right: false,
+            effect_scheduled: false,
+            cleanup_pending: true,
+            cleanup_runs: 0,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DynamicEffectGraph {
+    state: Mutex<DynamicEffectState>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum FrontierNode {
     Left,
@@ -850,6 +878,52 @@ impl FastFrontierGraph {
     }
 }
 
+impl DynamicEffectGraph {
+    fn rerun_switch_to_right(&self) {
+        let mut state = self.state.lock().expect("dynamic effect mutex poisoned");
+        if !state.effect_present {
+            return;
+        }
+        state.effect_scheduled = false;
+        if state.cleanup_pending {
+            state.cleanup_pending = false;
+            state.cleanup_runs = state.cleanup_runs.saturating_add(1);
+        }
+        state.subscribed_left = false;
+        state.subscribed_right = true;
+        state.cleanup_pending = true;
+    }
+
+    fn invalidate_left(&self) {
+        let mut state = self.state.lock().expect("dynamic effect mutex poisoned");
+        if state.effect_present && state.subscribed_left {
+            state.effect_scheduled = true;
+        }
+    }
+
+    fn invalidate_right(&self) {
+        let mut state = self.state.lock().expect("dynamic effect mutex poisoned");
+        if state.effect_present && state.subscribed_right {
+            state.effect_scheduled = true;
+        }
+    }
+
+    fn dispose(&self) {
+        let mut state = self.state.lock().expect("dynamic effect mutex poisoned");
+        if !state.effect_present {
+            return;
+        }
+        state.effect_present = false;
+        state.subscribed_left = false;
+        state.subscribed_right = false;
+        state.effect_scheduled = false;
+        if state.cleanup_pending {
+            state.cleanup_pending = false;
+            state.cleanup_runs = state.cleanup_runs.saturating_add(1);
+        }
+    }
+}
+
 #[test]
 fn optimistic_cached_read_rejects_mid_read_invalidation() {
     loom::model(|| {
@@ -1184,6 +1258,41 @@ fn effect_schedule_dispose_race_clears_pending_work_and_cleanup_once() {
         assert!(
             (1..=2).contains(&state.cleanup_runs),
             "the old cleanup and optional racing callback cleanup should each run at most once"
+        );
+    });
+}
+
+#[test]
+fn dynamic_dependency_switch_dispose_clears_stale_edges_and_cleanup() {
+    loom::model(|| {
+        let graph = Arc::new(DynamicEffectGraph::default());
+
+        graph.rerun_switch_to_right();
+        graph.invalidate_left();
+
+        let right_invalidator = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || graph.invalidate_right())
+        };
+        let disposer = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || graph.dispose())
+        };
+
+        right_invalidator
+            .join()
+            .expect("right invalidator should finish");
+        disposer.join().expect("disposer thread should finish");
+
+        let state = graph.state.lock().expect("dynamic effect mutex poisoned");
+        assert!(!state.effect_present);
+        assert!(!state.subscribed_left);
+        assert!(!state.subscribed_right);
+        assert!(!state.effect_scheduled);
+        assert!(!state.cleanup_pending);
+        assert_eq!(
+            state.cleanup_runs, 2,
+            "old and latest dynamic-dependency cleanups should each run exactly once"
         );
     });
 }

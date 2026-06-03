@@ -85,6 +85,15 @@ pub struct InstrumentationSnapshot {
     pub lock_wait_nanos: u64,
     /// Total nanoseconds spent holding profiled ThreadSafeContext locks.
     pub lock_hold_nanos: u64,
+    /// Number of changed-cell invalidation frontiers applied through per-node
+    /// sidecars without entering the graph mutex.
+    pub sidecar_invalidation_frontiers: u64,
+    /// Number of slot dirty marks published through per-node sidecars.
+    pub sidecar_dirty_marks: u64,
+    /// Number of attempted sidecar invalidations that fell back to the graph mutex.
+    pub sidecar_invalidation_fallbacks: u64,
+    /// Number of per-slot dirty epoch advances across graph and sidecar paths.
+    pub dirty_epoch_advances: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,6 +139,60 @@ impl InstrumentationCounters {
         self.snapshot.effect_queue_pushes = self.snapshot.effect_queue_pushes.saturating_add(1);
         self.snapshot.max_effect_queue_depth =
             self.snapshot.max_effect_queue_depth.max(depth as u64);
+    }
+
+    pub(crate) fn record_dirty_epoch_advances(&mut self, count: usize) {
+        self.snapshot.dirty_epoch_advances = self
+            .snapshot
+            .dirty_epoch_advances
+            .saturating_add(count as u64);
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ThreadSafeInvalidationInstrumentation {
+    sidecar_invalidation_frontiers: std::sync::atomic::AtomicU64,
+    sidecar_dirty_marks: std::sync::atomic::AtomicU64,
+    sidecar_invalidation_fallbacks: std::sync::atomic::AtomicU64,
+}
+
+impl ThreadSafeInvalidationInstrumentation {
+    pub(crate) fn record_sidecar_frontier(&self, dirty_marks: usize) {
+        self.sidecar_invalidation_frontiers
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.sidecar_dirty_marks
+            .fetch_add(dirty_marks as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_sidecar_fallback(&self) {
+        self.sidecar_invalidation_fallbacks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn apply_to_snapshot(&self, snapshot: &mut InstrumentationSnapshot) {
+        let sidecar_frontiers = self
+            .sidecar_invalidation_frontiers
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let sidecar_dirty_marks = self
+            .sidecar_dirty_marks
+            .load(std::sync::atomic::Ordering::Relaxed);
+        snapshot.sidecar_invalidation_frontiers = sidecar_frontiers;
+        snapshot.sidecar_dirty_marks = sidecar_dirty_marks;
+        snapshot.sidecar_invalidation_fallbacks = self
+            .sidecar_invalidation_fallbacks
+            .load(std::sync::atomic::Ordering::Relaxed);
+        snapshot.dirty_epoch_advances = snapshot
+            .dirty_epoch_advances
+            .saturating_add(sidecar_dirty_marks);
+    }
+
+    pub(crate) fn reset(&self) {
+        self.sidecar_invalidation_frontiers
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.sidecar_dirty_marks
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.sidecar_invalidation_fallbacks
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

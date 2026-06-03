@@ -575,6 +575,85 @@ mod threading_contract {
         assert_eq!(ctx.get(&doubled), final_value * 2);
         assert!(runs.load(Ordering::SeqCst) >= 1);
     }
+
+    /// SPEC: dynamic thread-safe effect dependencies unsubscribe stale edges
+    /// before later lazy invalidations can rerun the effect, and disposal clears
+    /// pending cleanup/subscription state before racing writes continue.
+    #[test]
+    fn thread_safe_dynamic_effect_dependency_cleanup_survives_disposal() {
+        let ctx = ThreadSafeContext::new();
+        let choose_left = ctx.cell(true);
+        let left = ctx.cell(1usize);
+        let right = ctx.cell(10usize);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let cleanup_runs = Arc::new(AtomicUsize::new(0));
+        let seen_for_effect = Arc::clone(&seen);
+        let cleanup_runs_for_effect = Arc::clone(&cleanup_runs);
+
+        let effect = ctx.effect(move |ctx| {
+            let value = if ctx.get_cell(&choose_left) {
+                ctx.get_cell(&left)
+            } else {
+                ctx.get_cell(&right)
+            };
+            seen_for_effect
+                .lock()
+                .expect("seen lock should not be poisoned")
+                .push(value);
+            let cleanup_runs = Arc::clone(&cleanup_runs_for_effect);
+            move || {
+                cleanup_runs.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        assert_eq!(*seen.lock().expect("seen lock"), vec![1]);
+
+        ctx.set_cell(&choose_left, false);
+        assert_eq!(*seen.lock().expect("seen lock"), vec![1, 10]);
+        assert_eq!(
+            cleanup_runs.load(Ordering::SeqCst),
+            1,
+            "switching dynamic dependencies should run the previous cleanup once"
+        );
+
+        ctx.set_cell(&left, 2);
+        assert_eq!(
+            *seen.lock().expect("seen lock"),
+            vec![1, 10],
+            "stale left dependency should not rerun the effect after it switches to right"
+        );
+
+        ctx.set_cell(&right, 11);
+        assert_eq!(*seen.lock().expect("seen lock"), vec![1, 10, 11]);
+
+        let dispose_ctx = ctx.clone();
+        let dispose_thread = thread::spawn(move || {
+            dispose_ctx.dispose_effect(&effect);
+        });
+        let writer_ctx = ctx.clone();
+        let writer = thread::spawn(move || {
+            writer_ctx.set_cell(&right, 12);
+            writer_ctx.set_cell(&choose_left, true);
+            writer_ctx.set_cell(&left, 3);
+        });
+
+        dispose_thread.join().expect("dispose thread should finish");
+        writer.join().expect("writer thread should finish");
+
+        assert!(!ctx.is_effect_active(&effect));
+        let after_dispose = seen.lock().expect("seen lock").clone();
+        ctx.set_cell(&right, 13);
+        ctx.set_cell(&left, 4);
+        assert_eq!(
+            *seen.lock().expect("seen lock"),
+            after_dispose,
+            "disposed effect should not rerun through stale dynamic dependency edges"
+        );
+        assert!(
+            cleanup_runs.load(Ordering::SeqCst) >= 2,
+            "disposal should run the latest pending cleanup"
+        );
+    }
 }
 
 // ============================================================================
@@ -655,6 +734,7 @@ mod benchmark_report_harness {
             "batch_storms",
             "thread_safe_contention",
             "thread_safe_effect_contention",
+            "thread_safe_graph_propagation",
             "profile_instrumentation",
         ] {
             assert!(
@@ -675,6 +755,8 @@ mod benchmark_report_harness {
         assert!(section.contains("Required p50/p95 latency evidence"));
         assert!(section.contains("Required latency evidence uses Criterion sample"));
         assert!(section.contains("| Group | Case | p50 | p95 | Samples |"));
+        assert!(section.contains("Sidecar frontiers"));
+        assert!(section.contains("Dirty epochs"));
         assert!(section.contains("current_std_mutex_condvar"));
         assert!(section.contains("narrower_condvar_wakeups"));
         assert!(section.contains("parking_lot_style_parking"));
@@ -694,6 +776,10 @@ mod benchmark_report_harness {
             "queue_coalescing / 16",
             "cleanup_execution / 16",
             "batch_flush / 16",
+            "fan_out_eager_validation / 16",
+            "fan_out_lazy_dirty_epochs / 16",
+            "fan_in_lazy_dirty_epochs / 16",
+            "fan_in_batched_flush / 16",
         ] {
             assert!(
                 section.contains(expected),
@@ -720,6 +806,10 @@ mod benchmark_report_harness {
             "thread_safe_effect_contention_cleanup_execution_16",
             "thread_safe_effect_contention_batch_flush_8",
             "thread_safe_effect_contention_batch_flush_16",
+            "thread_safe_graph_propagation_fan_out_eager_validation_16",
+            "thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16",
+            "thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16",
+            "thread_safe_graph_propagation_fan_in_batched_flush_16",
         ] {
             assert!(
                 section.contains(expected),
@@ -730,6 +820,7 @@ mod benchmark_report_harness {
         assert!(CARGO_TOML.contains("name = \"instrumentation_profile\""));
         assert!(UPDATE_SCRIPT.contains("lazily-instrumentation-profile.csv"));
         assert!(UPDATE_SCRIPT.contains("SET_CELL_INVALIDATION_CASE_ORDER"));
+        assert!(UPDATE_SCRIPT.contains("THREAD_SAFE_GRAPH_PROPAGATION_CASE_ORDER"));
         assert!(UPDATE_SCRIPT.contains("REGRESSION_BUDGETS"));
         assert!(UPDATE_SCRIPT.contains("regression_budget_failures"));
         assert!(UPDATE_SCRIPT.contains("instrumentation regression budget failure"));
@@ -741,6 +832,7 @@ mod benchmark_report_harness {
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_queue_coalescing_16"));
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_cleanup_execution_16"));
         assert!(UPDATE_SCRIPT.contains("thread_safe_effect_contention_batch_flush_16"));
+        assert!(UPDATE_SCRIPT.contains("thread_safe_graph_propagation"));
         assert!(UPDATE_SCRIPT.contains("SYNC_STRATEGY_ADOPTION_GATE"));
         assert!(UPDATE_SCRIPT.contains("--check"));
         assert!(UPDATE_SCRIPT.contains("benchmark-results:start"));
@@ -772,6 +864,7 @@ mod storage_strategy_evaluation {
             "cell-only dirty refresh",
             "SlotId-partitioned recompute sidecar",
             "per-node dependent frontier sidecars",
+            "cache revision acts as the dirty epoch",
             "explicit `InvalidationPlan`",
             "snapshot hard-clear frontiers",
             "snapshot and application under the context mutex",
@@ -779,6 +872,7 @@ mod storage_strategy_evaluation {
             "local batch-frame prototype",
             "Effect-heavy contention profiles",
             "thread_safe_effect_contention",
+            "thread_safe_graph_propagation",
             "effect queue coalescing",
             "cleanup execution",
             "nested batch flush behavior",
@@ -820,6 +914,9 @@ mod storage_strategy_evaluation {
             "Synchronization strategy adoption gate",
             "Required p50/p95 latency evidence",
             "ThreadSafe lock attribution for contention profiles",
+            "thread_safe_graph_propagation | fan_out_lazy_dirty_epochs / 16",
+            "Sidecar frontiers",
+            "Dirty epochs",
         ] {
             assert!(
                 README.contains(expected),
@@ -945,6 +1042,22 @@ mod benchmark_instrumentation {
         assert!(
             snapshot.lock_acquisitions > 0,
             "thread-safe operations should acquire the graph lock"
+        );
+        assert!(
+            snapshot.sidecar_invalidation_frontiers >= 1,
+            "slot-only changed-cell invalidation should publish through a per-node sidecar frontier"
+        );
+        assert!(
+            snapshot.sidecar_dirty_marks >= 1,
+            "sidecar invalidation should publish at least one dirty slot mark"
+        );
+        assert_eq!(
+            snapshot.sidecar_invalidation_fallbacks, 0,
+            "slot-only invalidation should not fall back to the graph mutex"
+        );
+        assert!(
+            snapshot.dirty_epoch_advances >= snapshot.sidecar_dirty_marks,
+            "dirty epoch counters should include sidecar dirty marks"
         );
 
         let profile = ctx.lock_profile_snapshot();
@@ -1363,6 +1476,24 @@ mod benchmark_instrumentation {
         assert_eq!(
             set_cell_locks.lock_acquisitions, 0,
             "slot-only independent cell invalidations should stay on per-node sidecars"
+        );
+        let snapshot = ctx.instrumentation_snapshot();
+        let changed_writes = workers * iters - 1;
+        assert_eq!(
+            snapshot.sidecar_invalidation_frontiers, changed_writes as u64,
+            "each changed-cell write should publish one sidecar frontier"
+        );
+        assert!(
+            snapshot.sidecar_dirty_marks >= changed_writes as u64,
+            "sidecar dirty marks should expose per-slot dirty epoch publication"
+        );
+        assert_eq!(
+            snapshot.sidecar_invalidation_fallbacks, 0,
+            "independent slot-only roots should not fall back to graph-locked invalidation"
+        );
+        assert!(
+            snapshot.dirty_epoch_advances >= snapshot.sidecar_dirty_marks,
+            "dirty epoch advances should include all sidecar dirty marks"
         );
 
         for value in &values {
