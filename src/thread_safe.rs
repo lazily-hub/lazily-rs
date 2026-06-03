@@ -828,7 +828,7 @@ struct ThreadSafeState {
     next_id: u64,
     free_ids: Vec<u64>,
     pending_effects: VecDeque<SlotId>,
-    scheduled_effects: HashSet<SlotId>,
+    scheduled_effects: Vec<bool>,
     flushing_effects: bool,
     batch_depth: usize,
     batched_cells: HashSet<SlotId>,
@@ -860,6 +860,19 @@ impl ThreadSafeState {
     fn remove_node(&mut self, id: SlotId) -> Option<ThreadSafeNode> {
         let idx = id.0 as usize;
         self.nodes.get_mut(idx).and_then(|slot| slot.take())
+    }
+
+    fn deschedule_effect(&mut self, id: SlotId) {
+        let idx = id.0 as usize;
+        if idx < self.scheduled_effects.len() {
+            self.scheduled_effects[idx] = false;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_effect_scheduled(&self, id: SlotId) -> bool {
+        let idx = id.0 as usize;
+        idx < self.scheduled_effects.len() && self.scheduled_effects[idx]
     }
 }
 
@@ -2030,7 +2043,7 @@ impl ThreadSafeContext {
     pub fn dispose_effect(&self, handle: &EffectHandle) {
         let (dependencies, cleanup) = {
             let mut state = self.lock_state();
-            state.scheduled_effects.remove(&handle.id);
+            state.deschedule_effect(handle.id);
             state.pending_effects.retain(|queued| *queued != handle.id);
             let Some(ThreadSafeNode::Effect(effect)) = state.remove_node(handle.id) else {
                 return;
@@ -2068,7 +2081,17 @@ impl ThreadSafeContext {
             _ => return,
         }
 
-        if state.scheduled_effects.insert(id) {
+        let idx = id.0 as usize;
+        let already_scheduled = if idx < state.scheduled_effects.len() {
+            state.scheduled_effects[idx]
+        } else {
+            false
+        };
+        if !already_scheduled {
+            if idx >= state.scheduled_effects.len() {
+                state.scheduled_effects.resize(idx + 1, false);
+            }
+            state.scheduled_effects[idx] = true;
             state.pending_effects.push_back(id);
             #[cfg(feature = "instrumentation")]
             {
@@ -2095,7 +2118,7 @@ impl ThreadSafeContext {
             let id = {
                 let mut state = self.lock_state();
                 if let Some(id) = state.pending_effects.pop_front() {
-                    state.scheduled_effects.remove(&id);
+                    state.deschedule_effect(id);
                     Some(id)
                 } else {
                     state.flushing_effects = false;
@@ -2118,7 +2141,7 @@ impl ThreadSafeContext {
         let (run, old_dependencies, cleanup) = {
             let mut state = self.lock_state();
             state.pending_effects.retain(|queued| *queued != id);
-            state.scheduled_effects.remove(&id);
+            state.deschedule_effect(id);
             let effect = match state.get_node_mut(id) {
                 Some(ThreadSafeNode::Effect(effect)) => effect,
                 _ => return,
@@ -2406,7 +2429,7 @@ mod tests {
 
     fn effect_is_scheduled(ctx: &ThreadSafeContext, handle: &EffectHandle) -> bool {
         let state = ctx.lock_state();
-        state.scheduled_effects.contains(&handle.id)
+        state.is_effect_scheduled(handle.id)
     }
 
     fn pending_effect_count(ctx: &ThreadSafeContext) -> usize {
