@@ -836,8 +836,8 @@ impl ThreadSafeState {
 
 struct ThreadSafeInner {
     state: Mutex<ThreadSafeState>,
-    slot_fast_paths: RwLock<HashMap<SlotId, Arc<ThreadSafeSlotFastPath>>>,
-    cell_fast_paths: RwLock<HashMap<SlotId, Arc<ThreadSafeCellFastPath>>>,
+    slot_fast_paths: RwLock<Vec<Option<Arc<ThreadSafeSlotFastPath>>>>,
+    cell_fast_paths: RwLock<Vec<Option<Arc<ThreadSafeCellFastPath>>>>,
     batch_depth: AtomicUsize,
     active_callbacks: AtomicUsize,
     #[cfg(feature = "instrumentation")]
@@ -850,8 +850,8 @@ impl Default for ThreadSafeInner {
     fn default() -> Self {
         Self {
             state: Mutex::new(ThreadSafeState::default()),
-            slot_fast_paths: RwLock::new(HashMap::new()),
-            cell_fast_paths: RwLock::new(HashMap::new()),
+            slot_fast_paths: RwLock::new(Vec::new()),
+            cell_fast_paths: RwLock::new(Vec::new()),
             batch_depth: AtomicUsize::new(0),
             active_callbacks: AtomicUsize::new(0),
             #[cfg(feature = "instrumentation")]
@@ -1110,8 +1110,8 @@ impl ThreadSafeContext {
             .slot_fast_paths
             .read()
             .expect("ThreadSafeContext slot fast path registry poisoned")
-            .get(&id)
-            .cloned()
+            .get(id.0 as usize)
+            .and_then(|opt| opt.as_ref().cloned())
     }
 
     fn cell_fast_path(&self, id: SlotId) -> Option<Arc<ThreadSafeCellFastPath>> {
@@ -1119,8 +1119,8 @@ impl ThreadSafeContext {
             .cell_fast_paths
             .read()
             .expect("ThreadSafeContext cell fast path registry poisoned")
-            .get(&id)
-            .cloned()
+            .get(id.0 as usize)
+            .and_then(|opt| opt.as_ref().cloned())
     }
 
     fn try_read_fresh_slot_fast_path<T>(&self, id: SlotId) -> Option<T>
@@ -1392,11 +1392,16 @@ impl ThreadSafeContext {
             force_recompute: false,
             revision: 0,
         };
-        self.inner
+        let mut slot_fast_paths = self
+            .inner
             .slot_fast_paths
             .write()
-            .expect("ThreadSafeContext slot fast path registry poisoned")
-            .insert(id, fast_path);
+            .expect("ThreadSafeContext slot fast path registry poisoned");
+        let idx = id.0 as usize;
+        if idx >= slot_fast_paths.len() {
+            slot_fast_paths.resize_with(idx + 1, || None);
+        }
+        slot_fast_paths[idx] = Some(fast_path);
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Slot(node));
         SlotHandle::new(id)
@@ -1698,11 +1703,16 @@ impl ThreadSafeContext {
             dependents: EdgeVec::new(),
             fast_path: Arc::clone(&fast_path),
         };
-        self.inner
+        let mut cell_fast_paths = self
+            .inner
             .cell_fast_paths
             .write()
-            .expect("ThreadSafeContext cell fast path registry poisoned")
-            .insert(id, fast_path);
+            .expect("ThreadSafeContext cell fast path registry poisoned");
+        let idx = id.0 as usize;
+        if idx >= cell_fast_paths.len() {
+            cell_fast_paths.resize_with(idx + 1, || None);
+        }
+        cell_fast_paths[idx] = Some(fast_path);
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Cell(node));
         CellHandle::new(id)
