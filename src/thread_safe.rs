@@ -30,6 +30,11 @@ type EdgeVec = SmallVec<[SlotId; 4]>;
 #[cfg(feature = "vec_edges")]
 type EdgeVec = Vec<SlotId>;
 
+#[cfg(not(feature = "vec_edges"))]
+type DependentEdgeVec = SmallVec<[(SlotId, ThreadSafeDependentKind); 4]>;
+#[cfg(feature = "vec_edges")]
+type DependentEdgeVec = Vec<(SlotId, ThreadSafeDependentKind)>;
+
 fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
     if edges.contains(&id) {
         false
@@ -40,11 +45,25 @@ fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
 }
 
 fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
-    if let Some(pos) = edges.iter().position(|x| *x == id) {
+    if let Some(pos) = edges.iter().position(|eid| *eid == id) {
         edges.swap_remove(pos);
         true
     } else {
         false
+    }
+}
+
+fn dependent_edge_insert(edges: &mut DependentEdgeVec, id: SlotId, kind: ThreadSafeDependentKind) {
+    if let Some(entry) = edges.iter_mut().find(|(eid, _)| *eid == id) {
+        entry.1 = kind;
+    } else {
+        edges.push((id, kind));
+    }
+}
+
+fn dependent_edge_remove(edges: &mut DependentEdgeVec, id: SlotId) {
+    if let Some(pos) = edges.iter().position(|(eid, _)| *eid == id) {
+        edges.swap_remove(pos);
     }
 }
 
@@ -244,7 +263,7 @@ struct ThreadSafeSlotFastPath {
     slot_dependency_count: AtomicUsize,
     recompute: Mutex<ThreadSafeSlotRecomputeState>,
     recompute_condvar: Condvar,
-    dependents: Mutex<HashMap<SlotId, ThreadSafeDependentKind>>,
+    dependents: Mutex<DependentEdgeVec>,
 }
 
 impl ThreadSafeSlotFastPath {
@@ -260,7 +279,7 @@ impl ThreadSafeSlotFastPath {
             slot_dependency_count: AtomicUsize::new(slot_dependency_count),
             recompute: Mutex::new(ThreadSafeSlotRecomputeState::default()),
             recompute_condvar: Condvar::new(),
-            dependents: Mutex::new(HashMap::new()),
+            dependents: Mutex::new(DependentEdgeVec::new()),
         }
     }
 
@@ -464,26 +483,31 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn insert_dependent(&self, dependent_id: SlotId, kind: ThreadSafeDependentKind) {
-        self.dependents
-            .lock()
-            .expect("ThreadSafeContext slot dependents mutex poisoned")
-            .insert(dependent_id, kind);
+        dependent_edge_insert(
+            &mut self
+                .dependents
+                .lock()
+                .expect("ThreadSafeContext slot dependents mutex poisoned"),
+            dependent_id,
+            kind,
+        );
     }
 
     fn remove_dependent(&self, dependent_id: SlotId) {
-        self.dependents
-            .lock()
-            .expect("ThreadSafeContext slot dependents mutex poisoned")
-            .remove(&dependent_id);
+        dependent_edge_remove(
+            &mut self
+                .dependents
+                .lock()
+                .expect("ThreadSafeContext slot dependents mutex poisoned"),
+            dependent_id,
+        );
     }
 
     fn dependents_snapshot(&self) -> Vec<(SlotId, ThreadSafeDependentKind)> {
         self.dependents
             .lock()
             .expect("ThreadSafeContext slot dependents mutex poisoned")
-            .iter()
-            .map(|(id, kind)| (*id, *kind))
-            .collect()
+            .to_vec()
     }
 }
 
@@ -509,7 +533,7 @@ struct ThreadSafeCellNode {
 
 struct ThreadSafeCellFastPath {
     value: Mutex<Box<ThreadSafeAny>>,
-    dependents: Mutex<HashMap<SlotId, ThreadSafeDependentKind>>,
+    dependents: Mutex<DependentEdgeVec>,
 }
 
 impl ThreadSafeCellFastPath {
@@ -519,7 +543,7 @@ impl ThreadSafeCellFastPath {
     {
         Self {
             value: Mutex::new(Box::new(value)),
-            dependents: Mutex::new(HashMap::new()),
+            dependents: Mutex::new(DependentEdgeVec::new()),
         }
     }
 
@@ -554,26 +578,31 @@ impl ThreadSafeCellFastPath {
     }
 
     fn insert_dependent(&self, dependent_id: SlotId, kind: ThreadSafeDependentKind) {
-        self.dependents
-            .lock()
-            .expect("ThreadSafeContext cell dependents mutex poisoned")
-            .insert(dependent_id, kind);
+        dependent_edge_insert(
+            &mut self
+                .dependents
+                .lock()
+                .expect("ThreadSafeContext cell dependents mutex poisoned"),
+            dependent_id,
+            kind,
+        );
     }
 
     fn remove_dependent(&self, dependent_id: SlotId) {
-        self.dependents
-            .lock()
-            .expect("ThreadSafeContext cell dependents mutex poisoned")
-            .remove(&dependent_id);
+        dependent_edge_remove(
+            &mut self
+                .dependents
+                .lock()
+                .expect("ThreadSafeContext cell dependents mutex poisoned"),
+            dependent_id,
+        );
     }
 
     fn dependents_snapshot(&self) -> Vec<(SlotId, ThreadSafeDependentKind)> {
         self.dependents
             .lock()
             .expect("ThreadSafeContext cell dependents mutex poisoned")
-            .iter()
-            .map(|(id, kind)| (*id, *kind))
-            .collect()
+            .to_vec()
     }
 }
 
