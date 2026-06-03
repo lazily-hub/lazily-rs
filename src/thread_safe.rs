@@ -7,7 +7,9 @@ use smallvec::SmallVec;
 #[cfg(feature = "instrumentation")]
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+
+use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
+use std::sync::Arc;
 #[cfg(feature = "instrumentation")]
 use std::time::Instant;
 
@@ -296,17 +298,12 @@ impl ThreadSafeSlotFastPath {
             return None;
         }
 
-        let value = self
-            .value
-            .read()
-            .expect("ThreadSafeContext slot fast path rwlock poisoned")
-            .as_ref()
-            .map(|value| {
-                value
-                    .downcast_ref::<T>()
-                    .expect("type mismatch in slot")
-                    .clone()
-            });
+        let value = self.value.read().as_ref().map(|value| {
+            value
+                .downcast_ref::<T>()
+                .expect("type mismatch in slot")
+                .clone()
+        });
         if self.cache_revision.load(Ordering::Acquire) != cache_revision
             || self.dirty.load(Ordering::Acquire)
             || self.force_recompute.load(Ordering::Acquire)
@@ -331,10 +328,7 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn store_value(&self, value: Option<Arc<ThreadSafeAny>>) {
-        *self
-            .value
-            .write()
-            .expect("ThreadSafeContext slot fast path rwlock poisoned") = value;
+        *self.value.write() = value;
         self.cache_revision.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -377,9 +371,7 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn lock_recompute_state(&self) -> MutexGuard<'_, ThreadSafeSlotRecomputeState> {
-        self.recompute
-            .lock()
-            .expect("ThreadSafeContext slot recompute mutex poisoned")
+        self.recompute.lock()
     }
 
     fn begin_recompute(&self) -> Option<ThreadSafeRecomputeStart> {
@@ -421,10 +413,7 @@ impl ThreadSafeSlotFastPath {
             registered_waiter = true;
         }
         while recompute.computing {
-            recompute = self
-                .recompute_condvar
-                .wait(recompute)
-                .expect("ThreadSafeContext slot recompute mutex poisoned while waiting");
+            self.recompute_condvar.wait(&mut recompute);
         }
 
         let notify_next_waiter = if registered_waiter {
@@ -450,64 +439,33 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn dependencies_snapshot(&self) -> EdgeVec {
-        self.dependencies
-            .lock()
-            .expect("ThreadSafeContext slot dependencies mutex poisoned")
-            .clone()
+        self.dependencies.lock().clone()
     }
 
     fn insert_dependency(&self, dependency_id: SlotId, dependency_is_slot: bool) {
-        let inserted = edge_insert(
-            &mut self
-                .dependencies
-                .lock()
-                .expect("ThreadSafeContext slot dependencies mutex poisoned"),
-            dependency_id,
-        );
+        let inserted = edge_insert(&mut self.dependencies.lock(), dependency_id);
         if inserted && dependency_is_slot {
             self.slot_dependency_count.fetch_add(1, Ordering::AcqRel);
         }
     }
 
     fn remove_dependency(&self, dependency_id: SlotId, dependency_is_slot: bool) {
-        let removed = edge_remove(
-            &mut self
-                .dependencies
-                .lock()
-                .expect("ThreadSafeContext slot dependencies mutex poisoned"),
-            dependency_id,
-        );
+        let removed = edge_remove(&mut self.dependencies.lock(), dependency_id);
         if removed && dependency_is_slot {
             self.slot_dependency_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
 
     fn insert_dependent(&self, dependent_id: SlotId, kind: ThreadSafeDependentKind) {
-        dependent_edge_insert(
-            &mut self
-                .dependents
-                .lock()
-                .expect("ThreadSafeContext slot dependents mutex poisoned"),
-            dependent_id,
-            kind,
-        );
+        dependent_edge_insert(&mut self.dependents.lock(), dependent_id, kind);
     }
 
     fn remove_dependent(&self, dependent_id: SlotId) {
-        dependent_edge_remove(
-            &mut self
-                .dependents
-                .lock()
-                .expect("ThreadSafeContext slot dependents mutex poisoned"),
-            dependent_id,
-        );
+        dependent_edge_remove(&mut self.dependents.lock(), dependent_id);
     }
 
     fn dependents_snapshot(&self) -> Vec<(SlotId, ThreadSafeDependentKind)> {
-        self.dependents
-            .lock()
-            .expect("ThreadSafeContext slot dependents mutex poisoned")
-            .to_vec()
+        self.dependents.lock().to_vec()
     }
 }
 
@@ -553,7 +511,6 @@ impl ThreadSafeCellFastPath {
     {
         self.value
             .lock()
-            .expect("ThreadSafeContext cell value mutex poisoned")
             .downcast_ref::<T>()
             .expect("type mismatch in cell")
             .clone()
@@ -563,10 +520,7 @@ impl ThreadSafeCellFastPath {
     where
         T: PartialEq + Send + Sync + 'static,
     {
-        let mut value = self
-            .value
-            .lock()
-            .expect("ThreadSafeContext cell value mutex poisoned");
+        let mut value = self.value.lock();
         let old = value
             .downcast_ref::<T>()
             .expect("type mismatch in cell set");
@@ -578,31 +532,15 @@ impl ThreadSafeCellFastPath {
     }
 
     fn insert_dependent(&self, dependent_id: SlotId, kind: ThreadSafeDependentKind) {
-        dependent_edge_insert(
-            &mut self
-                .dependents
-                .lock()
-                .expect("ThreadSafeContext cell dependents mutex poisoned"),
-            dependent_id,
-            kind,
-        );
+        dependent_edge_insert(&mut self.dependents.lock(), dependent_id, kind);
     }
 
     fn remove_dependent(&self, dependent_id: SlotId) {
-        dependent_edge_remove(
-            &mut self
-                .dependents
-                .lock()
-                .expect("ThreadSafeContext cell dependents mutex poisoned"),
-            dependent_id,
-        );
+        dependent_edge_remove(&mut self.dependents.lock(), dependent_id);
     }
 
     fn dependents_snapshot(&self) -> Vec<(SlotId, ThreadSafeDependentKind)> {
-        self.dependents
-            .lock()
-            .expect("ThreadSafeContext cell dependents mutex poisoned")
-            .to_vec()
+        self.dependents.lock().to_vec()
     }
 }
 
@@ -1104,29 +1042,19 @@ impl ThreadSafeContext {
 
     #[cfg(not(feature = "instrumentation"))]
     fn read_state(&self) -> MutexGuard<'_, ThreadSafeState> {
-        self.inner
-            .state
-            .lock()
-            .expect("ThreadSafeContext mutex poisoned")
+        self.inner.state.lock()
     }
 
     #[cfg(not(feature = "instrumentation"))]
     fn lock_state(&self) -> MutexGuard<'_, ThreadSafeState> {
-        self.inner
-            .state
-            .lock()
-            .expect("ThreadSafeContext mutex poisoned")
+        self.inner.state.lock()
     }
 
     #[cfg(feature = "instrumentation")]
     fn read_state(&self) -> ProfiledReadGuard<'_> {
         let site = current_thread_safe_lock_site();
         let wait_started = Instant::now();
-        let guard = self
-            .inner
-            .state
-            .lock()
-            .expect("ThreadSafeContext mutex poisoned");
+        let guard = self.inner.state.lock();
         self.inner
             .lock_instrumentation
             .record_lock_wait(site, wait_started.elapsed());
@@ -1142,11 +1070,7 @@ impl ThreadSafeContext {
     fn lock_state(&self) -> ProfiledWriteGuard<'_> {
         let site = current_thread_safe_lock_site();
         let wait_started = Instant::now();
-        let guard = self
-            .inner
-            .state
-            .lock()
-            .expect("ThreadSafeContext mutex poisoned");
+        let guard = self.inner.state.lock();
         self.inner
             .lock_instrumentation
             .record_lock_wait(site, wait_started.elapsed());
@@ -1189,7 +1113,6 @@ impl ThreadSafeContext {
         self.inner
             .slot_fast_paths
             .read()
-            .expect("ThreadSafeContext slot fast path registry poisoned")
             .get(id.0 as usize)
             .and_then(|opt| opt.as_ref().cloned())
     }
@@ -1198,7 +1121,6 @@ impl ThreadSafeContext {
         self.inner
             .cell_fast_paths
             .read()
-            .expect("ThreadSafeContext cell fast path registry poisoned")
             .get(id.0 as usize)
             .and_then(|opt| opt.as_ref().cloned())
     }
@@ -1472,11 +1394,7 @@ impl ThreadSafeContext {
             force_recompute: false,
             revision: 0,
         };
-        let mut slot_fast_paths = self
-            .inner
-            .slot_fast_paths
-            .write()
-            .expect("ThreadSafeContext slot fast path registry poisoned");
+        let mut slot_fast_paths = self.inner.slot_fast_paths.write();
         let idx = id.0 as usize;
         if idx >= slot_fast_paths.len() {
             slot_fast_paths.resize_with(idx + 1, || None);
@@ -1783,11 +1701,7 @@ impl ThreadSafeContext {
             dependents: EdgeVec::new(),
             fast_path: Arc::clone(&fast_path),
         };
-        let mut cell_fast_paths = self
-            .inner
-            .cell_fast_paths
-            .write()
-            .expect("ThreadSafeContext cell fast path registry poisoned");
+        let mut cell_fast_paths = self.inner.cell_fast_paths.write();
         let idx = id.0 as usize;
         if idx >= cell_fast_paths.len() {
             cell_fast_paths.resize_with(idx + 1, || None);
@@ -2405,11 +2319,7 @@ impl ThreadSafeContext {
     #[cfg(feature = "instrumentation")]
     pub fn instrumentation_snapshot(&self) -> crate::instrumentation::InstrumentationSnapshot {
         let mut snapshot = {
-            let state = self
-                .inner
-                .state
-                .lock()
-                .expect("ThreadSafeContext mutex poisoned");
+            let state = self.inner.state.lock();
             state.instrumentation.snapshot()
         };
         self.inner
@@ -2435,11 +2345,7 @@ impl ThreadSafeContext {
     #[cfg(feature = "instrumentation")]
     pub fn reset_instrumentation(&self) {
         {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .expect("ThreadSafeContext mutex poisoned");
+            let mut state = self.inner.state.lock();
             state.instrumentation.reset();
         }
         self.inner.lock_instrumentation.reset();
