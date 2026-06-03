@@ -40,21 +40,21 @@ let counter = ctx.cell(0i32);
 
 // Create a derived value (automatically tracks dependencies)
 let doubled = ctx.computed(|ctx| {
-    let val = ctx.get_cell(&counter);
+    let val = counter.get(ctx);
     val * 2
 });
 
-assert_eq!(ctx.get(&doubled), 0);
+assert_eq!(doubled.get(&ctx), 0);
 
 // Mutate the cell — dependents are marked dirty (not recomputed yet)
 counter.set(&ctx, 5);
 
 // Slot recomputes lazily on next access
-assert_eq!(ctx.get(&doubled), 10);
+assert_eq!(doubled.get(&ctx), 10);
 
 // Effects run immediately and then after tracked dependencies change
 let effect = ctx.effect(move |ctx| {
-    println!("counter = {}", ctx.get_cell(&counter));
+    println!("counter = {}", counter.get(ctx));
 });
 
 counter.set(&ctx, 6); // schedules and runs the effect once
@@ -115,7 +115,7 @@ Effects can return a cleanup closure. Cleanup runs before the next rerun and whe
 
 ```rust
 let effect = ctx.effect(move |ctx| {
-    let value = ctx.get_cell(&counter);
+    let value = counter.get(ctx);
     move || println!("cleanup for {value}")
 });
 
@@ -130,9 +130,11 @@ effect.dispose(&ctx);
 | `ctx.computed(\|ctx\| T)` | Create a derived lazily-computed value |
 | `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot; synonym of `ctx.computed()` |
 | `ctx.memo(\|ctx\| T)` | Create a lazily-computed slot with a `PartialEq` memoization guard |
-| `ctx.get(&slot)` | Get value (computes if unset) |
+| `slot.get(&ctx)` | Get value (computes if unset) |
+| `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
 | `ctx.cell(value)` | Create a mutable cell |
-| `ctx.get_cell(&cell)` | Get cell value |
+| `cell.get(&ctx)` | Get cell value |
+| `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
 | `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |

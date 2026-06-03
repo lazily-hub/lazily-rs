@@ -20,6 +20,16 @@ impl<T> SlotHandle<T> {
         }
     }
 
+    /// Get this slot's value through its owning context.
+    ///
+    /// This is an ergonomic alias for [`Context::get`].
+    pub fn get(&self, ctx: &Context) -> T
+    where
+        T: Clone + 'static,
+    {
+        ctx.get(self)
+    }
+
     /// Clear this slot's cached value and recursively clear all dependents.
     ///
     /// The slot will recompute on the next [`Context::get`] call.

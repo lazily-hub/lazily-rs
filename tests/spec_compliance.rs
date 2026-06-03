@@ -3337,3 +3337,74 @@ mod edge_cases {
         assert_eq!(ctx.get(&v), vec![0, 1, 2, 3, 4]);
     }
 }
+
+// ============================================================================
+// Handle-centric get methods
+// ============================================================================
+
+mod handle_get_methods {
+    use super::*;
+
+    #[test]
+    fn cell_handle_get_returns_initial_value() {
+        let ctx = Context::new();
+        let c = ctx.cell(42i32);
+        assert_eq!(c.get(&ctx), 42);
+    }
+
+    #[test]
+    fn cell_handle_get_matches_context_get_cell() {
+        let ctx = Context::new();
+        let c = ctx.cell(99i32);
+        assert_eq!(c.get(&ctx), ctx.get_cell(&c));
+    }
+
+    #[test]
+    fn cell_handle_get_tracks_dependencies() {
+        let ctx = Context::new();
+        let c = ctx.cell(10i32);
+        let s = ctx.computed(move |ctx| c.get(ctx) * 2);
+        assert_eq!(s.get(&ctx), 20);
+        c.set(&ctx, 5);
+        assert_eq!(s.get(&ctx), 10);
+    }
+
+    #[test]
+    fn slot_handle_get_returns_computed_value() {
+        let ctx = Context::new();
+        let s = ctx.computed(|_| 7i32);
+        assert_eq!(s.get(&ctx), 7);
+    }
+
+    #[test]
+    fn slot_handle_get_matches_context_get() {
+        let ctx = Context::new();
+        let s = ctx.computed(|_| 123i32);
+        assert_eq!(s.get(&ctx), ctx.get(&s));
+    }
+
+    #[test]
+    fn slot_handle_get_lazy_recomputation() {
+        let ctx = Context::new();
+        let c = ctx.cell(1i32);
+        let s = ctx.computed(move |ctx| c.get(ctx) + 10);
+        assert_eq!(s.get(&ctx), 11);
+        c.set(&ctx, 5);
+        assert_eq!(s.get(&ctx), 15);
+    }
+
+    #[test]
+    fn thread_safe_cell_get_cell_still_works() {
+        let ctx = ThreadSafeContext::new();
+        let c = ctx.cell(42i32);
+        assert_eq!(ctx.get_cell(&c), 42);
+    }
+
+    #[test]
+    fn thread_safe_slot_get_still_works() {
+        let ctx = ThreadSafeContext::new();
+        let c = ctx.cell(10i32);
+        let s = ctx.computed(move |ctx| ctx.get_cell(&c) * 2);
+        assert_eq!(ctx.get(&s), 20);
+    }
+}

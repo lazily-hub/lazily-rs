@@ -20,6 +20,16 @@ impl<T> CellHandle<T> {
         }
     }
 
+    /// Get this cell's value through its owning context.
+    ///
+    /// This is an ergonomic alias for [`Context::get_cell`].
+    pub fn get(&self, ctx: &Context) -> T
+    where
+        T: Clone + 'static,
+    {
+        ctx.get_cell(self)
+    }
+
     /// Set this cell's value through its owning context.
     ///
     /// This is an ergonomic alias for [`Context::set_cell`].

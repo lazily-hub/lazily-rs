@@ -36,9 +36,11 @@ pub struct Context {
 | `ctx.computed(\|ctx\| T)` | Create a derived lazily-computed value |
 | `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot; synonym of `ctx.computed()` |
 | `ctx.memo(\|ctx\| T)` | Create a lazily-computed slot with a `PartialEq` memoization guard |
-| `ctx.get(&slot)` | Get value (computes if unset) |
+| `slot.get(&ctx)` | Get value (computes if unset) |
+| `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
 | `ctx.cell(value)` | Create a mutable cell |
-| `ctx.get_cell(&cell)` | Get cell value |
+| `cell.get(&ctx)` | Get cell value |
+| `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
 | `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
@@ -88,9 +90,11 @@ pub struct ThreadSafeContext {
 | `ctx.computed(\|ctx\| T)` | Create a `Send + Sync` derived lazily-computed value |
 | `ctx.slot(\|ctx\| T)` | Create a `Send + Sync` lazily-computed slot |
 | `ctx.memo(\|ctx\| T)` | Create a `Send + Sync` lazily-computed slot with a `PartialEq` memoization guard |
-| `ctx.get(&slot)` | Get value from any thread (computes if unset) |
+| `slot.get(&ctx)` | Get value from any thread (computes if unset) |
+| `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
 | `ctx.cell(value)` | Create a mutable `Send + Sync` cell |
-| `ctx.get_cell(&cell)` | Get cell value from any thread |
+| `cell.get(&ctx)` | Get cell value from any thread |
+| `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
 | `ctx.set_cell(&cell, value)` | Update cell and invalidate dependents across threads |
 | `ctx.batch(\|ctx\| { ... })` | Defer invalidation until the outermost shared batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run a `Send + Sync` effect immediately and rerun it after tracked dependencies invalidate |
