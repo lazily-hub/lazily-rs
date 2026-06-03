@@ -13,6 +13,7 @@ using a single `RefCell<ContextInner>`.
 struct ContextInner {
     nodes: Vec<Option<Node>>,
     next_id: u64,
+    free_ids: Vec<u64>,
     pending_effects: VecDeque<SlotId>,
     scheduled_effects: HashSet<SlotId>,
     flushing_effects: bool,
@@ -49,9 +50,9 @@ pub struct Context {
 | `effect.is_active(&ctx)` | Check whether an effect is still registered |
 
 `Context` stores nodes in a slot-id-indexed `Vec<Option<Node>>` rather than a
-hash map. `SlotId` values are monotonically allocated and are not reused; effect
-disposal leaves a vacant entry so existing handles and dependency ids remain
-stable while lookups stay contiguous and hash-free.
+hash map. `SlotId` values are allocated sequentially; effect disposal returns the
+ID to a free list for reuse, preventing unbounded `Vec` growth from transient
+effects while keeping lookups contiguous and hash-free.
 
 Dependency and dependent edges use `SmallVec<[SlotId; 4]>` rather than `HashSet<SlotId>`.
 For the typical 1-3 dependency fan-out, SmallVec stores edges inline without heap
@@ -247,6 +248,7 @@ API bounds:
 Locking model:
 
 - Uses one context-level `Mutex` synchronization primitive for graph state before introducing finer-grained graph locks
+- `ThreadSafeState` stores nodes in a slot-id-indexed `Vec<Option<ThreadSafeNode>>` matching the single-threaded `Context`, eliminating hash-map lookup overhead on every node access. Slot IDs are reused via a free list on effect disposal.
 - Fresh cached slot reads use a per-slot read-mostly cached-value sidecar; dependency-edge changes, invalidation frontier application, batch queues, effect queues, and disposal remain graph mutex mutations
 - Read-mostly cached slot access is versioned optimistically: the getter loads a per-slot atomic cache revision before cloning the retained cached `Arc`, then validates the revision and dirty/force flags again after the clone. Any concurrent invalidation, clear, or value publish changes the revision and forces the getter onto the graph-validated refresh path.
 - Each thread-safe slot also owns a per-slot recompute/value-publish sidecar for the cached-value visibility flags, in-flight bit, waiter `Condvar`, and revision used to reject stale callback results. Graph-state dirty/revision fields remain mirrored under the context mutex for dependency-frontier traversal and tests.
@@ -494,7 +496,7 @@ Implementation notes:
 - **Batching:** Multiple writes can share one invalidation/effect flush boundary
 - **Zero mandatory runtime dependencies:** The default library surface uses only the Rust standard library and `smallvec`; Tokio is optional and Criterion is dev-only for benchmarks
 - **Single-threaded fast path:** `Context` uses a single `RefCell<ContextInner>` with no mutex overhead and no `unsafe` code
-- **Contiguous local storage:** `Context` indexes nodes directly by `SlotId` to avoid hash-map lookup and churn in the single-threaded fast path
+- **Contiguous local storage:** Both `Context` and `ThreadSafeContext` index nodes directly by `SlotId` in a `Vec<Option<Node>>` to avoid hash-map lookup and churn; slot IDs are reused via a free list to prevent unbounded growth from transient effects
 - **Explicit thread-safe path:** `ThreadSafeContext` uses a context-level lock and `Send + Sync` bounds for shared reactive graphs
 - **Performance tracking:** Criterion benchmarks cover both `Context` and `ThreadSafeContext` for cached reads, cold first access, dependency fan-out, memo equality suppression, effect flushing, and batch storms; `ThreadSafeContext` also tracks a 1/2/4/8/16-worker contention matrix that separates hot shared-slot writes, independent per-worker slots, read-mostly waiters, and batched write bursts.
 - **Benchmark instrumentation:** The optional `instrumentation` feature exposes lightweight counters for recompute starts, duplicate speculative thread-safe computes, dependency edge churn, effect queue depth, reactive node allocations, aggregate `ThreadSafeContext` lock wait/hold timing, and per-operation thread-safe lock attribution.

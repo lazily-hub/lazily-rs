@@ -114,6 +114,7 @@ pub(crate) enum Node {
 struct ContextInner {
     nodes: Vec<Option<Node>>,
     next_id: u64,
+    free_ids: Vec<u64>,
     pending_effects: VecDeque<SlotId>,
     scheduled_effects: HashSet<SlotId>,
     flushing_effects: bool,
@@ -147,6 +148,7 @@ impl Context {
             inner: RefCell::new(ContextInner {
                 nodes: Vec::new(),
                 next_id: 0,
+                free_ids: Vec::new(),
                 pending_effects: VecDeque::new(),
                 scheduled_effects: HashSet::new(),
                 flushing_effects: false,
@@ -162,8 +164,14 @@ impl Context {
 
     pub(crate) fn alloc_id(&self) -> SlotId {
         let mut inner = self.inner.borrow_mut();
-        let slot_id = SlotId(inner.next_id);
-        inner.next_id += 1;
+        let slot_id = match inner.free_ids.pop() {
+            Some(id) => SlotId(id),
+            None => {
+                let id = SlotId(inner.next_id);
+                inner.next_id += 1;
+                id
+            }
+        };
         #[cfg(feature = "instrumentation")]
         {
             inner.instrumentation.record_node_allocation();
@@ -193,7 +201,6 @@ impl Context {
         if inner.nodes.len() <= index {
             inner.nodes.resize_with(index + 1, || None);
         }
-        debug_assert!(inner.nodes[index].is_none(), "SlotId reused");
         inner.nodes[index] = Some(node);
     }
 
@@ -629,6 +636,7 @@ impl Context {
                 return;
             };
             inner.scheduled_effects.remove(&handle.id);
+            inner.free_ids.push(handle.id.0);
             (effect.dependencies, effect.cleanup)
         };
 

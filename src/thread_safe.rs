@@ -634,7 +634,7 @@ impl ThreadSafeInvalidationPlan {
                 continue;
             }
 
-            let dependents = match state.nodes.get(&root.id) {
+            let dependents = match state.get_node(root.id) {
                 Some(ThreadSafeNode::Slot(slot)) => {
                     let (dirty, force_state) = simulated_slots
                         .get(&root.id)
@@ -682,7 +682,7 @@ impl ThreadSafeInvalidationPlan {
         let mut visited_slots = HashSet::new();
 
         while let Some(id) = queue.pop_front() {
-            match state.nodes.get(&id) {
+            match state.get_node(id) {
                 Some(ThreadSafeNode::Slot(slot)) => {
                     if !visited_slots.insert(id) {
                         continue;
@@ -707,7 +707,7 @@ impl ThreadSafeInvalidationPlan {
 
     fn apply_locked(self, state: &mut ThreadSafeState) {
         for id in self.clear_slot_order {
-            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
+            let Some(ThreadSafeNode::Slot(slot)) = state.get_node_mut(id) else {
                 continue;
             };
             slot.value = None;
@@ -723,7 +723,7 @@ impl ThreadSafeInvalidationPlan {
             if self.slots_to_clear.contains(&id) {
                 continue;
             }
-            let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get_mut(&id) else {
+            let Some(ThreadSafeNode::Slot(slot)) = state.get_node_mut(id) else {
                 continue;
             };
             slot.revision = slot.revision.wrapping_add(1);
@@ -791,8 +791,9 @@ where
 
 #[derive(Default)]
 struct ThreadSafeState {
-    nodes: HashMap<SlotId, ThreadSafeNode>,
+    nodes: Vec<Option<ThreadSafeNode>>,
     next_id: u64,
+    free_ids: Vec<u64>,
     pending_effects: VecDeque<SlotId>,
     scheduled_effects: HashSet<SlotId>,
     flushing_effects: bool,
@@ -802,6 +803,31 @@ struct ThreadSafeState {
     batched_slots: HashSet<SlotId>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
+}
+
+impl ThreadSafeState {
+    fn get_node(&self, id: SlotId) -> Option<&ThreadSafeNode> {
+        self.nodes.get(id.0 as usize).and_then(|opt| opt.as_ref())
+    }
+
+    fn get_node_mut(&mut self, id: SlotId) -> Option<&mut ThreadSafeNode> {
+        self.nodes
+            .get_mut(id.0 as usize)
+            .and_then(|opt| opt.as_mut())
+    }
+
+    fn insert_node(&mut self, id: SlotId, node: ThreadSafeNode) {
+        let idx = id.0 as usize;
+        if idx >= self.nodes.len() {
+            self.nodes.resize_with(idx + 1, || None);
+        }
+        self.nodes[idx] = Some(node);
+    }
+
+    fn remove_node(&mut self, id: SlotId) -> Option<ThreadSafeNode> {
+        let idx = id.0 as usize;
+        self.nodes.get_mut(idx).and_then(|slot| slot.take())
+    }
 }
 
 struct ThreadSafeInner {
@@ -1060,8 +1086,14 @@ impl ThreadSafeContext {
 
     fn alloc_id(&self) -> SlotId {
         let mut state = self.lock_state();
-        let slot_id = SlotId(state.next_id);
-        state.next_id += 1;
+        let slot_id = match state.free_ids.pop() {
+            Some(id) => SlotId(id),
+            None => {
+                let id = SlotId(state.next_id);
+                state.next_id += 1;
+                id
+            }
+        };
         #[cfg(feature = "instrumentation")]
         {
             state.instrumentation.record_node_allocation();
@@ -1122,7 +1154,7 @@ impl ThreadSafeContext {
         state: &ThreadSafeState,
         dependent_id: SlotId,
     ) -> Option<ThreadSafeDependentKind> {
-        match state.nodes.get(&dependent_id) {
+        match state.get_node(dependent_id) {
             Some(ThreadSafeNode::Slot(_)) => Some(ThreadSafeDependentKind::Slot),
             Some(ThreadSafeNode::Effect(_)) => Some(ThreadSafeDependentKind::Effect),
             Some(ThreadSafeNode::Cell(_)) | None => None,
@@ -1135,7 +1167,7 @@ impl ThreadSafeContext {
         dependent_id: SlotId,
         dependent_kind: ThreadSafeDependentKind,
     ) {
-        match state.nodes.get(&dependency_id) {
+        match state.get_node(dependency_id) {
             Some(ThreadSafeNode::Slot(slot)) => {
                 slot.fast_path
                     .insert_dependent(dependent_id, dependent_kind);
@@ -1153,7 +1185,7 @@ impl ThreadSafeContext {
         dependency_id: SlotId,
         dependent_id: SlotId,
     ) {
-        match state.nodes.get(&dependency_id) {
+        match state.get_node(dependency_id) {
             Some(ThreadSafeNode::Slot(slot)) => {
                 slot.fast_path.remove_dependent(dependent_id);
             }
@@ -1174,12 +1206,10 @@ impl ThreadSafeContext {
         #[cfg(feature = "instrumentation")]
         let mut edge_added = false;
         let mut state = self.lock_state();
-        let dependency_is_slot = matches!(
-            state.nodes.get(&dependency_id),
-            Some(ThreadSafeNode::Slot(_))
-        );
+        let dependency_is_slot =
+            matches!(state.get_node(dependency_id), Some(ThreadSafeNode::Slot(_)));
         let dependent_kind = Self::dependent_kind_locked(&state, dependent_id);
-        if let Some(node) = state.nodes.get_mut(&dependency_id) {
+        if let Some(node) = state.get_node_mut(dependency_id) {
             match node {
                 ThreadSafeNode::Slot(slot) => {
                     edge_insert(&mut slot.dependents, dependent_id);
@@ -1191,7 +1221,7 @@ impl ThreadSafeContext {
             }
         }
 
-        if let Some(node) = state.nodes.get_mut(&dependent_id) {
+        if let Some(node) = state.get_node_mut(dependent_id) {
             match node {
                 ThreadSafeNode::Slot(parent) => {
                     let inserted = edge_insert(&mut parent.dependencies, dependency_id);
@@ -1258,11 +1288,9 @@ impl ThreadSafeContext {
         dependent_id: SlotId,
         dependency_id: SlotId,
     ) -> bool {
-        let dependency_is_slot = matches!(
-            state.nodes.get(&dependency_id),
-            Some(ThreadSafeNode::Slot(_))
-        );
-        match state.nodes.get_mut(&dependent_id) {
+        let dependency_is_slot =
+            matches!(state.get_node(dependency_id), Some(ThreadSafeNode::Slot(_)));
+        match state.get_node_mut(dependent_id) {
             Some(ThreadSafeNode::Slot(slot)) => {
                 let removed = edge_remove(&mut slot.dependencies, dependency_id);
                 if removed {
@@ -1283,7 +1311,7 @@ impl ThreadSafeContext {
         dependency_id: SlotId,
         dependent_id: SlotId,
     ) {
-        let _edge_removed = match state.nodes.get_mut(&dependency_id) {
+        let _edge_removed = match state.get_node_mut(dependency_id) {
             Some(ThreadSafeNode::Slot(slot)) => edge_remove(&mut slot.dependents, dependent_id),
             Some(ThreadSafeNode::Cell(cell)) => edge_remove(&mut cell.dependents, dependent_id),
             Some(ThreadSafeNode::Effect(_)) | None => false,
@@ -1366,8 +1394,7 @@ impl ThreadSafeContext {
             .expect("ThreadSafeContext slot fast path registry poisoned")
             .insert(id, fast_path);
         self.lock_state()
-            .nodes
-            .insert(id, ThreadSafeNode::Slot(node));
+            .insert_node(id, ThreadSafeNode::Slot(node));
         SlotHandle::new(id)
     }
 
@@ -1418,7 +1445,7 @@ impl ThreadSafeContext {
         }
 
         let state = self.read_state();
-        match state.nodes.get(&id) {
+        match state.get_node(id) {
             Some(ThreadSafeNode::Slot(slot)) => {
                 if !slot.fast_path.needs_refresh()
                     && let (false, false, Some(value)) =
@@ -1436,7 +1463,7 @@ impl ThreadSafeContext {
                             .iter()
                             .filter(|dependency_id| {
                                 matches!(
-                                    state.nodes.get(dependency_id),
+                                    state.get_node(**dependency_id),
                                     Some(ThreadSafeNode::Slot(_))
                                 )
                             })
@@ -1468,13 +1495,13 @@ impl ThreadSafeContext {
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
         let dependencies = {
             let state = self.read_state();
-            match state.nodes.get(&id) {
+            match state.get_node(id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot
                     .dependencies
                     .iter()
                     .filter(|dependency_id| {
                         matches!(
-                            state.nodes.get(dependency_id),
+                            state.get_node(**dependency_id),
                             Some(ThreadSafeNode::Slot(_))
                         )
                     })
@@ -1499,7 +1526,7 @@ impl ThreadSafeContext {
             #[cfg(feature = "instrumentation")]
             let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
             let mut state = self.lock_state();
-            let slot = match state.nodes.get_mut(&id) {
+            let slot = match state.get_node_mut(id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot,
                 _ => return false,
             };
@@ -1568,7 +1595,7 @@ impl ThreadSafeContext {
                 state.instrumentation.record_slot_recompute();
             }
             {
-                let slot = match state.nodes.get_mut(&id) {
+                let slot = match state.get_node_mut(id) {
                     Some(ThreadSafeNode::Slot(slot)) => slot,
                     _ => {
                         recompute_guard.active = false;
@@ -1592,7 +1619,7 @@ impl ThreadSafeContext {
             );
 
             let (publish_fast_path, duplicate_speculative, notify_dependents, changed) = {
-                let slot = match state.nodes.get_mut(&id) {
+                let slot = match state.get_node_mut(id) {
                     Some(ThreadSafeNode::Slot(slot)) => slot,
                     _ => {
                         recompute_guard.active = false;
@@ -1673,8 +1700,7 @@ impl ThreadSafeContext {
             .expect("ThreadSafeContext cell fast path registry poisoned")
             .insert(id, fast_path);
         self.lock_state()
-            .nodes
-            .insert(id, ThreadSafeNode::Cell(node));
+            .insert_node(id, ThreadSafeNode::Cell(node));
         CellHandle::new(id)
     }
 
@@ -1729,7 +1755,7 @@ impl ThreadSafeContext {
         #[cfg(feature = "instrumentation")]
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::SetCellInvalidation);
         let mut state = self.lock_state();
-        match state.nodes.get(&id) {
+        match state.get_node(id) {
             Some(ThreadSafeNode::Cell(_)) => {}
             _ => panic!("set_cell on non-cell id"),
         }
@@ -1950,8 +1976,7 @@ impl ThreadSafeContext {
             force_run: true,
         };
         self.lock_state()
-            .nodes
-            .insert(id, ThreadSafeNode::Effect(node));
+            .insert_node(id, ThreadSafeNode::Effect(node));
         let handle = EffectHandle::new(id);
         self.schedule_effect(id, false);
         self.flush_effects();
@@ -1964,9 +1989,10 @@ impl ThreadSafeContext {
             let mut state = self.lock_state();
             state.scheduled_effects.remove(&handle.id);
             state.pending_effects.retain(|queued| *queued != handle.id);
-            let Some(ThreadSafeNode::Effect(effect)) = state.nodes.remove(&handle.id) else {
+            let Some(ThreadSafeNode::Effect(effect)) = state.remove_node(handle.id) else {
                 return;
             };
+            state.free_ids.push(handle.id.0);
             (effect.dependencies, effect.cleanup)
         };
 
@@ -1981,7 +2007,7 @@ impl ThreadSafeContext {
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
         let state = self.read_state();
-        matches!(state.nodes.get(&handle.id), Some(ThreadSafeNode::Effect(_)))
+        matches!(state.get_node(handle.id), Some(ThreadSafeNode::Effect(_)))
     }
 
     fn schedule_effect(&self, id: SlotId, force: bool) {
@@ -1990,7 +2016,7 @@ impl ThreadSafeContext {
     }
 
     fn schedule_effect_locked(state: &mut ThreadSafeState, id: SlotId, force: bool) {
-        match state.nodes.get_mut(&id) {
+        match state.get_node_mut(id) {
             Some(ThreadSafeNode::Effect(effect)) => {
                 if force {
                     effect.force_run = true;
@@ -2050,7 +2076,7 @@ impl ThreadSafeContext {
             let mut state = self.lock_state();
             state.pending_effects.retain(|queued| *queued != id);
             state.scheduled_effects.remove(&id);
-            let effect = match state.nodes.get_mut(&id) {
+            let effect = match state.get_node_mut(id) {
                 Some(ThreadSafeNode::Effect(effect)) => effect,
                 _ => return,
             };
@@ -2075,7 +2101,7 @@ impl ThreadSafeContext {
         let new_dependencies = _tracking.finish();
 
         let mut state = self.lock_state();
-        if matches!(state.nodes.get(&id), Some(ThreadSafeNode::Effect(_))) {
+        if matches!(state.get_node(id), Some(ThreadSafeNode::Effect(_))) {
             Self::remove_stale_dependencies_locked(
                 &mut state,
                 id,
@@ -2083,7 +2109,7 @@ impl ThreadSafeContext {
                 &new_dependencies,
             );
         }
-        if let Some(ThreadSafeNode::Effect(effect)) = state.nodes.get_mut(&id) {
+        if let Some(ThreadSafeNode::Effect(effect)) = state.get_node_mut(id) {
             effect.cleanup = next_cleanup;
         } else if let Some(cleanup) = next_cleanup {
             drop(state);
@@ -2094,7 +2120,7 @@ impl ThreadSafeContext {
     fn effect_should_run(&self, id: SlotId) -> bool {
         let (force_run, dependencies) = {
             let state = self.read_state();
-            let Some(ThreadSafeNode::Effect(effect)) = state.nodes.get(&id) else {
+            let Some(ThreadSafeNode::Effect(effect)) = state.get_node(id) else {
                 return false;
             };
             (effect.force_run, effect.dependencies.clone())
@@ -2199,7 +2225,7 @@ impl ThreadSafeContext {
     }
 
     fn dependents_locked(state: &ThreadSafeState, id: SlotId) -> EdgeVec {
-        match state.nodes.get(&id) {
+        match state.get_node(id) {
             Some(ThreadSafeNode::Slot(slot)) => slot.dependents.clone(),
             Some(ThreadSafeNode::Cell(cell)) => cell.dependents.clone(),
             Some(ThreadSafeNode::Effect(_)) | None => SmallVec::new(),
@@ -2244,7 +2270,7 @@ impl ThreadSafeContext {
         T: Send + Sync + 'static,
     {
         let state = self.read_state();
-        if let Some(ThreadSafeNode::Slot(slot)) = state.nodes.get(&handle.id) {
+        if let Some(ThreadSafeNode::Slot(slot)) = state.get_node(handle.id) {
             slot.value.is_some() && !slot.dirty && !slot.fast_path.needs_refresh()
         } else {
             false
@@ -2307,7 +2333,7 @@ mod tests {
         T: Send + Sync + 'static,
     {
         let state = ctx.lock_state();
-        match state.nodes.get(&handle.id) {
+        match state.get_node(handle.id) {
             Some(ThreadSafeNode::Slot(slot)) => slot.revision,
             _ => panic!("slot_revision called on non-slot id"),
         }
@@ -2318,7 +2344,7 @@ mod tests {
         T: Send + Sync + 'static,
     {
         let state = ctx.lock_state();
-        match state.nodes.get(&handle.id) {
+        match state.get_node(handle.id) {
             Some(ThreadSafeNode::Slot(slot)) => (slot.dirty, slot.force_recompute),
             _ => panic!("slot_dirty_force called on non-slot id"),
         }
@@ -2329,7 +2355,7 @@ mod tests {
         T: Send + Sync + 'static,
     {
         let state = ctx.lock_state();
-        match state.nodes.get(&handle.id) {
+        match state.get_node(handle.id) {
             Some(ThreadSafeNode::Cell(cell)) => cell.dependents.len(),
             _ => panic!("cell_dependents_len called on non-cell id"),
         }
@@ -2380,7 +2406,7 @@ mod tests {
             assert_eq!(plan.slots_to_mark.get(&right.id), Some(&true));
             assert_eq!(plan.slots_to_mark.get(&joined.id), Some(&false));
             assert_eq!(plan.effects_to_schedule.get(&effect.id), Some(&false));
-            match state.nodes.get(&joined.id) {
+            match state.get_node(joined.id) {
                 Some(ThreadSafeNode::Slot(slot)) => {
                     assert!(!slot.dirty);
                     assert!(!slot.force_recompute);
@@ -2435,7 +2461,7 @@ mod tests {
 
             assert_eq!(planned_clears, expected_clears);
             assert_eq!(plan.effects_to_schedule.get(&effect.id), Some(&true));
-            match state.nodes.get(&labeled.id) {
+            match state.get_node(labeled.id) {
                 Some(ThreadSafeNode::Slot(slot)) => {
                     assert!(slot.value.is_some());
                     assert!(!slot.dirty);
