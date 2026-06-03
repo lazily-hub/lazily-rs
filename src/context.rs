@@ -1,6 +1,9 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
+use std::rc::Rc;
+
+use smallvec::SmallVec;
 
 use crate::cell::CellHandle;
 use crate::effect::{EffectCallbackResult, EffectHandle};
@@ -16,6 +19,26 @@ type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
 /// Unique identifier for a reactive node (slot or cell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SlotId(pub(crate) u64);
+
+type EdgeVec = SmallVec<[SlotId; 4]>;
+
+fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
+    if edges.contains(&id) {
+        false
+    } else {
+        edges.push(id);
+        true
+    }
+}
+
+fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
+    if let Some(pos) = edges.iter().position(|x| *x == id) {
+        edges.swap_remove(pos);
+        true
+    } else {
+        false
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Thread-local tracking stack for automatic dependency discovery
@@ -48,13 +71,13 @@ pub(crate) struct SlotNode {
     /// The cached value, if set.
     pub(crate) value: Option<Box<dyn Any>>,
     /// The compute closure (type-erased).
-    pub(crate) compute: Box<ComputeFn>,
+    pub(crate) compute: Rc<ComputeFn>,
     /// Type-erased equality for memoizing recomputed values.
     pub(crate) equals: Option<Box<EqualsFn>>,
     /// Slots/cells that this slot depends on (parents). Populated during compute.
-    pub(crate) dependencies: HashSet<SlotId>,
+    pub(crate) dependencies: EdgeVec,
     /// Slots that depend on this node (children / subscribers).
-    pub(crate) dependents: HashSet<SlotId>,
+    pub(crate) dependents: EdgeVec,
     /// This slot may need a freshness check before returning its cached value.
     pub(crate) dirty: bool,
     /// This slot has a confirmed direct invalidation and must recompute.
@@ -64,14 +87,14 @@ pub(crate) struct SlotNode {
 pub(crate) struct CellNode {
     pub(crate) value: Box<dyn Any>,
     /// Slots that depend on this cell.
-    pub(crate) dependents: HashSet<SlotId>,
+    pub(crate) dependents: EdgeVec,
 }
 
 pub(crate) struct EffectNode {
     /// The effect callback.
-    pub(crate) run: Box<EffectFn>,
+    pub(crate) run: Rc<EffectFn>,
     /// Slots/cells that this effect depends on. Populated during each run.
-    pub(crate) dependencies: HashSet<SlotId>,
+    pub(crate) dependencies: EdgeVec,
     /// Cleanup returned by the latest effect run, if any.
     pub(crate) cleanup: Option<Box<dyn FnOnce()>>,
     /// Whether this scheduled effect must run without dependency freshness checks.
@@ -88,20 +111,24 @@ pub(crate) enum Node {
 // Context
 // ---------------------------------------------------------------------------
 
-/// Container for all reactive nodes. Owns allocations; uses interior
-/// mutability (`RefCell`) for single-threaded use.
-pub struct Context {
-    pub(crate) nodes: RefCell<Vec<Option<Node>>>,
-    pub(crate) next_id: RefCell<u64>,
-    pub(crate) pending_effects: RefCell<VecDeque<SlotId>>,
-    pub(crate) scheduled_effects: RefCell<HashSet<SlotId>>,
-    pub(crate) flushing_effects: RefCell<bool>,
-    pub(crate) batch_depth: RefCell<usize>,
-    pub(crate) batched_cells: RefCell<HashSet<SlotId>>,
-    pub(crate) batched_cell_clears: RefCell<HashSet<SlotId>>,
-    pub(crate) batched_slots: RefCell<HashSet<SlotId>>,
+struct ContextInner {
+    nodes: Vec<Option<Node>>,
+    next_id: u64,
+    pending_effects: VecDeque<SlotId>,
+    scheduled_effects: HashSet<SlotId>,
+    flushing_effects: bool,
+    batch_depth: usize,
+    batched_cells: HashSet<SlotId>,
+    batched_cell_clears: HashSet<SlotId>,
+    batched_slots: HashSet<SlotId>,
     #[cfg(feature = "instrumentation")]
-    pub(crate) instrumentation: RefCell<crate::instrumentation::InstrumentationCounters>,
+    instrumentation: crate::instrumentation::InstrumentationCounters,
+}
+
+/// Container for all reactive nodes. Owns allocations; uses a single
+/// interior-mutability cell (`RefCell`) for single-threaded use.
+pub struct Context {
+    inner: RefCell<ContextInner>,
 }
 
 struct BatchGuard<'a> {
@@ -117,29 +144,29 @@ impl Drop for BatchGuard<'_> {
 impl Context {
     pub fn new() -> Self {
         Self {
-            nodes: RefCell::new(Vec::new()),
-            next_id: RefCell::new(0),
-            pending_effects: RefCell::new(VecDeque::new()),
-            scheduled_effects: RefCell::new(HashSet::new()),
-            flushing_effects: RefCell::new(false),
-            batch_depth: RefCell::new(0),
-            batched_cells: RefCell::new(HashSet::new()),
-            batched_cell_clears: RefCell::new(HashSet::new()),
-            batched_slots: RefCell::new(HashSet::new()),
-            #[cfg(feature = "instrumentation")]
-            instrumentation: RefCell::new(
-                crate::instrumentation::InstrumentationCounters::default(),
-            ),
+            inner: RefCell::new(ContextInner {
+                nodes: Vec::new(),
+                next_id: 0,
+                pending_effects: VecDeque::new(),
+                scheduled_effects: HashSet::new(),
+                flushing_effects: false,
+                batch_depth: 0,
+                batched_cells: HashSet::new(),
+                batched_cell_clears: HashSet::new(),
+                batched_slots: HashSet::new(),
+                #[cfg(feature = "instrumentation")]
+                instrumentation: crate::instrumentation::InstrumentationCounters::default(),
+            }),
         }
     }
 
     pub(crate) fn alloc_id(&self) -> SlotId {
-        let mut id = self.next_id.borrow_mut();
-        let slot_id = SlotId(*id);
-        *id += 1;
+        let mut inner = self.inner.borrow_mut();
+        let slot_id = SlotId(inner.next_id);
+        inner.next_id += 1;
         #[cfg(feature = "instrumentation")]
         {
-            self.instrumentation.borrow_mut().record_node_allocation();
+            inner.instrumentation.record_node_allocation();
         }
         slot_id
     }
@@ -162,12 +189,12 @@ impl Context {
 
     fn insert_node(&self, id: SlotId, node: Node) {
         let index = Self::node_index(id).expect("SlotId does not fit usize");
-        let mut nodes = self.nodes.borrow_mut();
-        if nodes.len() <= index {
-            nodes.resize_with(index + 1, || None);
+        let mut inner = self.inner.borrow_mut();
+        if inner.nodes.len() <= index {
+            inner.nodes.resize_with(index + 1, || None);
         }
-        debug_assert!(nodes[index].is_none(), "SlotId reused");
-        nodes[index] = Some(node);
+        debug_assert!(inner.nodes[index].is_none(), "SlotId reused");
+        inner.nodes[index] = Some(node);
     }
 
     fn register_dependency(&self, dependency_id: SlotId, dependent_id: SlotId) {
@@ -177,93 +204,86 @@ impl Context {
 
         #[cfg(feature = "instrumentation")]
         let mut edge_added = false;
-        let mut nodes = self.nodes.borrow_mut();
-        // The node being accessed gets `dependent_id` as a dependent.
-        if let Some(node) = Self::get_node_mut(&mut nodes, dependency_id) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(node) = Self::get_node_mut(&mut inner.nodes, dependency_id) {
             match node {
                 Node::Slot(s) => {
-                    s.dependents.insert(dependent_id);
+                    edge_insert(&mut s.dependents, dependent_id);
                 }
                 Node::Cell(c) => {
-                    c.dependents.insert(dependent_id);
+                    edge_insert(&mut c.dependents, dependent_id);
                 }
                 Node::Effect(_) => {}
             }
         }
 
-        // The currently-running slot/effect records the accessed node as a
-        // dependency. Cells never run and therefore never track dependencies.
-        if let Some(node) = Self::get_node_mut(&mut nodes, dependent_id) {
+        if let Some(node) = Self::get_node_mut(&mut inner.nodes, dependent_id) {
             match node {
                 Node::Slot(parent) => {
                     #[cfg(feature = "instrumentation")]
                     {
-                        edge_added = parent.dependencies.insert(dependency_id);
+                        edge_added = edge_insert(&mut parent.dependencies, dependency_id);
                     }
                     #[cfg(not(feature = "instrumentation"))]
                     {
-                        parent.dependencies.insert(dependency_id);
+                        edge_insert(&mut parent.dependencies, dependency_id);
                     }
                 }
                 Node::Effect(parent) => {
                     #[cfg(feature = "instrumentation")]
                     {
-                        edge_added = parent.dependencies.insert(dependency_id);
+                        edge_added = edge_insert(&mut parent.dependencies, dependency_id);
                     }
                     #[cfg(not(feature = "instrumentation"))]
                     {
-                        parent.dependencies.insert(dependency_id);
+                        edge_insert(&mut parent.dependencies, dependency_id);
                     }
                 }
                 Node::Cell(_) => {}
             }
         }
-        drop(nodes);
 
         #[cfg(feature = "instrumentation")]
         if edge_added {
-            self.instrumentation
-                .borrow_mut()
-                .record_dependency_edge_added();
+            inner.instrumentation.record_dependency_edge_added();
         }
     }
 
     fn remove_dependent_edge(&self, dependency_id: SlotId, dependent_id: SlotId) {
         #[cfg(feature = "instrumentation")]
         let mut edge_removed = false;
-        let mut nodes = self.nodes.borrow_mut();
-        if let Some(dep_node) = Self::get_node_mut(&mut nodes, dependency_id) {
-            match dep_node {
-                Node::Slot(s) => {
-                    #[cfg(feature = "instrumentation")]
-                    {
-                        edge_removed = s.dependents.remove(&dependent_id);
+        {
+            let mut inner = self.inner.borrow_mut();
+            if let Some(dep_node) = Self::get_node_mut(&mut inner.nodes, dependency_id) {
+                match dep_node {
+                    Node::Slot(s) => {
+                        #[cfg(feature = "instrumentation")]
+                        {
+                            edge_removed = edge_remove(&mut s.dependents, dependent_id);
+                        }
+                        #[cfg(not(feature = "instrumentation"))]
+                        {
+                            edge_remove(&mut s.dependents, dependent_id);
+                        }
                     }
-                    #[cfg(not(feature = "instrumentation"))]
-                    {
-                        s.dependents.remove(&dependent_id);
+                    Node::Cell(c) => {
+                        #[cfg(feature = "instrumentation")]
+                        {
+                            edge_removed = edge_remove(&mut c.dependents, dependent_id);
+                        }
+                        #[cfg(not(feature = "instrumentation"))]
+                        {
+                            edge_remove(&mut c.dependents, dependent_id);
+                        }
                     }
+                    Node::Effect(_) => {}
                 }
-                Node::Cell(c) => {
-                    #[cfg(feature = "instrumentation")]
-                    {
-                        edge_removed = c.dependents.remove(&dependent_id);
-                    }
-                    #[cfg(not(feature = "instrumentation"))]
-                    {
-                        c.dependents.remove(&dependent_id);
-                    }
-                }
-                Node::Effect(_) => {}
             }
-        }
-        drop(nodes);
 
-        #[cfg(feature = "instrumentation")]
-        if edge_removed {
-            self.instrumentation
-                .borrow_mut()
-                .record_dependency_edge_removed();
+            #[cfg(feature = "instrumentation")]
+            if edge_removed {
+                inner.instrumentation.record_dependency_edge_removed();
+            }
         }
     }
 
@@ -313,10 +333,10 @@ impl Context {
         let id = self.alloc_id();
         let node = SlotNode {
             value: None,
-            compute: Box::new(move |ctx| Box::new(compute(ctx))),
+            compute: Rc::new(move |ctx| Box::new(compute(ctx))),
             equals,
-            dependencies: HashSet::new(),
-            dependents: HashSet::new(),
+            dependencies: SmallVec::new(),
+            dependents: SmallVec::new(),
             dirty: false,
             force_recompute: false,
         };
@@ -332,15 +352,14 @@ impl Context {
     /// Internal: get a slot value by id, performing computation if unset and
     /// registering dependency tracking.
     fn get_slot<T: Clone + 'static>(&self, id: SlotId) -> T {
-        // Register dependency if someone is tracking.
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(id, parent_id);
         }
 
         self.refresh_slot(id);
 
-        let nodes = self.nodes.borrow();
-        if let Some(Node::Slot(slot)) = Self::get_node(&nodes, id)
+        let inner = self.inner.borrow();
+        if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, id)
             && let Some(ref val) = slot.value
         {
             return val
@@ -357,10 +376,10 @@ impl Context {
     /// dependents use this as the memoization guard: a dirty dependency whose
     /// value recomputes equal does not force them to recompute.
     fn refresh_slot(&self, id: SlotId) -> bool {
-        let dependencies: Vec<SlotId> = {
-            let nodes = self.nodes.borrow();
-            match Self::get_node(&nodes, id) {
-                Some(Node::Slot(slot)) => slot.dependencies.iter().copied().collect(),
+        let dependencies = {
+            let inner = self.inner.borrow();
+            match Self::get_node(&inner.nodes, id) {
+                Some(Node::Slot(slot)) => slot.dependencies.clone(),
                 _ => return false,
             }
         };
@@ -373,8 +392,8 @@ impl Context {
         }
 
         let needs_recompute = {
-            let nodes = self.nodes.borrow();
-            let slot = match Self::get_node(&nodes, id) {
+            let inner = self.inner.borrow();
+            let slot = match Self::get_node(&inner.nodes, id) {
                 Some(Node::Slot(slot)) => slot,
                 _ => return false,
             };
@@ -390,56 +409,45 @@ impl Context {
     }
 
     fn is_slot_node(&self, id: SlotId) -> bool {
-        let nodes = self.nodes.borrow();
-        matches!(Self::get_node(&nodes, id), Some(Node::Slot(_)))
+        let inner = self.inner.borrow();
+        matches!(Self::get_node(&inner.nodes, id), Some(Node::Slot(_)))
     }
 
     fn clear_slot_dirty_flags(&self, id: SlotId) {
-        let mut nodes = self.nodes.borrow_mut();
-        if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut nodes, id) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
             slot.dirty = false;
             slot.force_recompute = false;
         }
     }
 
     fn recompute_slot_now(&self, id: SlotId) -> bool {
-        let compute: Box<ComputeFn>;
-        let old_deps: Vec<SlotId>;
+        let compute: Rc<ComputeFn>;
+        let old_deps;
         {
-            let mut nodes = self.nodes.borrow_mut();
-            let slot = match Self::get_node_mut(&mut nodes, id) {
+            let mut inner = self.inner.borrow_mut();
+            #[cfg(feature = "instrumentation")]
+            {
+                inner.instrumentation.record_slot_recompute();
+            }
+            let slot = match Self::get_node_mut(&mut inner.nodes, id) {
                 Some(Node::Slot(s)) => s,
                 _ => panic!("get_slot called on non-slot id"),
             };
-            #[cfg(feature = "instrumentation")]
-            {
-                self.instrumentation.borrow_mut().record_slot_recompute();
-            }
-            // Collect old dependencies to clear edges in a second pass.
-            old_deps = slot.dependencies.drain().collect();
-            // Get a pointer to the compute fn.
-            // Safety: we drop the borrow before calling compute, and the
-            // pointer is valid because nodes keeps the allocation alive and
-            // the compute fn is never mutated.
-            compute = unsafe {
-                let ptr = &*slot.compute as *const ComputeFn;
-                Box::new(move |ctx| (*ptr)(ctx))
-            };
+            old_deps = std::mem::take(&mut slot.dependencies);
+            compute = Rc::clone(&slot.compute);
         }
-        // Clear old dependency edges (remove `id` from each old dep's dependents).
         for dep_id in old_deps {
             self.remove_dependent_edge(dep_id, id);
         }
 
-        // Push tracking frame so nested gets register as dependencies.
         push_tracking_frame(id);
-        let result = compute(self);
+        let result = (compute.as_ref())(self);
         pop_tracking_frame();
 
-        // Store the computed value.
         let changed = {
-            let mut nodes = self.nodes.borrow_mut();
-            let slot = match Self::get_node_mut(&mut nodes, id) {
+            let mut inner = self.inner.borrow_mut();
+            let slot = match Self::get_node_mut(&mut inner.nodes, id) {
                 Some(Node::Slot(slot)) => slot,
                 _ => return false,
             };
@@ -467,13 +475,12 @@ impl Context {
 
     /// Get the value of a cell.
     pub fn get_cell<T: Clone + 'static>(&self, handle: &CellHandle<T>) -> T {
-        // Register dependency tracking.
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
 
-        let nodes = self.nodes.borrow();
-        if let Some(Node::Cell(c)) = Self::get_node(&nodes, handle.id) {
+        let inner = self.inner.borrow();
+        if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
             c.value
                 .downcast_ref::<T>()
                 .expect("type mismatch in cell")
@@ -490,7 +497,7 @@ impl Context {
         let id = self.alloc_id();
         let node = CellNode {
             value: Box::new(value),
-            dependents: HashSet::new(),
+            dependents: SmallVec::new(),
         };
         self.insert_node(id, Node::Cell(node));
         CellHandle::new(id)
@@ -500,8 +507,8 @@ impl Context {
     /// dependent slots are marked dirty for memoized validation.
     pub fn set_cell<T: PartialEq + 'static>(&self, handle: &CellHandle<T>, new_value: T) {
         let changed = {
-            let nodes = self.nodes.borrow();
-            if let Some(Node::Cell(c)) = Self::get_node(&nodes, handle.id) {
+            let inner = self.inner.borrow();
+            if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
                 let old = c
                     .value
                     .downcast_ref::<T>()
@@ -514,13 +521,13 @@ impl Context {
 
         if changed {
             {
-                let mut nodes = self.nodes.borrow_mut();
-                if let Some(Node::Cell(c)) = Self::get_node_mut(&mut nodes, handle.id) {
+                let mut inner = self.inner.borrow_mut();
+                if let Some(Node::Cell(c)) = Self::get_node_mut(&mut inner.nodes, handle.id) {
                     c.value = Box::new(new_value);
                 }
             }
             if self.is_batching() {
-                self.batched_cells.borrow_mut().insert(handle.id);
+                self.inner.borrow_mut().batched_cells.insert(handle.id);
             } else {
                 self.invalidate_cell_dependents_now(handle.id);
                 self.flush_effects();
@@ -540,17 +547,20 @@ impl Context {
     where
         F: FnOnce(&Context) -> R,
     {
-        *self.batch_depth.borrow_mut() += 1;
+        self.inner.borrow_mut().batch_depth += 1;
         let _guard = BatchGuard { ctx: self };
         run(self)
     }
 
     fn finish_batch(&self) {
         let should_flush = {
-            let mut depth = self.batch_depth.borrow_mut();
-            assert!(*depth > 0, "finish_batch called without active batch");
-            *depth -= 1;
-            *depth == 0
+            let mut inner = self.inner.borrow_mut();
+            assert!(
+                inner.batch_depth > 0,
+                "finish_batch called without active batch"
+            );
+            inner.batch_depth -= 1;
+            inner.batch_depth == 0
         };
 
         if should_flush {
@@ -559,13 +569,18 @@ impl Context {
     }
 
     fn is_batching(&self) -> bool {
-        *self.batch_depth.borrow() > 0
+        self.inner.borrow().batch_depth > 0
     }
 
     fn flush_batched_invalidations(&self) {
-        let cells: Vec<SlotId> = self.batched_cells.borrow_mut().drain().collect();
-        let cell_clears: Vec<SlotId> = self.batched_cell_clears.borrow_mut().drain().collect();
-        let slots: Vec<SlotId> = self.batched_slots.borrow_mut().drain().collect();
+        let cells: Vec<SlotId> = self.inner.borrow_mut().batched_cells.drain().collect();
+        let cell_clears: Vec<SlotId> = self
+            .inner
+            .borrow_mut()
+            .batched_cell_clears
+            .drain()
+            .collect();
+        let slots: Vec<SlotId> = self.inner.borrow_mut().batched_slots.drain().collect();
 
         for cell_id in cells {
             self.invalidate_cell_dependents_now(cell_id);
@@ -594,8 +609,8 @@ impl Context {
     {
         let id = self.alloc_id();
         let node = EffectNode {
-            run: Box::new(move |ctx| run(ctx).into_cleanup()),
-            dependencies: HashSet::new(),
+            run: Rc::new(move |ctx| run(ctx).into_cleanup()),
+            dependencies: SmallVec::new(),
             cleanup: None,
             force_run: true,
         };
@@ -609,14 +624,14 @@ impl Context {
     /// Dispose an effect by handle.
     pub fn dispose_effect(&self, handle: &EffectHandle) {
         let (dependencies, cleanup) = {
-            let mut nodes = self.nodes.borrow_mut();
-            let Some(Node::Effect(effect)) = Self::take_node(&mut nodes, handle.id) else {
+            let mut inner = self.inner.borrow_mut();
+            let Some(Node::Effect(effect)) = Self::take_node(&mut inner.nodes, handle.id) else {
                 return;
             };
+            inner.scheduled_effects.remove(&handle.id);
             (effect.dependencies, effect.cleanup)
         };
 
-        self.scheduled_effects.borrow_mut().remove(&handle.id);
         for dep_id in dependencies {
             self.remove_dependent_edge(dep_id, handle.id);
         }
@@ -627,96 +642,90 @@ impl Context {
 
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
-        let nodes = self.nodes.borrow();
-        matches!(Self::get_node(&nodes, handle.id), Some(Node::Effect(_)))
+        let inner = self.inner.borrow();
+        matches!(
+            Self::get_node(&inner.nodes, handle.id),
+            Some(Node::Effect(_))
+        )
     }
 
     fn schedule_effect(&self, id: SlotId, force: bool) {
-        let exists = {
-            let mut nodes = self.nodes.borrow_mut();
-            match Self::get_node_mut(&mut nodes, id) {
-                Some(Node::Effect(effect)) => {
-                    if force {
-                        effect.force_run = true;
-                    }
-                    true
+        let mut inner = self.inner.borrow_mut();
+        let exists = match Self::get_node_mut(&mut inner.nodes, id) {
+            Some(Node::Effect(effect)) => {
+                if force {
+                    effect.force_run = true;
                 }
-                _ => false,
+                true
             }
+            _ => false,
         };
         if !exists {
             return;
         }
 
-        let inserted = self.scheduled_effects.borrow_mut().insert(id);
-        if inserted {
-            let mut pending = self.pending_effects.borrow_mut();
-            pending.push_back(id);
+        if inner.scheduled_effects.insert(id) {
+            inner.pending_effects.push_back(id);
             #[cfg(feature = "instrumentation")]
             {
-                let depth = pending.len();
-                self.instrumentation
-                    .borrow_mut()
-                    .record_effect_queue_push(depth);
+                let depth = inner.pending_effects.len();
+                inner.instrumentation.record_effect_queue_push(depth);
             }
         }
     }
 
     fn remove_pending_effect(&self, id: SlotId) {
-        self.pending_effects
-            .borrow_mut()
-            .retain(|queued| *queued != id);
-        self.scheduled_effects.borrow_mut().remove(&id);
+        let mut inner = self.inner.borrow_mut();
+        inner.pending_effects.retain(|queued| *queued != id);
+        inner.scheduled_effects.remove(&id);
     }
 
     pub(crate) fn flush_effects(&self) {
         {
-            let mut flushing = self.flushing_effects.borrow_mut();
-            if *flushing {
+            let mut inner = self.inner.borrow_mut();
+            if inner.flushing_effects {
                 return;
             }
-            *flushing = true;
+            inner.flushing_effects = true;
         }
 
         loop {
-            let Some(id) = ({ self.pending_effects.borrow_mut().pop_front() }) else {
-                break;
+            let id = {
+                let mut inner = self.inner.borrow_mut();
+                match inner.pending_effects.pop_front() {
+                    Some(id) => {
+                        inner.scheduled_effects.remove(&id);
+                        id
+                    }
+                    None => {
+                        inner.flushing_effects = false;
+                        return;
+                    }
+                }
             };
-            self.scheduled_effects.borrow_mut().remove(&id);
             self.run_effect(id);
         }
-
-        *self.flushing_effects.borrow_mut() = false;
     }
 
     fn run_effect(&self, id: SlotId) {
         if !self.effect_should_run(id) {
             return;
         }
-        // Dependency refresh can prove that this same effect should run now;
-        // avoid leaving a duplicate scheduled rerun behind.
         self.remove_pending_effect(id);
 
-        // Collect old dependencies and callback pointer, then drop the borrow
-        // before running user code because the effect may read or write context.
-        let run: Box<EffectFn>;
-        let old_deps: Vec<SlotId>;
+        let run: Rc<EffectFn>;
+        let old_deps;
         let cleanup: Option<Box<dyn FnOnce()>>;
         {
-            let mut nodes = self.nodes.borrow_mut();
-            let effect = match Self::get_node_mut(&mut nodes, id) {
+            let mut inner = self.inner.borrow_mut();
+            let effect = match Self::get_node_mut(&mut inner.nodes, id) {
                 Some(Node::Effect(effect)) => effect,
                 _ => return,
             };
-            old_deps = effect.dependencies.drain().collect();
+            old_deps = std::mem::take(&mut effect.dependencies);
             cleanup = effect.cleanup.take();
             effect.force_run = false;
-            // Safety: nodes keeps the boxed callback allocation alive while the
-            // effect node exists, and this method is single-threaded.
-            run = unsafe {
-                let ptr = &*effect.run as *const EffectFn;
-                Box::new(move |ctx| (*ptr)(ctx))
-            };
+            run = Rc::clone(&effect.run);
         }
 
         for dep_id in old_deps {
@@ -727,28 +736,25 @@ impl Context {
         }
 
         push_tracking_frame(id);
-        let next_cleanup = run(self);
+        let next_cleanup = (run.as_ref())(self);
         pop_tracking_frame();
 
-        let mut nodes = self.nodes.borrow_mut();
-        if let Some(Node::Effect(effect)) = Self::get_node_mut(&mut nodes, id) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(Node::Effect(effect)) = Self::get_node_mut(&mut inner.nodes, id) {
             effect.cleanup = next_cleanup;
         } else if let Some(cleanup) = next_cleanup {
-            drop(nodes);
+            drop(inner);
             cleanup();
         }
     }
 
     fn effect_should_run(&self, id: SlotId) -> bool {
         let (force_run, dependencies) = {
-            let nodes = self.nodes.borrow();
-            let Some(Node::Effect(effect)) = Self::get_node(&nodes, id) else {
+            let inner = self.inner.borrow();
+            let Some(Node::Effect(effect)) = Self::get_node(&inner.nodes, id) else {
                 return false;
             };
-            (
-                effect.force_run,
-                effect.dependencies.iter().copied().collect::<Vec<_>>(),
-            )
+            (effect.force_run, effect.dependencies.clone())
         };
 
         if force_run {
@@ -765,7 +771,7 @@ impl Context {
     /// Hard-clear a slot's cached value and recursively clear all dependents.
     pub(crate) fn clear_slot(&self, id: SlotId) {
         if self.is_batching() {
-            self.batched_slots.borrow_mut().insert(id);
+            self.inner.borrow_mut().batched_slots.insert(id);
             return;
         }
         self.clear_slot_now(id);
@@ -778,17 +784,17 @@ impl Context {
     }
 
     fn clear_slot_now(&self, id: SlotId) {
-        let dependents: Vec<SlotId>;
+        let dependents;
         {
-            let mut nodes = self.nodes.borrow_mut();
-            if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut nodes, id) {
+            let mut inner = self.inner.borrow_mut();
+            if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
                 if slot.value.is_none() && !slot.dirty {
-                    return; // Already cleared, stop recursion.
+                    return;
                 }
                 slot.value = None;
                 slot.dirty = false;
                 slot.force_recompute = false;
-                dependents = slot.dependents.iter().copied().collect();
+                dependents = slot.dependents.clone();
             } else {
                 return;
             }
@@ -800,7 +806,7 @@ impl Context {
 
     pub(crate) fn clear_cell_dependents(&self, id: SlotId) {
         if self.is_batching() {
-            self.batched_cell_clears.borrow_mut().insert(id);
+            self.inner.borrow_mut().batched_cell_clears.insert(id);
             return;
         }
         self.clear_cell_dependents_now(id);
@@ -808,11 +814,11 @@ impl Context {
     }
 
     fn invalidate_cell_dependents_now(&self, id: SlotId) {
-        let dependents: Vec<SlotId> = {
-            let nodes = self.nodes.borrow();
-            match Self::get_node(&nodes, id) {
-                Some(Node::Cell(c)) => c.dependents.iter().copied().collect(),
-                _ => vec![],
+        let dependents = {
+            let inner = self.inner.borrow();
+            match Self::get_node(&inner.nodes, id) {
+                Some(Node::Cell(c)) => c.dependents.clone(),
+                _ => SmallVec::new(),
             }
         };
         for dep_id in dependents {
@@ -821,11 +827,11 @@ impl Context {
     }
 
     fn clear_cell_dependents_now(&self, id: SlotId) {
-        let dependents: Vec<SlotId> = {
-            let nodes = self.nodes.borrow();
-            match Self::get_node(&nodes, id) {
-                Some(Node::Cell(c)) => c.dependents.iter().copied().collect(),
-                _ => vec![],
+        let dependents = {
+            let inner = self.inner.borrow();
+            match Self::get_node(&inner.nodes, id) {
+                Some(Node::Cell(c)) => c.dependents.clone(),
+                _ => SmallVec::new(),
             }
         };
         for dep_id in dependents {
@@ -835,8 +841,8 @@ impl Context {
 
     fn clear_dependent_now(&self, id: SlotId) {
         let is_effect = {
-            let nodes = self.nodes.borrow();
-            matches!(Self::get_node(&nodes, id), Some(Node::Effect(_)))
+            let inner = self.inner.borrow();
+            matches!(Self::get_node(&inner.nodes, id), Some(Node::Effect(_)))
         };
 
         if is_effect {
@@ -848,8 +854,8 @@ impl Context {
 
     fn invalidate_dependent_from_changed_value(&self, id: SlotId) {
         let is_effect = {
-            let nodes = self.nodes.borrow();
-            matches!(Self::get_node(&nodes, id), Some(Node::Effect(_)))
+            let inner = self.inner.borrow();
+            matches!(Self::get_node(&inner.nodes, id), Some(Node::Effect(_)))
         };
 
         if is_effect {
@@ -860,11 +866,11 @@ impl Context {
     }
 
     fn notify_slot_value_changed(&self, id: SlotId) {
-        let dependents: Vec<SlotId> = {
-            let nodes = self.nodes.borrow();
-            match Self::get_node(&nodes, id) {
-                Some(Node::Slot(slot)) => slot.dependents.iter().copied().collect(),
-                _ => vec![],
+        let dependents = {
+            let inner = self.inner.borrow();
+            match Self::get_node(&inner.nodes, id) {
+                Some(Node::Slot(slot)) => slot.dependents.clone(),
+                _ => SmallVec::new(),
             }
         };
         for dep_id in dependents {
@@ -873,11 +879,11 @@ impl Context {
     }
 
     fn mark_slot_dirty(&self, id: SlotId, force_recompute: bool) {
-        let dependents: Vec<SlotId>;
+        let dependents;
         let should_propagate: bool;
         {
-            let mut nodes = self.nodes.borrow_mut();
-            let Some(Node::Slot(slot)) = Self::get_node_mut(&mut nodes, id) else {
+            let mut inner = self.inner.borrow_mut();
+            let Some(Node::Slot(slot)) = Self::get_node_mut(&mut inner.nodes, id) else {
                 return;
             };
             should_propagate = !slot.dirty || (force_recompute && !slot.force_recompute);
@@ -885,7 +891,7 @@ impl Context {
             if force_recompute {
                 slot.force_recompute = true;
             }
-            dependents = slot.dependents.iter().copied().collect();
+            dependents = slot.dependents.clone();
         }
 
         if !should_propagate {
@@ -894,8 +900,8 @@ impl Context {
 
         for dep_id in dependents {
             let is_effect = {
-                let nodes = self.nodes.borrow();
-                matches!(Self::get_node(&nodes, dep_id), Some(Node::Effect(_)))
+                let inner = self.inner.borrow();
+                matches!(Self::get_node(&inner.nodes, dep_id), Some(Node::Effect(_)))
             };
 
             if is_effect {
@@ -908,8 +914,8 @@ impl Context {
 
     /// Check whether a slot currently has a cached, fresh value (for testing).
     pub fn is_set<T: 'static>(&self, handle: &SlotHandle<T>) -> bool {
-        let nodes = self.nodes.borrow();
-        if let Some(Node::Slot(slot)) = Self::get_node(&nodes, handle.id) {
+        let inner = self.inner.borrow();
+        if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id) {
             slot.value.is_some() && !slot.dirty
         } else {
             false
@@ -919,13 +925,13 @@ impl Context {
     /// Return the current benchmark instrumentation counters.
     #[cfg(feature = "instrumentation")]
     pub fn instrumentation_snapshot(&self) -> crate::instrumentation::InstrumentationSnapshot {
-        self.instrumentation.borrow().snapshot()
+        self.inner.borrow().instrumentation.snapshot()
     }
 
     /// Reset benchmark instrumentation counters to zero.
     #[cfg(feature = "instrumentation")]
     pub fn reset_instrumentation(&self) {
-        self.instrumentation.borrow_mut().reset();
+        self.inner.borrow_mut().instrumentation.reset();
     }
 }
 

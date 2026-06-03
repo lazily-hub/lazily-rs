@@ -6,19 +6,24 @@ Rust library for lazy evaluation with context-aware dependency tracking and cach
 
 ### Context
 
-Container for all slots and cells. Owns all allocations via interior mutability (`RefCell`).
+Container for all slots and cells. Owns all allocations via interior mutability
+using a single `RefCell<ContextInner>`.
 
 ```rust
+struct ContextInner {
+    nodes: Vec<Option<Node>>,
+    next_id: u64,
+    pending_effects: VecDeque<SlotId>,
+    scheduled_effects: HashSet<SlotId>,
+    flushing_effects: bool,
+    batch_depth: usize,
+    batched_cells: HashSet<SlotId>,
+    batched_cell_clears: HashSet<SlotId>,
+    batched_slots: HashSet<SlotId>,
+}
+
 pub struct Context {
-    nodes: RefCell<Vec<Option<Node>>>,
-    next_id: RefCell<u64>,
-    pending_effects: RefCell<VecDeque<SlotId>>,
-    scheduled_effects: RefCell<HashSet<SlotId>>,
-    flushing_effects: RefCell<bool>,
-    batch_depth: RefCell<usize>,
-    batched_cells: RefCell<HashSet<SlotId>>,
-    batched_cell_clears: RefCell<HashSet<SlotId>>,
-    batched_slots: RefCell<HashSet<SlotId>>,
+    inner: RefCell<ContextInner>,
 }
 ```
 
@@ -47,6 +52,20 @@ pub struct Context {
 hash map. `SlotId` values are monotonically allocated and are not reused; effect
 disposal leaves a vacant entry so existing handles and dependency ids remain
 stable while lookups stay contiguous and hash-free.
+
+Dependency and dependent edges use `SmallVec<[SlotId; 4]>` rather than `HashSet<SlotId>`.
+For the typical 1-3 dependency fan-out, SmallVec stores edges inline without heap
+allocation, avoids hash computation overhead, and eliminates the temporary
+`Vec<SlotId>` allocations that were previously required in every refresh/clear/dirty
+hot path (replaced with `SmallVec::clone()` or `std::mem::take`). Sets that require
+true dedup semantics (scheduled effects, batch queues, tracking frames) remain as
+`HashSet<SlotId>`.
+
+The single-threaded `Context` consolidates all mutable state behind one
+`RefCell<ContextInner>` instead of ten separate `RefCell` fields. This reduces
+borrow-check overhead from 4-6 flag modifications per `get()` to 1 and eliminates
+the risk of re-entrant borrows across fields. Slot and effect compute closures are
+stored as `Rc<dyn Fn>` so they can be cloned cheaply without `unsafe` pointer copies.
 
 ### ThreadSafeContext
 
@@ -87,10 +106,10 @@ Lazily-computed cached value with dependency tracking. A Slot is **fresh**, **di
 ```rust
 struct SlotNode {
     value: Option<Box<dyn Any>>,
-    compute: Box<dyn Fn(&Context) -> Box<dyn Any>>,
+    compute: Rc<dyn Fn(&Context) -> Box<dyn Any>>,
     equals: Option<Box<dyn Fn(&dyn Any, &dyn Any) -> bool>>,
-    dependencies: HashSet<SlotId>,
-    dependents: HashSet<SlotId>,
+    dependencies: SmallVec<[SlotId; 4]>,
+    dependents: SmallVec<[SlotId; 4]>,
     dirty: bool,
     force_recompute: bool,
 }
@@ -114,7 +133,7 @@ Mutable value container. Changing a Cell's value marks dependent Slots dirty.
 ```rust
 struct CellNode {
     value: Box<dyn Any>,
-    dependents: HashSet<SlotId>,
+    dependents: SmallVec<[SlotId; 4]>,
 }
 ```
 
@@ -132,8 +151,8 @@ run is invalidated.
 
 ```rust
 struct EffectNode {
-    run: Box<dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>>,
-    dependencies: HashSet<SlotId>,
+    run: Rc<dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>>,
+    dependencies: SmallVec<[SlotId; 4]>,
     cleanup: Option<Box<dyn FnOnce()>>,
     force_run: bool,
 }
@@ -473,8 +492,8 @@ Implementation notes:
 - **Memoized invalidation:** Equal intermediate `ctx.memo()` recomputation suppresses downstream recomputation/effect reruns
 - **Effects:** Side effects are scheduled from the same dependency graph as slots
 - **Batching:** Multiple writes can share one invalidation/effect flush boundary
-- **Zero mandatory runtime dependencies:** The default library surface uses only the Rust standard library; Tokio is optional and Criterion is dev-only for benchmarks
-- **Single-threaded fast path:** `Context` uses `RefCell` interior mutability with no mutex overhead
+- **Zero mandatory runtime dependencies:** The default library surface uses only the Rust standard library and `smallvec`; Tokio is optional and Criterion is dev-only for benchmarks
+- **Single-threaded fast path:** `Context` uses a single `RefCell<ContextInner>` with no mutex overhead and no `unsafe` code
 - **Contiguous local storage:** `Context` indexes nodes directly by `SlotId` to avoid hash-map lookup and churn in the single-threaded fast path
 - **Explicit thread-safe path:** `ThreadSafeContext` uses a context-level lock and `Send + Sync` bounds for shared reactive graphs
 - **Performance tracking:** Criterion benchmarks cover both `Context` and `ThreadSafeContext` for cached reads, cold first access, dependency fan-out, memo equality suppression, effect flushing, and batch storms; `ThreadSafeContext` also tracks a 1/2/4/8/16-worker contention matrix that separates hot shared-slot writes, independent per-worker slots, read-mostly waiters, and batched write bursts.

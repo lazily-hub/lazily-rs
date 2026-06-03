@@ -1,6 +1,8 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+
+use smallvec::SmallVec;
 #[cfg(feature = "instrumentation")]
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -22,13 +24,33 @@ type ThreadSafeCleanup = dyn FnOnce() + Send;
 type ThreadSafeEffectFn =
     dyn Fn(&ThreadSafeContext) -> Option<Box<ThreadSafeCleanup>> + Send + Sync;
 
+type EdgeVec = SmallVec<[SlotId; 4]>;
+
+fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
+    if edges.contains(&id) {
+        false
+    } else {
+        edges.push(id);
+        true
+    }
+}
+
+fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
+    if let Some(pos) = edges.iter().position(|x| *x == id) {
+        edges.swap_remove(pos);
+        true
+    } else {
+        false
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ThreadSafeContextId(usize);
 
 struct ThreadSafeTrackingFrame {
     context_id: ThreadSafeContextId,
     node_id: SlotId,
-    known_dependencies: HashSet<SlotId>,
+    known_dependencies: EdgeVec,
     dependencies: HashSet<SlotId>,
 }
 
@@ -90,7 +112,7 @@ impl Drop for TrackingGuard {
 fn push_tracking_frame_with_known_dependencies(
     context_id: ThreadSafeContextId,
     node_id: SlotId,
-    known_dependencies: HashSet<SlotId>,
+    known_dependencies: EdgeVec,
 ) -> TrackingGuard {
     THREAD_SAFE_TRACKING_STACK.with(|stack| {
         stack.borrow_mut().push(ThreadSafeTrackingFrame {
@@ -194,8 +216,8 @@ fn current_thread_safe_lock_site() -> ThreadSafeLockSite {
 struct ThreadSafeSlotNode {
     value: Option<Arc<ThreadSafeAny>>,
     equals: Option<Arc<ThreadSafeEqualsFn>>,
-    dependencies: HashSet<SlotId>,
-    dependents: HashSet<SlotId>,
+    dependencies: EdgeVec,
+    dependents: EdgeVec,
     fast_path: Arc<ThreadSafeSlotFastPath>,
     dirty: bool,
     force_recompute: bool,
@@ -214,7 +236,7 @@ struct ThreadSafeSlotFastPath {
     dirty: AtomicBool,
     force_recompute: AtomicBool,
     compute: Arc<ThreadSafeComputeFn>,
-    dependencies: Mutex<HashSet<SlotId>>,
+    dependencies: Mutex<EdgeVec>,
     slot_dependency_count: AtomicUsize,
     recompute: Mutex<ThreadSafeSlotRecomputeState>,
     recompute_condvar: Condvar,
@@ -222,7 +244,7 @@ struct ThreadSafeSlotFastPath {
 }
 
 impl ThreadSafeSlotFastPath {
-    fn new(compute: Arc<ThreadSafeComputeFn>, initial_dependencies: HashSet<SlotId>) -> Self {
+    fn new(compute: Arc<ThreadSafeComputeFn>, initial_dependencies: EdgeVec) -> Self {
         let slot_dependency_count = initial_dependencies.len();
         Self {
             value: RwLock::new(None),
@@ -404,7 +426,7 @@ impl ThreadSafeSlotFastPath {
         }
     }
 
-    fn dependencies_snapshot(&self) -> HashSet<SlotId> {
+    fn dependencies_snapshot(&self) -> EdgeVec {
         self.dependencies
             .lock()
             .expect("ThreadSafeContext slot dependencies mutex poisoned")
@@ -412,22 +434,26 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn insert_dependency(&self, dependency_id: SlotId, dependency_is_slot: bool) {
-        let inserted = self
-            .dependencies
-            .lock()
-            .expect("ThreadSafeContext slot dependencies mutex poisoned")
-            .insert(dependency_id);
+        let inserted = edge_insert(
+            &mut self
+                .dependencies
+                .lock()
+                .expect("ThreadSafeContext slot dependencies mutex poisoned"),
+            dependency_id,
+        );
         if inserted && dependency_is_slot {
             self.slot_dependency_count.fetch_add(1, Ordering::AcqRel);
         }
     }
 
     fn remove_dependency(&self, dependency_id: SlotId, dependency_is_slot: bool) {
-        let removed = self
-            .dependencies
-            .lock()
-            .expect("ThreadSafeContext slot dependencies mutex poisoned")
-            .remove(&dependency_id);
+        let removed = edge_remove(
+            &mut self
+                .dependencies
+                .lock()
+                .expect("ThreadSafeContext slot dependencies mutex poisoned"),
+            dependency_id,
+        );
         if removed && dependency_is_slot {
             self.slot_dependency_count.fetch_sub(1, Ordering::AcqRel);
         }
@@ -473,7 +499,7 @@ struct ThreadSafeRecomputeStart {
 }
 
 struct ThreadSafeCellNode {
-    dependents: HashSet<SlotId>,
+    dependents: EdgeVec,
     fast_path: Arc<ThreadSafeCellFastPath>,
 }
 
@@ -549,7 +575,7 @@ impl ThreadSafeCellFastPath {
 
 struct ThreadSafeEffectNode {
     run: Arc<ThreadSafeEffectFn>,
-    dependencies: HashSet<SlotId>,
+    dependencies: EdgeVec,
     cleanup: Option<Box<ThreadSafeCleanup>>,
     force_run: bool,
 }
@@ -567,7 +593,7 @@ enum ThreadSafeRecomputeResult {
 
 enum ThreadSafeSlotRead<T> {
     Fresh(T),
-    Refresh(Vec<SlotId>),
+    Refresh(EdgeVec),
 }
 
 #[derive(Clone, Copy)]
@@ -1156,10 +1182,10 @@ impl ThreadSafeContext {
         if let Some(node) = state.nodes.get_mut(&dependency_id) {
             match node {
                 ThreadSafeNode::Slot(slot) => {
-                    slot.dependents.insert(dependent_id);
+                    edge_insert(&mut slot.dependents, dependent_id);
                 }
                 ThreadSafeNode::Cell(cell) => {
-                    cell.dependents.insert(dependent_id);
+                    edge_insert(&mut cell.dependents, dependent_id);
                 }
                 ThreadSafeNode::Effect(_) => {}
             }
@@ -1168,7 +1194,7 @@ impl ThreadSafeContext {
         if let Some(node) = state.nodes.get_mut(&dependent_id) {
             match node {
                 ThreadSafeNode::Slot(parent) => {
-                    let inserted = parent.dependencies.insert(dependency_id);
+                    let inserted = edge_insert(&mut parent.dependencies, dependency_id);
                     if inserted {
                         parent
                             .fast_path
@@ -1182,11 +1208,11 @@ impl ThreadSafeContext {
                 ThreadSafeNode::Effect(parent) => {
                     #[cfg(feature = "instrumentation")]
                     {
-                        edge_added = parent.dependencies.insert(dependency_id);
+                        edge_added = edge_insert(&mut parent.dependencies, dependency_id);
                     }
                     #[cfg(not(feature = "instrumentation"))]
                     {
-                        parent.dependencies.insert(dependency_id);
+                        edge_insert(&mut parent.dependencies, dependency_id);
                     }
                 }
                 ThreadSafeNode::Cell(_) => {}
@@ -1216,12 +1242,14 @@ impl ThreadSafeContext {
     fn remove_stale_dependencies_locked(
         state: &mut ThreadSafeState,
         dependent_id: SlotId,
-        old_dependencies: &HashSet<SlotId>,
+        old_dependencies: &EdgeVec,
         new_dependencies: &HashSet<SlotId>,
     ) {
-        for dependency_id in old_dependencies.difference(new_dependencies) {
-            Self::remove_parent_dependency_locked(state, dependent_id, *dependency_id);
-            Self::remove_dependent_edge_locked(state, *dependency_id, dependent_id);
+        for dependency_id in old_dependencies.iter() {
+            if !new_dependencies.contains(dependency_id) {
+                Self::remove_parent_dependency_locked(state, dependent_id, *dependency_id);
+                Self::remove_dependent_edge_locked(state, *dependency_id, dependent_id);
+            }
         }
     }
 
@@ -1236,14 +1264,16 @@ impl ThreadSafeContext {
         );
         match state.nodes.get_mut(&dependent_id) {
             Some(ThreadSafeNode::Slot(slot)) => {
-                let removed = slot.dependencies.remove(&dependency_id);
+                let removed = edge_remove(&mut slot.dependencies, dependency_id);
                 if removed {
                     slot.fast_path
                         .remove_dependency(dependency_id, dependency_is_slot);
                 }
                 removed
             }
-            Some(ThreadSafeNode::Effect(effect)) => effect.dependencies.remove(&dependency_id),
+            Some(ThreadSafeNode::Effect(effect)) => {
+                edge_remove(&mut effect.dependencies, dependency_id)
+            }
             Some(ThreadSafeNode::Cell(_)) | None => false,
         }
     }
@@ -1254,8 +1284,8 @@ impl ThreadSafeContext {
         dependent_id: SlotId,
     ) {
         let _edge_removed = match state.nodes.get_mut(&dependency_id) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.remove(&dependent_id),
-            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.remove(&dependent_id),
+            Some(ThreadSafeNode::Slot(slot)) => edge_remove(&mut slot.dependents, dependent_id),
+            Some(ThreadSafeNode::Cell(cell)) => edge_remove(&mut cell.dependents, dependent_id),
             Some(ThreadSafeNode::Effect(_)) | None => false,
         };
         if _edge_removed {
@@ -1318,13 +1348,13 @@ impl ThreadSafeContext {
             Arc::new(move |ctx: &ThreadSafeContext| Box::new(compute(ctx)));
         let fast_path = Arc::new(ThreadSafeSlotFastPath::new(
             Arc::clone(&compute),
-            HashSet::new(),
+            SmallVec::new(),
         ));
         let node = ThreadSafeSlotNode {
             value: None,
             equals,
-            dependencies: HashSet::new(),
-            dependents: HashSet::new(),
+            dependencies: SmallVec::new(),
+            dependents: SmallVec::new(),
             fast_path: Arc::clone(&fast_path),
             dirty: false,
             force_recompute: false,
@@ -1436,7 +1466,7 @@ impl ThreadSafeContext {
 
         #[cfg(feature = "instrumentation")]
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
-        let dependencies: Vec<SlotId> = {
+        let dependencies = {
             let state = self.read_state();
             match state.nodes.get(&id) {
                 Some(ThreadSafeNode::Slot(slot)) => slot
@@ -1457,7 +1487,7 @@ impl ThreadSafeContext {
         self.refresh_slot_with_dependencies(id, dependencies)
     }
 
-    fn refresh_slot_with_dependencies(&self, id: SlotId, dependencies: Vec<SlotId>) -> bool {
+    fn refresh_slot_with_dependencies(&self, id: SlotId, dependencies: EdgeVec) -> bool {
         let mut dependency_changed = false;
         for dependency_id in dependencies {
             if self.refresh_slot(dependency_id) {
@@ -1634,7 +1664,7 @@ impl ThreadSafeContext {
         let id = self.alloc_id();
         let fast_path = Arc::new(ThreadSafeCellFastPath::new(value));
         let node = ThreadSafeCellNode {
-            dependents: HashSet::new(),
+            dependents: SmallVec::new(),
             fast_path: Arc::clone(&fast_path),
         };
         self.inner
@@ -1915,7 +1945,7 @@ impl ThreadSafeContext {
         let id = self.alloc_id();
         let node = ThreadSafeEffectNode {
             run: Arc::new(move |ctx| run(ctx).into_thread_safe_cleanup()),
-            dependencies: HashSet::new(),
+            dependencies: SmallVec::new(),
             cleanup: None,
             force_run: true,
         };
@@ -2067,10 +2097,7 @@ impl ThreadSafeContext {
             let Some(ThreadSafeNode::Effect(effect)) = state.nodes.get(&id) else {
                 return false;
             };
-            (
-                effect.force_run,
-                effect.dependencies.iter().copied().collect::<Vec<_>>(),
-            )
+            (effect.force_run, effect.dependencies.clone())
         };
 
         if force_run {
@@ -2171,11 +2198,11 @@ impl ThreadSafeContext {
         Self::invalidate_frontier_locked(state, roots);
     }
 
-    fn dependents_locked(state: &ThreadSafeState, id: SlotId) -> Vec<SlotId> {
+    fn dependents_locked(state: &ThreadSafeState, id: SlotId) -> EdgeVec {
         match state.nodes.get(&id) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.iter().copied().collect(),
-            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.iter().copied().collect(),
-            Some(ThreadSafeNode::Effect(_)) | None => Vec::new(),
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.clone(),
+            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.clone(),
+            Some(ThreadSafeNode::Effect(_)) | None => SmallVec::new(),
         }
     }
 
