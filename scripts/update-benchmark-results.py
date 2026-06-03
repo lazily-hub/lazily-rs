@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh the generated benchmark results section in README.md."""
+"""Refresh the generated benchmark results section in BENCHMARKS.md."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
 START_MARKER = "<!-- benchmark-results:start -->"
 END_MARKER = "<!-- benchmark-results:end -->"
 INSERT_BEFORE = "\n## Multi-Language\n"
+BENCHMARKS_INSERT_BEFORE = "\n## Multi-Language\n"
 DEFAULT_PROFILE_OUTPUT = Path("target/lazily-instrumentation-profile.csv")
 GROUP_ORDER = {
     "cached_reads": 0,
@@ -856,6 +857,22 @@ def replace_section(readme: str, section: str) -> str:
     return readme.rstrip() + "\n" + new_section + "\n"
 
 
+def replace_benchmarks_section(content: str, section: str) -> str:
+    if START_MARKER in content and END_MARKER in content:
+        start = content.index(START_MARKER)
+        end = content.index(END_MARKER, start) + len(END_MARKER)
+        return content[:start] + section + content[end:]
+
+    new_section = "\n## Benchmark Results\n\n" + section + "\n"
+    if BENCHMARKS_INSERT_BEFORE in content:
+        return content.replace(
+            BENCHMARKS_INSERT_BEFORE,
+            new_section + BENCHMARKS_INSERT_BEFORE,
+            1,
+        )
+    return content.rstrip() + "\n" + new_section + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="fail if README.md is stale")
@@ -865,6 +882,12 @@ def main() -> int:
         help="reuse existing target/criterion results instead of running benches",
     )
     parser.add_argument("--readme", default=Path("README.md"), type=Path)
+    parser.add_argument(
+        "--benchmarks-file",
+        default=Path("BENCHMARKS.md"),
+        type=Path,
+        help="path to BENCHMARKS.md for generated benchmark results",
+    )
     parser.add_argument("--cargo-toml", default=Path("Cargo.toml"), type=Path)
     parser.add_argument(
         "--criterion-dir",
@@ -923,21 +946,21 @@ def main() -> int:
 
     package, version = read_package_metadata(args.cargo_toml)
     section = build_section(package, version, results, latencies, profiles)
-    current = args.readme.read_text(encoding="utf-8")
-    updated = replace_section(current, section)
+    current = args.benchmarks_file.read_text(encoding="utf-8")
+    updated = replace_benchmarks_section(current, section)
 
     if args.check:
         if current != updated:
             print(
-                "README.md benchmark results are stale; run "
+                "BENCHMARKS.md benchmark results are stale; run "
                 "`python3 scripts/update-benchmark-results.py`",
                 file=sys.stderr,
             )
             return 1
         return 0
 
-    args.readme.write_text(updated, encoding="utf-8")
-    print(f"updated {args.readme}")
+    args.benchmarks_file.write_text(updated, encoding="utf-8")
+    print(f"updated {args.benchmarks_file}")
     return 0
 
 
