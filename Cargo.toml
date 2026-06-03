@@ -9,13 +9,14 @@ keywords = ["reactive", "signals", "lazy", "dependency-tracking", "cache"]
 categories = ["data-structures"]
 
 [features]
-default = []
+default = ["smallvec"]
 instrumentation = []
 loom = []
 tokio = ["dep:tokio"]
+vec_edges = []
 
 [dependencies]
-smallvec = "1"
+smallvec = { version = "1", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]

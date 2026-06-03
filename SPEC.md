@@ -346,6 +346,14 @@ Lock strategy evaluation:
   reproduces. If confidence intervals overlap or Criterion reports no
   statistically significant change, document the watch item and avoid
   speculative synchronization changes.
+- Edge storage A/B benchmarking procedure: the `vec_edges` feature flag
+  switches `EdgeVec` from `SmallVec<[SlotId; 4]>` (default) to `Vec<SlotId>`.
+  To compare:
+  1. `cargo bench --bench context -- dependency_fan_out,set_cell_invalidation/high_fan_out --save-baseline smallvec`
+  2. `cargo bench --bench context --features vec_edges -- dependency_fan_out,set_cell_invalidation/high_fan_out --baseline smallvec`
+  3. Compare Criterion output — if confidence intervals overlap, keep SmallVec;
+     if Vec is faster at the tested fan-out widths, reconsider the default.
+  The comparison must run on the same host/toolchain with no other workload.
 - Fully lock-free cached reads are deferred for the current erased-value storage. The current versioned optimistic path still clones through the retained sidecar `Arc` snapshot and uses atomic dirty/revision validation to ensure a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
 - The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, dynamic dependency switch/disposal cleanup, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary

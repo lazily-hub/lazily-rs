@@ -2,6 +2,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+#[cfg(not(feature = "vec_edges"))]
 use smallvec::SmallVec;
 #[cfg(feature = "instrumentation")]
 use std::ops::{Deref, DerefMut};
@@ -24,7 +25,10 @@ type ThreadSafeCleanup = dyn FnOnce() + Send;
 type ThreadSafeEffectFn =
     dyn Fn(&ThreadSafeContext) -> Option<Box<ThreadSafeCleanup>> + Send + Sync;
 
+#[cfg(not(feature = "vec_edges"))]
 type EdgeVec = SmallVec<[SlotId; 4]>;
+#[cfg(feature = "vec_edges")]
+type EdgeVec = Vec<SlotId>;
 
 fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
     if edges.contains(&id) {
@@ -1376,13 +1380,13 @@ impl ThreadSafeContext {
             Arc::new(move |ctx: &ThreadSafeContext| Box::new(compute(ctx)));
         let fast_path = Arc::new(ThreadSafeSlotFastPath::new(
             Arc::clone(&compute),
-            SmallVec::new(),
+            EdgeVec::new(),
         ));
         let node = ThreadSafeSlotNode {
             value: None,
             equals,
-            dependencies: SmallVec::new(),
-            dependents: SmallVec::new(),
+            dependencies: EdgeVec::new(),
+            dependents: EdgeVec::new(),
             fast_path: Arc::clone(&fast_path),
             dirty: false,
             force_recompute: false,
@@ -1691,7 +1695,7 @@ impl ThreadSafeContext {
         let id = self.alloc_id();
         let fast_path = Arc::new(ThreadSafeCellFastPath::new(value));
         let node = ThreadSafeCellNode {
-            dependents: SmallVec::new(),
+            dependents: EdgeVec::new(),
             fast_path: Arc::clone(&fast_path),
         };
         self.inner
@@ -1971,7 +1975,7 @@ impl ThreadSafeContext {
         let id = self.alloc_id();
         let node = ThreadSafeEffectNode {
             run: Arc::new(move |ctx| run(ctx).into_thread_safe_cleanup()),
-            dependencies: SmallVec::new(),
+            dependencies: EdgeVec::new(),
             cleanup: None,
             force_run: true,
         };
@@ -2228,7 +2232,7 @@ impl ThreadSafeContext {
         match state.get_node(id) {
             Some(ThreadSafeNode::Slot(slot)) => slot.dependents.clone(),
             Some(ThreadSafeNode::Cell(cell)) => cell.dependents.clone(),
-            Some(ThreadSafeNode::Effect(_)) | None => SmallVec::new(),
+            Some(ThreadSafeNode::Effect(_)) | None => EdgeVec::new(),
         }
     }
 

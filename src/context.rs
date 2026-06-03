@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 
+#[cfg(not(feature = "vec_edges"))]
 use smallvec::SmallVec;
 
 use crate::cell::CellHandle;
@@ -20,7 +21,10 @@ type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SlotId(pub(crate) u64);
 
+#[cfg(not(feature = "vec_edges"))]
 type EdgeVec = SmallVec<[SlotId; 4]>;
+#[cfg(feature = "vec_edges")]
+type EdgeVec = Vec<SlotId>;
 
 fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
     if edges.contains(&id) {
@@ -342,8 +346,8 @@ impl Context {
             value: None,
             compute: Rc::new(move |ctx| Box::new(compute(ctx))),
             equals,
-            dependencies: SmallVec::new(),
-            dependents: SmallVec::new(),
+            dependencies: EdgeVec::new(),
+            dependents: EdgeVec::new(),
             dirty: false,
             force_recompute: false,
         };
@@ -504,7 +508,7 @@ impl Context {
         let id = self.alloc_id();
         let node = CellNode {
             value: Box::new(value),
-            dependents: SmallVec::new(),
+            dependents: EdgeVec::new(),
         };
         self.insert_node(id, Node::Cell(node));
         CellHandle::new(id)
@@ -617,7 +621,7 @@ impl Context {
         let id = self.alloc_id();
         let node = EffectNode {
             run: Rc::new(move |ctx| run(ctx).into_cleanup()),
-            dependencies: SmallVec::new(),
+            dependencies: EdgeVec::new(),
             cleanup: None,
             force_run: true,
         };
@@ -826,7 +830,7 @@ impl Context {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
                 Some(Node::Cell(c)) => c.dependents.clone(),
-                _ => SmallVec::new(),
+                _ => EdgeVec::new(),
             }
         };
         for dep_id in dependents {
@@ -839,7 +843,7 @@ impl Context {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
                 Some(Node::Cell(c)) => c.dependents.clone(),
-                _ => SmallVec::new(),
+                _ => EdgeVec::new(),
             }
         };
         for dep_id in dependents {
@@ -878,7 +882,7 @@ impl Context {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
                 Some(Node::Slot(slot)) => slot.dependents.clone(),
-                _ => SmallVec::new(),
+                _ => EdgeVec::new(),
             }
         };
         for dep_id in dependents {
