@@ -10,6 +10,29 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
 use std::sync::Arc;
+
+#[cfg(feature = "std_sync_mutex")]
+type StateMutex<T> = std::sync::Mutex<T>;
+#[cfg(not(feature = "std_sync_mutex"))]
+type StateMutex<T> = parking_lot::Mutex<T>;
+
+#[cfg(feature = "std_sync_mutex")]
+fn lock_state_inner(
+    m: &std::sync::Mutex<ThreadSafeState>,
+) -> std::sync::MutexGuard<'_, ThreadSafeState> {
+    m.lock().expect("state mutex poisoned")
+}
+#[cfg(not(feature = "std_sync_mutex"))]
+fn lock_state_inner(
+    m: &parking_lot::Mutex<ThreadSafeState>,
+) -> parking_lot::MutexGuard<'_, ThreadSafeState> {
+    m.lock()
+}
+
+#[cfg(feature = "std_sync_mutex")]
+type StateMutexGuard<'a> = std::sync::MutexGuard<'a, ThreadSafeState>;
+#[cfg(not(feature = "std_sync_mutex"))]
+type StateMutexGuard<'a> = parking_lot::MutexGuard<'a, ThreadSafeState>;
 #[cfg(feature = "instrumentation")]
 use std::time::Instant;
 
@@ -975,7 +998,7 @@ impl ThreadSafeState {
 }
 
 struct ThreadSafeInner {
-    state: Mutex<ThreadSafeState>,
+    state: StateMutex<ThreadSafeState>,
     slot_fast_paths: RwLock<Vec<Option<Arc<ThreadSafeSlotFastPath>>>>,
     cell_fast_paths: RwLock<Vec<Option<Arc<ThreadSafeCellFastPath>>>>,
     batch_depth: AtomicUsize,
@@ -989,7 +1012,7 @@ struct ThreadSafeInner {
 impl Default for ThreadSafeInner {
     fn default() -> Self {
         Self {
-            state: Mutex::new(ThreadSafeState::default()),
+            state: StateMutex::new(ThreadSafeState::default()),
             slot_fast_paths: RwLock::new(Vec::new()),
             cell_fast_paths: RwLock::new(Vec::new()),
             batch_depth: AtomicUsize::new(0),
@@ -1005,7 +1028,7 @@ impl Default for ThreadSafeInner {
 
 #[cfg(feature = "instrumentation")]
 struct ProfiledReadGuard<'a> {
-    guard: Option<MutexGuard<'a, ThreadSafeState>>,
+    guard: Option<StateMutexGuard<'a>>,
     lock_instrumentation: &'a crate::instrumentation::ThreadSafeLockInstrumentation,
     site: ThreadSafeLockSite,
     acquired_at: Instant,
@@ -1013,7 +1036,7 @@ struct ProfiledReadGuard<'a> {
 
 #[cfg(feature = "instrumentation")]
 struct ProfiledWriteGuard<'a> {
-    guard: Option<MutexGuard<'a, ThreadSafeState>>,
+    guard: Option<StateMutexGuard<'a>>,
     lock_instrumentation: &'a crate::instrumentation::ThreadSafeLockInstrumentation,
     site: ThreadSafeLockSite,
     acquired_at: Instant,
@@ -1163,20 +1186,20 @@ impl ThreadSafeContext {
     }
 
     #[cfg(not(feature = "instrumentation"))]
-    fn read_state(&self) -> MutexGuard<'_, ThreadSafeState> {
-        self.inner.state.lock()
+    fn read_state(&self) -> StateMutexGuard<'_> {
+        lock_state_inner(&self.inner.state)
     }
 
     #[cfg(not(feature = "instrumentation"))]
-    fn lock_state(&self) -> MutexGuard<'_, ThreadSafeState> {
-        self.inner.state.lock()
+    fn lock_state(&self) -> StateMutexGuard<'_> {
+        lock_state_inner(&self.inner.state)
     }
 
     #[cfg(feature = "instrumentation")]
     fn read_state(&self) -> ProfiledReadGuard<'_> {
         let site = current_thread_safe_lock_site();
         let wait_started = Instant::now();
-        let guard = self.inner.state.lock();
+        let guard = lock_state_inner(&self.inner.state);
         self.inner
             .lock_instrumentation
             .record_lock_wait(site, wait_started.elapsed());
@@ -1192,7 +1215,7 @@ impl ThreadSafeContext {
     fn lock_state(&self) -> ProfiledWriteGuard<'_> {
         let site = current_thread_safe_lock_site();
         let wait_started = Instant::now();
-        let guard = self.inner.state.lock();
+        let guard = lock_state_inner(&self.inner.state);
         self.inner
             .lock_instrumentation
             .record_lock_wait(site, wait_started.elapsed());
@@ -2442,7 +2465,7 @@ impl ThreadSafeContext {
     #[cfg(feature = "instrumentation")]
     pub fn instrumentation_snapshot(&self) -> crate::instrumentation::InstrumentationSnapshot {
         let mut snapshot = {
-            let state = self.inner.state.lock();
+            let state = lock_state_inner(&self.inner.state);
             state.instrumentation.snapshot()
         };
         self.inner
@@ -2468,7 +2491,7 @@ impl ThreadSafeContext {
     #[cfg(feature = "instrumentation")]
     pub fn reset_instrumentation(&self) {
         {
-            let mut state = self.inner.state.lock();
+            let mut state = lock_state_inner(&self.inner.state);
             state.instrumentation.reset();
         }
         self.inner.lock_instrumentation.reset();

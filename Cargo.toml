@@ -12,6 +12,7 @@ categories = ["data-structures"]
 default = ["smallvec"]
 instrumentation = []
 loom = []
+std_sync_mutex = []
 tokio = ["dep:tokio"]
 vec_edges = []
 
