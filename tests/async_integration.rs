@@ -344,3 +344,66 @@ async fn async_context_handles_are_copy() {
     let _effect_copy = effect;
     ctx.dispose_async_effect(&effect);
 }
+
+#[tokio::test]
+async fn async_context_sync_get_returns_resolved_value() {
+    let ctx = AsyncContext::new();
+    let slot = ctx.computed_async(|_| async { 7i32 });
+    assert!(ctx.get(&slot).is_none());
+    let _ = ctx.get_async(&slot).await;
+    assert_eq!(ctx.get(&slot), Some(7));
+}
+
+#[tokio::test]
+async fn async_context_sync_get_invalidated_returns_none() {
+    let ctx = AsyncContext::new();
+    let cell = ctx.cell(1i32);
+    let slot = ctx.computed_async(move |ctx| {
+        let v = ctx.get_cell(&cell);
+        async move { v * 3 }
+    });
+    assert_eq!(ctx.get_async(&slot).await, 3);
+    assert_eq!(ctx.get(&slot), Some(3));
+    ctx.set_cell(&cell, 5);
+    assert!(ctx.get(&slot).is_none());
+    assert_eq!(ctx.get_async(&slot).await, 15);
+    assert_eq!(ctx.get(&slot), Some(15));
+}
+
+#[tokio::test]
+async fn async_context_sync_get_with_chain() {
+    let ctx = AsyncContext::new();
+    let cell = ctx.cell(2i32);
+    let a = ctx.computed_async(move |ctx| {
+        let v = ctx.get_cell(&cell);
+        async move { v + 10 }
+    });
+    let b = ctx.computed_async(move |ctx| {
+        let ah = a;
+        async move { ctx.get_async(&ah).await * 2 }
+    });
+    assert_eq!(ctx.get_async(&b).await, 24);
+    assert_eq!(ctx.get(&a), Some(12));
+    assert_eq!(ctx.get(&b), Some(24));
+    ctx.set_cell(&cell, 5);
+    assert!(ctx.get(&a).is_none());
+    assert!(ctx.get(&b).is_none());
+}
+
+#[tokio::test]
+async fn async_context_sync_get_across_tokio_tasks() {
+    let ctx = Arc::new(AsyncContext::new());
+    let cell = ctx.cell(10i32);
+    let slot = ctx.computed_async(move |ctx| {
+        let v = ctx.get_cell(&cell);
+        async move { v + 1 }
+    });
+    let _ = ctx.get_async(&slot).await;
+    let ctx_c = ctx.clone();
+    let reader = tokio::spawn(async move { ctx_c.get(&slot) });
+    assert_eq!(reader.await.unwrap(), Some(11));
+    ctx.set_cell(&cell, 20);
+    let ctx_c = ctx.clone();
+    let reader2 = tokio::spawn(async move { ctx_c.get(&slot) });
+    assert_eq!(reader2.await.unwrap(), None);
+}

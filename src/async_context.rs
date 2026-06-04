@@ -719,21 +719,39 @@ impl AsyncContext {
         }
     }
 
+    pub fn get<T>(&self, handle: &AsyncSlotHandle<T>) -> Option<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let inner = self.inner.lock();
+        match inner.get_node(handle.id) {
+            Some(AsyncNode::Slot(slot)) => match &slot.state {
+                AsyncSlotState::Resolved => {
+                    let val = slot.value.as_ref().expect("resolved without value");
+                    Some(
+                        val.downcast_ref::<T>()
+                            .expect("type mismatch in get")
+                            .clone(),
+                    )
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
+        if let Some(val) = self.get(handle) {
+            return val;
+        }
+
         let mut recv = {
             let inner = self.inner.lock();
             match inner.get_node(handle.id) {
                 Some(AsyncNode::Slot(slot)) => match &slot.state {
-                    AsyncSlotState::Resolved => {
-                        let val = slot.value.as_ref().expect("resolved without value");
-                        return val
-                            .downcast_ref::<T>()
-                            .expect("type mismatch in get_async")
-                            .clone();
-                    }
                     AsyncSlotState::Computing { .. } => slot
                         .notifier
                         .as_ref()
@@ -742,6 +760,9 @@ impl AsyncContext {
                     AsyncSlotState::Error | AsyncSlotState::Empty => {
                         drop(inner);
                         spawn_async_compute(self, handle.id)
+                    }
+                    AsyncSlotState::Resolved => {
+                        unreachable!("get() already checked Resolved")
                     }
                 },
                 _ => panic!("AsyncSlotHandle does not point to a Slot node"),
@@ -1548,5 +1569,89 @@ mod tests {
         ctx.set_cell(&cell, 2);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(count.load(Ordering::Relaxed), after_first);
+    }
+
+    #[test]
+    fn sync_get_returns_none_for_empty_slot() {
+        let ctx = AsyncContext::new();
+        let slot = ctx.computed_async(|_| async { 42i32 });
+        assert!(ctx.get(&slot).is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_get_returns_some_after_resolve() {
+        let ctx = AsyncContext::new();
+        let slot = ctx.computed_async(|_| async { 42i32 });
+        let val = ctx.get_async(&slot).await;
+        assert_eq!(val, 42);
+        assert_eq!(ctx.get(&slot), Some(42));
+    }
+
+    #[tokio::test]
+    async fn sync_get_returns_none_after_invalidation() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i32);
+        let slot = ctx.computed_async(move |ctx| {
+            let v = ctx.get_cell(&cell);
+            async move { v * 2 }
+        });
+        let _ = ctx.get_async(&slot).await;
+        assert_eq!(ctx.get(&slot), Some(2));
+        ctx.set_cell(&cell, 5);
+        assert!(ctx.get(&slot).is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_get_avoids_spawn_overhead() {
+        let ctx = AsyncContext::new();
+        let count = Arc::new(AtomicU64::new(0));
+        let count_clone = count.clone();
+        let slot = ctx.computed_async(move |_| {
+            let c = count_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                99i32
+            }
+        });
+        let v1 = ctx.get_async(&slot).await;
+        assert_eq!(v1, 99);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        let v2 = ctx.get(&slot);
+        assert_eq!(v2, Some(99));
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn sync_get_with_memo_returns_cached() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(3i32);
+        let slot = ctx.memo_async(move |ctx| {
+            let v = ctx.get_cell(&cell);
+            async move { v.abs() }
+        });
+        assert_eq!(ctx.get_async(&slot).await, 3);
+        assert_eq!(ctx.get(&slot), Some(3));
+    }
+
+    #[tokio::test]
+    async fn get_async_uses_sync_fast_path() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(10i32);
+        let count = Arc::new(AtomicU64::new(0));
+        let count_clone = count.clone();
+        let slot = ctx.computed_async(move |ctx| {
+            let v = ctx.get_cell(&cell);
+            let c = count_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                v + 1
+            }
+        });
+        let v1 = ctx.get_async(&slot).await;
+        assert_eq!(v1, 11);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        let v2 = ctx.get_async(&slot).await;
+        assert_eq!(v2, 11);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 }

@@ -452,7 +452,8 @@ pub struct AsyncComputeContext<'a> {
 | `get_cell` | `fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T` | Get cell value (synchronous) |
 | `set_cell` | `fn set_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)` | Update cell and invalidate dependents |
 | `computed_async` | `fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>` | Create an async computed slot |
-| `get_async` | `async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T` | Await slot value; deduplicates in-flight computations |
+| `get` | `fn get<T>(&self, handle: &AsyncSlotHandle<T>) -> Option<T>` | Synchronous cached read; returns `Some(T)` if resolved, `None` otherwise. Avoids async overhead on warm paths |
+| `get_async` | `async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T` | Await slot value; uses `get()` fast-path for resolved slots, otherwise spawns async compute |
 | `memo_async` | `fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>` | Like `computed_async` with `PartialEq` memo guard |
 | `effect_async` | `fn effect_async<F, Fut, C, CleanupFut>(&self, effect: F) -> AsyncEffectHandle` | Create an async effect |
 | `dispose_async_effect` | `fn dispose_async_effect(&self, handle: &AsyncEffectHandle)` | Dispose async effect and await cleanup |
@@ -462,6 +463,7 @@ API bounds:
 
 | Method family | Additional bounds |
 |---------------|-------------------|
+| `get` | `T: Clone + Send + Sync + 'static` |
 | `cell`, `get_cell`, `set_cell` | `T: PartialEq + Clone + Send + Sync + 'static` |
 | `computed_async`, `memo_async` | `T: PartialEq + Clone + Send + Sync + 'static`; compute `Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static`; future `Future<Output = T> + Send + 'static` |
 | `effect_async` | effect `Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static`; future `Future<Output = Option<C>> + Send + 'static`; cleanup `FnOnce() -> CleanupFut + Send + 'static`; cleanup future `Future<Output = ()> + Send + 'static` |
@@ -627,6 +629,9 @@ Integration tests live in `tests/async_integration.rs` and are gated behind
   at most one in-flight computation for the current slot revision. Concurrent
   `get_async` callers await the same in-flight result instead of spawning
   duplicate futures.
+- Synchronous cached-read fast-path: `get()` returns the cached value
+  synchronously when the slot is `Resolved`, avoiding async overhead. `get_async()`
+  calls `get()` first; only unresolved or dirty slots enter the async spawn path.
 
 ## Invalidation Semantics
 

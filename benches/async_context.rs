@@ -26,6 +26,21 @@ fn rt() -> Runtime {
 fn bench_async_cached_resolve(c: &mut Criterion) {
     let mut group = c.benchmark_group("async_cached_resolve");
 
+    group.bench_function("sync_get", |b| {
+        let rt = rt();
+        let (ctx, slot) = rt.block_on(async {
+            let ctx = AsyncContext::new();
+            let cell = ctx.cell(21usize);
+            let slot = ctx.computed_async(move |ctx| {
+                let v = ctx.get_cell(&cell);
+                async move { v * 2 }
+            });
+            let _ = ctx.get_async(&slot).await;
+            (ctx, slot)
+        });
+        b.iter(|| black_box(ctx.get(&slot)));
+    });
+
     group.bench_function("async_context", |b| {
         let rt = rt();
         b.iter(|| {
