@@ -42,6 +42,12 @@ GROUP_ORDER = {
     "async_concurrent_contention": 15,
     "async_effect_throughput": 16,
     "async_batch_throughput": 17,
+    "tokio_sync_cached_read": 18,
+    "tokio_sync_cold_first_get": 19,
+    "tokio_sync_invalidation": 20,
+    "tokio_sync_concurrent_contention": 21,
+    "tokio_sync_batch": 22,
+    "tokio_sync_effect": 23,
 }
 SET_CELL_INVALIDATION_CASE_ORDER = {
     "high_fan_out": 0,
@@ -69,6 +75,10 @@ THREAD_SAFE_GRAPH_PROPAGATION_CASE_ORDER = {
 ASYNC_CONCURRENT_CONTENTION_CASE_ORDER = {
     "async_context": 0,
     "thread_safe_context_baseline": 1,
+}
+TOKIO_SYNC_CONCURRENT_CONTENTION_CASE_ORDER = {
+    "same_slot_write_read": 0,
+    "independent_slots": 1,
 }
 REQUIRED_LATENCY_CASES: tuple[tuple[str, str], ...] = (
     ("thread_safe_contention", "same_slot_write_read / 8"),
@@ -642,6 +652,15 @@ def benchmark_case_key(
             natural_case_key(worker or result.case),
         )
 
+    if result.group == "tokio_sync_concurrent_contention":
+        case_name, _, worker = result.case.partition(" / ")
+        return (
+            TOKIO_SYNC_CONCURRENT_CONTENTION_CASE_ORDER.get(
+                case_name, len(TOKIO_SYNC_CONCURRENT_CONTENTION_CASE_ORDER)
+            ),
+            natural_case_key(worker or result.case),
+        )
+
     return (0, natural_case_key(result.case))
 
 
@@ -925,7 +944,7 @@ def main() -> int:
     if args.check:
         pass
     elif not args.no_run:
-        run(["cargo", "bench", "--features", "instrumentation,async"])
+        run(["cargo", "bench", "--features", "instrumentation,async,tokio"])
         run_instrumentation_profile(args.profile_output)
     else:
         run_instrumentation_profile(args.profile_output)

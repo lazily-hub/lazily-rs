@@ -47,3 +47,8 @@ required-features = ["instrumentation"]
 name = "async_context"
 harness = false
 required-features = ["async"]
+
+[[bench]]
+name = "tokio_sync"
+harness = false
+required-features = ["tokio"]
