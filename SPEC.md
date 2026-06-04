@@ -605,6 +605,11 @@ primitives. It is separate from the `tokio` feature (which covers synchronous
 `ThreadSafeContext` sharing inside Tokio tasks). The `async` feature implies
 `tokio`.
 
+Integration tests live in `tests/async_integration.rs` and are gated behind
+`#![cfg(feature = "async")]`. Run with `make test-async` (or
+`cargo test --locked --features async`). The `make check` target includes
+`test-async` alongside `test`, `test-tokio`, and `test-loom`.
+
 #### AsyncContext implementation notes
 
 - Async graph locks must never be held while polling user futures or cleanup

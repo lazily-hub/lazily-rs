@@ -7,10 +7,12 @@ Lazy reactive primitives library for Rust.
 - `src/context.rs` — `Context` struct, dependency graph, thread-local tracking stack
 - `src/slot.rs` — `SlotHandle<T>` (lightweight `Copy` id into Context)
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
+- `src/async_context.rs` — `AsyncContext` async reactive graph (feature-gated behind `async`)
 - `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests
+- `tests/async_integration.rs` — 16 AsyncContext feature-gated integration tests
 
 ## Key Design Decisions
 
@@ -24,8 +26,9 @@ Lazy reactive primitives library for Rust.
 ## Commands
 
 ```bash
-make check           # Run fmt, clippy, build, default tests, tokio tests, loom tests, and benchmark result checks
+make check           # Run fmt, clippy, build, default tests, tokio tests, async tests, loom tests, and benchmark result checks
 make test-tokio      # Include Tokio sync integration tests
+make test-async      # AsyncContext integration tests
 make test-loom       # Run thread-safe Loom model tests
 make benchmark-check # Verify generated benchmark results and instrumentation budgets
 ```

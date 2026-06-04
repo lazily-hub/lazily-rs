@@ -10,12 +10,13 @@ PYTHON ?= python3
 	build \
 	test \
 	test-tokio \
+	test-async \
 	test-loom \
 	benchmark-check \
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-loom benchmark-check
+check: fmt clippy build test test-tokio test-async test-loom benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -31,6 +32,9 @@ test:
 
 test-tokio:
 >$(CARGO) test --locked --features tokio
+
+test-async:
+>$(CARGO) test --locked --features async
 
 test-loom:
 >$(CARGO) test --locked --features loom --test thread_safe_loom
