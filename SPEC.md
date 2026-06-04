@@ -38,9 +38,11 @@ pub struct Context {
 | `ctx.memo(\|ctx\| T)` | Create a lazily-computed slot with a `PartialEq` memoization guard |
 | `slot.get(&ctx)` | Get value (computes if unset) |
 | `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
+| `ctx.get_rc(&slot)` | Get slot value as `Rc<T>`, avoiding deep clone |
 | `ctx.cell(value)` | Create a mutable cell |
 | `cell.get(&ctx)` | Get cell value |
 | `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
+| `ctx.get_cell_rc(&cell)` | Get cell value as `Rc<T>`, avoiding deep clone |
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
 | `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |

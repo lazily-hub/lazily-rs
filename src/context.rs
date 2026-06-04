@@ -360,6 +360,26 @@ impl Context {
         self.get_slot(handle.id)
     }
 
+    /// Get the value of a slot as `Rc<T>`, avoiding a deep clone.
+    ///
+    /// Returns a reference-counted pointer to the stored value. Use this when
+    /// you only need to read the value without owning a separate copy.
+    pub fn get_rc<T: 'static>(&self, handle: &SlotHandle<T>) -> Rc<T> {
+        if let Some(parent_id) = current_tracking_frame() {
+            self.register_dependency(handle.id, parent_id);
+        }
+
+        self.refresh_slot(handle.id);
+
+        let inner = self.inner.borrow();
+        if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id)
+            && let Some(ref val) = slot.value
+        {
+            return val.clone().downcast::<T>().expect("type mismatch in slot");
+        }
+        panic!("get_rc called on unset or non-slot id");
+    }
+
     /// Internal: get a slot value by id, performing computation if unset and
     /// registering dependency tracking.
     fn get_slot<T: Clone + 'static>(&self, id: SlotId) -> T {
@@ -498,6 +518,23 @@ impl Context {
                 .clone()
         } else {
             panic!("get_cell called on non-cell id");
+        }
+    }
+
+    /// Get the value of a cell as `Rc<T>`, avoiding a deep clone.
+    pub fn get_cell_rc<T: 'static>(&self, handle: &CellHandle<T>) -> Rc<T> {
+        if let Some(parent_id) = current_tracking_frame() {
+            self.register_dependency(handle.id, parent_id);
+        }
+
+        let inner = self.inner.borrow();
+        if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
+            c.value
+                .clone()
+                .downcast::<T>()
+                .expect("type mismatch in cell")
+        } else {
+            panic!("get_cell_rc called on non-cell id");
         }
     }
 

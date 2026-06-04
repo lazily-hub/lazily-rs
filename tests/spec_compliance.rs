@@ -97,6 +97,78 @@ mod context {
         ctx.set_cell(&root, 2);
         assert_eq!(ctx.get(&tripled), 6);
     }
+
+    #[test]
+    fn get_rc_returns_reference_counted_slot_value() {
+        let ctx = Context::new();
+        let slot = ctx.slot(|_| "hello".to_string());
+        let rc1 = ctx.get_rc(&slot);
+        let rc2 = ctx.get_rc(&slot);
+        assert_eq!(&*rc1, "hello");
+        assert_eq!(&*rc2, "hello");
+        assert!(
+            Rc::ptr_eq(&rc1, &rc2),
+            "both Rc should point to the same allocation"
+        );
+    }
+
+    #[test]
+    fn get_cell_rc_returns_reference_counted_cell_value() {
+        let ctx = Context::new();
+        let cell = ctx.cell(42i32);
+        let rc1 = ctx.get_cell_rc(&cell);
+        let rc2 = ctx.get_cell_rc(&cell);
+        assert_eq!(*rc1, 42);
+        assert!(
+            Rc::ptr_eq(&rc1, &rc2),
+            "both Rc should point to the same allocation"
+        );
+    }
+
+    #[test]
+    fn get_rc_avoids_clone_for_non_clone_type() {
+        #[derive(Debug, PartialEq)]
+        struct NoClone(i32);
+
+        let ctx = Context::new();
+        let slot = ctx.slot(|_| NoClone(99));
+        let rc = ctx.get_rc(&slot);
+        assert_eq!(rc.0, 99);
+    }
+
+    #[test]
+    fn get_cell_rc_avoids_clone_for_non_clone_type() {
+        #[derive(Debug, PartialEq)]
+        struct NoClone(i32);
+
+        let ctx = Context::new();
+        let cell = ctx.cell(NoClone(7));
+        let rc = ctx.get_cell_rc(&cell);
+        assert_eq!(rc.0, 7);
+    }
+
+    #[test]
+    fn get_rc_tracks_dependencies() {
+        let ctx = Context::new();
+        let a = ctx.cell(1i32);
+        let b = ctx.slot(move |ctx| ctx.get_cell(&a) + 10);
+        let c = ctx.slot(move |ctx| *ctx.get_rc(&b) + 100);
+
+        assert_eq!(*ctx.get_rc(&c), 111);
+        ctx.set_cell(&a, 2);
+        assert_eq!(*ctx.get_rc(&c), 112);
+    }
+
+    #[test]
+    fn get_cell_rc_tracks_dependencies() {
+        let ctx = Context::new();
+        let a = ctx.cell(1i32);
+        let b = ctx.slot(move |ctx| *ctx.get_cell_rc(&a) + 10);
+
+        assert_eq!(*ctx.get_rc(&b), 11);
+        ctx.set_cell(&a, 5);
+        assert_eq!(*ctx.get_rc(&b), 15);
+    }
 }
 
 // ============================================================================
