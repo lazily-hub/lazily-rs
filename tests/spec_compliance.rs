@@ -3416,3 +3416,210 @@ mod handle_get_methods {
         assert_eq!(ctx.get(&s), 20);
     }
 }
+
+// ============================================================================
+// 9. AsyncContext Design Spec
+// ============================================================================
+
+mod async_context_design_spec {
+    const SPEC: &str = include_str!("../SPEC.md");
+
+    fn assert_spec_contains(fragment: &str) {
+        assert!(
+            SPEC.contains(fragment),
+            "SPEC.md should document AsyncContext design element: {fragment}"
+        );
+    }
+
+    #[test]
+    fn spec_documents_async_context_overview() {
+        for fragment in [
+            "### AsyncContext",
+            "explicit async context surface",
+            "not an overload of",
+            "`async` feature flag so downstream users",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_context_type_definitions() {
+        for fragment in [
+            "pub struct AsyncContext",
+            "pub struct AsyncSlotHandle<T>",
+            "pub struct AsyncCellHandle<T>",
+            "pub struct AsyncEffectHandle",
+            "pub struct AsyncComputeContext",
+            "AsyncContextInner",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_context_api_surface() {
+        for fragment in [
+            "computed_async",
+            "get_async",
+            "memo_async",
+            "effect_async",
+            "dispose_async_effect",
+            "fn cell<T>(&self, value: T) -> AsyncCellHandle<T>",
+            "fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T",
+            "fn set_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)",
+            "fn batch<F, R>(&self, run: F) -> R",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_context_api_bounds() {
+        for fragment in [
+            "T: PartialEq + Clone + Send + Sync + 'static",
+            "Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static",
+            "Future<Output = T> + Send + 'static",
+            "Future<Output = Option<C>> + Send + 'static",
+            "FnOnce() -> CleanupFut + Send + 'static",
+            "Future<Output = ()> + Send + 'static",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_slot_state_machine() {
+        for fragment in [
+            "AsyncSlotState",
+            "Empty",
+            "Computing",
+            "Resolved",
+            "Error",
+            "JoinHandle",
+            "revision",
+            "State transitions",
+            "Empty → Computing",
+            "Computing → Resolved",
+            "Computing → Error",
+            "Computing → Computing",
+            "Resolved → Computing",
+            "Error → Computing",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_cancellation_contract() {
+        for fragment in [
+            "cancellation contract",
+            "Waiter cancellation is safe",
+            "dropping one `get_async` future does not",
+            "Stale completion handling",
+            "revision no longer matches and discards the result",
+            "Explicit cancellation",
+            "cancellation-safe",
+            "Context disposal",
+            "JoinHandle::abort()",
+            "Effect cleanup futures",
+            "Disposal removes pending reruns before awaiting cleanup",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_dependency_tracking() {
+        for fragment in [
+            "do not use thread-local tracking stacks",
+            "AsyncComputeContext",
+            "pub async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T",
+            "pub fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T",
+            "records the accessed slot as a dependency",
+            "records the accessed cell as a dependency",
+            "HashSet<SlotId>",
+            "survives executor thread migration",
+            "suspension/resume across",
+            "`.await` points",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_effects() {
+        for fragment in [
+            "Serialized reruns",
+            "async effect reruns are serialized per effect",
+            "Cleanup ordering",
+            "cleanup future from the previous run completes before",
+            "Auto-tracking",
+            "Dependency invalidation",
+            "schedules an async rerun after the current",
+            "invalidation pass. The rerun is spawned on the runtime executor",
+            "Effect disposal",
+            "removes pending scheduled reruns",
+            "unsubscribes dependency edges",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_batch_support() {
+        for fragment in [
+            "synchronous boundary",
+            "Cell updates queue invalidation",
+            "Async slots",
+            "and effects are scheduled for rerun but do not execute inside the batch",
+            "after the batch returns, on the runtime executor",
+            "invalidations schedule async reruns only after the outermost batch exits",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_feature_flag() {
+        for fragment in [
+            "async = [\"dep:tokio\"]",
+            "depends on Tokio",
+            "separate from the `tokio` feature",
+            "The `async` feature implies",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_implementation_notes() {
+        for fragment in [
+            "Async graph locks must never be held while polling user futures",
+            "Nested async slot reads register dependencies",
+            "separate `async` feature flag",
+            "requires `Send + Sync + 'static` values, callbacks",
+            "futures, and cleanup futures",
+            "LocalAsyncContext",
+            "LocalSet",
+            "handles must not be interchangeable",
+            "in-flight computation for the current slot revision",
+            "at most one in-flight computation",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_stale_completion() {
+        for fragment in [
+            "stale completion",
+            "dependency invalidation advances the slot",
+            "recorded revision no longer matches",
+            "discarded",
+            "newly spawned future",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+}

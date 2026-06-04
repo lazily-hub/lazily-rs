@@ -405,82 +405,221 @@ Tokio integration is scoped in two stages:
    across `.await`, stale future completion, cleanup ordering, and `Send` versus
    `LocalSet` futures.
 
-### Future async computations/effects design
+### AsyncContext
 
-True async support must be a new explicit async context surface, not an overload
-of `Context` or `ThreadSafeContext`. A future implementation should introduce an
-`AsyncContext` API behind a separate feature once these semantics are covered by
-tests.
+True async support is a new explicit async context surface, not an overload of
+`Context` or `ThreadSafeContext`. The `AsyncContext` API lives behind a separate
+`async` feature flag so downstream users do not accidentally accept the larger
+semantic surface. The `async` feature depends on `tokio` for runtime primitives
+(`spawn`, `JoinHandle`, notification).
 
-API sketch:
+#### AsyncContext type definitions
 
 ```rust
-pub struct AsyncContext { /* shared async graph state */ }
-pub struct AsyncSlotHandle<T> { /* id + marker */ }
-pub struct AsyncEffectHandle { /* id */ }
+pub struct AsyncContext {
+    inner: Arc<AsyncContextInner>,
+}
 
-impl AsyncContext {
-    pub fn async_computed<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
-    where
-        T: Clone + Send + Sync + 'static,
-        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = T> + Send + 'static;
+pub struct AsyncSlotHandle<T> {
+    id: SlotId,
+    _marker: PhantomData<T>,
+}
 
-    pub async fn get_async<T>(&self, slot: &AsyncSlotHandle<T>) -> T
-    where
-        T: Clone + Send + Sync + 'static;
+pub struct AsyncCellHandle<T> {
+    id: SlotId,
+    _marker: PhantomData<T>,
+}
 
-    pub fn async_effect<F, Fut, C, CleanupFut>(&self, effect: F) -> AsyncEffectHandle
-    where
-        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Option<C>> + Send + 'static,
-        C: FnOnce() -> CleanupFut + Send + 'static,
-        CleanupFut: Future<Output = ()> + Send + 'static;
+pub struct AsyncEffectHandle {
+    id: SlotId,
+}
+
+pub struct AsyncComputeContext<'a> {
+    context_id: AsyncContextId,
+    node_id: SlotId,
+    inner: &'a AsyncContextInner,
 }
 ```
 
-Required semantics:
+#### AsyncContext API surface
 
-- **In-flight future deduplication:** each async slot has one published cache and
+| Method | Signature | Purpose |
+|--------|-----------|---------|
+| `new` | `fn new() -> Self` | Create a new async context |
+| `cell` | `fn cell<T>(&self, value: T) -> AsyncCellHandle<T>` | Create a mutable cell (`T: PartialEq + Clone + Send + Sync + 'static`) |
+| `get_cell` | `fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T` | Get cell value (synchronous) |
+| `set_cell` | `fn set_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)` | Update cell and invalidate dependents |
+| `computed_async` | `fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>` | Create an async computed slot |
+| `get_async` | `async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T` | Await slot value; deduplicates in-flight computations |
+| `memo_async` | `fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>` | Like `computed_async` with `PartialEq` memo guard |
+| `effect_async` | `fn effect_async<F, Fut, C, CleanupFut>(&self, effect: F) -> AsyncEffectHandle` | Create an async effect |
+| `dispose_async_effect` | `fn dispose_async_effect(&self, handle: &AsyncEffectHandle)` | Dispose async effect and await cleanup |
+| `batch` | `fn batch<F, R>(&self, run: F) -> R` | Synchronous batch boundary; schedules async reruns at batch exit |
+
+API bounds:
+
+| Method family | Additional bounds |
+|---------------|-------------------|
+| `cell`, `get_cell`, `set_cell` | `T: PartialEq + Clone + Send + Sync + 'static` |
+| `computed_async`, `memo_async` | `T: PartialEq + Clone + Send + Sync + 'static`; compute `Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static`; future `Future<Output = T> + Send + 'static` |
+| `effect_async` | effect `Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static`; future `Future<Output = Option<C>> + Send + 'static`; cleanup `FnOnce() -> CleanupFut + Send + 'static`; cleanup future `Future<Output = ()> + Send + 'static` |
+| handles | remain id-only and copyable; usable from any task only with the owning `AsyncContext` |
+
+#### AsyncSlotNode state machine
+
+Each async slot tracks its state through a finite state machine:
+
+```rust
+enum AsyncSlotState {
+    Empty,
+    Computing { revision: u64, handle: JoinHandle<()> },
+    Resolved,
+    Error,
+}
+```
+
+States:
+
+- **Empty:** no cached value, no in-flight computation. Entered on creation and
+  after hard clear.
+- **Computing:** a `JoinHandle` tracks the in-flight future for the current
+  revision. Concurrent `get_async` callers attach waiters to the same
+  in-flight result instead of spawning duplicate futures.
+- **Resolved:** the cached value is fresh. The value remains until dependency
+  invalidation transitions back to Computing.
+- **Error:** the last computation failed. Callers receive the error or retry on
+  the next `get_async`.
+
+State transitions:
+
+- **Empty → Computing:** first `get_async` call or dependency invalidation when
+  no cached value exists.
+- **Computing → Resolved:** future completes with `Ok`, and the recorded
+  revision still matches the current slot revision. The value is cached.
+- **Computing → Error:** future completes with `Err`, and the recorded revision
+  still matches.
+- **Computing → Computing (stale):** dependency invalidation advances the slot
+  revision during an in-flight computation. The completing future finds its
+  revision no longer matches and discards the result. A new future is spawned
+  for the updated revision.
+- **Resolved → Computing:** dependency invalidation marks the cached value stale
+  and spawns a new computation.
+- **Error → Computing:** `get_async` retry after an error.
+
+Revision tracking ensures stale completions are discarded: an async computation
+records the slot revision at start; at publish time the graph accepts the value
+only if the revision is still current.
+
+#### AsyncContext cancellation contract
+
+1. **Waiter cancellation is safe:** dropping one `get_async` future does not
+   cancel the shared in-flight computation while other waiters still need it.
+   Each waiter holds a shared handle (e.g., oneshot receiver or `Shared<...>`);
+   dropping the receiver does not abort the `JoinHandle`.
+
+2. **Stale completion handling:** when dependency invalidation advances the slot
+   revision during an in-flight computation, the completing future finds its
+   recorded revision no longer matches and discards the result. Waiting callers
+   are retried against the new revision or attached to the newly spawned future.
+
+3. **Explicit cancellation:** `slot.clear()`, dependency invalidation, or
+   context disposal may mark the in-flight revision as canceled. If the runtime
+   provides an abort handle, the task is aborted. User futures must be
+   cancellation-safe because aborting drops them at an `.await` boundary.
+
+4. **Context disposal:** dropping the `AsyncContext` cancels all in-flight
+   computations via their `JoinHandle::abort()` handles and awaits completion
+   of all active cleanup futures before returning.
+
+5. **Effect cleanup futures** must complete before the next effect body starts.
+   Disposal removes pending reruns before awaiting cleanup.
+
+#### AsyncContext dependency tracking
+
+Async compute and effect callbacks do not use thread-local tracking stacks.
+Instead, each callback receives an `AsyncComputeContext`:
+
+```rust
+impl<'a> AsyncComputeContext<'a> {
+    pub async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T;
+    pub fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T;
+}
+```
+
+- `get_async` on the compute context records the accessed slot as a dependency
+  before awaiting its value.
+- `get_cell` on the compute context records the accessed cell as a dependency
+  synchronously.
+- Dependencies are collected into a `HashSet<SlotId>` attached to the async
+  node. On rerun, stale dependencies are removed and new dependencies are
+  registered.
+- This design survives executor thread migration and suspension/resume across
+  `.await` points because the dependency set is carried by the
+  `AsyncComputeContext`, not a thread-local.
+
+#### AsyncContext async effects
+
+```rust
+fn effect_async<F, Fut, C, CleanupFut>(&self, effect: F) -> AsyncEffectHandle
+where
+    F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Option<C>> + Send + 'static,
+    C: FnOnce() -> CleanupFut + Send + 'static,
+    CleanupFut: Future<Output = ()> + Send + 'static;
+```
+
+- **Serialized reruns:** async effect reruns are serialized per effect. A rerun
+  does not start until the previous cleanup future completes.
+- **Cleanup ordering:** the cleanup future from the previous run completes before
+  the next effect body starts. Disposal awaits the current cleanup before
+  removing the effect node.
+- **Auto-tracking:** the effect body receives an `AsyncComputeContext` and
+  tracks dependencies through `get_async` and `get_cell` calls.
+- **Dependency invalidation** schedules an async rerun after the current
+  invalidation pass. The rerun is spawned on the runtime executor, not inline.
+- **Effect disposal:** removes pending scheduled reruns, awaits the current
+  cleanup future, and unsubscribes dependency edges.
+
+#### AsyncContext batch support
+
+- `ctx.batch()` is a synchronous boundary. Cell updates queue invalidation
+  roots.
+- At batch exit, queued roots trigger invalidation propagation. Async slots
+  and effects are scheduled for rerun but do not execute inside the batch
+  callback.
+- Async reruns execute after the batch returns, on the runtime executor.
+- Batching semantics remain synchronous at the graph mutation boundary:
+  invalidations schedule async reruns only after the outermost batch exits.
+
+#### AsyncContext feature flag
+
+```toml
+[features]
+async = ["dep:tokio"]
+```
+
+The `async` feature depends on Tokio for `spawn`, `JoinHandle`, and runtime
+primitives. It is separate from the `tokio` feature (which covers synchronous
+`ThreadSafeContext` sharing inside Tokio tasks). The `async` feature implies
+`tokio`.
+
+#### AsyncContext implementation notes
+
+- Async graph locks must never be held while polling user futures or cleanup
+  futures. Acquire the lock only to read/write graph state, then release before
+  polling.
+- Nested async slot reads register dependencies on the awaiting parent before
+  awaiting the child result.
+- The sync `tokio` feature is not enough to enable this API; true async support
+  uses the separate `async` feature flag.
+- The `Send` async context requires `Send + Sync + 'static` values, callbacks,
+  futures, and cleanup futures. A future `LocalAsyncContext` may support `!Send`
+  futures on `tokio::task::LocalSet`, but handles must not be interchangeable
+  with the `Send` async context.
+- In-flight future deduplication: each async slot has one published cache and
   at most one in-flight computation for the current slot revision. Concurrent
   `get_async` callers await the same in-flight result instead of spawning
   duplicate futures.
-- **Cancellation:** dropping one waiter does not cancel the shared in-flight
-  computation while other waiters still need it. Explicit `clear`, dependency
-  invalidation, or context disposal may mark the in-flight revision canceled and
-  abort the task if the runtime provides an abort handle. User futures and
-  cleanup futures must be cancellation-safe because aborting drops them at an
-  `.await` boundary.
-- **Dependency tracking across `.await`:** do not depend on thread-local stack
-  state surviving across suspension or executor thread migration. Async compute
-  and effect callbacks receive an `AsyncComputeContext`; every `get_async` and
-  `get_cell` through that context records dependencies against the active async
-  node explicitly.
-- **Stale future completion:** an async computation records the slot revision it
-  started from. When it completes, the graph publishes its value only if the
-  slot revision is still current. Stale completions are discarded and waiting
-  callers retry or await the newer in-flight computation.
-- **Effect cleanup ordering:** async effect reruns are serialized per effect.
-  Before a rerun or disposal publishes the next effect state, the previous
-  cleanup future must run outside the graph lock and complete before the next
-  effect body starts. Disposal removes pending reruns before awaiting cleanup.
-- **`Send` versus `LocalSet`:** the default async context should require
-  `Send + Sync + 'static` values, callbacks, futures, and cleanup futures so it
-  can run on a multithreaded Tokio runtime. A separate `LocalAsyncContext` may
-  support `!Send` futures on `tokio::task::LocalSet`, but its handles must not be
-  interchangeable with the `Send` async context.
-
-Implementation notes:
-
-- Async graph locks must never be held while polling user futures or cleanup
-  futures.
-- Nested async slot reads should register dependencies on the awaiting parent
-  before awaiting the child result.
-- Batching semantics should remain synchronous at the graph mutation boundary:
-  invalidations schedule async reruns only after the outermost batch exits.
-- The sync `tokio` feature is not enough to enable this API; true async support
-  should use a separate feature flag so downstream users do not accidentally
-  accept the larger semantic surface.
 
 ## Invalidation Semantics
 
