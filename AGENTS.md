@@ -31,7 +31,13 @@ make test-tokio      # Include Tokio sync integration tests
 make test-async      # AsyncContext integration tests
 make test-loom       # Run thread-safe Loom model tests
 make benchmark-check # Verify generated benchmark results and instrumentation budgets
+make benchmark-update # Run python3 scripts/update-benchmark-results.py to regenerate BENCHMARKS.md
+make instrumentation-profile # Run examples/instrumentation_profile.rs with --features instrumentation
 ```
+
+## Benchmark Skill
+
+Use `/lazily-benchmark` to check, update, or run A/B regression workflows for `BENCHMARKS.md`. See [runbooks/lazily-benchmark.md](../../runbooks/lazily-benchmark.md) for the full workflow.
 
 ## Related Projects
 
