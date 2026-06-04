@@ -921,6 +921,106 @@ typed cache.
 - This snapshot type is the input to #ipc2 (snapshot + incremental update
   protocol) and the value substrate for #ipc3 (CRDT vs Raft).
 
+## IPC snapshot + incremental update protocol (`lazily-ipc`)
+
+`lazily-ipc` transmits a reactive graph's state to a remote observer and keeps
+it in sync as the graph mutates. It builds directly on the `ContextSnapshot`
+from the `lazily-serde` design and reuses the existing batch-flush and
+cache-revision machinery as its consistency boundary rather than inventing a
+new one.
+
+### Two message kinds
+
+- **`Snapshot`** — full graph state. Sent on connect and on resync.
+- **`Delta`** — incremental change set. Sent **once per outermost batch-flush
+  invalidation pass** — the single atomic graph-mutation boundary the
+  thread-safe path already guarantees (see *Threading and Concurrency
+  Contract*: "Batch exit ... a single atomic graph mutation boundary and one
+  coalesced effect flush per outermost invalidation pass"). Coalescing is
+  therefore free: one delta per flush, never one per `set_cell`.
+
+### Epoch / versioning
+
+A context-level monotonic `ipc_epoch: u64` advances **once per outermost batch
+flush**, not per write. It is independent of the per-slot `cache_revision`
+atomics (which remain the read-path dirty epoch) — `ipc_epoch` is the wire
+sequence number.
+
+- `Snapshot` carries `epoch`.
+- Each `Delta` carries `{ base_epoch, epoch }` with `epoch == base_epoch + 1`.
+  Deltas are strictly sequential, so a receiver detects any gap, reorder, or
+  sender restart by checking `base_epoch == last_epoch`.
+
+### Payloads
+
+```
+Snapshot { epoch: u64, nodes: Vec<NodeSnapshot>,           // NodeSnapshot from lazily-serde
+           edges: Vec<(SlotId /*dependent*/, SlotId /*dependency*/)>,
+           roots: Vec<SlotId> }                            // cells + source slots
+
+Delta { base_epoch: u64, epoch: u64, ops: Vec<DeltaOp> }
+
+DeltaOp =
+  | CellSet    { slot_id, payload }           // changed-value cell write (PartialEq-guarded)
+  | SlotValue  { slot_id, payload }           // a recompute published a new value
+  | Invalidate { slot_id }                    // dirtied, not yet recomputed (lazy)
+  | NodeAdd    { slot_id, type_tag, payload | Opaque }
+  | NodeRemove { slot_id }                    // freed slot id (free-list reuse → Remove then Add)
+  | EdgeAdd    { dependent, dependency }
+  | EdgeRemove { dependent, dependency }
+```
+
+### Consistency invariants (inherited, not re-derived)
+
+- **PartialEq cell guard:** an equal `set_cell` invalidates nothing, so it emits
+  no `CellSet` and no downstream ops — the wire is silent exactly when the graph
+  is (SPEC *Invalidation Semantics*).
+- **memo equality suppression:** a dirty `memo()` that recomputes to an equal
+  value emits no `SlotValue` and no downstream `Invalidate`, mirroring the
+  local "downstream dirty slots become fresh without recomputing" rule.
+- **Coalesced frontier:** a dependent reached through many changed cells in one
+  batch appears at most once per delta — the same once-per-pass guarantee the
+  thread-safe frontier already enforces.
+
+### Lazy reconciliation
+
+Because lazily-rs is lazy, a flush can invalidate a slot without producing a new
+value. Two receiver modes:
+
+- **Value-mirror (default for IPC):** at flush the *sender* resolves each
+  invalidated allowlisted slot via `ctx.get()` so the delta carries concrete
+  `SlotValue`s. The receiver stays a pure data mirror holding no compute
+  closures. Trades local laziness for a value-complete wire image.
+- **Mirror-lazy:** the sender emits bare `Invalidate` and the receiver keeps a
+  stale marker, recomputing only on its own read. This requires the compute
+  closures to be replicated too and is therefore **deferred to
+  `lazily-distributed`** (#ipc3), not `lazily-ipc`.
+
+### Resync / gap handling
+
+The receiver tracks `last_epoch`. On a `Delta` whose `base_epoch != last_epoch`
+(gap, reorder, or sender restart) it discards the delta and requests a
+`Snapshot`; the sender replies with a fresh `Snapshot { epoch }` and resumes
+deltas from there. Messages are length-prefixed and tagged `Snapshot` / `Delta`
+via `serde`/`erased-serde`; the protocol is transport-agnostic (unix socket,
+pipe, WebSocket — the last feeds the #yxjw signaling server).
+
+### Permission boundary (forward link to #39c5)
+
+Only nodes on the per-peer allowlist (#39c5 `RemoteOp`) are serialized into a
+snapshot or delta; non-allowlisted nodes are **omitted entirely** — not even as
+`Opaque` — so a peer cannot infer their existence. The allowlist is applied at
+snapshot/delta *construction*, before serialization, so the filter is the same
+on the full and incremental paths.
+
+### Feature gate
+
+A new `ipc = ["serde"]` feature adds the pure-protocol `Snapshot`/`Delta` types
+plus a transport-agnostic `IpcSink` / `IpcSource` trait pair. No transport
+dependency enters the core crate. The `Delta`/`ipc_epoch` model is a
+single-writer linear log; whether multi-writer needs CRDT merge or Raft
+consensus on top of that log is exactly the #ipc3 question.
+
 ## Differences from lazily-zig
 
 | Aspect | lazily-zig | lazily-rs |
