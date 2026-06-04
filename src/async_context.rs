@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -9,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::context::SlotId;
@@ -27,9 +29,18 @@ fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
     }
 }
 
+fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
+    if let Some(pos) = edges.iter().position(|x| *x == id) {
+        edges.swap_remove(pos);
+        true
+    } else {
+        false
+    }
+}
+
 type AsyncAny = dyn Any + Send + Sync;
 type BoxedAsyncFuture = Pin<Box<dyn Future<Output = Arc<AsyncAny>> + Send>>;
-type AsyncComputeFn = dyn Fn() -> BoxedAsyncFuture + Send + Sync;
+type AsyncComputeFn = dyn Fn(&AsyncComputeContext) -> BoxedAsyncFuture + Send + Sync;
 type AsyncEqualsFn = dyn Fn(&AsyncAny, &AsyncAny) -> bool + Send + Sync;
 
 static NEXT_ASYNC_CONTEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -85,7 +96,6 @@ pub(crate) enum InvalidationResult {
     AlreadyEmpty,
 }
 
-#[allow(dead_code)]
 pub(crate) struct AsyncSlotNode {
     pub(crate) state: AsyncSlotState,
     pub(crate) value: Option<Arc<AsyncAny>>,
@@ -95,6 +105,14 @@ pub(crate) struct AsyncSlotNode {
     pub(crate) equals: Option<Arc<AsyncEqualsFn>>,
     pub(crate) dependencies: EdgeVec,
     pub(crate) dependents: EdgeVec,
+    pub(crate) notifier: Option<watch::Sender<AsyncCompletion>>,
+}
+
+#[derive(Clone)]
+pub(crate) enum AsyncCompletion {
+    Pending,
+    Resolved(Arc<dyn Any + Send + Sync>),
+    Error(Arc<dyn Error + Send + Sync>),
 }
 
 impl AsyncSlotNode {
@@ -206,6 +224,8 @@ pub(crate) struct AsyncContextInner {
     next_id: u64,
     free_ids: Vec<u64>,
     pub(crate) context_id: AsyncContextId,
+    batch_depth: usize,
+    batched_cells: HashSet<SlotId>,
 }
 
 impl AsyncContextInner {
@@ -284,18 +304,19 @@ impl Clone for AsyncEffectHandle {
 }
 impl Copy for AsyncEffectHandle {}
 
-pub struct AsyncComputeContext<'a> {
+pub struct AsyncComputeContext {
     pub(crate) _context_id: AsyncContextId,
     pub(crate) _node_id: SlotId,
-    pub(crate) inner: &'a Arc<Mutex<AsyncContextInner>>,
-    pub(crate) dependencies: HashSet<SlotId>,
+    pub(crate) inner: Arc<Mutex<AsyncContextInner>>,
+    pub(crate) dependencies: RefCell<HashSet<SlotId>>,
 }
 
-impl AsyncComputeContext<'_> {
+impl AsyncComputeContext {
     pub fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
+        self.dependencies.borrow_mut().insert(handle.id);
         let inner = self.inner.lock();
         match inner.get_node(handle.id) {
             Some(AsyncNode::Cell(cell)) => cell
@@ -307,6 +328,56 @@ impl AsyncComputeContext<'_> {
             _ => panic!("AsyncCellHandle does not point to a Cell node"),
         }
     }
+}
+
+fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<AsyncCompletion> {
+    let inner_arc: Arc<Mutex<AsyncContextInner>> = ctx.inner.clone();
+    let mut inner = inner_arc.lock();
+
+    let (compute, context_id) = match inner.get_node(slot_id) {
+        Some(AsyncNode::Slot(slot)) => {
+            if let AsyncSlotState::Computing { .. } = &slot.state {
+                return slot
+                    .notifier
+                    .as_ref()
+                    .expect("computing without notifier")
+                    .subscribe();
+            }
+            (slot.compute.clone(), inner.context_id)
+        }
+        _ => panic!("spawn_async_compute: not a slot node"),
+    };
+
+    let (tx, rx) = watch::channel(AsyncCompletion::Pending);
+    let inner_for_compute = inner_arc.clone();
+    let tx_clone = tx.clone();
+
+    let join_handle = tokio::spawn(async move {
+        let compute_ctx = AsyncComputeContext {
+            _context_id: context_id,
+            _node_id: slot_id,
+            inner: inner_for_compute.clone(),
+            dependencies: RefCell::new(HashSet::new()),
+        };
+        let result = compute(&compute_ctx).await;
+        let deps = compute_ctx.dependencies.into_inner();
+        {
+            let mut inner = inner_for_compute.lock();
+            AsyncContext::update_dependencies(&mut inner, slot_id, &deps);
+            if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(slot_id) {
+                let revision = slot.revision;
+                slot.transition_to_resolved(revision, result.clone());
+            }
+        }
+        let _ = tx_clone.send(AsyncCompletion::Resolved(result));
+    });
+
+    if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(slot_id) {
+        slot.transition_to_computing(join_handle);
+        slot.notifier = Some(tx);
+    }
+
+    rx
 }
 
 impl Default for AsyncContext {
@@ -324,6 +395,8 @@ impl AsyncContext {
                 next_id: 0,
                 free_ids: Vec::new(),
                 context_id,
+                batch_depth: 0,
+                batched_cells: HashSet::new(),
             })),
         }
     }
@@ -369,8 +442,10 @@ impl AsyncContext {
         T: PartialEq + Clone + Send + Sync + 'static,
     {
         let dependents;
+        let is_batching;
         {
             let mut inner = self.inner.lock();
+            is_batching = inner.batch_depth > 0;
             match inner.get_node_mut(handle.id) {
                 Some(AsyncNode::Cell(cell)) => {
                     let changed = !(*cell
@@ -381,6 +456,10 @@ impl AsyncContext {
                         == value);
                     if changed {
                         cell.value = Arc::new(value);
+                        if is_batching {
+                            inner.batched_cells.insert(handle.id);
+                            return;
+                        }
                         dependents = cell.dependents.clone();
                     } else {
                         return;
@@ -389,7 +468,9 @@ impl AsyncContext {
                 _ => panic!("AsyncCellHandle does not point to a Cell node"),
             }
         }
-        let _ = dependents;
+        for dep_id in dependents {
+            self.invalidate_async_slot(dep_id);
+        }
     }
 
     pub(crate) fn get_slot_state(&self, id: SlotId) -> AsyncSlotStateView {
@@ -443,14 +524,210 @@ impl AsyncContext {
             }
         }
     }
+
+    fn update_dependencies(
+        inner: &mut AsyncContextInner,
+        node_id: SlotId,
+        new_deps: &HashSet<SlotId>,
+    ) {
+        let old_deps = match inner.get_node(node_id) {
+            Some(AsyncNode::Slot(s)) => s.dependencies.iter().copied().collect::<HashSet<_>>(),
+            _ => return,
+        };
+        for old_id in old_deps.difference(new_deps) {
+            if let Some(AsyncNode::Slot(s)) = inner.get_node_mut(*old_id) {
+                edge_remove(&mut s.dependents, node_id);
+            }
+            if let Some(AsyncNode::Cell(c)) = inner.get_node_mut(*old_id) {
+                edge_remove(&mut c.dependents, node_id);
+            }
+        }
+        if let Some(AsyncNode::Slot(s)) = inner.get_node_mut(node_id) {
+            s.dependencies = new_deps.iter().copied().collect();
+        }
+        for new_id in new_deps {
+            if let Some(AsyncNode::Slot(s)) = inner.get_node_mut(*new_id) {
+                edge_insert(&mut s.dependents, node_id);
+            }
+            if let Some(AsyncNode::Cell(c)) = inner.get_node_mut(*new_id) {
+                edge_insert(&mut c.dependents, node_id);
+            }
+        }
+    }
+
+    fn invalidate_async_slot(&self, id: SlotId) {
+        let dependents;
+        let old_notifier;
+        {
+            let mut inner = self.inner.lock();
+            match inner.get_node_mut(id) {
+                Some(AsyncNode::Slot(slot)) => {
+                    let _result = slot.invalidate();
+                    old_notifier = slot.notifier.take();
+                    dependents = slot.dependents.clone();
+                }
+                _ => return,
+            }
+        }
+        drop(old_notifier);
+        for dep_id in dependents {
+            self.invalidate_async_slot(dep_id);
+        }
+    }
+
+    pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: Fn(&AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        self.slot_async_with_equals(compute, None)
+    }
+
+    pub fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+        F: Fn(&AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let equals: Arc<AsyncEqualsFn> = Arc::new(|old: &AsyncAny, new: &AsyncAny| -> bool {
+            let old_val = old.downcast_ref::<T>();
+            let new_val = new.downcast_ref::<T>();
+            match (old_val, new_val) {
+                (Some(o), Some(n)) => o == n,
+                _ => false,
+            }
+        });
+        self.slot_async_with_equals(compute, Some(equals))
+    }
+
+    fn slot_async_with_equals<T, F, Fut>(
+        &self,
+        compute: F,
+        equals: Option<Arc<AsyncEqualsFn>>,
+    ) -> AsyncSlotHandle<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: Fn(&AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let compute_arc: Arc<AsyncComputeFn> = Arc::new(move |ctx| {
+            let fut = compute(ctx);
+            Box::pin(async move { Arc::new(fut.await) as Arc<AsyncAny> })
+        });
+        let id;
+        {
+            let mut inner = self.inner.lock();
+            id = inner.alloc_id();
+            let node = AsyncSlotNode {
+                state: AsyncSlotState::Empty,
+                value: None,
+                error: None,
+                revision: 0,
+                compute: compute_arc,
+                equals,
+                dependencies: EdgeVec::new(),
+                dependents: EdgeVec::new(),
+                notifier: None,
+            };
+            inner.insert_node(id, AsyncNode::Slot(node));
+        }
+        AsyncSlotHandle {
+            id,
+            _marker: PhantomData,
+        }
+    }
+
+    pub async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let mut recv = {
+            let inner = self.inner.lock();
+            match inner.get_node(handle.id) {
+                Some(AsyncNode::Slot(slot)) => match &slot.state {
+                    AsyncSlotState::Resolved => {
+                        let val = slot.value.as_ref().expect("resolved without value");
+                        return val
+                            .downcast_ref::<T>()
+                            .expect("type mismatch in get_async")
+                            .clone();
+                    }
+                    AsyncSlotState::Computing { .. } => slot
+                        .notifier
+                        .as_ref()
+                        .expect("computing without notifier")
+                        .subscribe(),
+                    AsyncSlotState::Error | AsyncSlotState::Empty => {
+                        drop(inner);
+                        spawn_async_compute(self, handle.id)
+                    }
+                },
+                _ => panic!("AsyncSlotHandle does not point to a Slot node"),
+            }
+        };
+
+        loop {
+            if recv.changed().await.is_err() {
+                panic!("get_async: notifier dropped unexpectedly");
+            }
+            let completion = recv.borrow_and_update().clone();
+            match completion {
+                AsyncCompletion::Resolved(val) => {
+                    return val
+                        .downcast_ref::<T>()
+                        .expect("type mismatch in get_async completion")
+                        .clone();
+                }
+                AsyncCompletion::Error(_err) => {
+                    recv = spawn_async_compute(self, handle.id);
+                    continue;
+                }
+                AsyncCompletion::Pending => continue,
+            }
+        }
+    }
+
+    pub fn batch<F, R>(&self, run: F) -> R
+    where
+        F: FnOnce(&AsyncContext) -> R,
+    {
+        {
+            let mut inner = self.inner.lock();
+            inner.batch_depth += 1;
+        }
+        let result = run(self);
+        {
+            let mut inner = self.inner.lock();
+            inner.batch_depth -= 1;
+            if inner.batch_depth == 0 {
+                let batched = inner.batched_cells.drain().collect::<Vec<_>>();
+                drop(inner);
+                for cell_id in batched {
+                    let dependents = {
+                        let inner = self.inner.lock();
+                        match inner.get_node(cell_id) {
+                            Some(AsyncNode::Cell(c)) => c.dependents.clone(),
+                            _ => EdgeVec::new(),
+                        }
+                    };
+                    for dep_id in dependents {
+                        self.invalidate_async_slot(dep_id);
+                    }
+                }
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
     use tokio::runtime::Runtime;
 
-    fn stub_compute() -> BoxedAsyncFuture {
+    fn stub_compute(_ctx: &AsyncComputeContext) -> BoxedAsyncFuture {
         Box::pin(async { Arc::new(()) as Arc<AsyncAny> })
     }
 
@@ -464,6 +741,7 @@ mod tests {
             equals: None,
             dependencies: EdgeVec::new(),
             dependents: EdgeVec::new(),
+            notifier: None,
         }
     }
 
@@ -484,6 +762,7 @@ mod tests {
             })),
             dependencies: EdgeVec::new(),
             dependents: EdgeVec::new(),
+            notifier: None,
         }
     }
 
@@ -594,6 +873,7 @@ mod tests {
             equals: None,
             dependencies: EdgeVec::new(),
             dependents: EdgeVec::new(),
+            notifier: None,
         };
         let result = node.invalidate();
         assert!(matches!(result, InvalidationResult::WasError));
@@ -649,5 +929,112 @@ mod tests {
         let id1 = ctx1.inner.lock().context_id;
         let id2 = ctx2.inner.lock().context_id;
         assert_ne!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn computed_async_basic() {
+        let ctx = AsyncContext::new();
+        let slot = ctx.computed_async(|_ctx| async move { 42i32 });
+        let val = ctx.get_async(&slot).await;
+        assert_eq!(val, 42);
+    }
+
+    #[tokio::test]
+    async fn computed_async_reads_cell() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(10i32);
+        let slot = ctx.computed_async(move |ctx| {
+            let val = ctx.get_cell(&cell);
+            async move { val + 1 }
+        });
+        let val = ctx.get_async(&slot).await;
+        assert_eq!(val, 11);
+    }
+
+    #[tokio::test]
+    async fn computed_async_cached() {
+        let ctx = AsyncContext::new();
+        let count = Arc::new(AtomicU64::new(0));
+        let count_clone = count.clone();
+        let slot = ctx.computed_async(move |_| {
+            let c = count_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                42i32
+            }
+        });
+        let v1 = ctx.get_async(&slot).await;
+        let v2 = ctx.get_async(&slot).await;
+        assert_eq!(v1, 42);
+        assert_eq!(v2, 42);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn computed_async_invalidation() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i32);
+        let slot = ctx.computed_async(move |ctx| {
+            let val = ctx.get_cell(&cell);
+            async move { val * 2 }
+        });
+        assert_eq!(ctx.get_async(&slot).await, 2);
+        ctx.set_cell(&cell, 5);
+        assert_eq!(ctx.get_async(&slot).await, 10);
+    }
+
+    #[tokio::test]
+    async fn memo_async_suppresses_equal() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i32);
+        let count = Arc::new(AtomicU64::new(0));
+        let count_clone = count.clone();
+        let slot = ctx.memo_async(move |ctx| {
+            let val = ctx.get_cell(&cell);
+            let c = count_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                val / val
+            }
+        });
+        assert_eq!(ctx.get_async(&slot).await, 1);
+        ctx.set_cell(&cell, 2);
+        assert_eq!(ctx.get_async(&slot).await, 1);
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn batch_defers_invalidation() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i32);
+        let slot = ctx.computed_async(move |ctx| {
+            let val = ctx.get_cell(&cell);
+            async move { val * 10 }
+        });
+        assert_eq!(ctx.get_async(&slot).await, 10);
+        ctx.batch(|ctx| {
+            ctx.set_cell(&cell, 2);
+            ctx.set_cell(&cell, 3);
+        });
+        assert_eq!(ctx.get_async(&slot).await, 30);
+    }
+
+    #[tokio::test]
+    async fn concurrent_get_async_deduplicates() {
+        let ctx = AsyncContext::new();
+        let count = Arc::new(AtomicU64::new(0));
+        let count_clone = count.clone();
+        let slot = ctx.computed_async(move |_| {
+            let c = count_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                99i32
+            }
+        });
+        let (v1, v2) = tokio::join!(ctx.get_async(&slot), ctx.get_async(&slot));
+        assert_eq!(v1, 99);
+        assert_eq!(v2, 99);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 }

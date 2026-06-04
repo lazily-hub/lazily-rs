@@ -48,7 +48,7 @@ mod thread_safe;
 #[cfg(feature = "async")]
 pub use async_context::{
     AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncContextId, AsyncEffectHandle,
-    AsyncSlotHandle, AsyncSlotState,
+    AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView,
 };
 pub use cell::CellHandle;
 pub use context::Context;
