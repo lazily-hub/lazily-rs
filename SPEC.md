@@ -1021,6 +1021,102 @@ dependency enters the core crate. The `Delta`/`ipc_epoch` model is a
 single-writer linear log; whether multi-writer needs CRDT merge or Raft
 consensus on top of that log is exactly the #ipc3 question.
 
+## Multi-writer coordination: CRDT vs Raft (`lazily-distributed`)
+
+`lazily-ipc` (above) is a **single-writer** linear log: one authority mutates
+the graph and streams `Delta`s stamped by a monotonic `ipc_epoch`.
+`lazily-distributed` asks the harder question — when **multiple peers** may
+write the same shared reactive graph, what coordination model orders those
+writes: a CRDT (conflict-free replicated data types, eventual consistency) or
+Raft (leader-ordered consensus, strong consistency)?
+
+### The reactive structure collapses most of the question
+
+The key observation is that **not all graph state is writable**. lazily-rs has
+exactly two node kinds with respect to authorship:
+
+- **Cells / source slots** — externally writable. These are the *only* state a
+  peer can directly set.
+- **Derived slots** (`computed` / `memo`) — pure deterministic functions of
+  their dependencies. They are never written; they *recompute*. Their values,
+  and the dynamic dependency topology discovered during recompute, are a
+  **deterministic view** of the cell state — *provided every peer runs
+  identical compute closures* (the closure-replication prerequisite already
+  flagged as `lazily-ipc`'s mirror-lazy mode).
+
+So coordination is only needed on the small **cell plane**. The entire derived
+graph — typically the large majority of nodes, plus all edges and the effect
+schedule — converges automatically once the cells converge and recompute runs.
+This is the same property the local engine already relies on: derived state is a
+function, not a source of truth.
+
+### The two models on the cell plane
+
+| Aspect | CRDT (cell-plane registers) | Raft (leader-ordered log) |
+|--------|------------------------------|---------------------------|
+| Consistency | Eventual; peers converge after delivery | Strong; one total order, every peer identical |
+| Availability | Local-first — peers read/write while partitioned | Minority partition cannot write; needs quorum |
+| Write latency | Local (no round-trip) | Quorum round-trip to leader per write |
+| Offline peers | Native (merge on reconnect) | Not supported (writes need quorum) |
+| P2P / WAN fit | Direct (no leader); fits #yxjw signaling | Awkward — leader election over WAN, quorum cost |
+| Conflict model | Per-cell merge (LWW / MV register) | None — serialized, last in order wins by fiat |
+| Extends #ipc2 | Per-peer `Delta`s + causal stamps, merged | One global Raft-replicated `Delta` log |
+| Cost | Every writable cell must *be* a CRDT | Election, log replication, quorum machinery |
+
+### Recommendation — CRDT cell plane (HLC-stamped registers), not Raft
+
+Adopt a **CRDT layer on the cell plane only**, with derived slots recomputing
+deterministically on each peer. Concretely:
+
+- Each replicated cell is a **register CRDT keyed by a hybrid logical clock
+  (HLC)** — wall-clock for human-meaningful ordering, logical counter for
+  causal tiebreak. Two flavors, chosen per cell via a trait:
+  - **LWW-register** (last-write-wins) — default; "current value" semantics that
+    most reactive cells want. Silently drops the losing concurrent write.
+  - **MV-register** (multi-value) — surfaces concurrent writes as a set for the
+    compute layer (or app) to resolve, when dropping a write is unacceptable.
+  - Additive cells can opt into a **PN-counter** instead of a register.
+- The local **PartialEq invalidation guard** still applies — *after* merge: a
+  merge that yields an equal value invalidates nothing, exactly as a local equal
+  `set_cell` does. **memo equality suppression** likewise holds post-merge, so
+  convergent peers do the same downstream work.
+- `lazily-ipc`'s `Delta` generalizes from one monotonic `ipc_epoch` to
+  **per-peer causal stamps**: each peer keeps its own sequence; cross-peer order
+  comes from the HLC/dot metadata carried on each `CellSet`. Delivery can be
+  out-of-order; merge is commutative/associative/idempotent so gaps self-heal
+  without the snapshot-resync that the single-writer log needed.
+
+Raft is the wrong default because the `lazily-distributed` roadmap is
+explicitly **availability-first** — P2P signaling (#yxjw) and offline peers —
+and Raft trades exactly that away for a global total order that the reactive
+model does not need: derived state is already deterministic, and the writable
+surface is small.
+
+### The narrow exception — irreversible effects need an authority
+
+CRDT convergence is correct for *state*. It is **not** sufficient for **effects
+that perform irreversible external actions** (send an email, charge a card,
+fire a webhook): convergence may run the same effect on every peer, or run it
+twice as merges arrive. Pure state can converge; an external side effect cannot
+be merged.
+
+For that narrow class, gate the effect behind a **single-writer effect
+authority** — a designated peer (or a small Raft group owning *only the
+effect-intent log*, not the whole graph) decides when an irreversible effect
+fires, at-most-once. This is a hybrid: **CRDT for the state plane, a
+single-writer/Raft authority for the irreversible-effect plane**, with the
+#39c5 `RemoteOp` allowlist already gating which remote writes and effects a peer
+may trigger at all. The large reactive core stays leaderless and local-first;
+only the small irreversible-effect tail pays for consensus.
+
+### Open prototype gates (deferred to implementation)
+
+- HLC skew bounds and the LWW-vs-MV default per cell category.
+- Whether closure replication (required for peers to recompute derived slots) is
+  shipped as serialized compute descriptors or restricted to a shared compiled
+  graph — this gates how much of the derived plane can live remotely at all.
+- Delta-state vs op-based CRDT encoding on the wire, reusing `lazily-serde`.
+
 ## Differences from lazily-zig
 
 | Aspect | lazily-zig | lazily-rs |
