@@ -1013,6 +1013,30 @@ snapshot or delta; non-allowlisted nodes are **omitted entirely** — not even a
 snapshot/delta *construction*, before serialization, so the filter is the same
 on the full and incremental paths.
 
+#### Implemented (#39c5)
+
+The permission policy layer ships behind the `distributed` feature in
+`src/distributed.rs`:
+
+- `NodeId` / `PeerId` — wire-stable identifiers (decoupled from the internal
+  `SlotId`), `serde`-derived under the `serde` feature.
+- `OpKind` (`Read` / `Write` / `TriggerEffect`) and `RemoteOp { kind, node }` —
+  the gated, serializable unit a peer requests; the three kinds are gated
+  **independently** (a read grant never implies write or effect-trigger).
+- `PeerPermissions` — **default-deny** per-peer allowlist with `allow`,
+  `allow_many`, `revoke` (prunes empty peer entries), `revoke_peer`,
+  `is_allowed`, and a fail-closed `check` → `Result<(), PermissionDenied>`.
+- `filter_readable(peer, nodes)` enforces the **omission** invariant above:
+  non-readable nodes are dropped from the result entirely, preserving input
+  order, so it can be applied at snapshot/delta construction before
+  serialization.
+
+`PeerPermissions` is local server-side state and is intentionally **not**
+serializable; only the wire-facing `RemoteOp` family is. Higher layers
+(`lazily-ipc` snapshot/delta construction, the `lazily-distributed` CRDT cell
+plane, and the single-writer effect authority) gate every remote request
+through `check` and build observable subgraphs through `filter_readable`.
+
 ### Feature gate
 
 A new `ipc = ["serde"]` feature adds the pure-protocol `Snapshot`/`Delta` types

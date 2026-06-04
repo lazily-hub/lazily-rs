@@ -11,20 +11,24 @@ categories = ["data-structures"]
 [features]
 async = ["dep:tokio"]
 default = ["smallvec"]
+distributed = []
 instrumentation = []
 loom = []
+serde = ["dep:serde", "smallvec?/serde"]
 std_sync_mutex = []
 tokio = ["dep:tokio"]
 vec_edges = []
 
 [dependencies]
 parking_lot = "0.12"
+serde = { version = "1", optional = true, features = ["derive"] }
 smallvec = { version = "1", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 criterion = "0.8"
 loom = "0.7"
+serde_json = "1"
 
 [[example]]
 name = "tokio_sync"

@@ -39,6 +39,8 @@
 mod async_context;
 mod cell;
 mod context;
+#[cfg(feature = "distributed")]
+mod distributed;
 mod effect;
 #[cfg(feature = "instrumentation")]
 mod instrumentation;
@@ -52,6 +54,8 @@ pub use async_context::{
 };
 pub use cell::CellHandle;
 pub use context::Context;
+#[cfg(feature = "distributed")]
+pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
 pub use effect::{EffectCallbackResult, EffectHandle};
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{

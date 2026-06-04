@@ -12,11 +12,12 @@ PYTHON ?= python3
 	test-tokio \
 	test-async \
 	test-loom \
+	test-distributed \
 	benchmark-check \
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-loom benchmark-check
+check: fmt clippy build test test-tokio test-async test-loom test-distributed benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -38,6 +39,9 @@ test-async:
 
 test-loom:
 >$(CARGO) test --locked --features loom --test thread_safe_loom
+
+test-distributed:
+>$(CARGO) test --locked --features "distributed serde"
 
 benchmark-check:
 >$(PYTHON) scripts/update-benchmark-results.py --check

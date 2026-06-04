@@ -37,5 +37,8 @@ jobs:
       - name: Test Tokio feature
         run: cargo +stable test --locked --features tokio
 
+      - name: Test distributed feature
+        run: cargo +stable test --locked --features "distributed serde"
+
       - name: Test loom model
         run: cargo +stable test --locked --features loom --test thread_safe_loom
