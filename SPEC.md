@@ -806,6 +806,121 @@ budget; `--no-run` reuses existing Criterion estimate files for a report-only
 refresh after a manual baseline comparison run while refreshing the
 instrumentation CSV unless it is also running in check mode.
 
+## Serialization (`lazily-serde` feature gate)
+
+The `serde` feature is declared in `Cargo.toml` but currently has no
+implementation. Its purpose is to produce a serializable snapshot of context
+state so the planned `lazily-ipc` (snapshot + incremental update protocol) and
+`lazily-distributed` (CRDT/Raft remote graphs) layers have a stable on-the-wire
+representation to build on. This section fixes the design of that feature gate
+before any code lands.
+
+### The type-erasure problem
+
+`Context` and `ThreadSafeContext` store cached values as type-erased trait
+objects (`Rc<dyn Any>` and `Arc<dyn Any + Send + Sync>`; see *Typed cache
+fast-path*). `serde::Serialize` is **not object-safe** — it has a generic
+`serialize<S: Serializer>` method — so a `dyn Any` cannot be serialized
+directly, and the concrete type `T` is gone by the time a snapshot walks the
+node `Vec`. Any serialization design must recover the ability to call a
+monomorphized `Serialize`/`Deserialize` for each node's erased `T`. Two
+approaches were considered.
+
+### Approach A — trait bounds (erased-serde style)
+
+Replace `dyn Any` cache storage with a serialize-aware trait object — a sealed
+`dyn ReactiveValue: Any` whose vtable also carries an `erased_serde`-style
+`erased_serialize(&self, &mut dyn Serializer)`. Every signal-creation API
+(`slot`, `computed`, `memo`, `cell`) gains a `T: Serialize + DeserializeOwned`
+bound under `#[cfg(feature = "serde")]`.
+
+- **Pros:** serialization is *total* — every cached node is serializable with
+  no per-node opt-in; one storage type, one source of truth.
+- **Cons:**
+  - The `T: Serialize` bound is **viral**: it propagates through the whole
+    public API and leaks onto `Context` itself even for signals that are never
+    serialized, forcing callers to satisfy it for purely local reactive state.
+  - Requires either the `erased-serde` crate or a hand-rolled vtable
+    equivalent — acceptable under a feature gate but still added surface.
+  - **Breaks the typed cache fast-path.** That optimization recovers `&T` via
+    an unchecked pointer cast keyed on an inline `TypeId`; swapping the trait
+    object out from under it for a serialize-aware type would have to preserve
+    the same unchecked-cast guarantee.
+  - `Deserialize` is the hard half: reconstruction needs the concrete type at
+    the call site, so a type-tag → constructor registry is required anyway —
+    Approach A does not avoid the registry, it only adds the viral bound on top
+    of it.
+
+### Approach B — type-erased closures captured at creation (recommended)
+
+Keep `dyn Any` storage untouched. At signal creation under the `serde` feature,
+capture a monomorphized serde **vtable** — a small `&'static` struct of
+function pointers — alongside the `TypeId` the typed cache fast-path already
+records:
+
+```rust
+#[cfg(feature = "serde")]
+pub struct SerdeVTable {
+    pub type_tag: &'static str,                                  // stable cross-process key
+    pub serialize:   fn(&dyn Any, &mut dyn erased_serde::Serializer)
+                       -> Result<(), erased_serde::Error>,
+    pub deserialize: fn(&mut dyn erased_serde::Deserializer)
+                       -> Result<Rc<dyn Any>, erased_serde::Error>,
+}
+```
+
+Each `SlotNode`/`CellNode` (and the `ThreadSafe*FastPath` mirrors) gains a
+`#[cfg(feature = "serde")] serde_vtable: Option<&'static SerdeVTable>` field,
+set once at `slot()` / `computed()` / `memo()` / `cell()` creation. The thunks
+are monomorphized per `T` at the construction call site, so the concrete type
+is captured exactly where it is still known; invoking `serialize` downcasts the
+`&dyn Any` back to `&T` and calls the real `T: Serialize`.
+
+- **Pros:**
+  - **Composes with the typed cache fast-path** — both capture per-`T`
+    metadata at creation; the read hot path is untouched and pays zero
+    overhead (thunks run only at snapshot time).
+  - **Opt-in per node.** A signal whose `T: !Serialize` stores `None` and is
+    emitted as an `Opaque` placeholder, matching how `lazily-ipc` will snapshot
+    only an explicitly shared subgraph rather than the whole context. No viral
+    bound on `Context`.
+  - The `deserialize` thunk doubles as the type-tag → constructor registry
+    Approach A needs anyway; populating it at slot construction keeps tags and
+    constructors in one place.
+- **Cons:**
+  - Per-node storage grows by one pointer (`Option<&'static SerdeVTable>`, 8
+    bytes) — eliminated entirely when the `serde` feature is off via
+    `#[cfg(feature = "serde")]` on the field.
+  - Without specialization on stable Rust, "serialize if `T: Serialize`, else
+    `None`" needs a sealed `MaybeSerialize<T>` autoref/marker helper or
+    explicit `*_serde` constructor variants rather than a blanket impl.
+
+### Decision
+
+**Adopt Approach B.** The `lazily-ipc`/`lazily-distributed` roadmap serializes
+an explicit allowlisted `RemoteOp` set (#39c5), not arbitrary nodes, so the
+*totality* Approach A buys is unneeded — and it costs a viral bound plus a
+rework of the typed cache fast-path to buy it. Approach B keeps the default
+build byte-for-byte identical (field compiled out), preserves the zero-overhead
+read path, and reuses the `TypeId`-at-creation pattern already proven by the
+typed cache.
+
+### Feature-gate shape
+
+- `serde = ["dep:serde"]` (declared) gains `dep:erased-serde` under the same
+  gate; both stay optional, preserving the **zero mandatory runtime
+  dependency** goal.
+- A sealed `MaybeSerialize<T>` helper resolves the vtable to `Some` when
+  `T: Serialize + DeserializeOwned` and `None` otherwise, so existing
+  constructor signatures are unchanged and non-serializable signals keep
+  compiling.
+- `Context::snapshot()` / `ThreadSafeContext::snapshot()` walk live nodes,
+  invoke each present vtable, and emit `ContextSnapshot { nodes: Vec<NodeSnapshot
+  { slot_id, type_tag, payload | Opaque }> }`. Restoration reads `type_tag`,
+  looks up the `deserialize` thunk, and rebuilds typed cache entries.
+- This snapshot type is the input to #ipc2 (snapshot + incremental update
+  protocol) and the value substrate for #ipc3 (CRDT vs Raft).
+
 ## Differences from lazily-zig
 
 | Aspect | lazily-zig | lazily-rs |
