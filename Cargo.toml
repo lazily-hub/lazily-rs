@@ -42,3 +42,8 @@ harness = false
 name = "profile"
 harness = false
 required-features = ["instrumentation"]
+
+[[bench]]
+name = "async_context"
+harness = false
+required-features = ["async"]
