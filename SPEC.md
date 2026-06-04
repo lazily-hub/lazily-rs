@@ -1141,6 +1141,91 @@ only the small irreversible-effect tail pays for consensus.
   graph — this gates how much of the derived plane can live remotely at all.
 - Delta-state vs op-based CRDT encoding on the wire, reusing `lazily-serde`.
 
+## Internet-scale peer discovery: signaling server (`#yxjw`)
+
+The CRDT cell plane (above) is leaderless and local-first, but peers still have
+to *find* each other and open transport before any `Delta` can flow. On a LAN
+that is mDNS or a known address; across the internet it needs a rendezvous
+point. `#yxjw` is that rendezvous: a small **Cloudflare Worker signaling
+server** that brokers peer discovery and relays the WebRTC SDP/ICE handshake so
+peers can establish **direct P2P data channels**, falling back to server relay
+of opaque payloads when a direct channel cannot be formed. It is strictly a
+*discovery + relay* layer — it never parses or merges CRDT state, so it stays
+trivially horizontally scalable and never becomes the consistency authority the
+CRDT design deliberately avoids.
+
+### Why a Cloudflare Worker + Durable Objects
+
+- **One Durable Object per session id.** A WebSocket upgrade to
+  `GET /session/:id` routes to a `SignalingRoom` DO keyed by
+  `idFromName(sessionId)`. Cloudflare guarantees a single global instance per
+  id, so each session gets a lock-free single-threaded coordination point for
+  its roster with no external store. Scale is achieved by **sharding sessions
+  across DO instances**, not by growing one server — which matches the
+  availability-first, P2P posture of the CRDT recommendation (it "fits #yxjw
+  signaling").
+- **Edge-local.** Workers run close to peers worldwide, minimizing handshake
+  latency; the DO migrates to wherever its session is most active.
+
+### Roles and protocol
+
+The server tracks a per-session **roster** of connected peers and forwards three
+classes of frame. `PeerId` is the same `u64` as Rust `PeerId` (serialized by
+`serde` as a bare JSON number; ids must stay ≤ `Number.MAX_SAFE_INTEGER`).
+
+- Client → server: `join { peer, capabilities? }`, `offer { to, sdp }`,
+  `answer { to, sdp }`, `ice { to, candidate }`, `relay { to, payload }`,
+  `leave`.
+- Server → client: `welcome { peer, peers }` (roster on join),
+  `peer-joined`/`peer-left`, forwarded `offer`/`answer`/`ice`/`relay` stamped
+  with the real `from`, and `error { code, message }`.
+
+**Anti-spoofing:** the `from` on every forwarded frame is the *sender
+connection's* registered peer id, never a client-supplied field, so a peer
+cannot impersonate another.
+
+### Permission boundary (reuses #39c5)
+
+Admission and relay are gated by `SignalingPermissions`, the discovery-layer
+mirror of `lazily::distributed::PeerPermissions`:
+
+- `open` mode — any peer may join and signal any other joined peer (trusted /
+  LAN / common discovery case).
+- `allowlist` mode — **default-deny**: a peer may join only when explicitly
+  granted, and may send directed frames only to explicitly allowed targets,
+  exactly as #39c5 gates `RemoteOp`. This is the discovery-layer half of the
+  same boundary; the Rust data plane still re-checks every `RemoteOp` locally.
+
+### Reconnect / resync
+
+The roster lives in the DO; it is authoritative. A peer that drops simply
+re-`join`s and receives a fresh `welcome` roster — no snapshot epoch is needed
+at this layer because signaling carries no CRDT state (the data plane's
+HLC/dot-stamped `Delta`s self-heal independently per the CRDT design).
+
+### Implemented (#yxjw)
+
+Ships as a standalone TypeScript Worker under `signaling/` (its own Node
+toolchain; not part of the Rust crate build):
+
+- `src/protocol.ts` — wire types + untrusted-frame validation/codec.
+- `src/permissions.ts` — `SignalingPermissions` (`open` / default-deny
+  `allowlist`).
+- `src/room-core.ts` — transport-agnostic `RoomCore`: roster, routing,
+  anti-spoofing, permission gating.
+- `src/room.ts` — `SignalingRoom` Durable Object (thin WebSocket adapter).
+- `src/index.ts` — Worker entry: `/health` + `/session/:id` routing.
+- `test/` — 24 vitest tests (protocol/permissions/room-core units plus an
+  end-to-end Worker + DO + WebSocket test in the workerd runtime).
+
+### Open gates (deferred)
+
+- TURN/relay fallback policy when both peers are behind symmetric NAT (today the
+  server can relay payloads, but a dedicated TURN allocation is out of scope).
+- Authenticated admission tokens feeding the `allowlist` grants from an external
+  identity source rather than static configuration.
+- Capacity/back-pressure limits per session DO.
+
 ## Differences from lazily-zig
 
 | Aspect | lazily-zig | lazily-rs |

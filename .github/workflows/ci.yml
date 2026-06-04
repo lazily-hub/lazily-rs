@@ -42,3 +42,24 @@ jobs:
 
       - name: Test loom model
         run: cargo +stable test --locked --features loom --test thread_safe_loom
+
+  signaling:
+    name: Signaling Worker (#yxjw)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: signaling
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck + test
+        run: npm run check
