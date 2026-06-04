@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -414,6 +414,7 @@ enum ThreadSafeDependentKind {
 
 struct ThreadSafeSlotFastPath {
     value: RwLock<Option<Arc<ThreadSafeAny>>>,
+    type_id: TypeId,
     cache_revision: AtomicU64,
     dirty: AtomicBool,
     force_recompute: AtomicBool,
@@ -426,10 +427,15 @@ struct ThreadSafeSlotFastPath {
 }
 
 impl ThreadSafeSlotFastPath {
-    fn new(compute: Arc<ThreadSafeComputeFn>, initial_dependencies: EdgeVec) -> Self {
+    fn new(
+        compute: Arc<ThreadSafeComputeFn>,
+        initial_dependencies: EdgeVec,
+        type_id: TypeId,
+    ) -> Self {
         let slot_dependency_count = initial_dependencies.len();
         Self {
             value: RwLock::new(None),
+            type_id,
             cache_revision: AtomicU64::default(),
             dirty: AtomicBool::default(),
             force_recompute: AtomicBool::default(),
@@ -456,10 +462,8 @@ impl ThreadSafeSlotFastPath {
         }
 
         let value = self.value.read().as_ref().map(|value| {
-            value
-                .downcast_ref::<T>()
-                .expect("type mismatch in slot")
-                .clone()
+            assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
+            unsafe { &*(&**value as *const ThreadSafeAny as *const T) }.clone()
         });
         if self.cache_revision.load(Ordering::Acquire) != cache_revision
             || self.dirty.load(Ordering::Acquire)
@@ -648,6 +652,7 @@ struct ThreadSafeCellNode {
 
 struct ThreadSafeCellFastPath {
     value: Mutex<Box<ThreadSafeAny>>,
+    type_id: TypeId,
     dependents: Mutex<DependentEdgeVec>,
 }
 
@@ -658,6 +663,7 @@ impl ThreadSafeCellFastPath {
     {
         Self {
             value: Mutex::new(Box::new(value)),
+            type_id: TypeId::of::<T>(),
             dependents: Mutex::new(DependentEdgeVec::new()),
         }
     }
@@ -666,11 +672,9 @@ impl ThreadSafeCellFastPath {
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.value
-            .lock()
-            .downcast_ref::<T>()
-            .expect("type mismatch in cell")
-            .clone()
+        let value = self.value.lock();
+        assert!(self.type_id == TypeId::of::<T>(), "type mismatch in cell");
+        unsafe { &*(&**value as *const ThreadSafeAny as *const T) }.clone()
     }
 
     fn set_if_changed<T>(&self, new_value: T) -> bool
@@ -678,9 +682,11 @@ impl ThreadSafeCellFastPath {
         T: PartialEq + Send + Sync + 'static,
     {
         let mut value = self.value.lock();
-        let old = value
-            .downcast_ref::<T>()
-            .expect("type mismatch in cell set");
+        assert!(
+            self.type_id == TypeId::of::<T>(),
+            "type mismatch in cell set"
+        );
+        let old = unsafe { &*(&**value as *const ThreadSafeAny as *const T) };
         if *old == new_value {
             return false;
         }
@@ -1528,6 +1534,7 @@ impl ThreadSafeContext {
         let fast_path = Arc::new(ThreadSafeSlotFastPath::new(
             Arc::clone(&compute),
             EdgeVec::new(),
+            TypeId::of::<T>(),
         ));
         let node = ThreadSafeSlotNode {
             value: None,
@@ -1603,11 +1610,12 @@ impl ThreadSafeContext {
                     && let (false, false, Some(value)) =
                         (slot.dirty, slot.force_recompute, &slot.value)
                 {
+                    assert!(
+                        slot.fast_path.type_id == TypeId::of::<T>(),
+                        "type mismatch in slot"
+                    );
                     ThreadSafeSlotRead::Fresh(
-                        value
-                            .downcast_ref::<T>()
-                            .expect("type mismatch in slot")
-                            .clone(),
+                        unsafe { &*(&**value as *const ThreadSafeAny as *const T) }.clone(),
                     )
                 } else {
                     ThreadSafeSlotRead::Refresh(

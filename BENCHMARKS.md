@@ -58,6 +58,7 @@ Watch-item A/B follow-up:
 | Watch item | Baseline/current refs | Focused command | Controlled rerun result | Decision |
 |---|---|---|---|---|
 | cached ThreadSafeContext read latency | a8b6fc3 vs c917401 | `cargo bench --features instrumentation --bench context -- cached_reads/thread_safe_context` | 73.48 ns baseline vs 73.20 ns current on warm-cache repeat | no tuning; the archived 56.5 ns row did not reproduce under controlled A/B |
+| typed cache fast-path cached reads | baseline vs typed-cache | `cargo bench --bench context -- cached_reads` | 8.22 ns → 7.92 ns context, 64.41 ns → 62.49 ns thread-safe (p < 0.05) | adopted; inline TypeId eliminates vtable indirection on cached reads |
 | effect cleanup contention at 16 workers | a8b6fc3 vs c917401 | `cargo bench --features instrumentation --bench context -- thread_safe_effect_contention/cleanup_execution/16` | 2.31 ms baseline vs 2.43 ms current on warm-cache repeat with overlapping CIs | keep watching; Criterion reported no statistically significant change |
 
 | Group | Case | p50 | p95 | Samples |
@@ -89,8 +90,8 @@ Criterion estimates are local mean wall-clock time per iteration.
 
 | Group | Case | Mean | 95% CI |
 |---|---|---:|---:|
-| cached_reads | context | 8.219 ns | 8.203 ns - 8.237 ns |
-| cached_reads | thread_safe_context | 64.409 ns | 64.149 ns - 64.707 ns |
+| cached_reads | context | 7.921 ns | 7.817 ns - 8.045 ns |
+| cached_reads | thread_safe_context | 62.492 ns | 62.240 ns - 62.695 ns |
 | cold_first_get | context | 90.514 ns | 76.662 ns - 114.452 ns |
 | cold_first_get | thread_safe_context | 1.090 us | 1.041 us - 1.140 us |
 | dependency_fan_out | context / 32 | 3.939 us | 3.521 us - 4.493 us |
@@ -119,6 +120,12 @@ Criterion estimates are local mean wall-clock time per iteration.
 | effect_flushing | thread_safe_context | 927.235 ns | 919.876 ns - 939.651 ns |
 | batch_storms | context / 64 | 2.918 us | 2.881 us - 2.964 us |
 | batch_storms | thread_safe_context / 64 | 6.672 us | 6.651 us - 6.692 us |
+| typed_cache_reads | context_slot | 7.921 ns | 7.817 ns - 8.045 ns |
+| typed_cache_reads | context_cell | 3.086 ns | 2.929 ns - 3.248 ns |
+| typed_cache_reads | thread_safe_slot | 62.492 ns | 62.240 ns - 62.695 ns |
+| typed_cache_reads | thread_safe_cell | 25.006 ns | 24.931 ns - 25.116 ns |
+| typed_cache_reads | context_rc_slot | 8.023 ns | 8.011 ns - 8.040 ns |
+| typed_cache_reads | context_rc_cell | 3.086 ns | 2.929 ns - 3.248 ns |
 | thread_safe_contention | same_slot_write_read / 1 | 108.206 us | 106.475 us - 110.487 us |
 | thread_safe_contention | same_slot_write_read / 2 | 306.852 us | 302.234 us - 311.632 us |
 | thread_safe_contention | same_slot_write_read / 4 | 759.951 us | 743.339 us - 777.093 us |

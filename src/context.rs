@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
@@ -44,6 +44,11 @@ fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
     }
 }
 
+#[inline]
+unsafe fn downcast_ref_unchecked<T: 'static>(any: &Rc<dyn Any>) -> &T {
+    unsafe { &*(&**any as *const dyn Any as *const T) }
+}
+
 // ---------------------------------------------------------------------------
 // Thread-local tracking stack for automatic dependency discovery
 // ---------------------------------------------------------------------------
@@ -72,25 +77,19 @@ pub(crate) fn current_tracking_frame() -> Option<SlotId> {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct SlotNode {
-    /// The cached value, if set.
     pub(crate) value: Option<Rc<dyn Any>>,
-    /// The compute closure (type-erased).
+    pub(crate) type_id: TypeId,
     pub(crate) compute: Rc<ComputeFn>,
-    /// Type-erased equality for memoizing recomputed values.
     pub(crate) equals: Option<Box<EqualsFn>>,
-    /// Slots/cells that this slot depends on (parents). Populated during compute.
     pub(crate) dependencies: EdgeVec,
-    /// Slots that depend on this node (children / subscribers).
     pub(crate) dependents: EdgeVec,
-    /// This slot may need a freshness check before returning its cached value.
     pub(crate) dirty: bool,
-    /// This slot has a confirmed direct invalidation and must recompute.
     pub(crate) force_recompute: bool,
 }
 
 pub(crate) struct CellNode {
     pub(crate) value: Rc<dyn Any>,
-    /// Slots that depend on this cell.
+    pub(crate) type_id: TypeId,
     pub(crate) dependents: EdgeVec,
 }
 
@@ -344,6 +343,7 @@ impl Context {
         let id = self.alloc_id();
         let node = SlotNode {
             value: None,
+            type_id: TypeId::of::<T>(),
             compute: Rc::new(move |ctx| Rc::new(compute(ctx))),
             equals,
             dependencies: EdgeVec::new(),
@@ -375,7 +375,12 @@ impl Context {
         if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id)
             && let Some(ref val) = slot.value
         {
-            return val.clone().downcast::<T>().expect("type mismatch in slot");
+            assert!(slot.type_id == TypeId::of::<T>(), "type mismatch in slot");
+            let rc: Rc<dyn Any> = val.clone();
+            return unsafe {
+                let ptr = Rc::into_raw(rc) as *const T;
+                Rc::from_raw(ptr)
+            };
         }
         panic!("get_rc called on unset or non-slot id");
     }
@@ -393,10 +398,8 @@ impl Context {
         if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, id)
             && let Some(ref val) = slot.value
         {
-            return val
-                .downcast_ref::<T>()
-                .expect("type mismatch in slot")
-                .clone();
+            assert!(slot.type_id == TypeId::of::<T>(), "type mismatch in slot");
+            return unsafe { downcast_ref_unchecked::<T>(val) }.clone();
         }
         panic!("get_slot called on unset or non-slot id");
     }
@@ -512,10 +515,8 @@ impl Context {
 
         let inner = self.inner.borrow();
         if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
-            c.value
-                .downcast_ref::<T>()
-                .expect("type mismatch in cell")
-                .clone()
+            assert!(c.type_id == TypeId::of::<T>(), "type mismatch in cell");
+            unsafe { downcast_ref_unchecked::<T>(&c.value) }.clone()
         } else {
             panic!("get_cell called on non-cell id");
         }
@@ -529,10 +530,12 @@ impl Context {
 
         let inner = self.inner.borrow();
         if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
-            c.value
-                .clone()
-                .downcast::<T>()
-                .expect("type mismatch in cell")
+            assert!(c.type_id == TypeId::of::<T>(), "type mismatch in cell");
+            let rc: Rc<dyn Any> = c.value.clone();
+            unsafe {
+                let ptr = Rc::into_raw(rc) as *const T;
+                Rc::from_raw(ptr)
+            }
         } else {
             panic!("get_cell_rc called on non-cell id");
         }
@@ -545,6 +548,7 @@ impl Context {
         let id = self.alloc_id();
         let node = CellNode {
             value: Rc::new(value),
+            type_id: TypeId::of::<T>(),
             dependents: EdgeVec::new(),
         };
         self.insert_node(id, Node::Cell(node));
@@ -557,10 +561,8 @@ impl Context {
         let changed = {
             let inner = self.inner.borrow();
             if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
-                let old = c
-                    .value
-                    .downcast_ref::<T>()
-                    .expect("type mismatch in cell set");
+                assert!(c.type_id == TypeId::of::<T>(), "type mismatch in cell set");
+                let old = unsafe { downcast_ref_unchecked::<T>(&c.value) };
                 *old != new_value
             } else {
                 panic!("set_cell on non-cell id");

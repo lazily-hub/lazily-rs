@@ -395,6 +395,70 @@ Sharded/versioned storage evaluation:
   profiles, `set_cell_invalidation` matrix, and Loom/Shuttle coverage to improve
   before adopting it.
 
+### Typed cache fast-path
+
+`Context` and `ThreadSafeContext` store cached values as type-erased trait
+objects (`Rc<dyn Any>` and `Arc<dyn Any + Send + Sync>`).  Every cached read
+calls `downcast_ref::<T>()`, which invokes a virtual `type_id()` through the
+trait object's vtable, compares the returned `TypeId`, and then performs a
+pointer cast.  The vtable call adds indirect branching overhead to the hot
+cached-read path.
+
+The typed cache fast-path stores a `TypeId` inline in each node at creation
+time.  Cached reads compare the stored `TypeId` directly (a single inline
+`u64` equality check) and, on match, use an unchecked pointer cast to recover
+the typed reference.  This eliminates the vtable indirection on every cached
+slot and cell read for both `Context` and `ThreadSafeContext`.
+
+Storage layout:
+
+- `SlotNode.type_id: TypeId` — set once at `slot()` / `computed()` / `memo()`
+  creation from `TypeId::of::<T>()`
+- `CellNode.type_id: TypeId` — set once at `cell()` creation
+- `ThreadSafeSlotFastPath.type_id: TypeId` — set once at slot creation
+- `ThreadSafeCellFastPath.type_id: TypeId` — set once at cell creation
+
+Read-path fast-path:
+
+1. Load the node's `type_id` field (inline `u64` load, no vtable)
+2. Compare with `TypeId::of::<T>()`
+3. On match, cast the stored value pointer to `&T` without going through
+   `dyn Any::downcast_ref`
+4. On mismatch, panic with the same "type mismatch" message as before
+
+`get_rc()` and `get_cell_rc()` follow the same pattern but clone the
+reference-counted pointer instead of cloning the inner value.
+
+The compute-function signature (`dyn Fn(&Context) -> Rc<dyn Any>` for
+`Context`, `dyn Fn(&ThreadSafeContext) -> Box<ThreadSafeAny>` for
+`ThreadSafeContext`) remains unchanged; the typed cache is a storage-side
+optimization that does not affect the closure API.
+
+Benchmark gate:
+
+- `cached_reads/context` must show a measurable improvement over the
+  `downcast_ref` baseline.  The current baseline is approximately 8 ns per
+  cached read; the typed cache target is to reduce this by the vtable call
+  overhead (typically 0.5–1.5 ns on x86-64).
+- `cached_reads/thread_safe_context` must not regress.  The typed cache
+  benefits thread-safe cached reads by the same vtable elimination, but the
+  absolute improvement is smaller relative to the atomic-overhead-dominated
+  read path.
+- The improvement must reproduce under controlled Criterion A/B comparison
+  (same host, same toolchain, non-overlapping confidence intervals).
+
+Future implications:
+
+- Fully lock-free cached reads require typed storage so that a reader can
+  reconstruct a typed reference from an atomically published pointer without
+  vtable indirection.  The inline `TypeId` is a prerequisite: it proves the
+  type at compile time and makes the unchecked cast sound.
+- A future `ErasedValue` storage type could replace `Rc<dyn Any>` /
+  `Arc<dyn Any>` entirely, storing the value inline for small types and
+  avoiding heap allocation on compute.  The current inline-`TypeId` step
+  preserves the `Rc<dyn Any>` / `Arc<dyn Any>` layout while unlocking the
+  fast-path read optimization.
+
 Tokio integration is scoped in two stages:
 
 1. Synchronous thread-safe sharing first: `ThreadSafeContext` should work inside

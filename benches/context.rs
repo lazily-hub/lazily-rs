@@ -1340,6 +1340,60 @@ fn bench_thread_safe_graph_propagation(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_typed_cache_reads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("typed_cache_reads");
+
+    group.bench_function("context_slot", |b| {
+        let ctx = Context::new();
+        let cell = ctx.cell(42usize);
+        let slot = ctx.computed(move |ctx| ctx.get_cell(&cell));
+        black_box(ctx.get(&slot));
+
+        b.iter(|| black_box(ctx.get(black_box(&slot))));
+    });
+
+    group.bench_function("context_cell", |b| {
+        let ctx = Context::new();
+        let cell = ctx.cell(99usize);
+
+        b.iter(|| black_box(ctx.get_cell(black_box(&cell))));
+    });
+
+    group.bench_function("thread_safe_slot", |b| {
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell(42usize);
+        let slot = ctx.computed(move |ctx| ctx.get_cell(&cell));
+        black_box(ctx.get(&slot));
+
+        b.iter(|| black_box(ctx.get(black_box(&slot))));
+    });
+
+    group.bench_function("thread_safe_cell", |b| {
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell(99usize);
+
+        b.iter(|| black_box(ctx.get_cell(black_box(&cell))));
+    });
+
+    group.bench_function("context_rc_slot", |b| {
+        let ctx = Context::new();
+        let cell = ctx.cell(42usize);
+        let slot = ctx.computed(move |ctx| ctx.get_cell(&cell));
+        black_box(ctx.get(&slot));
+
+        b.iter(|| black_box(ctx.get_rc(black_box(&slot))));
+    });
+
+    group.bench_function("context_rc_cell", |b| {
+        let ctx = Context::new();
+        let cell = ctx.cell(99usize);
+
+        b.iter(|| black_box(ctx.get_cell_rc(black_box(&cell))));
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(20);
@@ -1353,6 +1407,7 @@ criterion_group!(
         bench_batch_storms,
         bench_thread_safe_contention,
         bench_thread_safe_effect_contention,
-        bench_thread_safe_graph_propagation
+        bench_thread_safe_graph_propagation,
+        bench_typed_cache_reads
 );
 criterion_main!(benches);
