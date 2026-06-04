@@ -345,16 +345,16 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
     let inner_arc: Arc<Mutex<AsyncContextInner>> = ctx.inner.clone();
     let mut inner = inner_arc.lock();
 
-    let (compute, context_id) = match inner.get_node(slot_id) {
+    let (compute, context_id, spawn_revision) = match inner.get_node(slot_id) {
         Some(AsyncNode::Slot(slot)) => {
-            if let AsyncSlotState::Computing { .. } = &slot.state {
+            if let AsyncSlotState::Computing { revision: _, .. } = &slot.state {
                 return slot
                     .notifier
                     .as_ref()
                     .expect("computing without notifier")
                     .subscribe();
             }
-            (slot.compute.clone(), inner.context_id)
+            (slot.compute.clone(), inner.context_id, slot.revision)
         }
         _ => panic!("spawn_async_compute: not a slot node"),
     };
@@ -377,10 +377,21 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
         let deps = deps_for_extract.lock().clone();
         {
             let mut inner = inner_for_compute.lock();
+            let current_revision = match inner.get_node(slot_id) {
+                Some(AsyncNode::Slot(s)) => s.revision,
+                _ => {
+                    let _ = tx_clone.send(AsyncCompletion::Error(Arc::new(std::io::Error::other(
+                        "slot node removed during compute",
+                    ))));
+                    return;
+                }
+            };
+            if current_revision != spawn_revision {
+                return;
+            }
             AsyncContext::update_dependencies(&mut inner, slot_id, &deps);
             if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(slot_id) {
-                let revision = slot.revision;
-                slot.transition_to_resolved(revision, result.clone());
+                slot.transition_to_resolved(spawn_revision, result.clone());
             }
         }
         let _ = tx_clone.send(AsyncCompletion::Resolved(result));
@@ -572,16 +583,24 @@ impl AsyncContext {
     fn invalidate_async_slot(&self, id: SlotId) {
         let dependents;
         let old_notifier;
+        let in_flight_handle;
         {
             let mut inner = self.inner.lock();
             match inner.get_node_mut(id) {
                 Some(AsyncNode::Slot(slot)) => {
-                    let _result = slot.invalidate();
+                    let result = slot.invalidate();
+                    in_flight_handle = match result {
+                        InvalidationResult::HadInFlight(handle) => Some(handle),
+                        _ => None,
+                    };
                     old_notifier = slot.notifier.take();
                     dependents = slot.dependents.clone();
                 }
                 _ => return,
             }
+        }
+        if let Some(handle) = in_flight_handle {
+            handle.abort();
         }
         drop(old_notifier);
         for dep_id in dependents {
@@ -738,6 +757,7 @@ impl AsyncContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     use tokio::runtime::Runtime;
 
@@ -1167,5 +1187,70 @@ mod tests {
                 assert!(s.dependencies.contains(&cell_b.id));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn invalidation_aborts_in_flight() {
+        let ctx = Arc::new(AsyncContext::new());
+        let cell = ctx.cell(1i32);
+        let compute_count = Arc::new(AtomicU64::new(0));
+        let count_clone = compute_count.clone();
+        let slot = ctx.computed_async(move |ctx| {
+            let _v = ctx.get_cell(&cell);
+            let c = count_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                42i32
+            }
+        });
+        let ctx_clone = ctx.clone();
+        let handle = tokio::spawn(async move { ctx_clone.get_async(&slot).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        ctx.set_cell(&cell, 2);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let val = ctx.get_async(&slot).await;
+        assert_eq!(val, 42);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn stale_revision_prevents_publish() {
+        let ctx = Arc::new(AsyncContext::new());
+        let cell = ctx.cell(1i32);
+        let slot = ctx.computed_async(move |ctx| {
+            let v = ctx.get_cell(&cell);
+            async move { v + 1 }
+        });
+        let ctx1 = ctx.clone();
+        let h1 = tokio::spawn(async move { ctx1.get_async(&slot).await });
+        let v1 = h1.await.unwrap();
+        assert_eq!(v1, 2);
+        let state = ctx.get_slot_state(slot.id);
+        assert!(matches!(state, AsyncSlotStateView::Resolved));
+        ctx.set_cell(&cell, 10);
+        let state = ctx.get_slot_state(slot.id);
+        assert!(matches!(state, AsyncSlotStateView::Empty));
+        let v2 = ctx.get_async(&slot).await;
+        assert_eq!(v2, 11);
+    }
+
+    #[tokio::test]
+    async fn dropping_one_waiter_does_not_cancel_shared_compute() {
+        let ctx = AsyncContext::new();
+        let compute_count = Arc::new(AtomicU64::new(0));
+        let count_clone = compute_count.clone();
+        let slot = ctx.computed_async(move |_| {
+            let c = count_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                99i32
+            }
+        });
+        let (v2, v3) = tokio::join!(ctx.get_async(&slot), ctx.get_async(&slot));
+        assert_eq!(v2, 99);
+        assert_eq!(v3, 99);
+        assert_eq!(compute_count.load(Ordering::Relaxed), 1);
     }
 }
