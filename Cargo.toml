@@ -9,6 +9,7 @@ keywords = ["reactive", "signals", "lazy", "dependency-tracking", "cache"]
 categories = ["data-structures"]
 
 [features]
+async = ["dep:tokio"]
 default = ["smallvec"]
 instrumentation = []
 loom = []

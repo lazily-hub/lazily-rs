@@ -34,6 +34,9 @@
 //! let _ = ctx.get(&pending);
 //! ```
 
+#[cfg(feature = "async")]
+#[allow(dead_code)]
+mod async_context;
 mod cell;
 mod context;
 mod effect;
@@ -42,6 +45,11 @@ mod instrumentation;
 mod slot;
 mod thread_safe;
 
+#[cfg(feature = "async")]
+pub use async_context::{
+    AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncContextId, AsyncEffectHandle,
+    AsyncSlotHandle, AsyncSlotState,
+};
 pub use cell::CellHandle;
 pub use context::Context;
 pub use effect::{EffectCallbackResult, EffectHandle};
