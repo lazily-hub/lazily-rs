@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -40,7 +39,7 @@ fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
 
 type AsyncAny = dyn Any + Send + Sync;
 type BoxedAsyncFuture = Pin<Box<dyn Future<Output = Arc<AsyncAny>> + Send>>;
-type AsyncComputeFn = dyn Fn(&AsyncComputeContext) -> BoxedAsyncFuture + Send + Sync;
+type AsyncComputeFn = dyn Fn(AsyncComputeContext) -> BoxedAsyncFuture + Send + Sync;
 type AsyncEqualsFn = dyn Fn(&AsyncAny, &AsyncAny) -> bool + Send + Sync;
 
 static NEXT_ASYNC_CONTEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -308,7 +307,7 @@ pub struct AsyncComputeContext {
     pub(crate) _context_id: AsyncContextId,
     pub(crate) _node_id: SlotId,
     pub(crate) inner: Arc<Mutex<AsyncContextInner>>,
-    pub(crate) dependencies: RefCell<HashSet<SlotId>>,
+    pub(crate) dependencies: Arc<Mutex<HashSet<SlotId>>>,
 }
 
 impl AsyncComputeContext {
@@ -316,7 +315,7 @@ impl AsyncComputeContext {
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.dependencies.borrow_mut().insert(handle.id);
+        self.dependencies.lock().insert(handle.id);
         let inner = self.inner.lock();
         match inner.get_node(handle.id) {
             Some(AsyncNode::Cell(cell)) => cell
@@ -326,6 +325,18 @@ impl AsyncComputeContext {
                 .expect("type mismatch in async compute get_cell")
                 .clone(),
             _ => panic!("AsyncCellHandle does not point to a Cell node"),
+        }
+    }
+
+    pub fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> impl Future<Output = T> + Send
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.dependencies.lock().insert(handle.id);
+        let inner_arc = self.inner.clone();
+        async move {
+            let ctx = AsyncContext { inner: inner_arc };
+            ctx.get_async(handle).await
         }
     }
 }
@@ -352,15 +363,18 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
     let inner_for_compute = inner_arc.clone();
     let tx_clone = tx.clone();
 
+    let deps_arc = Arc::new(Mutex::new(HashSet::new()));
+    let deps_for_extract = deps_arc.clone();
+
     let join_handle = tokio::spawn(async move {
         let compute_ctx = AsyncComputeContext {
             _context_id: context_id,
             _node_id: slot_id,
             inner: inner_for_compute.clone(),
-            dependencies: RefCell::new(HashSet::new()),
+            dependencies: deps_arc,
         };
-        let result = compute(&compute_ctx).await;
-        let deps = compute_ctx.dependencies.into_inner();
+        let result = compute(compute_ctx).await;
+        let deps = deps_for_extract.lock().clone();
         {
             let mut inner = inner_for_compute.lock();
             AsyncContext::update_dependencies(&mut inner, slot_id, &deps);
@@ -578,7 +592,7 @@ impl AsyncContext {
     pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
     where
         T: Clone + Send + Sync + 'static,
-        F: Fn(&AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
         self.slot_async_with_equals(compute, None)
@@ -587,7 +601,7 @@ impl AsyncContext {
     pub fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
-        F: Fn(&AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
         let equals: Arc<AsyncEqualsFn> = Arc::new(|old: &AsyncAny, new: &AsyncAny| -> bool {
@@ -608,7 +622,7 @@ impl AsyncContext {
     ) -> AsyncSlotHandle<T>
     where
         T: Clone + Send + Sync + 'static,
-        F: Fn(&AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
         let compute_arc: Arc<AsyncComputeFn> = Arc::new(move |ctx| {
@@ -727,7 +741,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use tokio::runtime::Runtime;
 
-    fn stub_compute(_ctx: &AsyncComputeContext) -> BoxedAsyncFuture {
+    fn stub_compute(_ctx: AsyncComputeContext) -> BoxedAsyncFuture {
         Box::pin(async { Arc::new(()) as Arc<AsyncAny> })
     }
 
@@ -1036,5 +1050,122 @@ mod tests {
         assert_eq!(v1, 99);
         assert_eq!(v2, 99);
         assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn async_slot_reads_async_slot() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(5i32);
+        let base = ctx.computed_async(move |ctx| {
+            let v = ctx.get_cell(&cell);
+            async move { v + 10 }
+        });
+        let derived = ctx.computed_async(move |ctx| {
+            let base_handle = base;
+            async move {
+                let v = ctx.get_async(&base_handle).await;
+                v * 2
+            }
+        });
+        assert_eq!(ctx.get_async(&derived).await, 30);
+    }
+
+    #[tokio::test]
+    async fn async_chain_invalidation() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i32);
+        let cell_clone = cell;
+        let base = ctx.computed_async(move |ctx| {
+            let v = ctx.get_cell(&cell_clone);
+            async move { v + 10 }
+        });
+        let derived = ctx.computed_async(move |ctx| {
+            let bh = base;
+            async move {
+                let v = ctx.get_async(&bh).await;
+                v * 2
+            }
+        });
+        assert_eq!(ctx.get_async(&derived).await, 22);
+        ctx.set_cell(&cell_clone, 3);
+        assert_eq!(ctx.get_async(&derived).await, 26);
+    }
+
+    #[tokio::test]
+    async fn async_chain_three_levels() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i32);
+        let a = ctx.computed_async(move |ctx| {
+            let v = ctx.get_cell(&cell);
+            async move { v + 1 }
+        });
+        let b = ctx.computed_async(move |ctx| {
+            let ah = a;
+            async move { ctx.get_async(&ah).await + 1 }
+        });
+        let c = ctx.computed_async(move |ctx| {
+            let bh = b;
+            async move { ctx.get_async(&bh).await + 1 }
+        });
+        assert_eq!(ctx.get_async(&c).await, 4);
+        ctx.set_cell(&cell, 10);
+        assert_eq!(ctx.get_async(&c).await, 13);
+    }
+
+    #[tokio::test]
+    async fn async_dependency_tracks_slot_edges() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(3i32);
+        let slot = ctx.computed_async(move |ctx| {
+            let v = ctx.get_cell(&cell);
+            async move { v * 2 }
+        });
+        let _ = ctx.get_async(&slot).await;
+        {
+            let inner = ctx.inner.lock();
+            if let Some(AsyncNode::Slot(s)) = inner.get_node(slot.id) {
+                assert!(s.dependencies.contains(&cell.id));
+            }
+        }
+        {
+            let inner = ctx.inner.lock();
+            if let Some(AsyncNode::Cell(c)) = inner.get_node(cell.id) {
+                assert!(c.dependents.contains(&slot.id));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn async_dependency_updates_on_rerun() {
+        let ctx = AsyncContext::new();
+        let cell_a = ctx.cell(1i32);
+        let cell_b = ctx.cell(100i32);
+        let flag = ctx.cell(true);
+        let slot = ctx.computed_async(move |ctx| {
+            let f = ctx.get_cell(&flag);
+            let v = if f {
+                ctx.get_cell(&cell_a)
+            } else {
+                ctx.get_cell(&cell_b)
+            };
+            async move { v }
+        });
+        assert_eq!(ctx.get_async(&slot).await, 1);
+        {
+            let inner = ctx.inner.lock();
+            if let Some(AsyncNode::Slot(s)) = inner.get_node(slot.id) {
+                assert!(s.dependencies.contains(&cell_a.id));
+                assert!(!s.dependencies.contains(&cell_b.id));
+            }
+        }
+        ctx.set_cell(&flag, false);
+        assert_eq!(ctx.get_async(&slot).await, 100);
+        {
+            let inner = ctx.inner.lock();
+            if let Some(AsyncNode::Slot(s)) = inner.get_node(slot.id) {
+                assert!(!s.dependencies.contains(&cell_a.id));
+                assert!(s.dependencies.contains(&cell_b.id));
+            }
+        }
     }
 }
