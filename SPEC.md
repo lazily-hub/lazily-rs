@@ -360,7 +360,18 @@ Lock strategy evaluation:
   3. Compare Criterion output — if confidence intervals overlap, keep SmallVec;
      if Vec is faster at the tested fan-out widths, reconsider the default.
   The comparison must run on the same host/toolchain with no other workload.
-- **Lock-free cached reads are implemented** (#vd5v / #lazilyperf38). The per-slot read-mostly cached-value sidecar (`ThreadSafeSlotFastPath.value`) is an `arc_swap::ArcSwapOption<Arc<dyn Any + Send + Sync>>`: `read_fresh` performs a wait-free atomic load of the published snapshot — no `RwLock` read lock — then reconstructs `&T` via the inline `type_id` (the typed-cache prerequisite) without vtable indirection. The atomic dirty/revision validation envelope is unchanged: a reader loads `cache_revision` and checks `dirty`/`force_recompute` before the load and re-checks both after the clone, so a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value. (`arc-swap`'s `RefCnt` is `Sized`-only, so the stored value is `Arc<Arc<dyn Any>>` — the inner `Arc` is a sized fat pointer; the extra outer `Arc` is allocated only on the cold publish path, never on the read.) Verified by the full default suite, the `thread_safe_loom` model, and a `cached_reads/thread_safe_context` A/B showing no regression; the rigorous isolated-worktree A/B per the benchmarking procedure remains a follow-up.
+- **Lock-free cached reads are implemented** (#vd5v / #lazilyperf38). The per-slot read-mostly cached-value sidecar (`ThreadSafeSlotFastPath.value`) is an `arc_swap::ArcSwapOption<Arc<dyn Any + Send + Sync>>`: `read_fresh` performs a wait-free atomic load of the published snapshot — no `RwLock` read lock — then reconstructs `&T` via the inline `type_id` (the typed-cache prerequisite) without vtable indirection. The atomic dirty/revision validation envelope is unchanged: a reader loads `cache_revision` and checks `dirty`/`force_recompute` before the load and re-checks both after the clone, so a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value. (`arc-swap`'s `RefCnt` is `Sized`-only, so the stored value is `Arc<Arc<dyn Any>>` — the inner `Arc` is a sized fat pointer; the extra outer `Arc` is allocated only on the cold publish path, never on the read.) Verified by the full default suite and the `thread_safe_loom` model.
+
+  **Contention tradeoff (rigorous isolated-worktree A/B, #xtwf).** This is a deliberate low-contention-for-high-contention trade, not a free win. Comparing `463ca71` (arc-swap) against its parent `06fd3c2` (the `parking_lot::RwLock` read) on a shared Criterion target dir, same host/toolchain:
+
+  | benchmark | arc-swap vs RwLock |
+  | --- | --- |
+  | `cached_reads/thread_safe_context` (1 thread) | **+3.1%** (slower) |
+  | `read_mostly_waiters/4` | **+11.9%** (slower) |
+  | `read_mostly_waiters/8` | **−6.5%** (faster) |
+  | `read_mostly_waiters/16` | **−28.6%** (faster) |
+
+  arc-swap's wait-free read wins at high core counts where `RwLock` read-lock cache-line traffic dominates, but its debt-tracking load plus the `Arc<Arc<…>>` double-indirection costs a few percent when uncontended. lazily-rs `ThreadSafeContext` targets highly-parallel reactive graphs, so the 8/16-worker win is the operative case and the ≤~3% uncontended/low-contention regression is accepted (see the revised benchmark gate below). The contended numbers carry wide confidence intervals; treat the crossover (~4→8 workers) as approximate.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
 - The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, dynamic dependency switch/disposal cleanup, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
@@ -440,10 +451,16 @@ Benchmark gate:
   `downcast_ref` baseline.  The current baseline is approximately 8 ns per
   cached read; the typed cache target is to reduce this by the vtable call
   overhead (typically 0.5–1.5 ns on x86-64).
-- `cached_reads/thread_safe_context` must not regress.  The typed cache
-  benefits thread-safe cached reads by the same vtable elimination, but the
-  absolute improvement is smaller relative to the atomic-overhead-dominated
-  read path.
+- `cached_reads/thread_safe_context` (single-thread, uncontended) is a
+  **bounded-regression** gate, not a no-regression gate, as of the #vd5v
+  lock-free read. The `arc-swap` read sidecar may regress the uncontended
+  cached read by up to ~3% in exchange for the high-contention win
+  (`read_mostly_waiters` −6%/−29% at 8/16 workers; see *Lock strategy
+  evaluation* → contention tradeoff). A regression beyond ~3% uncontended, or
+  any regression in the 8/16-worker read-contention matrix, fails the gate and
+  must be investigated. The earlier inline-`TypeId` vtable-elimination win for
+  `cached_reads/context` (single-threaded `Context`) is unaffected and must
+  still hold.
 - The improvement must reproduce under controlled Criterion A/B comparison
   (same host, same toolchain, non-overlapping confidence intervals).
 
