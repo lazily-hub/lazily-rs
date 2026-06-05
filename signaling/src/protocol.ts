@@ -109,6 +109,28 @@ export function encodeServerMessage(message: ServerMessage): string {
   return JSON.stringify(message);
 }
 
+/** Serialize a `ClientMessage` to a WebSocket string frame (client side). */
+export function encodeClientMessage(message: ClientMessage): string {
+  return JSON.stringify(message);
+}
+
+/**
+ * Parse a raw server frame into a `ServerMessage`. The server is trusted, so
+ * this only guards against non-JSON / non-object frames rather than validating
+ * every field.
+ */
+export function decodeServerFrame(data: string): ServerMessage | null {
+  try {
+    const parsed: unknown = JSON.parse(data);
+    if (typeof parsed === "object" && parsed !== null && "type" in parsed) {
+      return parsed as ServerMessage;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === "string");
 }

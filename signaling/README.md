@@ -53,6 +53,31 @@ npm run deploy       # wrangler deploy
 Set `SIGNALING_MODE = "allowlist"` in `wrangler.toml` (or as a binding var) to
 require explicit per-peer grants (default-deny).
 
+## Clients (#s0fc)
+
+The endpoint is consumable as a dependency by two clients that share the wire
+protocol (see `SPEC.md` → *Consumable clients*):
+
+- **TypeScript** — `@lazily/signaling` exports `./client` and `./protocol`:
+
+  ```ts
+  import { SignalingClient } from "@lazily/signaling/client";
+  const client = await SignalingClient.connect("wss://host", "room-1", 1);
+  client.onMessage((m) => { if (m.type === "peer-joined") client.relay(m.peer, { hi: true }); });
+  ```
+
+- **Rust** — `lazily` with the `signaling-client` feature:
+
+  ```rust
+  use lazily::{PeerId, SignalingClient, ServerMessage};
+  let mut c = SignalingClient::connect("wss://host", "room-1", PeerId(1)).await?;
+  while let Some(msg) = c.recv().await {
+      if let ServerMessage::PeerJoined { peer } = msg? {
+          c.relay(peer, serde_json::json!({ "hi": true })).await?;
+      }
+  }
+  ```
+
 ## Tests
 
 - `test/protocol.test.ts` — frame parsing/validation/codec.

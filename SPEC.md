@@ -1246,6 +1246,43 @@ toolchain; not part of the Rust crate build):
   identity source rather than static configuration.
 - Capacity/back-pressure limits per session DO.
 
+### Consumable clients (#s0fc)
+
+So a project can depend on the signaling endpoint for distributed peer discovery
+(the plan for agent-doc), the endpoint ships two clients that speak one shared
+wire protocol — this section is the normative source of truth both conform to.
+
+**Wire protocol (normative).** All frames are JSON with a `type` tag. `PeerId`
+is a `u64` serialized as a bare JSON number (Rust `PeerId(u64)` ⇄ TS `number`;
+keep ids ≤ 2^53).
+
+- Client → server: `join {peer, capabilities?}`, `offer {to, sdp}`,
+  `answer {to, sdp}`, `ice {to, candidate}`, `relay {to, payload}`, `leave`.
+- Server → client: `welcome {peer, peers}`, `peer-joined {peer}`,
+  `peer-left {peer}`, `offer/answer/ice/relay` (each stamped `from`),
+  `error {code, message}`.
+
+**Rust client** (`signaling-client` feature, `src/signaling_client.rs`):
+`lazily::SignalingClient::connect(base_url, session, peer)` opens a
+`tokio-tungstenite` WebSocket to `{base_url}/session/{session}`, joins, and
+exposes `offer`/`answer`/`ice`/`relay`/`leave` plus `recv()` for
+`ServerMessage`s. `ClientMessage`/`ServerMessage` are `serde`-tagged
+(`rename_all = "kebab-case"`) and reuse the #39c5 `PeerId`. Conformance tests
+assert the exact JSON shapes above. The feature pulls `tokio-tungstenite`
+(rustls) only when enabled; the default build is unaffected.
+
+**TypeScript client** (`@lazily/signaling` package, `signaling/src/client.ts`):
+`SignalingClient.connect(baseUrl, session, peer)` (or `attach(socket, peer)` for
+a pre-opened socket) works against any `WebSocket`-like transport (browser,
+Node ≥ 22, or injected), with `onMessage` + the same send helpers. The package
+exports `./client` and `./protocol`. Unit tests plus an end-to-end test drive
+the real Worker + Durable Object in `workerd`.
+
+Both clients are covered in CI (`cargo test --features signaling-client`; the
+Worker job's `npm run check`). The Rust conformance tests and the TS protocol
+share the byte-for-byte frame shapes defined above, so the two implementations
+stay wire-compatible.
+
 ## Differences from lazily-zig
 
 | Aspect | lazily-zig | lazily-rs |

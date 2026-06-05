@@ -44,6 +44,8 @@ mod distributed;
 mod effect;
 #[cfg(feature = "instrumentation")]
 mod instrumentation;
+#[cfg(feature = "signaling-client")]
+mod signaling_client;
 mod slot;
 mod thread_safe;
 
@@ -62,5 +64,7 @@ pub use instrumentation::{
     InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeLockSite,
     ThreadSafeLockSiteSnapshot,
 };
+#[cfg(feature = "signaling-client")]
+pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
 pub use slot::SlotHandle;
 pub use thread_safe::{ThreadSafeContext, ThreadSafeEffectCallbackResult};

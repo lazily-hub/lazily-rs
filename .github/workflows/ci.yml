@@ -40,6 +40,9 @@ jobs:
       - name: Test distributed feature
         run: cargo +stable test --locked --features "distributed serde"
 
+      - name: Test signaling client feature
+        run: cargo +stable test --locked --features signaling-client
+
       - name: Test loom model
         run: cargo +stable test --locked --features loom --test thread_safe_loom
 

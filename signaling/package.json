@@ -1,9 +1,20 @@
 {
-  "name": "lazily-signaling",
+  "name": "@lazily/signaling",
   "version": "0.1.0",
-  "private": true,
-  "description": "Cloudflare Worker signaling server for lazily-distributed peer discovery (#yxjw)",
+  "description": "Cloudflare Worker signaling server + client for lazily-distributed peer discovery (#yxjw/#s0fc)",
   "type": "module",
+  "license": "MIT",
+  "exports": {
+    "./client": "./src/client.ts",
+    "./protocol": "./src/protocol.ts"
+  },
+  "files": [
+    "src/client.ts",
+    "src/protocol.ts"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
