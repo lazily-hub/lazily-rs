@@ -8,6 +8,7 @@ use smallvec::SmallVec;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use arc_swap::ArcSwapOption;
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
 use std::sync::Arc;
 
@@ -413,7 +414,14 @@ enum ThreadSafeDependentKind {
 }
 
 struct ThreadSafeSlotFastPath {
-    value: RwLock<Option<Arc<ThreadSafeAny>>>,
+    // Lock-free read-mostly cached-value sidecar (#vd5v / #lazilyperf38). The
+    // inline `type_id` proves `T` so a reader can reconstruct `&T` from the
+    // atomically-published pointer without a vtable; the atomic `cache_revision`
+    // envelope still rejects mid-read invalidation / publish races. The stored
+    // `Arc<Arc<dyn Any>>` keeps an inner sized fat pointer because `arc-swap`'s
+    // `RefCnt` is `Sized`-only; the extra outer `Arc` is allocated on the cold
+    // publish path, never on the lock-free read.
+    value: ArcSwapOption<Arc<ThreadSafeAny>>,
     type_id: TypeId,
     cache_revision: AtomicU64,
     dirty: AtomicBool,
@@ -434,7 +442,7 @@ impl ThreadSafeSlotFastPath {
     ) -> Self {
         let slot_dependency_count = initial_dependencies.len();
         Self {
-            value: RwLock::new(None),
+            value: ArcSwapOption::empty(),
             type_id,
             cache_revision: AtomicU64::default(),
             dirty: AtomicBool::default(),
@@ -461,9 +469,12 @@ impl ThreadSafeSlotFastPath {
             return None;
         }
 
-        let value = self.value.read().as_ref().map(|value| {
+        // Lock-free atomic load of the published value snapshot; no read lock.
+        let snapshot = self.value.load();
+        let value = snapshot.as_ref().map(|value| {
             assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
-            unsafe { &*(&**value as *const ThreadSafeAny as *const T) }.clone()
+            let erased: &ThreadSafeAny = &***value;
+            unsafe { &*(erased as *const ThreadSafeAny as *const T) }.clone()
         });
         if self.cache_revision.load(Ordering::Acquire) != cache_revision
             || self.dirty.load(Ordering::Acquire)
@@ -489,7 +500,7 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn store_value(&self, value: Option<Arc<ThreadSafeAny>>) {
-        *self.value.write() = value;
+        self.value.store(value.map(Arc::new));
         self.cache_revision.fetch_add(1, Ordering::AcqRel);
     }
 

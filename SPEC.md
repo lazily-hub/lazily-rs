@@ -360,7 +360,7 @@ Lock strategy evaluation:
   3. Compare Criterion output — if confidence intervals overlap, keep SmallVec;
      if Vec is faster at the tested fan-out widths, reconsider the default.
   The comparison must run on the same host/toolchain with no other workload.
-- Fully lock-free cached reads are deferred for the current erased-value storage. The current versioned optimistic path still clones through the retained sidecar `Arc` snapshot and uses atomic dirty/revision validation to ensure a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value.
+- **Lock-free cached reads are implemented** (#vd5v / #lazilyperf38). The per-slot read-mostly cached-value sidecar (`ThreadSafeSlotFastPath.value`) is an `arc_swap::ArcSwapOption<Arc<dyn Any + Send + Sync>>`: `read_fresh` performs a wait-free atomic load of the published snapshot — no `RwLock` read lock — then reconstructs `&T` via the inline `type_id` (the typed-cache prerequisite) without vtable indirection. The atomic dirty/revision validation envelope is unchanged: a reader loads `cache_revision` and checks `dirty`/`force_recompute` before the load and re-checks both after the clone, so a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation cached value. (`arc-swap`'s `RefCnt` is `Sized`-only, so the stored value is `Arc<Arc<dyn Any>>` — the inner `Arc` is a sized fat pointer; the extra outer `Arc` is allocated only on the cold publish path, never on the read.) Verified by the full default suite, the `thread_safe_loom` model, and a `cached_reads/thread_safe_context` A/B showing no regression; the rigorous isolated-worktree A/B per the benchmarking procedure remains a follow-up.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
 - The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, dynamic dependency switch/disposal cleanup, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
@@ -452,7 +452,10 @@ Future implications:
 - Fully lock-free cached reads require typed storage so that a reader can
   reconstruct a typed reference from an atomically published pointer without
   vtable indirection.  The inline `TypeId` is a prerequisite: it proves the
-  type at compile time and makes the unchecked cast sound.
+  type at compile time and makes the unchecked cast sound. **Implemented**
+  (#vd5v): `ThreadSafeSlotFastPath.value` is now an `arc_swap::ArcSwapOption`,
+  so `read_fresh` loads the published snapshot wait-free and recovers `&T` via
+  the inline `type_id` — see *Lock strategy evaluation* above.
 - A future `ErasedValue` storage type could replace `Rc<dyn Any>` /
   `Arc<dyn Any>` entirely, storing the value inline for small types and
   avoiding heap allocation on compute.  The current inline-`TypeId` step
