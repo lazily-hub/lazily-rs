@@ -1318,3 +1318,182 @@ fn reentrant_callback_can_lock_graph_while_compute_is_in_flight() {
         assert!(!state.computing);
     });
 }
+
+// ---------------------------------------------------------------------------
+// Inline small-`Copy` seqlock model (#rdstrat2)
+//
+// Models `ThreadSafeContext`'s inline cached-read sidecar (`InlineSeqlock` in
+// `src/thread_safe.rs`): a single-writer / multi-reader seqlock whose value
+// bytes live in relaxed atomics, wrapped in the same `cache_revision` + `dirty`
+// validation envelope as the `Locked`/`LockFree` read strategies. The byte
+// buffer is modeled as two halves the writer always keeps equal, so an accepted
+// torn snapshot surfaces as `lo != hi`. Loom explores every interleaving and
+// memory ordering of one writer against concurrent readers.
+// ---------------------------------------------------------------------------
+
+use loom::sync::atomic::{AtomicU8, AtomicU64, fence};
+
+struct InlineSeqlockModel {
+    seq: AtomicUsize,
+    occupied: AtomicBool,
+    lo: AtomicU8,
+    hi: AtomicU8,
+    // Outer validation envelope (matches `ThreadSafeSlotFastPath`).
+    cache_revision: AtomicU64,
+    dirty: AtomicBool,
+}
+
+impl InlineSeqlockModel {
+    fn new() -> Self {
+        Self {
+            seq: AtomicUsize::new(0),
+            occupied: AtomicBool::new(false),
+            lo: AtomicU8::new(0),
+            hi: AtomicU8::new(0),
+            cache_revision: AtomicU64::new(0),
+            dirty: AtomicBool::new(false),
+        }
+    }
+
+    // Single-writer seqlock publish (mirrors `InlineSeqlock::write(Some(..))`).
+    fn seqlock_write(&self, v: u8) {
+        let begin = self.seq.load(Ordering::Relaxed).wrapping_add(1);
+        self.seq.store(begin, Ordering::Release);
+        fence(Ordering::Release);
+        self.lo.store(v, Ordering::Relaxed);
+        self.hi.store(v, Ordering::Relaxed);
+        self.occupied.store(true, Ordering::Relaxed);
+        self.seq.store(begin.wrapping_add(1), Ordering::Release);
+    }
+
+    // Single lock-free read attempt (mirrors `InlineSeqlock::read`). Returns
+    // `None` when empty or when the snapshot could be torn (caller retries in
+    // the real code); a returned `Some` must be a consistent image.
+    fn seqlock_try_read(&self) -> Option<(u8, u8)> {
+        let s1 = self.seq.load(Ordering::Acquire);
+        if s1 & 1 != 0 {
+            return None;
+        }
+        let occupied = self.occupied.load(Ordering::Relaxed);
+        let lo = self.lo.load(Ordering::Relaxed);
+        let hi = self.hi.load(Ordering::Relaxed);
+        fence(Ordering::Acquire);
+        let s2 = self.seq.load(Ordering::Relaxed);
+        if s1 == s2 && occupied {
+            Some((lo, hi))
+        } else {
+            None
+        }
+    }
+
+    // Full cached publish: seqlock write + envelope (store_value bumps the
+    // revision; mark_fresh clears dirty).
+    fn publish(&self, v: u8) {
+        self.seqlock_write(v);
+        self.cache_revision.fetch_add(1, Ordering::AcqRel);
+        self.dirty.store(false, Ordering::Release);
+    }
+
+    // Invalidation (mirrors `mark_dirty`): bump revision, set dirty.
+    fn invalidate(&self) {
+        self.cache_revision.fetch_add(1, Ordering::AcqRel);
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    // Full envelope read (mirrors `read_fresh`).
+    fn read_fresh(&self) -> Option<(u8, u8)> {
+        let revision = self.cache_revision.load(Ordering::Acquire);
+        if self.dirty.load(Ordering::Acquire) {
+            return None;
+        }
+        let snapshot = self.seqlock_try_read();
+        if self.cache_revision.load(Ordering::Acquire) != revision
+            || self.dirty.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        snapshot
+    }
+}
+
+#[test]
+fn inline_seqlock_reader_never_observes_torn_value() {
+    loom::model(|| {
+        let lock = Arc::new(InlineSeqlockModel::new());
+
+        let writer = {
+            let lock = Arc::clone(&lock);
+            thread::spawn(move || {
+                lock.seqlock_write(1);
+                lock.seqlock_write(2);
+            })
+        };
+        let reader = {
+            let lock = Arc::clone(&lock);
+            thread::spawn(move || {
+                if let Some((lo, hi)) = lock.seqlock_try_read() {
+                    assert_eq!(lo, hi, "seqlock accepted a torn snapshot");
+                }
+            })
+        };
+
+        writer.join().expect("writer should finish");
+        reader.join().expect("reader should finish");
+
+        // After both writers retire, the buffer is the last consistent publish.
+        let (lo, hi) = lock.seqlock_try_read().expect("final read should succeed");
+        assert_eq!(lo, hi);
+        assert_eq!(lo, 2);
+    });
+}
+
+#[test]
+fn inline_seqlock_envelope_rejects_torn_and_stale_under_concurrent_publish() {
+    loom::model(|| {
+        let lock = Arc::new(InlineSeqlockModel::new());
+        lock.publish(1);
+
+        let writer = {
+            let lock = Arc::clone(&lock);
+            thread::spawn(move || {
+                lock.invalidate();
+                lock.publish(2);
+            })
+        };
+        let reader = {
+            let lock = Arc::clone(&lock);
+            thread::spawn(move || {
+                // Any value the envelope accepts must be internally consistent
+                // (no torn read) and one of the two real publishes.
+                if let Some((lo, hi)) = lock.read_fresh() {
+                    assert_eq!(lo, hi, "envelope accepted a torn snapshot");
+                    assert!(lo == 1 || lo == 2, "envelope accepted a phantom value");
+                }
+            })
+        };
+
+        writer.join().expect("writer should finish");
+        reader.join().expect("reader should finish");
+
+        // A read that starts after the publish completes sees the fresh value.
+        assert_eq!(lock.read_fresh(), Some((2, 2)));
+    });
+}
+
+#[test]
+fn inline_seqlock_read_after_completed_invalidation_is_rejected() {
+    loom::model(|| {
+        let lock = InlineSeqlockModel::new();
+        lock.publish(7);
+        assert_eq!(lock.read_fresh(), Some((7, 7)));
+        // A completed invalidation must make the stale cached value unreadable.
+        lock.invalidate();
+        assert_eq!(
+            lock.read_fresh(),
+            None,
+            "stale cached value must not survive a completed invalidation"
+        );
+        lock.publish(9);
+        assert_eq!(lock.read_fresh(), Some((9, 9)));
+    });
+}

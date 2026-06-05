@@ -1,12 +1,13 @@
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::mem::MaybeUninit;
 
 #[cfg(not(feature = "vec_edges"))]
 use smallvec::SmallVec;
 #[cfg(feature = "instrumentation")]
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use arc_swap::ArcSwapOption;
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
@@ -427,35 +428,165 @@ pub enum ReadStrategy {
     HighConcurrency,
 }
 
-/// Read-mostly cached-value sidecar storage. The variant is fixed per slot at
-/// creation from the owning context's [`ReadStrategy`]; both carry the same
-/// atomic `cache_revision` validation envelope, so correctness is identical.
-///
-/// `LockFree` stores `Arc<Arc<dyn Any>>` because `arc-swap`'s `RefCnt` is
-/// `Sized`-only (the inner `Arc` is a sized fat pointer); the extra outer `Arc`
-/// is allocated only on the cold publish path, never on the read.
-enum CachedReadStorage {
-    Locked(RwLock<Option<Arc<ThreadSafeAny>>>),
-    LockFree(ArcSwapOption<Arc<ThreadSafeAny>>),
+/// Maximum inline byte capacity for the small-`Copy` seqlock fast path
+/// (#rdstrat2). Covers common small reactive values (scalars, small `Copy`
+/// structs, a `usize` triple) without heap indirection. A `Copy` type larger
+/// than this — or any non-`Copy` type — falls back to the strategy-selected
+/// `Locked`/`LockFree` path.
+const INLINE_CAP: usize = 24;
+/// Maximum alignment the inline buffer guarantees. The buffer is declared with
+/// this alignment; a `Copy` type whose alignment exceeds it falls back.
+const INLINE_ALIGN: usize = 16;
+
+/// Per-slot inline-eligibility record, captured at slot creation while the
+/// concrete `T` is in scope. `size` is needed on the type-erased store path to
+/// memcpy exactly `size_of::<T>()` bytes out of the published value.
+#[derive(Clone, Copy)]
+struct InlineSpec {
+    size: usize,
 }
 
-impl CachedReadStorage {
-    fn new(strategy: ReadStrategy) -> Self {
-        match strategy {
-            ReadStrategy::LowConcurrency => CachedReadStorage::Locked(RwLock::new(None)),
-            ReadStrategy::HighConcurrency => CachedReadStorage::LockFree(ArcSwapOption::empty()),
+/// Wait-free single-writer / multi-reader seqlock storing a small `Copy` value
+/// inline (#rdstrat2). The single-writer invariant is upheld by the caller:
+/// every `write` runs while holding the `ThreadSafeContext` graph state write
+/// lock (value publish in `recompute_slot_now`, clear in `apply_locked`), while
+/// readers (`read`) run lock-free. `seq` even = stable, odd = write in
+/// progress; a reader that observes an odd or changed `seq` discards its byte
+/// snapshot and retries, so no `T` is ever reconstructed from a torn buffer.
+///
+/// The value bytes live in `[AtomicU8; INLINE_CAP]` and are read/written with
+/// **relaxed atomic** per-byte ops — not a plain `memcpy` — so a reader racing
+/// the writer is well-defined (no data race / UB), unlike a classic non-atomic
+/// seqlock. The `seq` counter (Release on the writer's closing store, Acquire
+/// on the reader's bracketing loads, plus the canonical Acquire fence before
+/// the second load) makes an accepted byte snapshot a consistent image of one
+/// publish. The seqlock is the inner safety envelope; the outer atomic
+/// `cache_revision` + `dirty`/`force_recompute` checks in `read_fresh` reject
+/// reads racing a publish/invalidation, identically to the `Locked`/`LockFree`
+/// paths. The orderings are modeled exhaustively in
+/// `thread_safe_loom::inline_seqlock_*`.
+struct InlineSeqlock {
+    seq: AtomicUsize,
+    occupied: AtomicBool,
+    size: usize,
+    buf: [AtomicU8; INLINE_CAP],
+}
+
+impl InlineSeqlock {
+    fn new(spec: InlineSpec) -> Self {
+        Self {
+            seq: AtomicUsize::new(0),
+            occupied: AtomicBool::new(false),
+            size: spec.size,
+            buf: std::array::from_fn(|_| AtomicU8::new(0)),
         }
     }
 
-    /// Run `f` with the currently-published value (borrowed; a read lock is held
-    /// for `Locked`, a wait-free loaded guard for `LockFree`).
-    fn with_value<R>(&self, f: impl FnOnce(Option<&Arc<ThreadSafeAny>>) -> R) -> R {
-        match self {
-            CachedReadStorage::Locked(lock) => f(lock.read().as_ref()),
-            CachedReadStorage::LockFree(swap) => {
-                let snapshot = swap.load();
-                f(snapshot.as_ref().map(|outer| &**outer))
+    /// Publish (single writer). `src` points at `self.size` readable bytes of a
+    /// `Copy` `T` to store, or `None` to clear. Serialized against other writers
+    /// by the graph state write lock.
+    ///
+    /// # Safety
+    /// When `src` is `Some(ptr)`, `ptr` must be valid for reads of `self.size`
+    /// bytes for the duration of the call.
+    unsafe fn write(&self, src: Option<*const u8>) {
+        let begin = self.seq.load(Ordering::Relaxed).wrapping_add(1);
+        // Enter the odd (write-in-progress) phase, then order it before the byte
+        // mutation so a reader that observes the odd marker retries.
+        self.seq.store(begin, Ordering::Release);
+        std::sync::atomic::fence(Ordering::Release);
+        match src {
+            Some(ptr) => {
+                for i in 0..self.size {
+                    // SAFETY: `ptr` is valid for `self.size` reads (caller
+                    // contract); `i < self.size <= INLINE_CAP` indexes the buffer.
+                    let byte = unsafe { *ptr.add(i) };
+                    self.buf[i].store(byte, Ordering::Relaxed);
+                }
+                self.occupied.store(true, Ordering::Relaxed);
             }
+            None => {
+                self.occupied.store(false, Ordering::Relaxed);
+            }
+        }
+        // Leave the even (stable) phase; Release publishes the byte stores to a
+        // reader whose closing Acquire-fenced load observes this even value.
+        self.seq.store(begin.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Wait-free read of the published value as `T`. Returns `None` when the
+    /// slot is empty. The bytes are interpreted as `T` only after a stable even
+    /// `seq` proves the snapshot is not torn.
+    ///
+    /// # Safety
+    /// `T` must be the `Copy` type captured at slot creation, with
+    /// `size_of::<T>() == self.size`. The caller asserts the matching `TypeId`.
+    unsafe fn read<T>(&self) -> Option<T> {
+        debug_assert_eq!(std::mem::size_of::<T>(), self.size);
+        loop {
+            let s1 = self.seq.load(Ordering::Acquire);
+            if s1 & 1 != 0 {
+                // Write in progress; retry.
+                std::hint::spin_loop();
+                continue;
+            }
+            let occupied = self.occupied.load(Ordering::Relaxed);
+            let mut snapshot = MaybeUninit::<T>::uninit();
+            if occupied {
+                let dst = snapshot.as_mut_ptr() as *mut u8;
+                for i in 0..self.size {
+                    let byte = self.buf[i].load(Ordering::Relaxed);
+                    // SAFETY: `i < self.size == size_of::<T>()`, so `dst.add(i)`
+                    // is in bounds of the `MaybeUninit<T>` storage.
+                    unsafe { *dst.add(i) = byte };
+                }
+            }
+            // Pair with the writer's closing Release store: if `s2` equals the
+            // even `s1`, the byte loads above observed exactly this publish.
+            std::sync::atomic::fence(Ordering::Acquire);
+            let s2 = self.seq.load(Ordering::Relaxed);
+            if s1 == s2 {
+                return if occupied {
+                    // SAFETY: the stable, unchanged even `seq` proves no write
+                    // overlapped the byte loads, so `snapshot` holds a complete
+                    // `T` (which is `Copy`, so the bitwise read is sound).
+                    Some(unsafe { snapshot.assume_init() })
+                } else {
+                    None
+                };
+            }
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// Read-mostly cached-value sidecar storage. The variant is fixed per slot at
+/// creation; `Locked`/`LockFree` are chosen from the owning context's
+/// [`ReadStrategy`], while `Inline` subsumes both for small `Copy` values
+/// (#rdstrat2). All three carry the same atomic `cache_revision` validation
+/// envelope, so correctness is identical.
+///
+/// `LockFree` stores `Arc<Arc<dyn Any>>` because `arc-swap`'s `RefCnt` is
+/// `Sized`-only (the inner `Arc` is a sized fat pointer); the extra outer `Arc`
+/// is allocated only on the cold publish path, never on the read. `Inline`
+/// stores the value's bytes directly behind a seqlock — no `Arc`, no heap
+/// indirection, no refcount traffic on either read or publish.
+enum CachedReadStorage {
+    Locked(RwLock<Option<Arc<ThreadSafeAny>>>),
+    LockFree(ArcSwapOption<Arc<ThreadSafeAny>>),
+    Inline(InlineSeqlock),
+}
+
+impl CachedReadStorage {
+    fn new(strategy: ReadStrategy, inline: Option<InlineSpec>) -> Self {
+        if let Some(spec) = inline {
+            // Inline is optimal for small `Copy` values in both modes; the
+            // runtime `ReadStrategy` only governs the large/non-`Copy` fallback.
+            return CachedReadStorage::Inline(InlineSeqlock::new(spec));
+        }
+        match strategy {
+            ReadStrategy::LowConcurrency => CachedReadStorage::Locked(RwLock::new(None)),
+            ReadStrategy::HighConcurrency => CachedReadStorage::LockFree(ArcSwapOption::empty()),
         }
     }
 
@@ -463,16 +594,55 @@ impl CachedReadStorage {
         match self {
             CachedReadStorage::Locked(lock) => *lock.write() = value,
             CachedReadStorage::LockFree(swap) => swap.store(value.map(Arc::new)),
+            CachedReadStorage::Inline(seqlock) => match &value {
+                Some(arc) => {
+                    // The erased value's data pointer addresses the `T` bytes.
+                    // `arc` is alive across the call, so the source is valid.
+                    let erased: &ThreadSafeAny = &**arc;
+                    let src = erased as *const ThreadSafeAny as *const u8;
+                    // SAFETY: `src` is valid for `seqlock.size` (== size_of::<T>)
+                    // reads while `arc` is held; single-writer invariant holds.
+                    unsafe { seqlock.write(Some(src)) };
+                }
+                None => {
+                    // SAFETY: clear path; no source bytes read.
+                    unsafe { seqlock.write(None) };
+                }
+            },
         }
     }
 }
 
+/// Inline-eligibility decision for a value type. Returns `Some` only for `Copy`
+/// `T` that fits the inline buffer (size + alignment), so the unchecked bitwise
+/// store/read is sound (a torn read of a `Copy` value has no `Drop`/ownership
+/// hazard, and the size/align bound keeps the memcpy in-bounds and aligned).
+///
+/// This is a `Copy`-bounded free function rather than an automatic probe on the
+/// generic slot constructors **by necessity**: stable Rust cannot branch on
+/// `T: Copy` inside a generic fn that lacks the bound (method resolution is
+/// pre-monomorphization, so a `Copy`-gated inherent impl is never *applicable*
+/// where the bound is unprovable; that needs nightly `specialization`). The
+/// inline path is therefore opt-in through the `*_copy` constructors, which
+/// carry the `Copy` bound and call this. See `SPEC.md` → *Typed cache
+/// fast-path* and `plan-lazily-0.10-read-strategy.md` Phase 2.
+fn inline_spec_for<T: Copy + 'static>() -> Option<InlineSpec> {
+    if std::mem::size_of::<T>() <= INLINE_CAP && std::mem::align_of::<T>() <= INLINE_ALIGN {
+        Some(InlineSpec {
+            size: std::mem::size_of::<T>(),
+        })
+    } else {
+        None
+    }
+}
+
 struct ThreadSafeSlotFastPath {
-    // Read-mostly cached-value sidecar (#vd5v / #rdstrat1). The inline `type_id`
-    // proves `T` so a reader can reconstruct `&T` without a vtable; the atomic
-    // `cache_revision` envelope rejects mid-read invalidation / publish races.
-    // Storage variant (RwLock vs arc-swap) is selected per the context's
-    // `ReadStrategy` at creation.
+    // Read-mostly cached-value sidecar (#vd5v / #rdstrat1 / #rdstrat2). The
+    // inline `type_id` proves `T` so a reader can reconstruct `&T`/`T` without a
+    // vtable; the atomic `cache_revision` envelope rejects mid-read
+    // invalidation / publish races. Storage variant (RwLock vs arc-swap vs
+    // inline seqlock) is selected at creation from the context's `ReadStrategy`
+    // and the value's inline eligibility (small `Copy`).
     value: CachedReadStorage,
     type_id: TypeId,
     cache_revision: AtomicU64,
@@ -492,10 +662,11 @@ impl ThreadSafeSlotFastPath {
         initial_dependencies: EdgeVec,
         type_id: TypeId,
         strategy: ReadStrategy,
+        inline: Option<InlineSpec>,
     ) -> Self {
         let slot_dependency_count = initial_dependencies.len();
         Self {
-            value: CachedReadStorage::new(strategy),
+            value: CachedReadStorage::new(strategy, inline),
             type_id,
             cache_revision: AtomicU64::default(),
             dirty: AtomicBool::default(),
@@ -523,14 +694,31 @@ impl ThreadSafeSlotFastPath {
         }
 
         // Read the published snapshot via the selected strategy (wait-free load
-        // for LockFree, read lock for Locked).
-        let value = self.value.with_value(|slot| {
-            slot.map(|value| {
+        // for LockFree, read lock for Locked, wait-free seqlock for Inline).
+        let value = match &self.value {
+            CachedReadStorage::Locked(lock) => lock.read().as_ref().map(|value| {
                 assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
                 let erased: &ThreadSafeAny = &**value;
                 unsafe { &*(erased as *const ThreadSafeAny as *const T) }.clone()
-            })
-        });
+            }),
+            CachedReadStorage::LockFree(swap) => {
+                let snapshot = swap.load();
+                snapshot.as_ref().map(|outer| {
+                    let value: &Arc<ThreadSafeAny> = outer;
+                    assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
+                    let erased: &ThreadSafeAny = &**value;
+                    unsafe { &*(erased as *const ThreadSafeAny as *const T) }.clone()
+                })
+            }
+            CachedReadStorage::Inline(seqlock) => {
+                assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
+                // SAFETY: `Inline` is only created for the `Copy` type captured
+                // at slot creation; the `type_id` assert proves `T` matches it,
+                // so `size_of::<T>() == seqlock.size` and the bitwise read is
+                // sound.
+                unsafe { seqlock.read::<T>() }
+            }
+        };
         if self.cache_revision.load(Ordering::Acquire) != cache_revision
             || self.dirty.load(Ordering::Acquire)
             || self.force_recompute.load(Ordering::Acquire)
@@ -1605,10 +1793,69 @@ impl ThreadSafeContext {
         )
     }
 
+    /// Like [`slot`](Self::slot), but opts the cached-read sidecar into the
+    /// inline small-`Copy` seqlock fast path (#rdstrat2): when `T` is `Copy` and
+    /// fits the inline buffer (`size_of::<T>() <= 24`, `align <= 16`), the value
+    /// is stored inline behind a wait-free seqlock — no heap `Arc`, no refcount
+    /// traffic on read or publish, optimal under both [`ReadStrategy`] modes.
+    /// `T` that exceeds the bound transparently falls back to the
+    /// strategy-selected `RwLock`/`arc-swap` path.
+    ///
+    /// This is a separate constructor (rather than automatic) because stable
+    /// Rust cannot detect `T: Copy` inside the unbounded generic [`slot`]; see
+    /// [`inline_spec_for`].
+    pub fn slot_copy<T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        T: Copy + Send + Sync + 'static,
+        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
+    {
+        self.slot_with_equals_inline(compute, None, inline_spec_for::<T>())
+    }
+
+    /// Ergonomic alias for [`slot_copy`](Self::slot_copy).
+    pub fn computed_copy<T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        T: Copy + Send + Sync + 'static,
+        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
+    {
+        self.slot_copy(compute)
+    }
+
+    /// Like [`memo`](Self::memo), but opts into the inline small-`Copy` seqlock
+    /// fast path (#rdstrat2). See [`slot_copy`](Self::slot_copy).
+    pub fn memo_copy<T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        T: Copy + PartialEq + Send + Sync + 'static,
+        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
+    {
+        self.slot_with_equals_inline(
+            compute,
+            Some(Arc::new(|old, new| {
+                let old = old.downcast_ref::<T>().expect("type mismatch in slot");
+                let new = new.downcast_ref::<T>().expect("type mismatch in slot");
+                old == new
+            })),
+            inline_spec_for::<T>(),
+        )
+    }
+
     fn slot_with_equals<T, F>(
         &self,
         compute: F,
         equals: Option<Arc<ThreadSafeEqualsFn>>,
+    ) -> SlotHandle<T>
+    where
+        T: Send + Sync + 'static,
+        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
+    {
+        self.slot_with_equals_inline(compute, equals, None)
+    }
+
+    fn slot_with_equals_inline<T, F>(
+        &self,
+        compute: F,
+        equals: Option<Arc<ThreadSafeEqualsFn>>,
+        inline: Option<InlineSpec>,
     ) -> SlotHandle<T>
     where
         T: Send + Sync + 'static,
@@ -1622,6 +1869,7 @@ impl ThreadSafeContext {
             EdgeVec::new(),
             TypeId::of::<T>(),
             self.inner.read_strategy,
+            inline,
         ));
         let node = ThreadSafeSlotNode {
             value: None,
@@ -2619,6 +2867,132 @@ mod tests {
             ctx.set_cell(&cell, 5);
             assert_eq!(ctx.get(&doubled), 50, "{strategy:?} after set");
         }
+    }
+
+    fn slot_storage_kind<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> &'static str
+    where
+        T: Send + Sync + 'static,
+    {
+        let state = ctx.lock_state();
+        match state.get_node(handle.id) {
+            Some(ThreadSafeNode::Slot(slot)) => match &slot.fast_path.value {
+                CachedReadStorage::Locked(_) => "locked",
+                CachedReadStorage::LockFree(_) => "lockfree",
+                CachedReadStorage::Inline(_) => "inline",
+            },
+            _ => panic!("slot_storage_kind called on non-slot id"),
+        }
+    }
+
+    #[test]
+    fn slot_copy_uses_inline_storage_in_both_strategies(/* #rdstrat2 */) {
+        for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
+            let ctx = ThreadSafeContext::with_read_strategy(strategy);
+            let cell = ctx.cell(2_i32);
+            let doubled = ctx.computed_copy(move |c| c.get_cell(&cell) * 10);
+            // The inline seqlock subsumes the read-strategy tradeoff for small
+            // `Copy` values, so it is selected regardless of `strategy`.
+            assert_eq!(slot_storage_kind(&ctx, &doubled), "inline", "{strategy:?}");
+            assert_eq!(ctx.get(&doubled), 20, "{strategy:?}");
+            assert_eq!(ctx.get(&doubled), 20, "{strategy:?} cached");
+            ctx.set_cell(&cell, 5);
+            assert_eq!(ctx.get(&doubled), 50, "{strategy:?} after set");
+        }
+    }
+
+    #[test]
+    fn slot_copy_large_copy_value_falls_back_to_strategy_path() {
+        // 32 bytes > INLINE_CAP (24) → not inline-eligible; uses the strategy
+        // path (RwLock for the default LowConcurrency).
+        let ctx = ThreadSafeContext::with_read_strategy(ReadStrategy::LowConcurrency);
+        let cell = ctx.cell(7u8);
+        let big = ctx.slot_copy(move |c| [c.get_cell(&cell); 32]);
+        assert_eq!(slot_storage_kind(&ctx, &big), "locked");
+        assert_eq!(ctx.get(&big), [7u8; 32]);
+        ctx.set_cell(&cell, 9);
+        assert_eq!(ctx.get(&big), [9u8; 32]);
+    }
+
+    #[test]
+    fn memo_copy_inline_roundtrips_multifield_struct() {
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        struct Point {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell(1_i32);
+        let p = ctx.memo_copy(move |c| {
+            let v = c.get_cell(&cell);
+            Point {
+                x: v,
+                y: v * 2,
+                z: v * 3,
+            }
+        });
+        assert_eq!(slot_storage_kind(&ctx, &p), "inline");
+        assert_eq!(ctx.get(&p), Point { x: 1, y: 2, z: 3 });
+        ctx.set_cell(&cell, 4);
+        assert_eq!(ctx.get(&p), Point { x: 4, y: 8, z: 12 });
+    }
+
+    #[test]
+    fn inline_seqlock_concurrent_readers_never_observe_torn_value() {
+        // A `Copy` value whose two halves a writer always keeps equal (and a
+        // monotonically non-decreasing tag). A torn read (half old / half new)
+        // would surface as `a != b`; the seqlock must make every lock-free
+        // `read_fresh` observe a complete, self-consistent snapshot — that is
+        // the inline-storage safety property (freshness vs the latest publish
+        // is the same envelope as the other strategies and is covered by the
+        // single-threaded tests; under concurrent recompute a reader may win the
+        // publish race, so exact freshness is not asserted here — only that no
+        // value is ever observed torn). Loom proves the orderings exhaustively
+        // in `thread_safe_loom::inline_seqlock_*`.
+        #[derive(Clone, Copy)]
+        struct Pair {
+            a: u64,
+            b: u64,
+        }
+        let ctx = Arc::new(ThreadSafeContext::new());
+        let cell = ctx.cell(0u64);
+        let pair = ctx.slot_copy(move |c| {
+            let v = c.get_cell(&cell);
+            Pair { a: v, b: v }
+        });
+        assert_eq!(slot_storage_kind(&ctx, &pair), "inline");
+        let _ = ctx.get(&pair);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let ctx = Arc::clone(&ctx);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let p = ctx.get(&pair);
+                        assert_eq!(p.a, p.b, "torn inline read: {} != {}", p.a, p.b);
+                    }
+                })
+            })
+            .collect();
+
+        for i in 1..3000u64 {
+            // Each publish (seqlock write under the state lock) races the
+            // lock-free readers above.
+            ctx.set_cell(&cell, i);
+            let _ = ctx.get(&pair);
+        }
+        stop.store(true, Ordering::Relaxed);
+        for reader in readers {
+            reader.join().expect("reader thread panicked (torn read)");
+        }
+
+        // After quiescence the inline value reflects the final publish.
+        ctx.set_cell(&cell, 4242);
+        let p = ctx.get(&pair);
+        assert_eq!(p.a, 4242);
+        assert_eq!(p.b, 4242);
     }
 
     fn slot_revision<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> u64

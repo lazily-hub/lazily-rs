@@ -364,7 +364,7 @@ Lock strategy evaluation:
   - `LowConcurrency` → `parking_lot::RwLock<Option<Arc<dyn Any + Send + Sync>>>` read — optimal uncontended / low core counts (the default).
   - `HighConcurrency` → `arc_swap::ArcSwapOption<Arc<dyn Any + Send + Sync>>` wait-free load — no read lock; optimal at 8+ cores. (`arc-swap`'s `RefCnt` is `Sized`-only, so it stores `Arc<Arc<dyn Any>>`; the extra outer `Arc` is allocated only on the cold publish path, never on the read.)
 
-  Both reconstruct `&T` via the inline `type_id` without vtable indirection, and both carry the **same** atomic `cache_revision` + `dirty`/`force_recompute` validation envelope (loaded before, re-checked after the clone), so a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation value regardless of strategy. The runtime selection costs one per-read enum branch (the price of compiling both paths). **0.9.0 shipped arc-swap as the default; 0.10.0 (#rdstrat1) flips the default to `LowConcurrency`** with explicit opt-in to `HighConcurrency`. Verified by the full default suite (both strategies) and the `thread_safe_loom` model (the validation algorithm is identical across variants). The inline small-`Copy` seqlock fast path that subsumes this tradeoff for small values is #rdstrat2 (deferred; see plan).
+  Both reconstruct `&T` via the inline `type_id` without vtable indirection, and both carry the **same** atomic `cache_revision` + `dirty`/`force_recompute` validation envelope (loaded before, re-checked after the clone), so a `get` starting after a completed cross-thread invalidation cannot return the pre-invalidation value regardless of strategy. The runtime selection costs one per-read enum branch (the price of compiling both paths). **0.9.0 shipped arc-swap as the default; 0.10.0 (#rdstrat1) flips the default to `LowConcurrency`** with explicit opt-in to `HighConcurrency`. Verified by the full default suite (both strategies) and the `thread_safe_loom` model (the validation algorithm is identical across variants). The inline small-`Copy` seqlock fast path that subsumes this tradeoff for small values is #rdstrat2 (**implemented**; opt-in via `slot_copy`/`computed_copy`/`memo_copy` — see *Inline small-`Copy` seqlock* below).
 
   **Contention tradeoff (rigorous isolated-worktree A/B, #xtwf).** This is a deliberate low-contention-for-high-contention trade, not a free win. Comparing `463ca71` (arc-swap) against its parent `06fd3c2` (the `parking_lot::RwLock` read) on a shared Criterion target dir, same host/toolchain:
 
@@ -377,7 +377,7 @@ Lock strategy evaluation:
 
   arc-swap's wait-free read wins at high core counts where `RwLock` read-lock cache-line traffic dominates, but its debt-tracking load plus the `Arc<Arc<…>>` double-indirection costs a few percent when uncontended. lazily-rs `ThreadSafeContext` targets highly-parallel reactive graphs, so the 8/16-worker win is the operative case and the ≤~3% uncontended/low-contention regression is accepted (see the revised benchmark gate below). The contended numbers carry wide confidence intervals; treat the crossover (~4→8 workers) as approximate.
 - Any future sharding or CAS path must include a Loom or Shuttle safety model covering concurrent first get, stale in-flight completion, invalidation during compute, effect scheduling/disposal, and re-entrant callbacks before it can replace the single-graph-lock design
-- The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, dynamic dependency switch/disposal cleanup, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, and nested batch invalidation flushing only at the outermost boundary
+- The current sidecar `Mutex`/`Condvar` waiter path, optimistic cached-read fallback, and explicit invalidation-plan safety envelope are covered by `cargo test --features loom --test thread_safe_loom`, which models concurrent first get, scoped slot notification, waiter-counted handoff wakeup draining, stale in-flight completion and retry, read-mostly waiter handoff, mid-read optimistic validation fallback, invalidation during compute, fast-frontier fallback while dependency discovery is active, dynamic dependency switch/disposal cleanup, effect scheduling/disposal races, re-entrant callback graph access, duplicate diamond paths marking each frontier slot once, effect enqueue coalescing, nested batch invalidation flushing only at the outermost boundary, and the inline small-`Copy` seqlock (#rdstrat2) refusing torn reads and stale post-invalidation reads under concurrent single-writer publish
 - A lock-strategy change must preserve the rule that user compute/effect/cleanup callbacks never run while holding graph-state locks
 
 Sharded/versioned storage evaluation:
@@ -481,7 +481,61 @@ Future implications:
   `Arc<dyn Any>` entirely, storing the value inline for small types and
   avoiding heap allocation on compute.  The current inline-`TypeId` step
   preserves the `Rc<dyn Any>` / `Arc<dyn Any>` layout while unlocking the
-  fast-path read optimization.
+  fast-path read optimization. **Partially implemented for `ThreadSafeContext`
+  cached reads** (#rdstrat2): the slot cached-read sidecar
+  (`CachedReadStorage::Inline`) stores small `Copy` values inline behind a
+  wait-free seqlock — see *Inline small-`Copy` seqlock* below. The node still
+  retains its `Arc<dyn Any>` value (the inline buffer is a read-acceleration
+  duplicate); a full `ErasedValue` that removes the `Arc` for non-`Copy` types
+  remains future work.
+
+### Inline small-`Copy` seqlock (#rdstrat2)
+
+For small `Copy` values, the `ThreadSafeContext` slot cached-read sidecar
+(`ThreadSafeSlotFastPath.value`) selects a third `CachedReadStorage` variant,
+`Inline`, instead of the strategy-selected `Locked`/`LockFree` path. The value's
+bytes are stored inline in `[AtomicU8; INLINE_CAP]` (`INLINE_CAP = 24`,
+alignment bound 16) behind a **single-writer / multi-reader seqlock**, with no
+heap `Arc`, no refcount traffic on either read or publish. The inline path is
+optimal under **both** `ReadStrategy` modes; the runtime mode only governs the
+large / non-`Copy` fallback.
+
+- **Soundness conditions.** Inline is chosen only when `T: Copy` *and*
+  `size_of::<T>() <= INLINE_CAP` *and* `align_of::<T>() <= 16`. `Copy` removes
+  any `Drop` / ownership hazard from a discarded torn read; the size/alignment
+  bound keeps the byte copy in-bounds. The bytes are read/written with
+  **relaxed atomic** per-byte operations (not a plain `memcpy`), so a reader
+  racing the single writer is well-defined under the Rust memory model — unlike
+  a classic non-atomic seqlock, which has a formally-UB benign data race. The
+  inline `type_id` proves `T` so the validated byte snapshot can be
+  reconstructed into `T` without a vtable.
+- **Single-writer invariant.** Every `write` (value publish in
+  `recompute_slot_now`, clear in `apply_locked`) runs while holding the graph
+  state write lock, so writes are serialized; only reads are lock-free. The
+  `seq` counter is even when stable, odd while a write is in progress; a reader
+  observing an odd or changed `seq` discards its snapshot and retries. The
+  closing `Release` store of the even `seq` and the reader's bracketing Acquire
+  loads (with the canonical Acquire fence) make an accepted snapshot a
+  consistent image of exactly one publish.
+- **Same validation envelope.** The inline path carries the identical atomic
+  `cache_revision` + `dirty` / `force_recompute` envelope as the other two
+  strategies, so a read racing a publish/invalidation is rejected identically.
+- **Opt-in constructors.** Inline selection is **not** automatic on the generic
+  `slot` / `computed` / `memo` constructors: stable Rust cannot branch on
+  `T: Copy` inside a generic fn that lacks the bound (method resolution is
+  pre-monomorphization, so a `Copy`-gated impl is never *applicable* where the
+  bound is unprovable; automatic detection would require nightly
+  `specialization`). The inline path is therefore opt-in through the
+  `Copy`-bounded `slot_copy` / `computed_copy` / `memo_copy` constructors,
+  which fall back transparently to the strategy path when the value exceeds the
+  inline size/alignment bound.
+- **Loom gate.** The seqlock orderings (single-writer publish vs. concurrent
+  lock-free readers, plus the `cache_revision`/`dirty` envelope) are modeled
+  exhaustively by `cargo test --features loom --test thread_safe_loom`
+  (`inline_seqlock_reader_never_observes_torn_value`,
+  `inline_seqlock_envelope_rejects_torn_and_stale_under_concurrent_publish`,
+  `inline_seqlock_read_after_completed_invalidation_is_rejected`), satisfying
+  the lock-strategy Loom gate before landing.
 
 Tokio integration is scoped in two stages:
 
