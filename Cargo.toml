@@ -1,12 +1,15 @@
 [package]
 name = "lazily"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "Lazy reactive signals with dependency tracking and cache invalidation"
 license = "MIT"
 repository = "https://github.com/btakita/lazily-rs"
 keywords = ["reactive", "signals", "lazy", "dependency-tracking", "cache"]
 categories = ["data-structures"]
+# The signaling/ subtree is a standalone TypeScript Cloudflare Worker + client,
+# not part of the Rust crate; keep it out of the published package.
+exclude = ["signaling/"]
 
 [features]
 async = ["dep:tokio"]
