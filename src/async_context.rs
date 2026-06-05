@@ -744,48 +744,70 @@ impl AsyncContext {
     where
         T: Clone + Send + Sync + 'static,
     {
-        if let Some(val) = self.get(handle) {
-            return val;
-        }
-
-        let mut recv = {
-            let inner = self.inner.lock();
-            match inner.get_node(handle.id) {
-                Some(AsyncNode::Slot(slot)) => match &slot.state {
-                    AsyncSlotState::Computing { .. } => slot
-                        .notifier
-                        .as_ref()
-                        .expect("computing without notifier")
-                        .subscribe(),
-                    AsyncSlotState::Error | AsyncSlotState::Empty => {
-                        drop(inner);
-                        spawn_async_compute(self, handle.id)
-                    }
-                    AsyncSlotState::Resolved => {
-                        unreachable!("get() already checked Resolved")
-                    }
-                },
-                _ => panic!("AsyncSlotHandle does not point to a Slot node"),
-            }
-        };
-
+        // Outer loop re-resolves from authoritative slot state. Two concurrency
+        // windows make a single straight-line pass insufficient (#k03k):
+        //   1. The slot can transition `Computing -> Resolved` between the
+        //      `get()` fast-path check (which drops the lock) and the re-lock
+        //      below — so `Resolved` is reachable here and must be read, not
+        //      treated as unreachable.
+        //   2. The notifier's `watch` senders can all drop without a final
+        //      `Resolved` send when an in-flight compute is superseded by a
+        //      newer revision (`spawn_revision` mismatch -> early return) or the
+        //      slot is invalidated. A dropped notifier therefore means "the
+        //      world changed", not a fatal error: restart and re-observe.
         loop {
-            if recv.changed().await.is_err() {
-                panic!("get_async: notifier dropped unexpectedly");
+            // Fast path: value already published.
+            if let Some(val) = self.get(handle) {
+                return val;
             }
-            let completion = recv.borrow_and_update().clone();
-            match completion {
-                AsyncCompletion::Resolved(val) => {
-                    return val
-                        .downcast_ref::<T>()
-                        .expect("type mismatch in get_async completion")
-                        .clone();
+
+            let mut recv = {
+                let inner = self.inner.lock();
+                match inner.get_node(handle.id) {
+                    Some(AsyncNode::Slot(slot)) => match &slot.state {
+                        AsyncSlotState::Computing { .. } => slot
+                            .notifier
+                            .as_ref()
+                            .expect("computing without notifier")
+                            .subscribe(),
+                        AsyncSlotState::Error | AsyncSlotState::Empty => {
+                            drop(inner);
+                            spawn_async_compute(self, handle.id)
+                        }
+                        AsyncSlotState::Resolved => {
+                            // Window (1): resolved since the `get()` check.
+                            let val = slot.value.as_ref().expect("resolved without value");
+                            return val
+                                .downcast_ref::<T>()
+                                .expect("type mismatch in get_async")
+                                .clone();
+                        }
+                    },
+                    _ => panic!("AsyncSlotHandle does not point to a Slot node"),
                 }
-                AsyncCompletion::Error(_err) => {
-                    recv = spawn_async_compute(self, handle.id);
-                    continue;
+            };
+
+            'await_completion: loop {
+                if recv.changed().await.is_err() {
+                    // Window (2): notifier dropped (compute superseded or slot
+                    // invalidated). Re-resolve from current slot state instead
+                    // of panicking.
+                    break 'await_completion;
                 }
-                AsyncCompletion::Pending => continue,
+                let completion = recv.borrow_and_update().clone();
+                match completion {
+                    AsyncCompletion::Resolved(val) => {
+                        return val
+                            .downcast_ref::<T>()
+                            .expect("type mismatch in get_async completion")
+                            .clone();
+                    }
+                    AsyncCompletion::Error(_err) => {
+                        recv = spawn_async_compute(self, handle.id);
+                        continue 'await_completion;
+                    }
+                    AsyncCompletion::Pending => continue 'await_completion,
+                }
             }
         }
     }

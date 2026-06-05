@@ -407,3 +407,47 @@ async fn async_context_sync_get_across_tokio_tasks() {
     let reader2 = tokio::spawn(async move { ctx_c.get(&slot) });
     assert_eq!(reader2.await.unwrap(), None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn async_context_concurrent_set_and_get_async_never_panics_k03k() {
+    // Regression for #k03k. Concurrent `set_cell` (invalidation) racing
+    // `get_async` (re-resolve) previously panicked on a benign race:
+    //   - `unreachable!("get() already checked Resolved")` when the slot
+    //     transitioned `Computing -> Resolved` between the `get()` fast-path
+    //     check and the re-lock inside `get_async`; and
+    //   - `get_async: notifier dropped unexpectedly` when a superseded
+    //     (stale-revision) or invalidated compute dropped its `watch` senders
+    //     without a final `Resolved` send.
+    // Both must now re-resolve from authoritative slot state, not panic.
+    let ctx = Arc::new(AsyncContext::new());
+    let cell = ctx.cell(0usize);
+    let slot: AsyncSlotHandle<usize> = ctx.computed_async(move |ctx| {
+        let v = ctx.get_cell(&cell);
+        async move { v.wrapping_add(1) }
+    });
+    let _ = ctx.get_async(&slot).await;
+
+    let workers = 8usize;
+    let iters = 250usize;
+    let mut handles = Vec::with_capacity(workers);
+    for w in 0..workers {
+        let ctx_c = Arc::clone(&ctx);
+        let cell_c = cell;
+        let slot_c = slot;
+        handles.push(tokio::spawn(async move {
+            for i in 0..iters {
+                ctx_c.set_cell(&cell_c, w * iters + i);
+                // Always resolves to (some observed cell + 1); never panics.
+                let v = ctx_c.get_async(&slot_c).await;
+                assert!(v >= 1, "computed value should be cell + 1");
+            }
+        }));
+    }
+    for h in handles {
+        h.await.expect("worker task panicked (race in get_async)");
+    }
+
+    // After contention settles, a fresh write resolves deterministically.
+    ctx.set_cell(&cell, 4242);
+    assert_eq!(ctx.get_async(&slot).await, 4243);
+}

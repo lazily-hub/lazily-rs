@@ -680,6 +680,31 @@ only if the revision is still current.
 5. **Effect cleanup futures** must complete before the next effect body starts.
    Disposal removes pending reruns before awaiting cleanup.
 
+#### `get_async` re-resolve contract (#k03k)
+
+`get_async` must treat the slot state as authoritative and **re-resolve** rather
+than assert, because the slot can change between its lock acquisitions and a
+notifier can close under it. It runs an outer loop that, each pass, re-reads the
+slot via the `get()` fast path and then re-locks to attach to / spawn a
+computation. Two concurrency windows are load-bearing:
+
+1. **Resolved-since-`get()`:** the slot can transition `Computing → Resolved`
+   between the `get()` fast-path check (which releases the lock) and the
+   re-lock. Observing `Resolved` at the re-lock is therefore expected and the
+   cached value is read directly — it is **not** an unreachable state.
+2. **Notifier dropped:** the per-computation `watch` senders can all drop
+   without a final `Resolved` send when an in-flight compute is superseded by a
+   newer revision (the stale `Computing → Computing` transition early-returns) or
+   the slot is invalidated. A `recv.changed()` error means "the world changed",
+   not a fatal error: the awaiter restarts the outer loop and re-resolves from
+   current slot state (returning the now-published value, attaching to the new
+   in-flight compute, or respawning).
+
+Neither window is a data inconsistency — the published value is always correct;
+the contract is that `get_async` never panics on these benign races. Covered by
+`async_context_concurrent_set_and_get_async_never_panics_k03k`, which fails
+deterministically against the prior assert-based implementation.
+
 #### AsyncContext dependency tracking
 
 Async compute and effect callbacks do not use thread-local tracking stacks.
