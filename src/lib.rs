@@ -67,4 +67,4 @@ pub use instrumentation::{
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
 pub use slot::SlotHandle;
-pub use thread_safe::{ThreadSafeContext, ThreadSafeEffectCallbackResult};
+pub use thread_safe::{ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult};

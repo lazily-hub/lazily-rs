@@ -413,15 +413,67 @@ enum ThreadSafeDependentKind {
     Effect,
 }
 
+/// Runtime-selectable cached-read strategy for [`ThreadSafeContext`]
+/// (#rdstrat1). Both paths are compiled in; the mode is chosen at context
+/// construction (`ThreadSafeContext::with_read_strategy`), defaulting to
+/// `LowConcurrency`. See `SPEC.md` → *Lock strategy evaluation*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadStrategy {
+    /// `parking_lot::RwLock` reads — optimal uncontended / low core counts.
+    #[default]
+    LowConcurrency,
+    /// `arc_swap::ArcSwapOption` wait-free reads — optimal at 8+ cores
+    /// (#vd5v); a few percent slower uncontended.
+    HighConcurrency,
+}
+
+/// Read-mostly cached-value sidecar storage. The variant is fixed per slot at
+/// creation from the owning context's [`ReadStrategy`]; both carry the same
+/// atomic `cache_revision` validation envelope, so correctness is identical.
+///
+/// `LockFree` stores `Arc<Arc<dyn Any>>` because `arc-swap`'s `RefCnt` is
+/// `Sized`-only (the inner `Arc` is a sized fat pointer); the extra outer `Arc`
+/// is allocated only on the cold publish path, never on the read.
+enum CachedReadStorage {
+    Locked(RwLock<Option<Arc<ThreadSafeAny>>>),
+    LockFree(ArcSwapOption<Arc<ThreadSafeAny>>),
+}
+
+impl CachedReadStorage {
+    fn new(strategy: ReadStrategy) -> Self {
+        match strategy {
+            ReadStrategy::LowConcurrency => CachedReadStorage::Locked(RwLock::new(None)),
+            ReadStrategy::HighConcurrency => CachedReadStorage::LockFree(ArcSwapOption::empty()),
+        }
+    }
+
+    /// Run `f` with the currently-published value (borrowed; a read lock is held
+    /// for `Locked`, a wait-free loaded guard for `LockFree`).
+    fn with_value<R>(&self, f: impl FnOnce(Option<&Arc<ThreadSafeAny>>) -> R) -> R {
+        match self {
+            CachedReadStorage::Locked(lock) => f(lock.read().as_ref()),
+            CachedReadStorage::LockFree(swap) => {
+                let snapshot = swap.load();
+                f(snapshot.as_ref().map(|outer| &**outer))
+            }
+        }
+    }
+
+    fn store(&self, value: Option<Arc<ThreadSafeAny>>) {
+        match self {
+            CachedReadStorage::Locked(lock) => *lock.write() = value,
+            CachedReadStorage::LockFree(swap) => swap.store(value.map(Arc::new)),
+        }
+    }
+}
+
 struct ThreadSafeSlotFastPath {
-    // Lock-free read-mostly cached-value sidecar (#vd5v / #lazilyperf38). The
-    // inline `type_id` proves `T` so a reader can reconstruct `&T` from the
-    // atomically-published pointer without a vtable; the atomic `cache_revision`
-    // envelope still rejects mid-read invalidation / publish races. The stored
-    // `Arc<Arc<dyn Any>>` keeps an inner sized fat pointer because `arc-swap`'s
-    // `RefCnt` is `Sized`-only; the extra outer `Arc` is allocated on the cold
-    // publish path, never on the lock-free read.
-    value: ArcSwapOption<Arc<ThreadSafeAny>>,
+    // Read-mostly cached-value sidecar (#vd5v / #rdstrat1). The inline `type_id`
+    // proves `T` so a reader can reconstruct `&T` without a vtable; the atomic
+    // `cache_revision` envelope rejects mid-read invalidation / publish races.
+    // Storage variant (RwLock vs arc-swap) is selected per the context's
+    // `ReadStrategy` at creation.
+    value: CachedReadStorage,
     type_id: TypeId,
     cache_revision: AtomicU64,
     dirty: AtomicBool,
@@ -439,10 +491,11 @@ impl ThreadSafeSlotFastPath {
         compute: Arc<ThreadSafeComputeFn>,
         initial_dependencies: EdgeVec,
         type_id: TypeId,
+        strategy: ReadStrategy,
     ) -> Self {
         let slot_dependency_count = initial_dependencies.len();
         Self {
-            value: ArcSwapOption::empty(),
+            value: CachedReadStorage::new(strategy),
             type_id,
             cache_revision: AtomicU64::default(),
             dirty: AtomicBool::default(),
@@ -469,12 +522,14 @@ impl ThreadSafeSlotFastPath {
             return None;
         }
 
-        // Lock-free atomic load of the published value snapshot; no read lock.
-        let snapshot = self.value.load();
-        let value = snapshot.as_ref().map(|value| {
-            assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
-            let erased: &ThreadSafeAny = &***value;
-            unsafe { &*(erased as *const ThreadSafeAny as *const T) }.clone()
+        // Read the published snapshot via the selected strategy (wait-free load
+        // for LockFree, read lock for Locked).
+        let value = self.value.with_value(|slot| {
+            slot.map(|value| {
+                assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
+                let erased: &ThreadSafeAny = &**value;
+                unsafe { &*(erased as *const ThreadSafeAny as *const T) }.clone()
+            })
         });
         if self.cache_revision.load(Ordering::Acquire) != cache_revision
             || self.dirty.load(Ordering::Acquire)
@@ -500,7 +555,7 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn store_value(&self, value: Option<Arc<ThreadSafeAny>>) {
-        self.value.store(value.map(Arc::new));
+        self.value.store(value);
         self.cache_revision.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -1018,6 +1073,7 @@ struct ThreadSafeInner {
     state: StateMutex<ThreadSafeState>,
     slot_fast_paths: RwLock<Vec<Option<Arc<ThreadSafeSlotFastPath>>>>,
     cell_fast_paths: RwLock<Vec<Option<Arc<ThreadSafeCellFastPath>>>>,
+    read_strategy: ReadStrategy,
     batch_depth: AtomicUsize,
     active_callbacks: AtomicUsize,
     #[cfg(feature = "instrumentation")]
@@ -1032,6 +1088,7 @@ impl Default for ThreadSafeInner {
             state: StateMutex::new(ThreadSafeState::default()),
             slot_fast_paths: RwLock::new(Vec::new()),
             cell_fast_paths: RwLock::new(Vec::new()),
+            read_strategy: ReadStrategy::default(),
             batch_depth: AtomicUsize::new(0),
             active_callbacks: AtomicUsize::new(0),
             #[cfg(feature = "instrumentation")]
@@ -1196,6 +1253,24 @@ impl Drop for FlushGuard {
 impl ThreadSafeContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a context with an explicit cached-read [`ReadStrategy`] (#rdstrat1).
+    ///
+    /// Both read paths are compiled in; this selects the mode at runtime for the
+    /// context's lifetime. `new()` / `default()` use `ReadStrategy::LowConcurrency`.
+    pub fn with_read_strategy(strategy: ReadStrategy) -> Self {
+        Self {
+            inner: Arc::new(ThreadSafeInner {
+                read_strategy: strategy,
+                ..ThreadSafeInner::default()
+            }),
+        }
+    }
+
+    /// The cached-read strategy selected for this context.
+    pub fn read_strategy(&self) -> ReadStrategy {
+        self.inner.read_strategy
     }
 
     fn context_id(&self) -> ThreadSafeContextId {
@@ -1546,6 +1621,7 @@ impl ThreadSafeContext {
             Arc::clone(&compute),
             EdgeVec::new(),
             TypeId::of::<T>(),
+            self.inner.read_strategy,
         ));
         let node = ThreadSafeSlotNode {
             value: None,
@@ -2517,6 +2593,33 @@ impl ThreadSafeContext {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn read_strategy_defaults_to_low_concurrency() {
+        assert_eq!(
+            ThreadSafeContext::new().read_strategy(),
+            ReadStrategy::LowConcurrency
+        );
+        assert_eq!(
+            ThreadSafeContext::with_read_strategy(ReadStrategy::HighConcurrency).read_strategy(),
+            ReadStrategy::HighConcurrency
+        );
+    }
+
+    #[test]
+    fn both_read_strategies_cache_and_invalidate_correctly() {
+        for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
+            let ctx = ThreadSafeContext::with_read_strategy(strategy);
+            let cell = ctx.cell(2_i32);
+            let doubled = ctx.computed(move |c| c.get_cell(&cell) * 10);
+            // cold compute + cached read
+            assert_eq!(ctx.get(&doubled), 20, "{strategy:?}");
+            assert_eq!(ctx.get(&doubled), 20, "{strategy:?} cached");
+            // invalidate via cell write, recompute
+            ctx.set_cell(&cell, 5);
+            assert_eq!(ctx.get(&doubled), 50, "{strategy:?} after set");
+        }
+    }
 
     fn slot_revision<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> u64
     where
