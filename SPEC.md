@@ -1148,6 +1148,26 @@ dependency enters the core crate. The `Delta`/`ipc_epoch` model is a
 single-writer linear log; whether multi-writer needs CRDT merge or Raft
 consensus on top of that log is exactly the #ipc3 question.
 
+Implemented surface:
+
+- `Snapshot { epoch, nodes, edges, roots }`, `NodeSnapshot`, `NodeState`, and
+  `EdgeSnapshot` define the full graph image.
+- `Delta { base_epoch, epoch, ops }` and `DeltaOp` define the one-flush
+  incremental image. `Delta::next(base_epoch, ops)` enforces
+  `epoch == base_epoch + 1`; `Delta::apply_status(last_epoch)` returns
+  `Apply` or `ResyncRequired`.
+- `Snapshot::filter_readable` and `Delta::filter_readable` apply
+  `PeerPermissions` before serialization. Non-readable nodes and operations are
+  omitted entirely; edges are retained only when both endpoints are readable.
+- `IpcMessage`, `IpcSink`, and `IpcSource` keep Unix sockets, pipes,
+  WebSockets, and shared-memory ring buffers outside the core crate.
+
+Shared-memory IPC is therefore a supported transport direction, not a separate
+reactive-graph mode: the shared memory segment should carry framed
+`IpcMessage`s, while each process keeps its own local `Context` /
+`ThreadSafeContext` and reconciles via snapshots and deltas. A live `Context`
+is not shared across process address spaces.
+
 ## Multi-writer coordination: CRDT vs Raft (`lazily-distributed`)
 
 `lazily-ipc` (above) is a **single-writer** linear log: one authority mutates

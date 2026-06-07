@@ -39,11 +39,13 @@
 mod async_context;
 mod cell;
 mod context;
-#[cfg(feature = "distributed")]
+#[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
 mod effect;
 #[cfg(feature = "instrumentation")]
 mod instrumentation;
+#[cfg(feature = "ipc")]
+mod ipc;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
 mod slot;
@@ -56,13 +58,18 @@ pub use async_context::{
 };
 pub use cell::CellHandle;
 pub use context::Context;
-#[cfg(feature = "distributed")]
+#[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
 pub use effect::{EffectCallbackResult, EffectHandle};
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{
     InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeLockSite,
     ThreadSafeLockSiteSnapshot,
+};
+#[cfg(feature = "ipc")]
+pub use ipc::{
+    Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, IpcPayload, IpcSink, IpcSource,
+    NodeSnapshot, NodeState, Snapshot,
 };
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};

@@ -16,6 +16,7 @@ async = ["dep:tokio"]
 default = ["smallvec"]
 distributed = []
 instrumentation = []
+ipc = ["serde"]
 loom = []
 serde = ["dep:serde", "smallvec?/serde"]
 # Async client for the #yxjw Cloudflare signaling endpoint, so a Rust project

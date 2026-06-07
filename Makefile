@@ -13,12 +13,13 @@ PYTHON ?= python3
 	test-async \
 	test-loom \
 	test-distributed \
+	test-ipc \
 	test-signaling-client \
 	benchmark-check \
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-loom test-distributed test-signaling-client benchmark-check
+check: fmt clippy build test test-tokio test-async test-loom test-distributed test-ipc test-signaling-client benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -43,6 +44,9 @@ test-loom:
 
 test-distributed:
 >$(CARGO) test --locked --features "distributed serde"
+
+test-ipc:
+>$(CARGO) test --locked --features ipc --test ipc
 
 test-signaling-client:
 >$(CARGO) test --locked --features signaling-client
