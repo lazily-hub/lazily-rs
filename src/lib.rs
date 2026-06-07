@@ -69,7 +69,8 @@ pub use instrumentation::{
 #[cfg(feature = "ipc")]
 pub use ipc::{
     Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, IpcPayload, IpcSink, IpcSource,
-    NodeSnapshot, NodeState, Snapshot,
+    IpcValue, NodeSnapshot, NodeState, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError,
+    ShmBlobRef, Snapshot,
 };
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};

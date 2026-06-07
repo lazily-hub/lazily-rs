@@ -2,7 +2,8 @@
 
 use lazily::{
     Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeSnapshot, NodeState,
-    OpKind, PeerId, PeerPermissions, RemoteOp, Snapshot,
+    OpKind, PeerId, PeerPermissions, RemoteOp, SHM_BLOB_HEADER_LEN, ShmBlobArena,
+    ShmBlobArenaError, Snapshot,
 };
 
 const PEER_A: PeerId = PeerId(1);
@@ -165,4 +166,75 @@ fn delta_filter_omits_non_readable_ops_without_redaction() {
             },
         ]
     );
+}
+
+#[test]
+fn shm_blob_arena_round_trips_payload_by_descriptor() {
+    let mut arena = ShmBlobArena::with_capacity(SHM_BLOB_HEADER_LEN + 128).unwrap();
+    let blob = arena.write_blob(12, b"large context pack").unwrap();
+
+    assert_eq!(arena.read_blob(blob).unwrap(), b"large context pack");
+    assert_eq!(blob.epoch, 12);
+    assert_eq!(blob.len, "large context pack".len() as u64);
+}
+
+#[test]
+fn shm_blob_arena_rejects_oversized_payload() {
+    let mut arena = ShmBlobArena::with_capacity(SHM_BLOB_HEADER_LEN + 4).unwrap();
+    let err = arena.write_blob(1, b"12345").unwrap_err();
+
+    assert_eq!(err, ShmBlobArenaError::BlobTooLarge { len: 5, max_len: 4 });
+}
+
+#[test]
+fn shm_blob_arena_wrap_rejects_stale_descriptor() {
+    let mut arena = ShmBlobArena::with_capacity((SHM_BLOB_HEADER_LEN * 2) + 8).unwrap();
+    let old = arena.write_blob(1, b"old").unwrap();
+    let _middle = arena.write_blob(2, b"abcd").unwrap();
+    let _new = arena.write_blob(3, b"new").unwrap();
+
+    let err = arena.read_blob(old).unwrap_err();
+    assert!(matches!(
+        err,
+        ShmBlobArenaError::DescriptorMismatch {
+            field: "generation"
+        } | ShmBlobArenaError::DescriptorMismatch { field: "checksum" }
+    ));
+}
+
+#[test]
+fn shm_blob_arena_rejects_torn_payload() {
+    let mut arena = ShmBlobArena::with_capacity(SHM_BLOB_HEADER_LEN + 32).unwrap();
+    let blob = arena.write_blob(4, b"payload").unwrap();
+    let payload_offset = blob.offset as usize + SHM_BLOB_HEADER_LEN;
+    arena.bytes_mut()[payload_offset] ^= 0xff;
+
+    let err = arena.read_blob(blob).unwrap_err();
+    assert!(matches!(err, ShmBlobArenaError::ChecksumMismatch { .. }));
+}
+
+#[test]
+fn ipc_messages_can_reference_shared_blobs() {
+    let mut arena = ShmBlobArena::with_capacity(SHM_BLOB_HEADER_LEN + 128).unwrap();
+    let blob = arena.write_blob(9, b"large slot value").unwrap();
+    let snapshot = Snapshot::new(
+        9,
+        vec![NodeSnapshot::shared_blob(NodeId(7), "text/plain", blob)],
+        vec![],
+        vec![NodeId(7)],
+    );
+    let delta = Delta::next(9, vec![DeltaOp::slot_value_blob(NodeId(7), blob)]);
+
+    let snapshot_json = serde_json::to_string(&IpcMessage::Snapshot(snapshot.clone())).unwrap();
+    let delta_json = serde_json::to_string(&IpcMessage::Delta(delta.clone())).unwrap();
+
+    assert_eq!(
+        serde_json::from_str::<IpcMessage>(&snapshot_json).unwrap(),
+        IpcMessage::Snapshot(snapshot)
+    );
+    assert_eq!(
+        serde_json::from_str::<IpcMessage>(&delta_json).unwrap(),
+        IpcMessage::Delta(delta)
+    );
+    assert_eq!(arena.read_blob(blob).unwrap(), b"large slot value");
 }

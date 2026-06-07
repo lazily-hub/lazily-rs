@@ -6,6 +6,15 @@
 //! that transports can carry.
 
 use crate::distributed::{NodeId, PeerId, PeerPermissions, RemoteOp};
+use std::fmt;
+
+/// Bytes reserved before every shared-memory blob payload.
+pub const SHM_BLOB_HEADER_LEN: usize = 40;
+
+const SHM_BLOB_MAGIC: u32 = 0x4c5a_5348; // "LZSH"
+const SHM_BLOB_VERSION: u16 = 1;
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Serialized value bytes for a node.
 ///
@@ -14,11 +23,305 @@ use crate::distributed::{NodeId, PeerId, PeerPermissions, RemoteOp};
 /// the node value.
 pub type IpcPayload = Vec<u8>;
 
+/// Descriptor for a payload stored in a shared-memory blob arena.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ShmBlobRef {
+    /// Offset of the blob header from the beginning of the shared arena.
+    pub offset: u64,
+    /// Payload length in bytes, excluding the arena header.
+    pub len: u64,
+    /// Per-write generation used to reject stale descriptors after wraparound.
+    pub generation: u64,
+    /// IPC epoch associated with the message that published this blob.
+    pub epoch: u64,
+    /// Non-cryptographic payload checksum for torn-write/stale-region checks.
+    pub checksum: u64,
+}
+
+/// IPC value stored inline or by shared-memory blob reference.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IpcValue {
+    /// Inline serialized bytes.
+    Inline(IpcPayload),
+    /// Descriptor for bytes stored in a shared-memory blob arena.
+    SharedBlob(ShmBlobRef),
+}
+
+impl From<IpcPayload> for IpcValue {
+    fn from(payload: IpcPayload) -> Self {
+        Self::Inline(payload)
+    }
+}
+
+impl From<ShmBlobRef> for IpcValue {
+    fn from(blob: ShmBlobRef) -> Self {
+        Self::SharedBlob(blob)
+    }
+}
+
+/// Error returned by [`ShmBlobArena`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShmBlobArenaError {
+    /// The backing buffer cannot hold even one blob header plus one payload byte.
+    CapacityTooSmall {
+        /// Actual backing-buffer capacity.
+        capacity: usize,
+        /// Minimum usable capacity.
+        min_capacity: usize,
+    },
+    /// Payload is larger than the largest single blob this arena can hold.
+    BlobTooLarge {
+        /// Requested payload length.
+        len: usize,
+        /// Maximum payload length.
+        max_len: usize,
+    },
+    /// Descriptor points outside this arena.
+    DescriptorOutOfBounds {
+        /// Descriptor offset.
+        offset: u64,
+        /// Descriptor payload length.
+        len: u64,
+        /// Backing-buffer capacity.
+        capacity: usize,
+    },
+    /// Descriptor/header metadata did not match.
+    DescriptorMismatch {
+        /// Mismatched field name.
+        field: &'static str,
+    },
+    /// Payload checksum did not match the descriptor/header checksum.
+    ChecksumMismatch {
+        /// Expected checksum.
+        expected: u64,
+        /// Actual checksum.
+        actual: u64,
+    },
+    /// The arena generation counter overflowed.
+    GenerationOverflow,
+}
+
+impl fmt::Display for ShmBlobArenaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CapacityTooSmall {
+                capacity,
+                min_capacity,
+            } => write!(
+                f,
+                "SHM blob arena capacity {capacity} is smaller than minimum {min_capacity}"
+            ),
+            Self::BlobTooLarge { len, max_len } => {
+                write!(f, "SHM blob length {len} exceeds maximum {max_len}")
+            }
+            Self::DescriptorOutOfBounds {
+                offset,
+                len,
+                capacity,
+            } => write!(
+                f,
+                "SHM blob descriptor offset={offset} len={len} exceeds arena capacity {capacity}"
+            ),
+            Self::DescriptorMismatch { field } => {
+                write!(f, "SHM blob descriptor mismatch for {field}")
+            }
+            Self::ChecksumMismatch { expected, actual } => write!(
+                f,
+                "SHM blob checksum mismatch: expected {expected:#x}, got {actual:#x}"
+            ),
+            Self::GenerationOverflow => write!(f, "SHM blob generation counter overflowed"),
+        }
+    }
+}
+
+impl std::error::Error for ShmBlobArenaError {}
+
+/// Fixed-size blob arena suitable for a shared-memory transport.
+///
+/// The arena writes a small header before each payload. Readers validate the
+/// header, generation, epoch, payload length, and checksum before returning a
+/// slice. The backing storage is generic so callers can use an owned `Vec<u8>`
+/// for tests or an OS-specific memory mapping in a transport crate.
+#[derive(Debug, Clone)]
+pub struct ShmBlobArena<B = Vec<u8>> {
+    bytes: B,
+    write_offset: usize,
+    next_generation: u64,
+}
+
+impl ShmBlobArena<Vec<u8>> {
+    /// Create a Vec-backed arena with `capacity` bytes.
+    pub fn with_capacity(capacity: usize) -> Result<Self, ShmBlobArenaError> {
+        Self::from_buffer(vec![0; capacity])
+    }
+}
+
+impl<B> ShmBlobArena<B>
+where
+    B: AsRef<[u8]> + AsMut<[u8]>,
+{
+    /// Wrap an existing byte buffer.
+    pub fn from_buffer(bytes: B) -> Result<Self, ShmBlobArenaError> {
+        let capacity = bytes.as_ref().len();
+        let min_capacity = SHM_BLOB_HEADER_LEN + 1;
+        if capacity < min_capacity {
+            return Err(ShmBlobArenaError::CapacityTooSmall {
+                capacity,
+                min_capacity,
+            });
+        }
+
+        Ok(Self {
+            bytes,
+            write_offset: 0,
+            next_generation: 1,
+        })
+    }
+
+    /// Total arena capacity in bytes.
+    pub fn capacity(&self) -> usize {
+        self.bytes.as_ref().len()
+    }
+
+    /// Maximum payload length this arena can hold in one blob.
+    pub fn max_blob_len(&self) -> usize {
+        self.capacity() - SHM_BLOB_HEADER_LEN
+    }
+
+    /// Current write cursor offset.
+    pub fn write_offset(&self) -> usize {
+        self.write_offset
+    }
+
+    /// Borrow the backing bytes.
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+
+    /// Mutably borrow the backing bytes.
+    ///
+    /// Transport implementations can use this to expose the backing memory to
+    /// OS mapping setup. Mutating bytes after writing descriptors may make old
+    /// descriptors fail validation.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        self.bytes.as_mut()
+    }
+
+    /// Consume the arena and return its backing storage.
+    pub fn into_inner(self) -> B {
+        self.bytes
+    }
+
+    /// Write a payload and return a descriptor suitable for an IPC message.
+    pub fn write_blob(
+        &mut self,
+        epoch: u64,
+        payload: &[u8],
+    ) -> Result<ShmBlobRef, ShmBlobArenaError> {
+        let capacity = self.capacity();
+        let max_len = self.max_blob_len();
+        if payload.len() > max_len {
+            return Err(ShmBlobArenaError::BlobTooLarge {
+                len: payload.len(),
+                max_len,
+            });
+        }
+
+        let total_len = SHM_BLOB_HEADER_LEN + payload.len();
+        if self.write_offset + total_len > capacity {
+            self.write_offset = 0;
+        }
+
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or(ShmBlobArenaError::GenerationOverflow)?;
+
+        let offset = self.write_offset;
+        let checksum = checksum(payload);
+        let descriptor = ShmBlobRef {
+            offset: offset as u64,
+            len: payload.len() as u64,
+            generation,
+            epoch,
+            checksum,
+        };
+
+        let payload_offset = offset + SHM_BLOB_HEADER_LEN;
+        let payload_end = payload_offset + payload.len();
+        write_header(self.bytes.as_mut(), offset, descriptor);
+        self.bytes.as_mut()[payload_offset..payload_end].copy_from_slice(payload);
+
+        self.write_offset += total_len;
+        if self.write_offset == capacity {
+            self.write_offset = 0;
+        }
+
+        Ok(descriptor)
+    }
+
+    /// Read and validate a previously written blob.
+    pub fn read_blob(&self, descriptor: ShmBlobRef) -> Result<&[u8], ShmBlobArenaError> {
+        let capacity = self.capacity();
+        let offset = usize::try_from(descriptor.offset).map_err(|_| {
+            ShmBlobArenaError::DescriptorOutOfBounds {
+                offset: descriptor.offset,
+                len: descriptor.len,
+                capacity,
+            }
+        })?;
+        let len = usize::try_from(descriptor.len).map_err(|_| {
+            ShmBlobArenaError::DescriptorOutOfBounds {
+                offset: descriptor.offset,
+                len: descriptor.len,
+                capacity,
+            }
+        })?;
+        let total_len = SHM_BLOB_HEADER_LEN.checked_add(len).ok_or(
+            ShmBlobArenaError::DescriptorOutOfBounds {
+                offset: descriptor.offset,
+                len: descriptor.len,
+                capacity,
+            },
+        )?;
+        if offset
+            .checked_add(total_len)
+            .is_none_or(|end| end > capacity)
+        {
+            return Err(ShmBlobArenaError::DescriptorOutOfBounds {
+                offset: descriptor.offset,
+                len: descriptor.len,
+                capacity,
+            });
+        }
+
+        let header = read_header(self.bytes.as_ref(), offset)?;
+        if header != descriptor {
+            return Err(mismatch_field(header, descriptor));
+        }
+
+        let payload_offset = offset + SHM_BLOB_HEADER_LEN;
+        let payload = &self.bytes.as_ref()[payload_offset..payload_offset + len];
+        let actual = checksum(payload);
+        if actual != descriptor.checksum {
+            return Err(ShmBlobArenaError::ChecksumMismatch {
+                expected: descriptor.checksum,
+                actual,
+            });
+        }
+
+        Ok(payload)
+    }
+}
+
 /// Serializable state for one allowlisted node in a [`Snapshot`] or `NodeAdd`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NodeState {
     /// Concrete serialized value bytes.
     Payload(IpcPayload),
+    /// Descriptor for a concrete value stored in a shared-memory blob arena.
+    SharedBlob(ShmBlobRef),
     /// A known node whose value cannot be serialized.
     Opaque,
 }
@@ -51,6 +354,15 @@ impl NodeSnapshot {
             node,
             type_tag: type_tag.into(),
             state: NodeState::Opaque,
+        }
+    }
+
+    /// Create a visible node whose value lives in a shared-memory blob arena.
+    pub fn shared_blob(node: NodeId, type_tag: impl Into<String>, blob: ShmBlobRef) -> Self {
+        Self {
+            node,
+            type_tag: type_tag.into(),
+            state: NodeState::SharedBlob(blob),
         }
     }
 }
@@ -139,9 +451,9 @@ impl Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeltaOp {
     /// A source cell was changed to `payload`.
-    CellSet { node: NodeId, payload: IpcPayload },
+    CellSet { node: NodeId, payload: IpcValue },
     /// A lazily recomputed slot published a concrete value.
-    SlotValue { node: NodeId, payload: IpcPayload },
+    SlotValue { node: NodeId, payload: IpcValue },
     /// A node was dirtied without publishing a concrete value.
     Invalidate { node: NodeId },
     /// A new node became visible.
@@ -166,13 +478,29 @@ pub enum DeltaOp {
 
 impl DeltaOp {
     /// Construct a `CellSet`.
-    pub fn cell_set(node: NodeId, payload: IpcPayload) -> Self {
-        Self::CellSet { node, payload }
+    pub fn cell_set(node: NodeId, payload: impl Into<IpcValue>) -> Self {
+        Self::CellSet {
+            node,
+            payload: payload.into(),
+        }
     }
 
     /// Construct a `SlotValue`.
-    pub fn slot_value(node: NodeId, payload: IpcPayload) -> Self {
-        Self::SlotValue { node, payload }
+    pub fn slot_value(node: NodeId, payload: impl Into<IpcValue>) -> Self {
+        Self::SlotValue {
+            node,
+            payload: payload.into(),
+        }
+    }
+
+    /// Construct a `CellSet` whose value is stored in a shared-memory blob.
+    pub fn cell_set_blob(node: NodeId, blob: ShmBlobRef) -> Self {
+        Self::cell_set(node, blob)
+    }
+
+    /// Construct a `SlotValue` whose value is stored in a shared-memory blob.
+    pub fn slot_value_blob(node: NodeId, blob: ShmBlobRef) -> Self {
+        Self::slot_value(node, blob)
     }
 
     /// Construct an `Invalidate`.
@@ -333,4 +661,99 @@ pub trait IpcSource {
 
 fn can_read(permissions: &PeerPermissions, peer: PeerId, node: NodeId) -> bool {
     permissions.is_allowed(peer, RemoteOp::read(node))
+}
+
+fn write_header(bytes: &mut [u8], offset: usize, descriptor: ShmBlobRef) {
+    let header = &mut bytes[offset..offset + SHM_BLOB_HEADER_LEN];
+    write_u32(header, 0, SHM_BLOB_MAGIC);
+    write_u16(header, 4, SHM_BLOB_VERSION);
+    write_u16(header, 6, SHM_BLOB_HEADER_LEN as u16);
+    write_u64(header, 8, descriptor.generation);
+    write_u64(header, 16, descriptor.epoch);
+    write_u64(header, 24, descriptor.len);
+    write_u64(header, 32, descriptor.checksum);
+}
+
+fn read_header(bytes: &[u8], offset: usize) -> Result<ShmBlobRef, ShmBlobArenaError> {
+    let header = &bytes[offset..offset + SHM_BLOB_HEADER_LEN];
+    let magic = read_u32(header, 0);
+    if magic != SHM_BLOB_MAGIC {
+        return Err(ShmBlobArenaError::DescriptorMismatch { field: "magic" });
+    }
+    let version = read_u16(header, 4);
+    if version != SHM_BLOB_VERSION {
+        return Err(ShmBlobArenaError::DescriptorMismatch { field: "version" });
+    }
+    let header_len = read_u16(header, 6);
+    if usize::from(header_len) != SHM_BLOB_HEADER_LEN {
+        return Err(ShmBlobArenaError::DescriptorMismatch {
+            field: "header_len",
+        });
+    }
+
+    Ok(ShmBlobRef {
+        offset: offset as u64,
+        generation: read_u64(header, 8),
+        epoch: read_u64(header, 16),
+        len: read_u64(header, 24),
+        checksum: read_u64(header, 32),
+    })
+}
+
+fn mismatch_field(actual: ShmBlobRef, expected: ShmBlobRef) -> ShmBlobArenaError {
+    let field = if actual.generation != expected.generation {
+        "generation"
+    } else if actual.epoch != expected.epoch {
+        "epoch"
+    } else if actual.len != expected.len {
+        "len"
+    } else if actual.checksum != expected.checksum {
+        "checksum"
+    } else {
+        "offset"
+    };
+
+    ShmBlobArenaError::DescriptorMismatch { field }
+}
+
+fn checksum(payload: &[u8]) -> u64 {
+    payload.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(
+        bytes[offset..offset + 2]
+            .try_into()
+            .expect("slice size checked"),
+    )
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        bytes[offset..offset + 4]
+            .try_into()
+            .expect("slice size checked"),
+    )
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(
+        bytes[offset..offset + 8]
+            .try_into()
+            .expect("slice size checked"),
+    )
 }

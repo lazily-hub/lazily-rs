@@ -1161,12 +1161,18 @@ Implemented surface:
   omitted entirely; edges are retained only when both endpoints are readable.
 - `IpcMessage`, `IpcSink`, and `IpcSource` keep Unix sockets, pipes,
   WebSockets, and shared-memory ring buffers outside the core crate.
+- `ShmBlobArena`, `ShmBlobRef`, and `IpcValue::SharedBlob` provide the shared
+  memory payload path. The arena writes a fixed header before each payload with
+  generation, epoch, length, and checksum metadata; readers validate that
+  header before accepting a descriptor. `IpcMessage` control frames can carry a
+  `ShmBlobRef` instead of embedding large bytes inline.
 
 Shared-memory IPC is therefore a supported transport direction, not a separate
-reactive-graph mode: the shared memory segment should carry framed
-`IpcMessage`s, while each process keeps its own local `Context` /
-`ThreadSafeContext` and reconciles via snapshots and deltas. A live `Context`
-is not shared across process address spaces.
+reactive-graph mode: the shared memory segment carries large blob payloads, and
+the ordinary control transport carries framed `IpcMessage`s with blob
+descriptors. Each process keeps its own local `Context` / `ThreadSafeContext`
+and reconciles via snapshots and deltas. A live `Context` is not shared across
+process address spaces.
 
 ## Multi-writer coordination: CRDT vs Raft (`lazily-distributed`)
 
