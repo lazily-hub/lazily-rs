@@ -27,6 +27,7 @@ use std::collections::HashSet;
 use std::fs;
 
 const FIXTURES_DIR: &str = "tests/conformance";
+const SPEC_FIXTURES_DIR: &str = "../lazily-spec/conformance";
 
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -38,7 +39,13 @@ struct Fixture {
 }
 
 fn load_fixture(name: &str) -> Fixture {
-    let path = format!("{FIXTURES_DIR}/{name}");
+    let spec_path = format!("{SPEC_FIXTURES_DIR}/{name}");
+    let local_path = format!("{FIXTURES_DIR}/{name}");
+    let path = if std::path::Path::new(&spec_path).exists() {
+        spec_path
+    } else {
+        local_path
+    };
     let raw =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read fixture {path}: {e}"));
     let fixture: Fixture = serde_json::from_str(&raw)
