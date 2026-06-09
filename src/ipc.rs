@@ -4,6 +4,10 @@
 //! socket, pipe, WebSocket, or shared-memory ring buffer. It defines the stable
 //! serializable state image and the permission-filtered construction helpers
 //! that transports can carry.
+//!
+//! FFI adapters should treat encoded [`IpcMessage`] values as owned byte buffers
+//! crossing the ABI. They should not expose live Rust contexts, references,
+//! closures, or typed handles to foreign runtimes.
 
 use crate::distributed::{NodeId, PeerId, PeerPermissions, RemoteOp};
 use std::fmt;

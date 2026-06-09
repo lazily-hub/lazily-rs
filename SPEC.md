@@ -1174,6 +1174,116 @@ descriptors. Each process keeps its own local `Context` / `ThreadSafeContext`
 and reconciles via snapshots and deltas. A live `Context` is not shared across
 process address spaces.
 
+## Cross-language channel compatibility (FFI / IPC / WebSocket / WebRTC data)
+
+Yes: lazily-rs has a viable FFI strategy, but the FFI layer should be an
+adapter around the same transport-agnostic state plane used by IPC and
+distributed peers. It should not expose the closure-based Rust `Context`,
+`ThreadSafeContext`, `SlotHandle<T>`, `CellHandle<T>`, or `&T` cached values
+directly across an ABI boundary.
+
+### Compatibility model
+
+The cross-language lazily family has one canonical message plane:
+
+- `IpcMessage::Snapshot` and `IpcMessage::Delta` are the graph-state payloads.
+- `NodeId`, `PeerId`, `RemoteOp`, `Snapshot`, `Delta`, and `DeltaOp` are the
+  wire-facing contract; internal `SlotId` values and typed handles remain local
+  implementation details.
+- `IpcPayload` is opaque serialized value bytes. The producing language owns
+  type-aware encoding through stable `type_tag`s; the channel only moves bytes.
+- `ShmBlobRef` is a descriptor carried by a control frame. Shared memory stores
+  large payload bytes, but reconciliation still happens through ordinary
+  `IpcMessage`s.
+
+Every supported channel carries that same message plane:
+
+| Channel | Compatibility strategy |
+|---------|------------------------|
+| FFI | C ABI exposes opaque context/session handles plus owned byte buffers for `IpcMessage` encode/decode, snapshot export, delta apply, and memory release. No Rust references, trait objects, closures, or typed handles cross the boundary. |
+| IPC | Unix sockets, pipes, local TCP, or process channels carry length-prefixed serialized `IpcMessage`s. Shared-memory IPC is an optimization for large `IpcValue::SharedBlob` payload bytes, not a separate graph-sharing mode. |
+| WebSocket | One WebSocket frame carries one serialized `IpcMessage` or a negotiated fragment. The #yxjw signaling server may relay the frame as opaque payload and must not parse CRDT/IPC state. |
+| WebRTC data | Reliable ordered data channels carry the same serialized `IpcMessage`s after #yxjw peer discovery. Unordered or unreliable channels are only acceptable for optional lossy telemetry; `Delta`s need ordered reliable delivery or receiver-side gap detection and snapshot resync. |
+
+### FFI boundary shape
+
+The Rust FFI surface should be deliberately narrow:
+
+```rust
+#[repr(C)]
+pub struct LazilyBytes {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+pub struct LazilyBuffer {
+    pub ptr: *mut u8,
+    pub len: usize,
+    pub cap: usize,
+}
+
+#[repr(C)]
+pub struct LazilyStatus {
+    pub code: u32,
+    pub message: LazilyBytes,
+}
+```
+
+The ABI exports `extern "C"` functions for creating/freeing opaque handles,
+feeding an owned `LazilyBytes` frame into the local graph, exporting a
+`LazilyBuffer` frame, and freeing buffers allocated by Rust. All allocation
+ownership is explicit: the caller owns input bytes, Rust owns output buffers
+until the paired free function is called. Errors return `LazilyStatus`; panics
+must be caught before crossing the C ABI.
+
+The FFI layer may expose convenience helpers for local cells, but those helpers
+still encode/decode through the same `type_tag` + payload registry used by
+`lazily-serde`. A foreign runtime can therefore choose either direct local FFI
+calls or framed IPC/WebSocket/WebRTC transport without changing the graph-state
+protocol.
+
+### Capability negotiation
+
+Each non-local session starts with a small compatibility handshake before graph
+state flows:
+
+- protocol id: `lazily-ipc`
+- protocol major version
+- codec (`json` today; binary codecs can be transport crates as long as they
+  encode the same `IpcMessage` schema)
+- maximum frame size and fragmentation support
+- ordered/reliable delivery guarantee
+- `PeerId` and session/graph id
+- supported features such as `shared-blob`, `crdt-cell-plane`, and
+  `signaling-relay`
+
+If peers disagree on protocol major version, codec, ordering guarantees, or
+required feature flags, they fail closed before applying any `Snapshot` or
+`Delta`.
+
+### Cross-language family rules
+
+- The shared semantics are lazy slots, mutable cells, dynamic dependency
+  tracking, `PartialEq`/equality-guarded invalidation, memo equality
+  suppression, batching, and permission-filtered snapshots/deltas.
+- Compute closures are language-local. Cross-language sync shares the cell
+  state plane by default; derived slots converge remotely only when peers use a
+  shared compiled graph or an explicit compute-descriptor system.
+- JavaScript/TypeScript peers must keep `PeerId` values at or below
+  `Number.MAX_SAFE_INTEGER`, matching the #s0fc signaling protocol.
+- Permission filtering happens before serialization on every channel. A
+  WebSocket relay, WebRTC data channel, or FFI caller must not receive nodes or
+  operations that `PeerPermissions` would omit.
+- Channel code must preserve back-pressure and resync behavior: if frame
+  delivery gaps, reorders, truncates, or exceeds negotiated size, the receiver
+  requests a fresh `Snapshot` instead of applying a partial delta.
+
+This keeps FFI viable without making it a special semantic path. FFI, IPC,
+WebSocket, and WebRTC data differ only in framing, ownership, and reliability;
+the lazily family stays compatible because all channels carry the same
+permission-filtered `IpcMessage` state plane.
+
 ## Multi-writer coordination: CRDT vs Raft (`lazily-distributed`)
 
 `lazily-ipc` (above) is a **single-writer** linear log: one authority mutates

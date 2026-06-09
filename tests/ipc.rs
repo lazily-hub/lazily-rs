@@ -238,3 +238,31 @@ fn ipc_messages_can_reference_shared_blobs() {
     );
     assert_eq!(arena.read_blob(blob).unwrap(), b"large slot value");
 }
+
+#[test]
+fn ipc_message_bytes_are_channel_agnostic_payloads() {
+    let message = IpcMessage::Delta(Delta::next(
+        15,
+        vec![
+            DeltaOp::cell_set(NodeId(1), b"cell".to_vec()),
+            DeltaOp::slot_value(NodeId(2), b"slot".to_vec()),
+        ],
+    ));
+
+    let websocket_text_frame = serde_json::to_string(&message).unwrap();
+    let webrtc_data_frame = websocket_text_frame.as_bytes().to_vec();
+    let ffi_owned_buffer = webrtc_data_frame.clone();
+
+    assert_eq!(
+        serde_json::from_str::<IpcMessage>(&websocket_text_frame).unwrap(),
+        message
+    );
+    assert_eq!(
+        serde_json::from_slice::<IpcMessage>(&webrtc_data_frame).unwrap(),
+        message
+    );
+    assert_eq!(
+        serde_json::from_slice::<IpcMessage>(&ffi_owned_buffer).unwrap(),
+        message
+    );
+}

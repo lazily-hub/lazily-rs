@@ -3490,7 +3490,85 @@ mod handle_get_methods {
 }
 
 // ============================================================================
-// 9. AsyncContext Design Spec
+// 9. Cross-language channel compatibility
+// ============================================================================
+
+mod cross_language_channel_compatibility_spec {
+    const README: &str = include_str!("../README.md");
+    const SPEC: &str = include_str!("../SPEC.md");
+
+    fn assert_spec_contains(fragment: &str) {
+        assert!(
+            SPEC.contains(fragment),
+            "SPEC.md should document channel compatibility element: {fragment}"
+        );
+    }
+
+    #[test]
+    fn spec_documents_ffi_as_abi_adapter_not_a_second_graph_model() {
+        for fragment in [
+            "Cross-language channel compatibility (FFI / IPC / WebSocket / WebRTC data)",
+            "Yes: lazily-rs has a viable FFI strategy",
+            "adapter around the same transport-agnostic state plane",
+            "should not expose the closure-based Rust `Context`",
+            "No Rust references, trait objects, closures, or typed handles cross the boundary",
+            "must be caught before crossing the C ABI",
+            "`type_tag` + payload registry",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_one_message_plane_for_all_channels() {
+        for fragment in [
+            "one canonical message plane",
+            "`IpcMessage::Snapshot` and `IpcMessage::Delta` are the graph-state payloads",
+            "`NodeId`, `PeerId`, `RemoteOp`, `Snapshot`, `Delta`, and `DeltaOp`",
+            "wire-facing contract",
+            "typed handles remain local",
+            "differ only in framing",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_channel_reliability_and_negotiation_requirements() {
+        for fragment in [
+            "Reliable ordered data channels carry the same serialized `IpcMessage`s",
+            "`Delta`s need ordered reliable delivery or receiver-side gap detection and snapshot resync",
+            "protocol id: `lazily-ipc`",
+            "protocol major version",
+            "maximum frame size and fragmentation support",
+            "ordered/reliable delivery guarantee",
+            "fail closed before applying",
+            "Permission filtering happens before serialization on every channel",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn readme_summarizes_cross_channel_strategy() {
+        for fragment in [
+            "Cross-Channel Compatibility",
+            "`IpcMessage::Snapshot` and `IpcMessage::Delta`",
+            "C ABI adapter with opaque handles and owned byte buffers",
+            "IPC, WebSocket frames, WebRTC data channels, and FFI byte buffers",
+            "Transport code owns framing",
+            "memory ownership, reliability, and back-pressure",
+        ] {
+            assert!(
+                README.contains(fragment),
+                "README.md should summarize channel compatibility element: {fragment}"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// 10. AsyncContext Design Spec
 // ============================================================================
 
 mod async_context_design_spec {

@@ -237,6 +237,18 @@ lazily is implemented across three languages with shared semantics:
 | Thread safety | Single-threaded `Context`; explicit `ThreadSafeContext` | Mutex by default | GIL |
 | Storage | Unified generics | `.direct` / `.indirect` | Object identity |
 
+## Cross-Channel Compatibility
+
+The cross-language family should use one graph-state protocol across channels:
+`IpcMessage::Snapshot` and `IpcMessage::Delta`. Rust FFI is viable as a narrow
+C ABI adapter with opaque handles and owned byte buffers, not by sharing live
+Rust contexts, closures, typed handles, or references across the ABI.
+
+IPC, WebSocket frames, WebRTC data channels, and FFI byte buffers can then carry
+the same permission-filtered snapshots and deltas. Transport code owns framing,
+memory ownership, reliability, and back-pressure; lazily semantics stay in the
+shared message schema.
+
 ## Related
 
 - [lazily-zig](https://github.com/btakita/lazily-zig) — Zig implementation with FFI support
