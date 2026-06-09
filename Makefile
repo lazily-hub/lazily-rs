@@ -19,12 +19,13 @@ PYTHON ?= python3
 	test-ffi-binary \
 	test-ipc \
 	test-ipc-binary \
+	test-ipc-conformance \
 	test-signaling-client \
 	benchmark-check \
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-signaling-client benchmark-check
+check: fmt clippy build test test-tokio test-async test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-signaling-client benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -67,6 +68,9 @@ test-ipc:
 
 test-ipc-binary:
 >$(CARGO) test --locked --features ipc-binary --test ipc
+
+test-ipc-conformance:
+>$(CARGO) test --locked --features ipc --test conformance
 
 test-signaling-client:
 >$(CARGO) test --locked --features signaling-client
