@@ -266,3 +266,72 @@ fn ipc_message_bytes_are_channel_agnostic_payloads() {
         message
     );
 }
+
+#[cfg(feature = "ipc-binary")]
+mod binary {
+    use lazily::{
+        DecodeError, Delta, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeSnapshot, Snapshot,
+    };
+
+    #[test]
+    fn ipc_message_binary_round_trip_snapshot() {
+        let snapshot = Snapshot::new(
+            7,
+            vec![
+                NodeSnapshot::payload(NodeId(1), "i32", vec![1, 2, 3]),
+                NodeSnapshot::opaque(NodeId(2), "opaque-type"),
+            ],
+            vec![EdgeSnapshot::new(NodeId(2), NodeId(1))],
+            vec![NodeId(1), NodeId(2)],
+        );
+        let message = IpcMessage::Snapshot(snapshot.clone());
+
+        let encoded = message.encode_binary().unwrap();
+        let decoded = IpcMessage::decode_binary(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_binary_round_trip_delta() {
+        let delta = Delta::next(
+            3,
+            vec![
+                DeltaOp::cell_set(NodeId(1), vec![10, 20]),
+                DeltaOp::slot_value(NodeId(2), vec![30, 40]),
+                DeltaOp::invalidate(NodeId(3)),
+            ],
+        );
+        let message = IpcMessage::Delta(delta.clone());
+
+        let encoded = message.encode_binary().unwrap();
+        let decoded = IpcMessage::decode_binary(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_binary_rejects_invalid_bytes() {
+        let result = IpcMessage::decode_binary(b"garbage");
+        assert!(matches!(result, Err(DecodeError::Binary(_))));
+    }
+
+    #[test]
+    fn ipc_message_binary_is_smaller_than_json() {
+        let snapshot = Snapshot::new(
+            42,
+            vec![NodeSnapshot::payload(NodeId(1), "i32", vec![1, 2, 3, 4])],
+            vec![EdgeSnapshot::new(NodeId(1), NodeId(2))],
+            vec![NodeId(1)],
+        );
+        let message = IpcMessage::Snapshot(snapshot);
+
+        let json_len = serde_json::to_vec(&message).unwrap().len();
+        let binary_len = message.encode_binary().unwrap().len();
+
+        assert!(
+            binary_len < json_len,
+            "binary ({binary_len}) should be smaller than json ({json_len})"
+        );
+    }
+}

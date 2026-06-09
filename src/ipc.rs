@@ -632,6 +632,92 @@ pub enum IpcMessage {
     Delta(Delta),
 }
 
+impl IpcMessage {
+    #[cfg(feature = "ffi")]
+    pub fn encode_json(&self) -> Result<Vec<u8>, EncodeError> {
+        serde_json::to_vec(self).map_err(EncodeError::Json)
+    }
+
+    #[cfg(feature = "ffi")]
+    pub fn decode_json(bytes: &[u8]) -> Result<Self, DecodeError> {
+        serde_json::from_slice(bytes).map_err(DecodeError::Json)
+    }
+
+    #[cfg(feature = "ipc-binary")]
+    pub fn encode_binary(&self) -> Result<Vec<u8>, EncodeError> {
+        postcard::to_allocvec(self).map_err(EncodeError::Binary)
+    }
+
+    #[cfg(feature = "ipc-binary")]
+    pub fn decode_binary(bytes: &[u8]) -> Result<Self, DecodeError> {
+        postcard::from_bytes(bytes).map_err(DecodeError::Binary)
+    }
+}
+
+#[derive(Debug)]
+pub enum EncodeError {
+    #[cfg(feature = "ffi")]
+    Json(serde_json::Error),
+    #[cfg(feature = "ipc-binary")]
+    Binary(postcard::Error),
+}
+
+#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(feature = "ffi")]
+            Self::Json(e) => write!(f, "JSON encode: {e}"),
+            #[cfg(feature = "ipc-binary")]
+            Self::Binary(e) => write!(f, "binary encode: {e}"),
+        }
+    }
+}
+
+#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+impl std::error::Error for EncodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            #[cfg(feature = "ffi")]
+            Self::Json(e) => Some(e),
+            #[cfg(feature = "ipc-binary")]
+            Self::Binary(e) => Some(e),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum DecodeError {
+    #[cfg(feature = "ffi")]
+    Json(serde_json::Error),
+    #[cfg(feature = "ipc-binary")]
+    Binary(postcard::Error),
+}
+
+#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(feature = "ffi")]
+            Self::Json(e) => write!(f, "JSON decode: {e}"),
+            #[cfg(feature = "ipc-binary")]
+            Self::Binary(e) => write!(f, "binary decode: {e}"),
+        }
+    }
+}
+
+#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+impl std::error::Error for DecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            #[cfg(feature = "ffi")]
+            Self::Json(e) => Some(e),
+            #[cfg(feature = "ipc-binary")]
+            Self::Binary(e) => Some(e),
+        }
+    }
+}
+
 /// Transport sink for IPC messages.
 pub trait IpcSink {
     /// Transport-specific error type.

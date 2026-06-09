@@ -1266,6 +1266,28 @@ FFI consumers) via `crate-type = ["lib", "cdylib"]` in `Cargo.toml`.
   headers) and `diplomat` (multi-language binding generation). The current
   `cbindgen` approach is sufficient for C ABI consumers.
 
+### Binary serialization (`ipc-binary` feature)
+
+The `ipc-binary` feature adds optional binary serialization via `postcard`
+alongside the default JSON codec. Binary frames are significantly smaller and
+faster for performance-critical paths between same-language or
+binary-aware peers.
+
+- `IpcMessage::encode_binary()` / `IpcMessage::decode_binary()` — postcard
+  encode/decode on the `IpcMessage` type.
+- `IpcMessage::encode_json()` / `IpcMessage::decode_json()` — JSON
+  encode/decode (gated behind the `ffi` feature which pulls in `serde_json`).
+- FFI binary functions: `lazily_ffi_channel_send_binary`,
+  `lazily_ffi_channel_recv_binary`, `lazily_ffi_ipc_message_validate_binary`,
+  `lazily_ffi_ipc_message_kind_binary`, `lazily_ffi_ipc_message_clone_binary`
+  — mirror the JSON FFI functions but use the postcard codec.
+- `EncodeError` / `DecodeError` — codec-agnostic error types with `Json` and
+  `Binary` variants gated by their respective features.
+
+The binary codec is **not** self-describing; peers must agree on the schema.
+For cross-language use, JSON remains the default; binary is for
+same-Rust or postcard-aware transports.
+
 ### Capability negotiation
 
 Each non-local session starts with a small compatibility handshake before graph

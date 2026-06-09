@@ -70,11 +70,19 @@ pub use ffi::{
     lazily_ffi_channel_recv_json, lazily_ffi_channel_send_json, lazily_ffi_ipc_message_clone_json,
     lazily_ffi_ipc_message_kind_json, lazily_ffi_ipc_message_validate_json,
 };
+#[cfg(all(feature = "ffi", feature = "ipc-binary"))]
+pub use ffi::{
+    lazily_ffi_channel_recv_binary, lazily_ffi_channel_send_binary,
+    lazily_ffi_ipc_message_clone_binary, lazily_ffi_ipc_message_kind_binary,
+    lazily_ffi_ipc_message_validate_binary,
+};
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{
     InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeLockSite,
     ThreadSafeLockSiteSnapshot,
 };
+#[cfg(all(feature = "ipc", any(feature = "ffi", feature = "ipc-binary")))]
+pub use ipc::{DecodeError, EncodeError};
 #[cfg(feature = "ipc")]
 pub use ipc::{
     Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, IpcPayload, IpcSink, IpcSource,
