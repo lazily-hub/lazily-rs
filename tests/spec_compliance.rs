@@ -3512,6 +3512,9 @@ mod cross_language_channel_compatibility_spec {
             "adapter around the same transport-agnostic state plane",
             "should not expose the closure-based Rust `Context`",
             "No Rust references, trait objects, closures, or typed handles cross the boundary",
+            "The `ffi` feature exports `extern \"C\"` functions",
+            "The implemented channel is a local ABI adapter",
+            "re-encodes canonical JSON bytes",
             "must be caught before crossing the C ABI",
             "`type_tag` + payload registry",
         ] {
@@ -3556,6 +3559,9 @@ mod cross_language_channel_compatibility_spec {
             "`IpcMessage::Snapshot` and `IpcMessage::Delta`",
             "C ABI adapter with opaque handles and owned byte buffers",
             "IPC, WebSocket frames, WebRTC data channels, and FFI byte buffers",
+            "Enable the `ffi` feature for the C ABI adapter",
+            "`LazilyFfiChannel`",
+            "`LazilyFfiBytes`",
             "Transport code owns framing",
             "memory ownership, reliability, and back-pressure",
         ] {

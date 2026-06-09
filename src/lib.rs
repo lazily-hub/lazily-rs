@@ -42,6 +42,8 @@ mod context;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
 mod effect;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 #[cfg(feature = "instrumentation")]
 mod instrumentation;
 #[cfg(feature = "ipc")]
@@ -61,6 +63,13 @@ pub use context::Context;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
 pub use effect::{EffectCallbackResult, EffectHandle};
+#[cfg(feature = "ffi")]
+pub use ffi::{
+    LazilyFfiBytes, LazilyFfiChannel, LazilyFfiMessageKind, LazilyFfiStatus, lazily_ffi_bytes_free,
+    lazily_ffi_channel_free, lazily_ffi_channel_len, lazily_ffi_channel_new,
+    lazily_ffi_channel_recv_json, lazily_ffi_channel_send_json, lazily_ffi_ipc_message_clone_json,
+    lazily_ffi_ipc_message_kind_json, lazily_ffi_ipc_message_validate_json,
+};
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{
     InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeLockSite,

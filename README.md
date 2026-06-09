@@ -249,6 +249,12 @@ the same permission-filtered snapshots and deltas. Transport code owns framing,
 memory ownership, reliability, and back-pressure; lazily semantics stay in the
 shared message schema.
 
+Enable the `ffi` feature for the C ABI adapter. It exposes an opaque
+`LazilyFfiChannel`, JSON `IpcMessage` validation/classification helpers, and
+Rust-owned `LazilyFfiBytes` buffers with an explicit free function. The adapter
+re-encodes every accepted frame as canonical `IpcMessage` JSON, so FFI callers
+share the same state plane as other channels.
+
 ## Related
 
 - [lazily-zig](https://github.com/btakita/lazily-zig) — Zig implementation with FFI support

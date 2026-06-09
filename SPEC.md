@@ -1207,35 +1207,46 @@ Every supported channel carries that same message plane:
 
 ### FFI boundary shape
 
-The Rust FFI surface should be deliberately narrow:
+The Rust FFI surface is deliberately narrow:
 
 ```rust
 #[repr(C)]
-pub struct LazilyBytes {
-    pub ptr: *const u8,
-    pub len: usize,
-}
-
-#[repr(C)]
-pub struct LazilyBuffer {
+pub struct LazilyFfiBytes {
     pub ptr: *mut u8,
     pub len: usize,
-    pub cap: usize,
 }
 
 #[repr(C)]
-pub struct LazilyStatus {
-    pub code: u32,
-    pub message: LazilyBytes,
+pub enum LazilyFfiStatus {
+    Ok = 0,
+    Empty = 1,
+    NullPointer = 2,
+    InvalidMessage = 3,
+    EncodeFailed = 4,
+    Panic = 5,
+}
+
+#[repr(C)]
+pub enum LazilyFfiMessageKind {
+    Unknown = 0,
+    Snapshot = 1,
+    Delta = 2,
 }
 ```
 
-The ABI exports `extern "C"` functions for creating/freeing opaque handles,
-feeding an owned `LazilyBytes` frame into the local graph, exporting a
-`LazilyBuffer` frame, and freeing buffers allocated by Rust. All allocation
-ownership is explicit: the caller owns input bytes, Rust owns output buffers
-until the paired free function is called. Errors return `LazilyStatus`; panics
-must be caught before crossing the C ABI.
+The `ffi` feature exports `extern "C"` functions for creating/freeing an opaque
+`LazilyFfiChannel`, validating/classifying JSON-encoded `IpcMessage` frames,
+enqueueing accepted frames, receiving Rust-owned `LazilyFfiBytes` frames, and
+freeing buffers allocated by Rust. All allocation ownership is explicit: the
+caller owns input bytes, Rust owns output buffers until the paired free function
+is called. Errors return `LazilyFfiStatus`; panics must be caught before crossing the C ABI.
+
+The implemented channel is a local ABI adapter. It decodes each accepted frame
+as `IpcMessage`, then re-encodes canonical JSON bytes before enqueueing or
+returning a cloned frame. That keeps FFI byte transport aligned with IPC,
+WebSocket, and WebRTC data transport while leaving snapshot export, delta
+application to a live graph, and richer typed convenience APIs as higher-level
+work on top of the same message plane.
 
 The FFI layer may expose convenience helpers for local cells, but those helpers
 still encode/decode through the same `type_tag` + payload registry used by
