@@ -1288,6 +1288,78 @@ The binary codec is **not** self-describing; peers must agree on the schema.
 For cross-language use, JSON remains the default; binary is for
 same-Rust or postcard-aware transports.
 
+### WebRTC data channel transport (`webrtc-data` feature)
+
+WebRTC data channels carry `IpcMessage` frames peer-to-peer after the
+`signaling-client` (#yxjw) completes SDP/ICE negotiation. This is the
+internet-scale transport layer — no server relay needed for graph state
+after the initial signaling handshake.
+
+#### Feature gate
+
+```toml
+webrtc-data = ["ipc", "dep:str0m", "dep:tokio"]
+```
+
+Uses `str0m` for the WebRTC stack (pure Rust, no C dependencies) and
+`tokio` for async runtime integration. Separate from `signaling-client`
+so consumers can use signaling without incurring the full WebRTC
+dependency.
+
+#### Transport interface
+
+```rust
+#[cfg(feature = "webrtc-data")]
+pub struct WebRtcDataChannel {
+    // str0m session wrapping a single data channel
+}
+
+#[cfg(feature = "webrtc-data")]
+impl IpcSink for WebRtcDataChannel {
+    type Error = WebRtcDataError;
+    fn send(&mut self, message: &IpcMessage) -> Result<(), Self::Error>;
+}
+
+#[cfg(feature = "webrtc-data")]
+impl IpcSource for WebRtcDataChannel {
+    type Error = WebRtcDataError;
+    fn recv(&mut self) -> Result<Option<IpcMessage>, Self::Error>;
+}
+```
+
+#### Channel contract
+
+- **Ordered + reliable**: data channels must be created with
+  `ordered: true, maxRetransmits: None` so `Delta` delivery matches the
+  single-writer epoch contract. Unordered/unreliable channels are only
+  acceptable for optional lossy telemetry, never for graph state.
+- **Framing**: each `IpcMessage` is length-prefixed (4-byte LE length +
+  payload). Binary or JSON codec negotiated during capability handshake.
+- **Back-pressure**: `send` blocks or yields when the SCTP congestion
+  window is full; the caller must not flood faster than the channel drains.
+- **Reconnect**: on channel close or SCTP failure, the transport signals
+  `Err` so the caller can re-signaling and re-establish a fresh channel.
+  The `Delta` resync mechanism handles any gap.
+
+#### Lifecycle
+
+1. `SignalingClient` exchanges SDP offer/answer with peer via #yxjw
+2. ICE candidates trickle through the signaling channel
+3. On ICE completion, `WebRtcDataChannel::from_sdp(local_sdp, remote_sdp)`
+   creates the str0m session and opens the data channel
+4. Capability handshake on the data channel (protocol id, codec, features)
+5. `IpcMessage` frames flow bidirectionally
+6. On disconnect, re-signaling via `SignalingClient` and repeat
+
+#### Integration test surface
+
+- `tests/webrtc_data.rs` — gated behind `#[cfg(feature = "webrtc-data")]`
+- Loopback test: create two str0m sessions back-to-back, send
+  `IpcMessage::Snapshot` and `IpcMessage::Delta`, verify round-trip
+- Codec negotiation: JSON and binary on the same channel
+- Ordered delivery: send 100 deltas, verify epoch order on recv
+- `make test-webrtc-data` target in Makefile
+
 ### Capability negotiation
 
 Each non-local session starts with a small compatibility handshake before graph
