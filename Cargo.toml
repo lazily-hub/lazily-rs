@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2024"
 description = "Lazy reactive signals with dependency tracking and cache invalidation"
 license = "MIT"

@@ -5,7 +5,7 @@ Generated benchmark data for the [lazily](https://crates.io/crates/lazily) react
 ## Benchmark Results
 
 <!-- benchmark-results:start -->
-Generated for package `lazily` version `0.10.1`.
+Generated for package `lazily` version `0.10.2`.
 
 Environment: `rustc 1.96.0 (ac68faa20 2026-05-25)` on `x86_64-unknown-linux-gnu`.
 
@@ -508,4 +508,3 @@ lazily is implemented across three languages with shared semantics:
 ## License
 
 MIT
-
