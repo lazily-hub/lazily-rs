@@ -1254,6 +1254,18 @@ still encode/decode through the same `type_tag` + payload registry used by
 calls or framed IPC/WebSocket/WebRTC transport without changing the graph-state
 protocol.
 
+### Shared library build
+
+The crate produces both an `rlib` (for Rust consumers) and a `cdylib` (for
+FFI consumers) via `crate-type = ["lib", "cdylib"]` in `Cargo.toml`.
+
+- `make build-ffi` builds the shared library with the `ffi` feature enabled.
+- `make ffi-headers` generates a C header file (`target/lazily.h`) via
+  `cbindgen` using `cbindgen.toml`.
+- Future options include `safer-ffi` (safer FFI wrappers with auto-generated
+  headers) and `diplomat` (multi-language binding generation). The current
+  `cbindgen` approach is sufficient for C ABI consumers.
+
 ### Capability negotiation
 
 Each non-local session starts with a small compatibility handshake before graph

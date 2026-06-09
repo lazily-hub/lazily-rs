@@ -8,6 +8,8 @@ PYTHON ?= python3
 	fmt \
 	clippy \
 	build \
+	build-ffi \
+	ffi-headers \
 	test \
 	test-tokio \
 	test-async \
@@ -30,6 +32,12 @@ clippy:
 
 build:
 >$(CARGO) build --locked --all-targets --all-features
+
+build-ffi:
+>$(CARGO) build --locked --features ffi
+
+ffi-headers: build-ffi
+>cbindgen --config cbindgen.toml --crate lazily -o target/lazily.h
 
 test:
 >$(CARGO) test --locked
