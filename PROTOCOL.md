@@ -1,0 +1,429 @@
+# lazily Wire Protocol
+
+Language-agnostic protocol reference for the lazily reactive-graph family
+(lazily-rs, lazily-py, lazily-zig). This document describes the wire format,
+message schemas, and transport contracts. Language-specific APIs live in each
+binding's own documentation.
+
+## Message Plane
+
+All channels (FFI, IPC, WebSocket, WebRTC data) carry the same two message
+kinds:
+
+- **`Snapshot`** — full graph image, sent on connect and on resync
+- **`Delta`** — incremental change set, sent once per outermost batch flush
+
+These are tagged as `IpcMessage`:
+
+```json
+{ "Snapshot": { ... } }
+{ "Delta": { ... } }
+```
+
+## Wire Types
+
+### NodeId
+
+Stable wire identifier for a reactive node (cell or slot). Decoupled from
+language-internal allocation IDs.
+
+```json
+{ "node": 1 }
+```
+
+Wire format: `u64` wrapped in a `"node"` field.
+
+### PeerId
+
+Identifies a remote peer.
+
+```json
+{ "peer": 42 }
+```
+
+Wire format: `u64`. JavaScript peers must keep this at or below
+`Number.MAX_SAFE_INTEGER`.
+
+### OpKind
+
+Access category for a remote operation.
+
+| Value | Meaning |
+|-------|---------|
+| `"Read"` | Read node value into snapshot/delta |
+| `"Write"` | Write new value to source cell |
+| `"TriggerEffect"` | Trigger effect on irreversible-effect plane |
+
+### RemoteOp
+
+A single operation a remote peer may request.
+
+```json
+{ "kind": "Read", "node": 1 }
+```
+
+### IpcPayload
+
+Opaque serialized value bytes. The producing language owns type-aware encoding
+through `type_tag`; the channel only moves bytes.
+
+Wire format: array of `u8` (JSON array of integers).
+
+### NodeState
+
+Serialization state for a node.
+
+```json
+{ "Payload": [1, 2, 3, 4] }
+"Opaque"
+{ "SharedBlob": { "offset": 0, "len": 16, "generation": 1, "epoch": 9, "checksum": 123456789 } }
+```
+
+| Variant | Meaning |
+|---------|---------|
+| `{ "Payload": [...] }` | Inline serialized value bytes |
+| `"Opaque"` | Known node whose value cannot be serialized |
+| `{ "SharedBlob": { ... } }` | Descriptor for bytes in shared memory |
+
+### ShmBlobRef
+
+Descriptor for a payload stored in a shared-memory blob arena.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `offset` | `u64` | Byte offset from arena start |
+| `len` | `u64` | Payload length in bytes |
+| `generation` | `u64` | Per-write generation (stale rejection) |
+| `epoch` | `u64` | IPC epoch of the publishing message |
+| `checksum` | `u64` | FNV-1a payload checksum |
+
+### IpcValue
+
+Value stored inline or by shared-memory blob reference.
+
+```json
+{ "Inline": [10, 20, 30] }
+{ "SharedBlob": { "offset": 40, "len": 17, "generation": 2, "epoch": 9, "checksum": 987654321 } }
+```
+
+## Snapshot Message
+
+Full graph image sent on connect or resync.
+
+### Schema
+
+```
+Snapshot {
+  epoch: u64,
+  nodes: Vec<NodeSnapshot>,
+  edges: Vec<EdgeSnapshot>,
+  roots: Vec<NodeId>
+}
+```
+
+### NodeSnapshot
+
+```
+NodeSnapshot {
+  node: NodeId,
+  type_tag: string,
+  state: NodeState
+}
+```
+
+### EdgeSnapshot
+
+```
+EdgeSnapshot {
+  dependent: NodeId,
+  dependency: NodeId
+}
+```
+
+### Example: Minimal snapshot
+
+```json
+{
+  "Snapshot": {
+    "epoch": 1,
+    "nodes": [
+      {
+        "node": 1,
+        "type_tag": "i32",
+        "state": { "Payload": [1, 2, 3, 4] }
+      }
+    ],
+    "edges": [],
+    "roots": [1]
+  }
+}
+```
+
+### Example: Multi-node snapshot with opaque node
+
+```json
+{
+  "Snapshot": {
+    "epoch": 7,
+    "nodes": [
+      { "node": 1, "type_tag": "i32", "state": { "Payload": [1, 2, 3] } },
+      { "node": 2, "type_tag": "f64", "state": { "Payload": [0, 0, 0, 0, 0, 0, 240, 63] } },
+      { "node": 3, "type_tag": "opaque-type", "state": "Opaque" }
+    ],
+    "edges": [
+      { "dependent": 2, "dependency": 1 },
+      { "dependent": 3, "dependency": 1 }
+    ],
+    "roots": [1, 2]
+  }
+}
+```
+
+### Example: Snapshot with shared-blob node
+
+```json
+{
+  "Snapshot": {
+    "epoch": 9,
+    "nodes": [
+      {
+        "node": 7,
+        "type_tag": "text/plain",
+        "state": {
+          "SharedBlob": {
+            "offset": 0,
+            "len": 16,
+            "generation": 1,
+            "epoch": 9,
+            "checksum": 123456789
+          }
+        }
+      }
+    ],
+    "edges": [],
+    "roots": [7]
+  }
+}
+```
+
+## Delta Message
+
+Incremental change set emitted after one outermost batch flush.
+
+### Schema
+
+```
+Delta {
+  base_epoch: u64,
+  epoch: u64,
+  ops: Vec<DeltaOp>
+}
+```
+
+Sequential deltas satisfy `epoch == base_epoch + 1`. A receiver detects gaps,
+reorders, or sender restarts by checking `base_epoch == last_epoch`.
+
+### DeltaOp Variants
+
+| Variant | Fields | Meaning |
+|---------|--------|---------|
+| `CellSet` | `node`, `payload` (IpcValue) | Source cell changed to new value |
+| `SlotValue` | `node`, `payload` (IpcValue) | Lazily recomputed slot published a value |
+| `Invalidate` | `node` | Node dirtied without a concrete value |
+| `NodeAdd` | `node`, `type_tag`, `state` (NodeState) | New node became visible |
+| `NodeRemove` | `node` | Node was removed |
+| `EdgeAdd` | `dependent`, `dependency` | Dependency edge added |
+| `EdgeRemove` | `dependent`, `dependency` | Dependency edge removed |
+
+### Example: Sequential delta with all op variants
+
+```json
+{
+  "Delta": {
+    "base_epoch": 40,
+    "epoch": 41,
+    "ops": [
+      { "CellSet": { "node": 1, "payload": { "Inline": [10] } } },
+      { "SlotValue": { "node": 2, "payload": { "Inline": [20] } } },
+      { "Invalidate": { "node": 3 } },
+      { "NodeAdd": { "node": 4, "type_tag": "u64", "state": { "Payload": [64] } } },
+      { "NodeRemove": { "node": 5 } },
+      { "EdgeAdd": { "dependent": 2, "dependency": 1 } },
+      { "EdgeRemove": { "dependent": 3, "dependency": 1 } }
+    ]
+  }
+}
+```
+
+### Example: Non-sequential delta (gap)
+
+```json
+{
+  "Delta": {
+    "base_epoch": 12,
+    "epoch": 13,
+    "ops": []
+  }
+}
+```
+
+When the receiver's `last_epoch` is 10, this delta has a gap (expected 10→11,
+got 12→13). The receiver must discard it and request a fresh `Snapshot`.
+
+### Example: Delta with shared-blob payload
+
+```json
+{
+  "Delta": {
+    "base_epoch": 8,
+    "epoch": 9,
+    "ops": [
+      {
+        "SlotValue": {
+          "node": 7,
+          "payload": {
+            "SharedBlob": {
+              "offset": 40,
+              "len": 17,
+              "generation": 2,
+              "epoch": 9,
+              "checksum": 987654321
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+## Epoch Contract
+
+- `ipc_epoch` is a monotonic `u64` that advances once per outermost batch flush.
+- `Snapshot` carries `epoch`.
+- `Delta` carries `{ base_epoch, epoch }` with `epoch == base_epoch + 1`.
+- On `Delta` where `base_epoch != last_epoch`: discard the delta, request a
+  fresh `Snapshot`, resume from the snapshot's `epoch`.
+
+## Consistency Invariants
+
+- **PartialEq cell guard:** equal `CellSet` produces no wire ops.
+- **Memo equality suppression:** a dirty memo slot that recomputes to an equal
+  value emits no `SlotValue` or downstream `Invalidate`.
+- **Coalesced frontier:** a dependent reached through many changed cells in one
+  batch appears at most once per delta.
+
+## Permission Boundary
+
+Only nodes on the per-peer allowlist are serialized. Non-allowlisted nodes are
+**omitted entirely** (not even as `Opaque`) so a peer cannot infer their
+existence. Edges are retained only when both endpoints are readable.
+
+This filter is applied at snapshot/delta construction time, before
+serialization, on all channels without exception.
+
+## Serialization
+
+### JSON (default)
+
+`serde_json` with derived `Serialize`/`Deserialize`. All examples above use
+JSON. This is the cross-language default.
+
+### Binary (optional)
+
+`postcard` compact binary encoding via the `ipc-binary` feature. Smaller and
+faster than JSON, but **not self-describing** — peers must agree on the schema.
+For same-language or postcard-aware transports only.
+
+Binary frames decode through `IpcMessage::decode_binary(bytes)` and encode
+through `IpcMessage::encode_binary()`.
+
+## Transport Contracts
+
+### FFI (C ABI)
+
+- Opaque channel handle + owned byte buffers
+- Functions: `channel_new`, `channel_free`, `channel_send`, `channel_recv`,
+  `ipc_message_validate`, `ipc_message_kind`, `ipc_message_clone`,
+  `bytes_free`
+- Binary variants: same functions with `_binary` suffix
+- Ownership: caller owns input bytes; Rust owns output buffers until the paired
+  free function is called
+- Errors return `LazilyFfiStatus` enum; panics are caught before the C ABI
+
+### IPC (Unix socket / pipe / local TCP)
+
+- Length-prefixed serialized `IpcMessage` frames
+- Shared-memory optional for large `IpcValue::SharedBlob` payloads
+- `IpcSink` / `IpcSource` trait interface
+
+### WebSocket
+
+- One WebSocket text/binary frame carries one serialized `IpcMessage`
+- Signaling server (#yxjw) relays frames as opaque payload
+- Server must not parse CRDT/IPC state
+
+### WebRTC Data Channel
+
+- Reliable ordered data channels only (for graph state)
+- Length-prefixed framing: 4-byte LE length + payload
+- JSON or binary codec negotiated during capability handshake
+- On channel failure: re-signaling via `SignalingClient`, delta resync covers gaps
+- Unordered/unreliable channels only for optional lossy telemetry
+
+## Capability Negotiation
+
+Each non-local session starts with a handshake:
+
+| Field | Description |
+|-------|-------------|
+| Protocol id | `"lazily-ipc"` |
+| Protocol major version | `1` |
+| Codec | `"json"` or `"binary"` |
+| Maximum frame size | Negotiated maximum |
+| Ordered/reliable | Required for graph state |
+| PeerId | Session participant |
+| Supported features | `shared-blob`, `crdt-cell-plane`, etc. |
+
+If peers disagree on protocol major version, codec, or ordering guarantees,
+they fail closed before applying any `Snapshot` or `Delta`.
+
+## Cross-Language Family Rules
+
+- Compute closures are language-local. Cross-language sync shares the cell
+  state plane; derived slots converge remotely only when peers use a shared
+  compiled graph or explicit compute descriptors.
+- Permission filtering happens before serialization on every channel.
+- Channel code must preserve back-pressure and resync behavior.
+- All channels carry the same permission-filtered `IpcMessage` state plane.
+
+## Conformance Test Vectors
+
+Canonical JSON fixtures in `tests/conformance/` validate wire-format agreement
+across all language bindings:
+
+| Fixture | Coverage |
+|---------|----------|
+| `snapshot_minimal.json` | Single payload node, no edges |
+| `snapshot_multi_node.json` | Multiple nodes, opaque state, edges |
+| `snapshot_shared_blob.json` | Shared-memory blob reference |
+| `delta_sequential.json` | All 7 DeltaOp variants |
+| `delta_non_sequential.json` | Gap requiring resync |
+| `delta_shared_blob.json` | Delta with shared-blob payload |
+
+Each fixture contains:
+
+```json
+{
+  "description": "...",
+  "protocol_version": 1,
+  "kind": "Snapshot" | "Delta",
+  "assertions": { ... },
+  "wire": { <IpcMessage> }
+}
+```
+
+Language bindings should:
+1. Parse `wire` into native types
+2. Validate `assertions` (field values, counts, state kinds)
+3. Re-serialize and verify byte-exact match
