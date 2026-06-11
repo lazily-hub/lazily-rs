@@ -3709,6 +3709,8 @@ mod async_context_design_spec {
             "pub fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T",
             "records the accessed slot as a dependency",
             "records the accessed cell as a dependency",
+            "Async reads register the graph edge immediately",
+            "publishes stale data",
             "HashSet<SlotId>",
             "survives executor thread migration",
             "suspension/resume across",
@@ -3789,6 +3791,20 @@ mod async_context_design_spec {
             "recorded revision no longer matches",
             "discarded",
             "newly spawned future",
+        ] {
+            assert_spec_contains(fragment);
+        }
+    }
+
+    #[test]
+    fn spec_documents_async_race_stress_harness() {
+        for fragment in [
+            "Async race stress coverage",
+            "`get_async` waiter cancellation",
+            "in-flight completion after dependency invalidation",
+            "replacement across awaited slot reads",
+            "async effect cleanup-before-rerun",
+            "tests/async_stress.rs",
         ] {
             assert_spec_contains(fragment);
         }

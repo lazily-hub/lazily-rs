@@ -271,6 +271,38 @@ impl AsyncContextInner {
     }
 }
 
+fn register_dependency_locked(
+    inner: &mut AsyncContextInner,
+    dependency_id: SlotId,
+    dependent_id: SlotId,
+) {
+    if dependency_id == dependent_id {
+        return;
+    }
+    if let Some(node) = inner.get_node_mut(dependent_id) {
+        match node {
+            AsyncNode::Slot(s) => {
+                edge_insert(&mut s.dependencies, dependency_id);
+            }
+            AsyncNode::Effect(e) => {
+                edge_insert(&mut e.dependencies, dependency_id);
+            }
+            AsyncNode::Cell(_) => {}
+        }
+    }
+    if let Some(node) = inner.get_node_mut(dependency_id) {
+        match node {
+            AsyncNode::Slot(s) => {
+                edge_insert(&mut s.dependents, dependent_id);
+            }
+            AsyncNode::Cell(c) => {
+                edge_insert(&mut c.dependents, dependent_id);
+            }
+            AsyncNode::Effect(_) => {}
+        }
+    }
+}
+
 pub struct AsyncContext {
     inner: Arc<Mutex<AsyncContextInner>>,
 }
@@ -323,7 +355,8 @@ impl AsyncComputeContext {
         T: Clone + Send + Sync + 'static,
     {
         self.dependencies.lock().insert(handle.id);
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
+        register_dependency_locked(&mut inner, handle.id, self._node_id);
         match inner.get_node(handle.id) {
             Some(AsyncNode::Cell(cell)) => cell
                 .value
@@ -340,6 +373,10 @@ impl AsyncComputeContext {
         T: Clone + Send + Sync + 'static,
     {
         self.dependencies.lock().insert(handle.id);
+        {
+            let mut inner = self.inner.lock();
+            register_dependency_locked(&mut inner, handle.id, self._node_id);
+        }
         let inner_arc = self.inner.clone();
         async move {
             let ctx = AsyncContext { inner: inner_arc };
@@ -549,32 +586,8 @@ impl AsyncContext {
     }
 
     pub(crate) fn register_dependency(&self, dependency_id: SlotId, dependent_id: SlotId) {
-        if dependency_id == dependent_id {
-            return;
-        }
         let mut inner = self.inner.lock();
-        if let Some(node) = inner.get_node_mut(dependent_id) {
-            match node {
-                AsyncNode::Slot(s) => {
-                    edge_insert(&mut s.dependencies, dependency_id);
-                }
-                AsyncNode::Effect(e) => {
-                    edge_insert(&mut e.dependencies, dependency_id);
-                }
-                AsyncNode::Cell(_) => {}
-            }
-        }
-        if let Some(node) = inner.get_node_mut(dependency_id) {
-            match node {
-                AsyncNode::Slot(s) => {
-                    edge_insert(&mut s.dependents, dependent_id);
-                }
-                AsyncNode::Cell(c) => {
-                    edge_insert(&mut c.dependents, dependent_id);
-                }
-                AsyncNode::Effect(_) => {}
-            }
-        }
+        register_dependency_locked(&mut inner, dependency_id, dependent_id);
     }
 
     fn update_dependencies(

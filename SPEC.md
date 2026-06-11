@@ -724,6 +724,13 @@ the contract is that `get_async` never panics on these benign races. Covered by
 `async_context_concurrent_set_and_get_async_never_panics_k03k`, which fails
 deterministically against the prior assert-based implementation.
 
+Async race stress coverage must exercise `get_async` waiter cancellation, stale
+in-flight completion after dependency invalidation, dynamic dependency
+replacement across awaited slot reads, and async effect cleanup-before-rerun
+ordering. The harness lives in `tests/async_stress.rs` under the `async` feature
+so `make test-async` and `make check` run it with the rest of AsyncContext
+coverage.
+
 #### AsyncContext dependency tracking
 
 Async compute and effect callbacks do not use thread-local tracking stacks.
@@ -737,12 +744,15 @@ impl<'a> AsyncComputeContext<'a> {
 ```
 
 - `get_async` on the compute context records the accessed slot as a dependency
-  before awaiting its value.
+before awaiting its value.
 - `get_cell` on the compute context records the accessed cell as a dependency
-  synchronously.
+synchronously.
+- Async reads register the graph edge immediately, so source invalidation while
+the future is suspended can cancel or supersede the in-flight computation before
+it publishes stale data.
 - Dependencies are collected into a `HashSet<SlotId>` attached to the async
-  node. On rerun, stale dependencies are removed and new dependencies are
-  registered.
+node. On rerun, stale dependencies are removed and new dependencies are
+registered.
 - This design survives executor thread migration and suspension/resume across
   `.await` points because the dependency set is carried by the
   `AsyncComputeContext`, not a thread-local.
