@@ -991,3 +991,50 @@ impl Default for Context {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_nodes_are_vec_indexed_by_sequential_slot_ids_and_reuse_effect_ids() {
+        let ctx = Context::new();
+        let cell = ctx.cell(1i32);
+        let slot = ctx.slot(|_| 2i32);
+        let effect = ctx.effect(move |ctx| {
+            let _ = ctx.get(&slot);
+        });
+
+        assert_eq!(cell.id, SlotId(0));
+        assert_eq!(slot.id, SlotId(1));
+        assert_eq!(effect.id, SlotId(2));
+        {
+            let inner = ctx.inner.borrow();
+            assert_eq!(inner.nodes.len(), 3);
+            assert_eq!(inner.next_id, 3);
+            assert!(inner.free_ids.is_empty());
+            assert!(matches!(inner.nodes[0].as_ref(), Some(Node::Cell(_))));
+            assert!(matches!(inner.nodes[1].as_ref(), Some(Node::Slot(_))));
+            assert!(matches!(inner.nodes[2].as_ref(), Some(Node::Effect(_))));
+        }
+
+        effect.dispose(&ctx);
+        {
+            let inner = ctx.inner.borrow();
+            assert_eq!(inner.nodes.len(), 3);
+            assert_eq!(inner.next_id, 3);
+            assert_eq!(inner.free_ids.as_slice(), &[2]);
+            assert!(inner.nodes[2].is_none());
+        }
+
+        let reused = ctx.computed(|_| 3i32);
+        assert_eq!(reused.id, SlotId(2));
+        {
+            let inner = ctx.inner.borrow();
+            assert_eq!(inner.nodes.len(), 3);
+            assert_eq!(inner.next_id, 3);
+            assert!(inner.free_ids.is_empty());
+            assert!(matches!(inner.nodes[2].as_ref(), Some(Node::Slot(_))));
+        }
+    }
+}
