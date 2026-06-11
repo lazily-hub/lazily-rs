@@ -308,15 +308,20 @@ Locking model:
 - Batch exit, effect scheduling, disposal, and explicit clears must each have a single atomic graph mutation boundary and one coalesced effect flush per outermost invalidation pass
 - The outermost thread-safe batch exit must collect dependents for all changed cells and apply one coalesced frontier invalidation, so a shared dependent reached through many changed cells is marked dirty and advances revision once per batch flush
 - Thread-safe invalidation uses an explicit `InvalidationPlan` computed from a
-  frontier work queue under the graph mutex instead of recursive dependent
-  walks. Changed-cell and slot-value-change roots snapshot dependent frontiers,
-  coalesce duplicate slot ids in one invalidation pass, preserve direct
-  changed-value `force_recompute` upgrades when a slot is reached through both
+frontier work queue under the graph mutex instead of recursive dependent
+walks. Changed-cell and slot-value-change roots snapshot dependent frontiers,
+coalesce duplicate slot ids in one invalidation pass, preserve direct
+changed-value `force_recompute` upgrades when a slot is reached through both
   direct and downstream paths, snapshot hard-clear frontiers for explicit
   slot/cell clears, then apply dirty, clear, revision, and effect-scheduling
   mutations at the same graph mutation boundary. The plan shape is partitionable
-  for future bounded worker traversal, but this prototype keeps snapshot and application under the context mutex until benchmark and model-checking
-  evidence proves a parallel apply path safe.
+for future bounded worker traversal, but this prototype keeps snapshot and application under the context mutex until benchmark and model-checking
+evidence proves a parallel apply path safe.
+- Thread-safe stress coverage must run the same contention script under both
+`LowConcurrency` and `HighConcurrency`, mixing batched cell writes, explicit
+slot and cell-dependent clears, effect cleanup/rerun, effect disposal racing
+with writers, and concurrent cached reads. The harness lives in
+`tests/thread_safe_stress.rs` and is part of `make check`.
 
 Lock strategy evaluation:
 
@@ -335,14 +340,17 @@ Lock strategy evaluation:
 - `ThreadSafeContext` uses per-slot sidecar recompute `Condvar`s for in-flight waiters. Those Condvars guard only per-slot in-flight/revision/cache-visibility state, use waiter-counted `notify_one` handoff wakeups to avoid broad `notify_all` contention, and must not mutate dependency graph state independently of the context mutex
 - The read-mostly prototype is benchmark-gated by the 1/2/4/8/16-worker `same_slot_write_read`, `independent_slots`, `read_mostly_waiters`, and `batched_write_bursts` matrix after the `#lazybatch1` and `#lazybatch2` invalidation/read-churn fixes
 - The dependent-frontier sidecar prototype is benchmark-gated by
-  `thread_safe_contention / independent_slots` and
-  `set_cell_invalidation / independent_slot_contention` at 8 and 16 workers. It
-  should reduce `set_cell_invalidation` graph-lock acquisitions for independent
-  slot-only roots without changing effect, batch, or dynamic-dependency
-  semantics.
+`thread_safe_contention / independent_slots` and
+`set_cell_invalidation / independent_slot_contention` at 8 and 16 workers. It
+should reduce `set_cell_invalidation` graph-lock acquisitions for independent
+slot-only roots without changing effect, batch, or dynamic-dependency
+semantics.
+- A sidecar frontier invalidation that reaches a slot with recompute in flight
+falls back to the graph-locked invalidation path, so stale publishes cannot
+clear newer dirty markers.
 - High-parallel graph propagation profiles gate the lazy-invalidation path with
-  `thread_safe_graph_propagation` at 8 and 16 workers. The matrix compares
-  fan-out eager validation, fan-out lazy dirty epoch publication, fan-in lazy
+`thread_safe_graph_propagation` at 8 and 16 workers. The matrix compares
+fan-out eager validation, fan-out lazy dirty epoch publication, fan-in lazy
   dirty epoch publication, and fan-in batched flush behavior using throughput,
   p50/p95 latency, lock attribution, effect queue pushes, dependency-edge
   counters, sidecar dirty marks, sidecar fallbacks, and dirty epoch advances.

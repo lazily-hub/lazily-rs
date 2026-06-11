@@ -753,12 +753,30 @@ impl ThreadSafeSlotFastPath {
             recompute.revision = recompute.revision.wrapping_add(1);
             recompute.dirty = true;
             recompute.force_recompute |= force_recompute;
+            if force_recompute {
+                self.force_recompute.store(true, Ordering::Release);
+            }
+            self.dirty.store(true, Ordering::Release);
         }
         self.cache_revision.fetch_add(1, Ordering::AcqRel);
-        self.dirty.store(true, Ordering::Release);
-        if force_recompute {
-            self.force_recompute.store(true, Ordering::Release);
+    }
+
+    fn try_mark_dirty_without_inflight(&self, force_recompute: bool) -> bool {
+        {
+            let mut recompute = self.lock_recompute_state();
+            if recompute.computing {
+                return false;
+            }
+            recompute.revision = recompute.revision.wrapping_add(1);
+            recompute.dirty = true;
+            recompute.force_recompute |= force_recompute;
+            if force_recompute {
+                self.force_recompute.store(true, Ordering::Release);
+            }
+            self.dirty.store(true, Ordering::Release);
         }
+        self.cache_revision.fetch_add(1, Ordering::AcqRel);
+        true
     }
 
     fn mark_fresh(&self, has_value: bool) {
@@ -767,9 +785,9 @@ impl ThreadSafeSlotFastPath {
             recompute.has_value = has_value;
             recompute.dirty = false;
             recompute.force_recompute = false;
+            self.force_recompute.store(false, Ordering::Release);
+            self.dirty.store(false, Ordering::Release);
         }
-        self.force_recompute.store(false, Ordering::Release);
-        self.dirty.store(false, Ordering::Release);
     }
 
     fn clear(&self) {
@@ -780,9 +798,9 @@ impl ThreadSafeSlotFastPath {
             recompute.has_value = false;
             recompute.dirty = false;
             recompute.force_recompute = false;
+            self.force_recompute.store(false, Ordering::Release);
+            self.dirty.store(false, Ordering::Release);
         }
-        self.force_recompute.store(false, Ordering::Release);
-        self.dirty.store(false, Ordering::Release);
     }
 
     fn lock_recompute_state(&self) -> MutexGuard<'_, ThreadSafeSlotRecomputeState> {
@@ -2077,7 +2095,6 @@ impl ThreadSafeContext {
         );
         let _callback_activity = self.callback_activity();
         let result = compute(self);
-        drop(_callback_activity);
         let new_dependencies = _tracking.finish();
         let result = Arc::<ThreadSafeAny>::from(result);
 
@@ -2282,10 +2299,11 @@ impl ThreadSafeContext {
             return None;
         }
 
-        let roots = fast_path
-            .dependents_snapshot()
-            .into_iter()
-            .map(|(id, kind)| (id, kind, true));
+        let dependents = fast_path.dependents_snapshot();
+        if dependents.is_empty() {
+            return None;
+        }
+        let roots = dependents.into_iter().map(|(id, kind)| (id, kind, true));
         self.try_mark_slot_frontier_fast(roots)
     }
 
@@ -2353,7 +2371,12 @@ impl ThreadSafeContext {
         let dirty_marks = slot_order.len();
         for id in slot_order {
             let force_recompute = slots_to_mark.get(&id).copied().unwrap_or(false);
-            self.slot_fast_path(id)?.mark_dirty(force_recompute);
+            if !self
+                .slot_fast_path(id)?
+                .try_mark_dirty_without_inflight(force_recompute)
+            {
+                return None;
+            }
         }
         #[cfg(feature = "instrumentation")]
         self.inner
@@ -2612,7 +2635,6 @@ impl ThreadSafeContext {
         );
         let _callback_activity = self.callback_activity();
         let next_cleanup = run(self);
-        drop(_callback_activity);
         let new_dependencies = _tracking.finish();
 
         let mut state = self.lock_state();

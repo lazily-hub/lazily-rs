@@ -178,9 +178,18 @@ mod context {
 mod threading_contract {
     use super::*;
 
+    const SPEC: &str = include_str!("../SPEC.md");
+
     fn assert_copy<T: Copy>() {}
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    fn assert_spec_contains(fragment: &str) {
+        assert!(
+            SPEC.contains(fragment),
+            "SPEC.md should document threading contract element: {fragment}"
+        );
+    }
 
     /// SPEC: Handles are lightweight ids. When their payload type is thread-safe,
     /// the handle may be copied between threads even though the current Context is
@@ -725,6 +734,22 @@ mod threading_contract {
             cleanup_runs.load(Ordering::SeqCst) >= 2,
             "disposal should run the latest pending cleanup"
         );
+    }
+
+    #[test]
+    fn spec_documents_thread_safe_stress_harness() {
+        for fragment in [
+            "Thread-safe stress coverage",
+            "`LowConcurrency` and `HighConcurrency`",
+            "batched cell writes",
+            "effect cleanup/rerun",
+            "effect disposal racing",
+            "concurrent cached reads",
+            "stale publishes cannot",
+            "tests/thread_safe_stress.rs",
+        ] {
+            assert_spec_contains(fragment);
+        }
     }
 }
 
