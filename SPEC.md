@@ -196,6 +196,25 @@ ctx.batch(|ctx| {
 - **Effect flushing:** Effects scheduled by batched invalidation rerun after the batch invalidation pass and coalesce duplicate schedules
 - **Reads during a batch:** Direct `ctx.get_cell()` reads see the latest cell value immediately; dependent slot reads keep their pre-batch cached value until dirty marking flushes at batch exit
 
+### Regression property harness
+
+The default Rust test suite includes `tests/property_graph.rs`, a `proptest`
+harness that drives a fixed reactive graph with generated programs of cell
+sets, equal-value sets, `cell.clear_dependents`, `slot.clear`, memo-guarded
+dependencies, batch boundaries, reads, and effect disposal/recreation.
+
+Each generated program is checked against a pure model:
+
+- Cell and slot reads must match the model after every operation.
+- Equal-value cell sets must not schedule effect cleanup/rerun work.
+- Same-parity cell changes through a `memo` slot must preserve downstream
+effect run counts when the observable output is unchanged.
+- Explicit slot and cell-dependent clears must hard-clear cached slots when no
+effect is active, and must rerun active effects to re-prime their dependencies.
+- Operations inside `ctx.batch` must not clear cached dependent slots or run
+effect cleanups/reruns until the outermost batch exits; dependent reads during
+the batch must continue to see the pre-batch cached value.
+
 ### SlotId
 
 Unique identifier for reactive nodes. Lightweight `Copy` type wrapping a `u64`.
