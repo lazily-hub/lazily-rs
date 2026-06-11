@@ -2465,6 +2465,21 @@ mod invalidation_semantics {
         );
         assert!(ctx.is_set(&parity));
         assert!(ctx.is_set(&downstream));
+        assert_eq!(
+            ctx.get(&downstream),
+            0,
+            "freshened downstream cache should remain readable without recompute"
+        );
+        assert_eq!(
+            *parity_computes.borrow(),
+            2,
+            "clean downstream read should not revalidate the unchanged memo"
+        );
+        assert_eq!(
+            *downstream_computes.borrow(),
+            1,
+            "clean downstream read should keep the preserved cache"
+        );
 
         ctx.set_cell(&root, 3);
         assert_eq!(ctx.get(&downstream), 10);
