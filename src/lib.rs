@@ -55,6 +55,8 @@ mod signaling_client;
 mod slot;
 #[cfg(feature = "webrtc-str0m")]
 mod str0m_backend;
+#[cfg(feature = "webrtc-str0m")]
+mod str0m_net;
 mod thread_safe;
 #[cfg(feature = "webrtc")]
 mod webrtc_transport;
@@ -104,6 +106,8 @@ pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, Signal
 pub use slot::SlotHandle;
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
+#[cfg(feature = "webrtc-str0m")]
+pub use str0m_net::{Str0mNet, Str0mNetChannel, Str0mNetError};
 pub use thread_safe::{ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult};
 #[cfg(feature = "webrtc")]
 pub use webrtc_transport::{

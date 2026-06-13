@@ -11,9 +11,12 @@
 //! [`DataChannel`](crate::DataChannel) so the `WebRtcSink`/`WebRtcSource` bridge
 //! (permission filtering, `IpcMessage` codec) runs over a genuine str0m channel.
 //!
-//! A networked (non-loopback) backend reuses the same pump loop with a real UDP
-//! socket and a background driver thread instead of the in-memory packet route;
-//! that is out of scope here (needs live connectivity) and noted in the plan.
+//! The networked (non-loopback) backend [`Str0mNet`](crate::Str0mNet) reuses the
+//! same pump loop with a real UDP socket and a background driver thread instead
+//! of the in-memory packet route, exchanging the SDP/ICE handshake over
+//! [`SignalingClient`](crate::SignalingClient). It needs live connectivity so it
+//! cannot run on the synthetic clock; see `src/str0m_net.rs` and
+//! `tests/str0m_net.rs` (real two-socket `127.0.0.1` round trip).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

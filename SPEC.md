@@ -1420,6 +1420,41 @@ impl IpcSource for WebRtcDataChannel {
 - Ordered delivery: send 100 deltas, verify epoch order on recv
 - `make test-webrtc-data` target in Makefile
 
+#### str0m backends: loopback vs networked (`webrtc-str0m` feature)
+
+The `webrtc-str0m` feature ships two concrete `DataChannel` backends over the
+same sans-IO str0m pump loop, differing only in transport and clock:
+
+- **`Str0mLoopback`** (`src/str0m_backend.rs`) — two `Rtc` instances in one
+  thread, connected by an **in-memory packet route** advanced on a **synthetic
+  clock**. No sockets, no threads, no wall-clock dependency, so the full
+  ICE/DTLS/SCTP handshake is **deterministically testable in-process**. This is
+  the unit/CI substrate for the `WebRtcSink`/`WebRtcSource` bridge.
+- **`Str0mNet`** (`src/str0m_net.rs`) — one `Rtc` driven over a **real UDP
+  socket** by a **background driver thread**, with the SDP offer/answer and
+  trickled ICE candidates exchanged by the caller (typically over
+  `SignalingClient`, #yxjw). This is the real "beyond signaling" peer-to-peer
+  path that can reach a peer on another host.
+
+`Str0mNet` lifecycle:
+
+1. `Str0mNet::offer(bind)` → binds the UDP socket, opens the `lazily-ipc` channel,
+   returns the SDP offer string; `Str0mNet::answer(bind, offer)` returns the SDP
+   answer string. The offerer applies the peer's answer with `accept_answer`.
+2. Each peer exposes its host candidate via `local_candidate()`; the caller
+   trickles it to the remote, which feeds it to `add_remote_candidate()`.
+3. The driver thread pumps `poll_output` → UDP `send_to`, and UDP `recv_from` →
+   `handle_input`, advancing real timers, until the SCTP data channel opens
+   (`wait_open`). Inbound frames queue for `try_recv_frame`; outbound frames
+   requested before open are buffered and flushed on open.
+4. On `ChannelClose`, socket failure, or a dead `Rtc`, the channel reports closed
+   so the sync sink/source surface `Err` and the caller re-signals.
+
+Because `Str0mNet` needs live two-peer connectivity it cannot use the synthetic
+clock. `tests/str0m_net.rs` exercises a real two-socket round trip over
+`127.0.0.1` (real UDP/DTLS/SCTP/timers); a cross-host round trip through the live
+signaling Worker is operator-gated.
+
 ### Capability negotiation
 
 Each non-local session starts with a small compatibility handshake before graph

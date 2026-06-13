@@ -83,8 +83,10 @@ test-ipc-conformance:
 test-signaling-client:
 >$(CARGO) test --locked --features signaling-client
 
-# WebRTC DataChannel transport (#webrtc2/#webrtc3) + concrete str0m backend
-# (#webrtcbackend): loopback integration tests, no real network.
+# WebRTC DataChannel transport (#webrtc2/#webrtc3) + concrete str0m backends:
+# the deterministic in-memory/synthetic-clock loopback (#webrtcbackend) plus the
+# networked Str0mNet backend (#lzwebrtcnet), whose test does a real two-socket
+# round trip over 127.0.0.1 (real UDP/DTLS/SCTP/timers).
 test-webrtc:
 >$(CARGO) test --locked --features webrtc-str0m
 
