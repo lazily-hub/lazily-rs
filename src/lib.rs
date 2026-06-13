@@ -52,6 +52,8 @@ mod ipc;
 mod signaling_client;
 mod slot;
 mod thread_safe;
+#[cfg(feature = "webrtc")]
+mod webrtc_transport;
 
 #[cfg(feature = "async")]
 pub use async_context::{
@@ -93,3 +95,7 @@ pub use ipc::{
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
 pub use slot::SlotHandle;
 pub use thread_safe::{ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult};
+#[cfg(feature = "webrtc")]
+pub use webrtc_transport::{
+    DataChannel, InMemoryDataChannel, WebRtcSink, WebRtcSource, WebRtcTransportError,
+};

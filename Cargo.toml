@@ -24,6 +24,10 @@ ipc = ["serde"]
 ipc-binary = ["ipc", "dep:postcard"]
 loom = []
 serde = ["dep:serde", "smallvec?/serde"]
+# #jpf1: WebRTC DataChannel IPC transport — abstraction layer (sync IpcSink/Source
+# bridge + permission filtering + in-memory loopback). The concrete webrtc-rs/str0m
+# backend is an additive follow-up; this feature stays dependency-light.
+webrtc = ["ipc", "dep:serde_json"]
 # Async client for the #yxjw Cloudflare signaling endpoint, so a Rust project
 # (e.g. agent-doc) can depend on lazily-rs for distributed peer discovery (#s0fc).
 signaling-client = ["distributed", "serde", "dep:serde_json", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
