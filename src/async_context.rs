@@ -303,8 +303,24 @@ fn register_dependency_locked(
     }
 }
 
+/// Test-only async hook installed via [`AsyncContext::__install_window1_hook`]
+/// to deterministically exercise the `#k03k` window-1 race in `get_async` (the
+/// slot transitioning `Computing -> Resolved` between the lock-free fast-path
+/// check and the re-lock). Compiled out of default/release builds.
+#[cfg(feature = "instrumentation")]
+pub type Window1Hook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 pub struct AsyncContext {
     inner: Arc<Mutex<AsyncContextInner>>,
+    /// One-shot async seam fired inside `get_async`'s window-1 gap; `take`n on
+    /// first fire so it runs exactly once. See [`Window1Hook`].
+    #[cfg(feature = "instrumentation")]
+    window1_hook: Mutex<Option<Window1Hook>>,
+    /// Counts how many times `get_async` returned through the window-1
+    /// `Resolved`-after-re-lock arm. Lets tests prove the race arm was taken
+    /// rather than the fast path.
+    #[cfg(feature = "instrumentation")]
+    window1_resolved_hits: AtomicU64,
 }
 
 pub struct AsyncSlotHandle<T> {
@@ -379,7 +395,13 @@ impl AsyncComputeContext {
         }
         let inner_arc = self.inner.clone();
         async move {
-            let ctx = AsyncContext { inner: inner_arc };
+            let ctx = AsyncContext {
+                inner: inner_arc,
+                #[cfg(feature = "instrumentation")]
+                window1_hook: Mutex::new(None),
+                #[cfg(feature = "instrumentation")]
+                window1_resolved_hits: AtomicU64::new(0),
+            };
             ctx.get_async(handle).await
         }
     }
@@ -468,7 +490,27 @@ impl AsyncContext {
                 batched_cells: HashSet::new(),
                 pending_async_effects: Vec::new(),
             })),
+            #[cfg(feature = "instrumentation")]
+            window1_hook: Mutex::new(None),
+            #[cfg(feature = "instrumentation")]
+            window1_resolved_hits: AtomicU64::new(0),
         }
+    }
+
+    /// Install a one-shot async seam fired inside `get_async`'s window-1 gap.
+    /// Used by tests to deterministically resolve a slot in the window between
+    /// the fast-path `get()` check and the re-lock, forcing the `#k03k`
+    /// `Resolved`-after-re-lock arm. Test-only (`instrumentation` feature).
+    #[cfg(feature = "instrumentation")]
+    pub fn __install_window1_hook(&self, hook: Window1Hook) {
+        *self.window1_hook.lock() = Some(hook);
+    }
+
+    /// Number of `get_async` returns that went through the window-1
+    /// `Resolved`-after-re-lock arm. Test-only (`instrumentation` feature).
+    #[cfg(feature = "instrumentation")]
+    pub fn __window1_resolved_hits(&self) -> u64 {
+        self.window1_resolved_hits.load(Ordering::Relaxed)
     }
 
     pub fn cell<T>(&self, value: T) -> AsyncCellHandle<T>
@@ -774,6 +816,18 @@ impl AsyncContext {
                 return val;
             }
 
+            // Test-only seam (compiled out of default/release builds): fire a
+            // one-shot hook in the window-1 gap so a test can resolve the slot
+            // between the fast-path check above and the re-lock below,
+            // deterministically reaching the `#k03k` Resolved arm.
+            #[cfg(feature = "instrumentation")]
+            {
+                let hook = self.window1_hook.lock().take();
+                if let Some(hook) = hook {
+                    hook().await;
+                }
+            }
+
             let mut recv = {
                 let inner = self.inner.lock();
                 match inner.get_node(handle.id) {
@@ -789,6 +843,8 @@ impl AsyncContext {
                         }
                         AsyncSlotState::Resolved => {
                             // Window (1): resolved since the `get()` check.
+                            #[cfg(feature = "instrumentation")]
+                            self.window1_resolved_hits.fetch_add(1, Ordering::Relaxed);
                             let val = slot.value.as_ref().expect("resolved without value");
                             return val
                                 .downcast_ref::<T>()

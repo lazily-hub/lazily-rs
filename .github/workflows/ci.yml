@@ -43,6 +43,12 @@ jobs:
       - name: Test signaling client feature
         run: cargo +stable test --locked --features signaling-client
 
+      - name: Test async feature
+        run: cargo +stable test --locked --features async
+
+      - name: Test async resolve-loop windows (#k03k)
+        run: cargo +stable test --locked --features "async instrumentation" --test async_resolve_loop
+
       - name: Test loom model
         run: cargo +stable test --locked --features loom --test thread_safe_loom
 

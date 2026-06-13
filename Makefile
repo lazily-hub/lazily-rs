@@ -13,6 +13,7 @@ PYTHON ?= python3
 	test \
 	test-tokio \
 	test-async \
+	test-async-resolve \
 	test-loom \
 	test-distributed \
 	test-ffi \
@@ -25,7 +26,7 @@ PYTHON ?= python3
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-signaling-client benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-signaling-client benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -50,6 +51,11 @@ test-tokio:
 
 test-async:
 >$(CARGO) test --locked --features async
+
+# Deterministic #k03k resolve-loop window coverage needs the instrumentation
+# seam (window 1) alongside the async feature; test-async alone compiles it out.
+test-async-resolve:
+>$(CARGO) test --locked --features "async instrumentation" --test async_resolve_loop
 
 test-loom:
 >$(CARGO) test --locked --features loom --test thread_safe_loom

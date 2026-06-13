@@ -732,6 +732,29 @@ the contract is that `get_async` never panics on these benign races. Covered by
 `async_context_concurrent_set_and_get_async_never_panics_k03k`, which fails
 deterministically against the prior assert-based implementation.
 
+**Deterministic window coverage.** Unlike `ThreadSafeContext`, the async resolve
+loop **cannot** be modeled with Loom: `AsyncContext` runs on tokio's async
+executor and `tokio::sync::watch`, while Loom only shims synchronous `loom::sync`
+primitives and has no async runtime. Each window is instead pinned by a targeted
+deterministic test in `tests/async_resolve_loop.rs` (`async` + `instrumentation`
+features):
+
+- **Window 1** is forced via a one-shot `instrumentation`-gated seam
+  (`AsyncContext::__install_window1_hook`) that resolves the slot inside the
+  synchronous gap between the fast-path `get()` and the re-lock — the gap has no
+  `.await`, so cooperative scheduling alone cannot reach it. The test asserts the
+  reader returned through the `Resolved`-after-re-lock arm via
+  `__window1_resolved_hits`. The seam compiles out of default/release builds.
+- **Window 2** is forced by gating an in-flight compute and superseding it with a
+  newer revision so the notifier drops without a final send, asserting the waiter
+  re-resolves to the latest value rather than panicking (mirrors the broader
+  `async_stress.rs::get_async_waiter_cancellation_and_stale_completion_keep_latest`).
+
+Exhaustive interleaving exploration of the async path (beyond these two known
+windows) would require a Shuttle model, which in turn requires making
+`async_context.rs` generic over its concurrency primitives — a larger
+architectural change tracked separately, not a Loom drop-in.
+
 Async race stress coverage must exercise `get_async` waiter cancellation, stale
 in-flight completion after dependency invalidation, dynamic dependency
 replacement across awaited slot reads, and async effect cleanup-before-rerun
