@@ -75,6 +75,11 @@ harness = false
 required-features = ["async"]
 
 [[bench]]
+name = "webrtc_transport"
+harness = false
+required-features = ["webrtc"]
+
+[[bench]]
 name = "tokio_sync"
 harness = false
 required-features = ["tokio"]
