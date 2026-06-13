@@ -49,6 +49,18 @@ jobs:
       - name: Test async resolve-loop windows (#k03k)
         run: cargo +stable test --locked --features "async instrumentation" --test async_resolve_loop
 
+      # lazily-spec is the canonical cross-language wire-protocol source. Clone
+      # it as a sibling so conformance.rs prefers ../lazily-spec/conformance over
+      # its local fixture copies — CI then validates lazily-rs against canonical
+      # fixtures and fails on drift (#lzspecconf).
+      - name: Fetch canonical lazily-spec conformance fixtures (#lzspecconf)
+        run: git clone --depth 1 https://github.com/lazily-hub/lazily-spec.git ../lazily-spec
+
+      - name: Test IPC conformance against canonical spec fixtures (#lzspecconf)
+        run: |
+          test -d ../lazily-spec/conformance || { echo "::error::../lazily-spec/conformance missing — conformance.rs would silently fall back to local fixtures"; exit 1; }
+          cargo +stable test --locked --features ipc --test conformance
+
       - name: Test loom model
         run: cargo +stable test --locked --features loom --test thread_safe_loom
 
