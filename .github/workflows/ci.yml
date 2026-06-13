@@ -46,6 +46,12 @@ jobs:
       - name: Test async feature
         run: cargo +stable test --locked --features async
 
+      - name: Test WebRTC DataChannel transport + str0m backend (#webrtcbackend)
+        run: cargo +stable test --locked --features webrtc-str0m
+
+      - name: Test WebSocket DataChannel backend (#akp3)
+        run: cargo +stable test --locked --features websocket
+
       - name: Test async resolve-loop windows (#k03k)
         run: cargo +stable test --locked --features "async instrumentation" --test async_resolve_loop
 

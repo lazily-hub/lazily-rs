@@ -22,11 +22,13 @@ PYTHON ?= python3
 	test-ipc-binary \
 	test-ipc-conformance \
 	test-signaling-client \
+	test-webrtc \
+	test-websocket \
 	benchmark-check \
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-signaling-client benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-signaling-client test-webrtc test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -80,6 +82,16 @@ test-ipc-conformance:
 
 test-signaling-client:
 >$(CARGO) test --locked --features signaling-client
+
+# WebRTC DataChannel transport (#webrtc2/#webrtc3) + concrete str0m backend
+# (#webrtcbackend): loopback integration tests, no real network.
+test-webrtc:
+>$(CARGO) test --locked --features webrtc-str0m
+
+# WebSocket DataChannel backend (#akp3): in-process loopback over a real WS
+# handshake, no real network.
+test-websocket:
+>$(CARGO) test --locked --features websocket
 
 benchmark-check:
 >$(PYTHON) scripts/update-benchmark-results.py --check

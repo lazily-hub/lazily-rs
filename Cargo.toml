@@ -30,6 +30,10 @@ webrtc = ["ipc", "dep:serde_json"]
 # #webrtcbackend: concrete sans-IO str0m DataChannel backend over the `webrtc`
 # abstraction. Additive + opt-in so the str0m dep tree stays out of default builds.
 webrtc-str0m = ["webrtc", "dep:str0m"]
+# #akp3: concrete WebSocket DataChannel backend over the `webrtc` abstraction.
+# WebSocket is ordered+reliable so it satisfies DataChannel directly via an
+# async-to-sync tokio bridge — no signaling/ICE. Additive + opt-in.
+websocket = ["webrtc", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 # Async client for the #yxjw Cloudflare signaling endpoint, so a Rust project
 # (e.g. agent-doc) can depend on lazily-rs for distributed peer discovery (#s0fc).
 signaling-client = ["distributed", "serde", "dep:serde_json", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]

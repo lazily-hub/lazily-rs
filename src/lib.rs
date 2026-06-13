@@ -56,6 +56,8 @@ mod str0m_backend;
 mod thread_safe;
 #[cfg(feature = "webrtc")]
 mod webrtc_transport;
+#[cfg(feature = "websocket")]
+mod ws_backend;
 
 #[cfg(feature = "async")]
 pub use async_context::{
@@ -103,3 +105,5 @@ pub use thread_safe::{ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackR
 pub use webrtc_transport::{
     DataChannel, InMemoryDataChannel, WebRtcSink, WebRtcSource, WebRtcTransportError,
 };
+#[cfg(feature = "websocket")]
+pub use ws_backend::{WsDataChannel, WsError};
