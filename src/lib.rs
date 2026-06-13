@@ -37,6 +37,8 @@
 #[cfg(feature = "async")]
 #[allow(dead_code)]
 mod async_context;
+#[cfg(feature = "webrtc")]
+mod bridge;
 mod cell;
 mod context;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
@@ -64,6 +66,8 @@ pub use async_context::{
     AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncContextId, AsyncEffectHandle,
     AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView,
 };
+#[cfg(feature = "webrtc")]
+pub use bridge::{BridgeHub, HubError};
 pub use cell::CellHandle;
 pub use context::Context;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
