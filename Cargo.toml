@@ -25,9 +25,11 @@ ipc-binary = ["ipc", "dep:postcard"]
 loom = []
 serde = ["dep:serde", "smallvec?/serde"]
 # #jpf1: WebRTC DataChannel IPC transport — abstraction layer (sync IpcSink/Source
-# bridge + permission filtering + in-memory loopback). The concrete webrtc-rs/str0m
-# backend is an additive follow-up; this feature stays dependency-light.
+# bridge + permission filtering + in-memory loopback). Dependency-light.
 webrtc = ["ipc", "dep:serde_json"]
+# #webrtcbackend: concrete sans-IO str0m DataChannel backend over the `webrtc`
+# abstraction. Additive + opt-in so the str0m dep tree stays out of default builds.
+webrtc-str0m = ["webrtc", "dep:str0m"]
 # Async client for the #yxjw Cloudflare signaling endpoint, so a Rust project
 # (e.g. agent-doc) can depend on lazily-rs for distributed peer discovery (#s0fc).
 signaling-client = ["distributed", "serde", "dep:serde_json", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
@@ -43,6 +45,7 @@ postcard = { version = "1", optional = true, features = ["alloc"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 smallvec = { version = "1", optional = true }
+str0m = { version = "0.20", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-webpki-roots"] }
 
