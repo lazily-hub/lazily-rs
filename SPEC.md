@@ -175,6 +175,39 @@ struct EffectNode {
 - **Cleanup:** Returning a cleanup closure runs it before the next rerun and on disposal
 - **Disposal:** `effect.dispose(&ctx)` unsubscribes from dependencies, removes pending scheduled work, and prevents future reruns
 
+### Signal
+
+Eager derived value. A Signal sits one step beyond a Slot on the
+`Slot -> Cell -> Signal` progression: where a Slot is **lazy** (invalidation
+only marks it dirty; the value is recomputed on the next read), a Signal is
+**eager** — it recomputes the instant any dependency is invalidated. The value
+is always materialized, so observers never see an intermediate unset value: a
+dependency change drives the value directly from `v1` to `v2`.
+
+A Signal is composed from existing primitives: a memoized Slot (`ctx.memo`)
+plus a small puller Effect that re-materializes the slot after every
+invalidation. This composition is intentional — it inherits the Slot's
+glitch-free, pull-based recomputation and the memo guard, while the Effect
+supplies eagerness.
+
+```rust
+let n = ctx.cell(1);
+let doubled = ctx.signal(|ctx| n.get(ctx) * 2); // materialized now: 2
+n.set(&ctx, 5);                                  // doubled is already 10
+assert_eq!(doubled.get(&ctx), 10);
+```
+
+**Semantics:**
+
+- **Eager activation:** `ctx.signal()` computes the value once at creation; the value is set from the start
+- **Eager recomputation:** Dependency invalidation recomputes the value during the invalidation flush, before the invalidating `set_cell`/`set`/`batch` call returns — no read is required to drive it
+- **No unset state:** The backing slot is invalidated via dirty-marking (not hard-cleared), so the value transitions `v1 -> v2` and is never observed as unset
+- **Memo guard:** Backed by `ctx.memo`, a recomputation that yields an equal value (via `PartialEq`) does not invalidate downstream dependents
+- **Glitch-free:** Recomputation is pull-based; a Signal that reads other Signals/Slots always observes values consistent with the current inputs (e.g. a diamond `D = f(A, g(A))` never surfaces a mixed new-`A`/old-`g(A)` intermediate)
+- **Batch coalescing:** Writes inside `ctx.batch()` settle to a single consistent recomputation at batch exit
+- **Type bounds:** `signal<T>` requires `T: PartialEq + 'static` (for the memo guard); `get_signal` additionally requires `T: Clone`
+- **Disposal:** `signal.dispose(&ctx)` removes the eager puller; the value remains readable and reverts to lazy (recomputed on next read) behavior
+
 ### Batch
 
 Write-coalescing boundary for multiple cell updates or explicit slot clears.

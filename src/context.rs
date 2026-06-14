@@ -8,6 +8,7 @@ use smallvec::SmallVec;
 
 use crate::cell::CellHandle;
 use crate::effect::{EffectCallbackResult, EffectHandle};
+use crate::signal::SignalHandle;
 use crate::slot::SlotHandle;
 
 /// Type alias for the erased compute function stored in slots.
@@ -815,6 +816,61 @@ impl Context {
         dependencies
             .into_iter()
             .any(|dep_id| self.is_slot_node(dep_id) && self.refresh_slot(dep_id))
+    }
+
+    // -- Signal API --------------------------------------------------------
+
+    /// Create an **eager** derived value that recomputes immediately whenever
+    /// one of its dependencies is invalidated.
+    ///
+    /// Where [`Context::computed`] is lazy (recomputed on the next read), a
+    /// signal is materialized eagerly: by the time the invalidating
+    /// `set_cell`/`set`/`batch` call returns, the signal already holds its new
+    /// value. The value is always set, so observers never see an intermediate
+    /// unset state — a dependency change drives the value directly from `v1`
+    /// to `v2`.
+    ///
+    /// The signal is backed by a memoized slot, so a recomputation that yields
+    /// an equal value (via `PartialEq`) does not invalidate downstream
+    /// dependents. Recomputation is pull-based and therefore glitch-free: a
+    /// signal that reads other signals/slots always observes values consistent
+    /// with the current inputs.
+    pub fn signal<T, F>(&self, compute: F) -> SignalHandle<T>
+    where
+        T: PartialEq + 'static,
+        F: Fn(&Context) -> T + 'static,
+    {
+        let slot = self.memo(compute);
+        // Eager puller: re-materializes the slot after every invalidation.
+        // `get_rc` refreshes and registers the dependency without deep-cloning
+        // the value on each refresh.
+        let effect = self.effect(move |ctx| {
+            let _ = ctx.get_rc(&slot);
+        });
+        SignalHandle::new(slot, effect)
+    }
+
+    /// Read a signal's current value. Always returns a materialized value.
+    pub fn get_signal<T: Clone + 'static>(&self, handle: &SignalHandle<T>) -> T {
+        self.get(&handle.slot)
+    }
+
+    /// Read a signal's current value as `Rc<T>`, avoiding a deep clone.
+    pub fn get_signal_rc<T: 'static>(&self, handle: &SignalHandle<T>) -> Rc<T> {
+        self.get_rc(&handle.slot)
+    }
+
+    /// Dispose a signal's eager puller.
+    ///
+    /// Stops eager recomputation; the backing value remains readable and
+    /// reverts to lazy (recomputed on next read) behavior.
+    pub fn dispose_signal<T>(&self, handle: &SignalHandle<T>) {
+        self.dispose_effect(&handle.effect);
+    }
+
+    /// Check whether a signal's eager puller is still active.
+    pub fn is_signal_active<T>(&self, handle: &SignalHandle<T>) -> bool {
+        self.is_effect_active(&handle.effect)
     }
 
     // -- Clearing ----------------------------------------------------------

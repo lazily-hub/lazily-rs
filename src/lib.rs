@@ -50,6 +50,7 @@ pub mod ffi;
 mod instrumentation;
 #[cfg(feature = "ipc")]
 mod ipc;
+mod signal;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
 mod slot;
@@ -103,6 +104,7 @@ pub use ipc::{
     IpcValue, NodeSnapshot, NodeState, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError,
     ShmBlobRef, Snapshot,
 };
+pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
 pub use slot::SlotHandle;
