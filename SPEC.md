@@ -1455,6 +1455,39 @@ clock. `tests/str0m_net.rs` exercises a real two-socket round trip over
 `127.0.0.1` (real UDP/DTLS/SCTP/timers); a cross-host round trip through the live
 signaling Worker is operator-gated.
 
+#### Signaling glue: `Str0mNet` over `SignalingClient` (#lzwebrtcwire)
+
+`Str0mNet` exchanges its SDP offer/answer and trickled ICE candidates *out of
+band*; `SignalingClient` (#yxjw, below) is the out-of-band channel. The
+`webrtc_signaling` module (enabled when **both** `signaling-client` and
+`webrtc-str0m` are on) is the wire between them — two `async` driver functions
+that own the full handshake:
+
+- `offer_to_peer(client, peer, bind, timeout)` — binds the socket via
+  `Str0mNet::offer`, sends the SDP `offer` and the local `local_candidate()` to
+  `peer` over the signaling client, then pumps incoming `ServerMessage`s
+  (`answer` → `accept_answer`, `ice` → `add_remote_candidate`) until the data
+  channel opens, returning the connected `Str0mNet`.
+- `answer_next_offer(client, bind, timeout)` — waits for the next `offer` frame,
+  produces the SDP answer via `Str0mNet::answer`, returns the answer + local
+  candidate over signaling, applies any ICE candidate that raced ahead of the
+  offer, then pumps until open. Returns the offering `PeerId` and the connected
+  `Str0mNet`.
+
+Both pump loops re-check `Str0mNet::is_open()` on a short poll tick as well as on
+each signaling frame, because the channel opens on the backend's driver thread,
+off the signaling path. The caller is responsible for learning the target peer is
+present (from the `welcome` roster or a `peer-joined` frame) before offering; an
+offer to an absent peer is dropped by the relay and surfaces only as a timeout.
+
+`tests/webrtc_signaling.rs` drives this end to end over a **loopback signaling
+relay**: an in-process `tokio-tungstenite` server implementing the #yxjw roster +
+`from`-stamped routing on `127.0.0.1`, two real `SignalingClient` WebSocket
+connections, and the real `Str0mNet` UDP/DTLS/SCTP transport — proving a
+permission-filtered `Snapshot` crosses a data channel negotiated entirely through
+`SignalingClient`. The only remaining slice is the live two-host / NAT run through
+the deployed #yxjw Worker, which is operator-gated (#h6qb).
+
 ### Capability negotiation
 
 Each non-local session starts with a small compatibility handshake before graph

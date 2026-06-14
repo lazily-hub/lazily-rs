@@ -28,7 +28,7 @@ PYTHON ?= python3
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-signaling-client test-webrtc test-websocket benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -89,6 +89,12 @@ test-signaling-client:
 # round trip over 127.0.0.1 (real UDP/DTLS/SCTP/timers).
 test-webrtc:
 >$(CARGO) test --locked --features webrtc-str0m
+
+# Full WebRTC handshake driven THROUGH SignalingClient over a loopback signaling
+# relay (#lzwebrtcwire): real WebSocket offer/answer/ICE on 127.0.0.1 plus the
+# real Str0mNet UDP/DTLS/SCTP transport. Needs both feature trees.
+test-webrtc-signaling:
+>$(CARGO) test --locked --features "signaling-client webrtc-str0m" --test webrtc_signaling
 
 # WebSocket DataChannel backend (#akp3): in-process loopback over a real WS
 # handshake, no real network.

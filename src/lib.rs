@@ -58,6 +58,8 @@ mod str0m_backend;
 #[cfg(feature = "webrtc-str0m")]
 mod str0m_net;
 mod thread_safe;
+#[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
+mod webrtc_signaling;
 #[cfg(feature = "webrtc")]
 mod webrtc_transport;
 #[cfg(feature = "websocket")]
@@ -109,6 +111,8 @@ pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_net::{Str0mNet, Str0mNetChannel, Str0mNetError};
 pub use thread_safe::{ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult};
+#[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
+pub use webrtc_signaling::{WebrtcSignalingError, answer_next_offer, offer_to_peer};
 #[cfg(feature = "webrtc")]
 pub use webrtc_transport::{
     DataChannel, InMemoryDataChannel, WebRtcSink, WebRtcSource, WebRtcTransportError,

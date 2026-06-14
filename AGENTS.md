@@ -54,7 +54,7 @@ authoring `AGENTS.md`, `SKILL.md`, or runbooks in this repo must read:
 
 before making changes.
 
-<!-- tsift:code-navigation v=0.1.69 -->
+<!-- tsift:code-navigation v=0.1.70 -->
 ## Code Navigation
 
 Keep this block self-contained for Codex/OpenCode prompt reuse. If this repository also ships current `.claude/skills/tsift/SKILL.md` or `runbooks/code-navigation.md`, use those deeper runbooks for command detail instead of expanding this block.
