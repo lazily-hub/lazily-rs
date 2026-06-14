@@ -451,3 +451,176 @@ async fn async_context_concurrent_set_and_get_async_never_panics_k03k() {
     ctx.set_cell(&cell, 4242);
     assert_eq!(ctx.get_async(&slot).await, 4243);
 }
+
+// -- Eager async Signal (#lzsignalparity) ---------------------------------
+//
+// The AsyncContext counterpart to the single-threaded/thread-safe `signal`
+// suite in tests/signal.rs. Because resolution is asynchronous, eager
+// materialization completes on the runtime shortly after the invalidating
+// write rather than synchronously within it, so these tests yield before
+// asserting the puller has driven the recompute.
+
+use lazily::AsyncSignalHandle;
+use std::time::Duration;
+
+#[tokio::test]
+async fn async_signal_materializes_eagerly_without_a_read() {
+    let ctx = AsyncContext::new();
+    let n = ctx.cell(2i32);
+    let computes = Arc::new(AtomicU64::new(0));
+    let c = computes.clone();
+    let sig: AsyncSignalHandle<i32> = ctx.signal_async(move |ctx| {
+        let v = ctx.get_cell(&n);
+        let c = c.clone();
+        async move {
+            c.fetch_add(1, Ordering::Relaxed);
+            v * 2
+        }
+    });
+
+    // The eager puller drives one compute on creation; no read happens first.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(computes.load(Ordering::Relaxed), 1);
+    // A non-blocking snapshot already sees the materialized value.
+    assert_eq!(ctx.get_signal(&sig), Some(4));
+}
+
+#[tokio::test]
+async fn async_signal_recomputes_eagerly_without_a_read() {
+    let ctx = AsyncContext::new();
+    let n = ctx.cell(1i32);
+    let computes = Arc::new(AtomicU64::new(0));
+    let c = computes.clone();
+    let sig = ctx.signal_async(move |ctx| {
+        let v = ctx.get_cell(&n);
+        let c = c.clone();
+        async move {
+            c.fetch_add(1, Ordering::Relaxed);
+            v + 10
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(ctx.get_signal(&sig), Some(11));
+
+    // Changing the input recomputes eagerly: no `get_async` is needed to drive
+    // it — a later non-blocking snapshot already reflects the new value.
+    ctx.set_cell(&n, 5);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(computes.load(Ordering::Relaxed) >= 2);
+    assert_eq!(ctx.get_signal(&sig), Some(15));
+}
+
+#[tokio::test]
+async fn async_signal_value_is_glitch_free_but_propagation_is_not_suppressed() {
+    // The async memo guard keeps the *value* correct on an equal recompute, but
+    // (unlike the single-threaded/thread-safe graph) it does NOT suppress
+    // downstream propagation — async invalidation force-reruns effect
+    // dependents on every upstream change. This mirrors the documented
+    // `async_context_memo_blocks_downstream_on_equal` behavior.
+    let ctx = AsyncContext::new();
+    let n = ctx.cell(4i32);
+    let parity = ctx.signal_async(move |ctx| {
+        let v = ctx.get_cell(&n);
+        async move { v % 2 }
+    });
+
+    let observed = Arc::new(Mutex::new(Vec::<i32>::new()));
+    let obs = observed.clone();
+    let _watch = ctx.effect_async(move |ctx| {
+        let fut = ctx.get_signal_async(&parity);
+        let obs = obs.clone();
+        async move {
+            let v = fut.await;
+            obs.lock().unwrap().push(v);
+            None::<fn()>
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 4 -> 6: parity value stays 0 (no observable glitch)...
+    ctx.set_cell(&n, 6);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(ctx.get_signal_async(&parity).await, 0);
+
+    // 6 -> 7: parity flips to 1.
+    ctx.set_cell(&n, 7);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(ctx.get_signal_async(&parity).await, 1);
+
+    // Every observed value is a real parity (0 or 1); the run-count is not
+    // suppressed on the equal step, but no inconsistent value is ever seen.
+    let observed = observed.lock().unwrap();
+    assert!(
+        observed.iter().all(|v| *v == 0 || *v == 1),
+        "observed inconsistent value: {observed:?}"
+    );
+    assert_eq!(observed.first().copied(), Some(0));
+    assert_eq!(observed.last().copied(), Some(1));
+}
+
+#[tokio::test]
+async fn async_chained_signals_propagate_eagerly() {
+    let ctx = AsyncContext::new();
+    let n = ctx.cell(1i32);
+    let a = ctx.signal_async(move |ctx| {
+        let v = ctx.get_cell(&n);
+        async move { v + 1 }
+    });
+    let b = ctx.signal_async(move |ctx| {
+        let fut = ctx.get_signal_async(&a);
+        async move { fut.await * 10 }
+    });
+
+    assert_eq!(ctx.get_signal_async(&a).await, 2);
+    assert_eq!(ctx.get_signal_async(&b).await, 20);
+
+    ctx.set_cell(&n, 5);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Both updated eagerly; a non-blocking snapshot already reflects them.
+    assert_eq!(ctx.get_signal(&a), Some(6));
+    assert_eq!(ctx.get_signal(&b), Some(60));
+}
+
+#[tokio::test]
+async fn async_signal_dispose_stops_eager_recomputation() {
+    let ctx = AsyncContext::new();
+    let n = ctx.cell(1i32);
+    let computes = Arc::new(AtomicU64::new(0));
+    let c = computes.clone();
+    let sig = ctx.signal_async(move |ctx| {
+        let v = ctx.get_cell(&n);
+        let c = c.clone();
+        async move {
+            c.fetch_add(1, Ordering::Relaxed);
+            v + 1
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(sig.is_active(&ctx));
+    assert_eq!(computes.load(Ordering::Relaxed), 1);
+
+    sig.dispose(&ctx);
+    assert!(!sig.is_active(&ctx));
+
+    // Eager puller gone: a cell change no longer drives recomputation...
+    ctx.set_cell(&n, 9);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(computes.load(Ordering::Relaxed), 1);
+
+    // ...but the value is still resolvable lazily on demand.
+    assert_eq!(sig.get_async(&ctx).await, 10);
+    assert_eq!(computes.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn async_signal_get_async_awaits_up_to_date_value() {
+    let ctx = AsyncContext::new();
+    let n = ctx.cell(3i32);
+    let sig = ctx.signal_async(move |ctx| {
+        let v = ctx.get_cell(&n);
+        async move { v * 2 }
+    });
+    assert_eq!(sig.get_async(&ctx).await, 6);
+    ctx.set_cell(&n, 4);
+    assert_eq!(sig.get_async(&ctx).await, 8);
+}

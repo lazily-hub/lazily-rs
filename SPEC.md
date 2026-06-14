@@ -208,6 +208,42 @@ assert_eq!(doubled.get(&ctx), 10);
 - **Type bounds:** `signal<T>` requires `T: PartialEq + 'static` (for the memo guard); `get_signal` additionally requires `T: Clone`
 - **Disposal:** `signal.dispose(&ctx)` removes the eager puller; the value remains readable and reverts to lazy (recomputed on next read) behavior
 
+#### Signal across context types
+
+The eager-Signal primitive is exposed on all three context types with the same
+`memo-slot + puller-effect` composition, so shared-graph and async consumers get
+the same always-set, glitch-free `v1 -> v2` derived values that the
+single-threaded `Context` provides (#lzsignalparity).
+
+- **`ThreadSafeContext::signal`** — shared-graph counterpart. Returns a
+  `ThreadSafeSignalHandle<T>` with `.get`/`.dispose`/`.is_active(&ctx)` helpers
+  and matching `ctx.get_signal`/`dispose_signal`/`is_signal_active`. Recomputation
+  is eager (driven during the invalidation flush before the `set_cell`/`batch`
+  call returns), glitch-free, memo-guarded, and batch-coalesced — identical to
+  the single-threaded semantics above. Type bounds add `Send + Sync`:
+  `signal<T>` requires `T: PartialEq + Send + Sync + 'static`; `get_signal`
+  additionally requires `T: Clone`. The handle is `Copy + Send + Sync` and may be
+  read from any thread sharing the context.
+- **`AsyncContext::signal_async`** — async counterpart. Returns an
+  `AsyncSignalHandle<T>` backed by `memo_async` plus an `effect_async` puller
+  that awaits the slot after every invalidation. Reads: `ctx.get_signal` (or
+  `handle.get`) returns `Option<T>` as a non-blocking snapshot;
+  `ctx.get_signal_async` (or `handle.get_async`) awaits the up-to-date value.
+  Inside a slot/effect callback, `AsyncComputeContext::get_signal_async` reads a
+  signal and registers its backing slot as a dependency, enabling chained async
+  signals and downstream observers. Type bounds:
+  `T: PartialEq + Clone + Send + Sync + 'static`.
+  - **Eagerness is runtime-driven:** because resolution is asynchronous, the
+    puller drives the recompute to completion on the runtime shortly after the
+    invalidating write rather than synchronously within it.
+  - **Propagation is not suppressed on equal recompute:** the async memo guard
+    keeps the *value* correct on an equal recompute, but — unlike the
+    single-threaded/thread-safe graph — does not suppress downstream
+    propagation (async invalidation force-reruns effect dependents on every
+    upstream change). No inconsistent (glitch) value is ever observed. This
+    matches the documented `async memo does not suppress downstream propagation`
+    behavior of `memo_async`.
+
 ### Batch
 
 Write-coalescing boundary for multiple cell updates or explicit slot clears.

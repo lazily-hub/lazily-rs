@@ -1396,6 +1396,60 @@ where
     }
 }
 
+/// A typed handle to an **eager** derived value within a [`ThreadSafeContext`].
+///
+/// This is the thread-safe counterpart to [`crate::SignalHandle`]. Like the
+/// single-threaded handle it is a memoized backing slot plus a small puller
+/// effect that re-materializes the slot after every invalidation, so reading a
+/// signal always returns a materialized, up-to-date value with no observable
+/// intermediate "unset" state. See [`ThreadSafeContext::signal`].
+pub struct ThreadSafeSignalHandle<T> {
+    /// Memoized backing slot that holds the derived value.
+    pub(crate) slot: SlotHandle<T>,
+    /// Puller effect that keeps `slot` eagerly materialized.
+    pub(crate) effect: EffectHandle,
+}
+
+impl<T> ThreadSafeSignalHandle<T> {
+    pub(crate) fn new(slot: SlotHandle<T>, effect: EffectHandle) -> Self {
+        Self { slot, effect }
+    }
+
+    /// Read this signal's current value through its owning context.
+    ///
+    /// Ergonomic alias for [`ThreadSafeContext::get_signal`]. The value is
+    /// always materialized; there is no unset state to observe.
+    pub fn get(&self, ctx: &ThreadSafeContext) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        ctx.get_signal(self)
+    }
+
+    /// Dispose this signal's eager puller.
+    ///
+    /// After disposal the signal stops eagerly recomputing on invalidation; the
+    /// backing value remains readable and behaves like a lazy memo slot
+    /// (recomputed on the next read).
+    pub fn dispose(&self, ctx: &ThreadSafeContext) {
+        ctx.dispose_signal(self);
+    }
+
+    /// Check whether this signal's eager puller is still active.
+    pub fn is_active(&self, ctx: &ThreadSafeContext) -> bool {
+        ctx.is_signal_active(self)
+    }
+}
+
+// Handles are Copy/Clone since they're just ids.
+impl<T> Clone for ThreadSafeSignalHandle<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ThreadSafeSignalHandle<T> {}
+
 /// Lock-backed context for sharing lazy reactive state across OS threads.
 ///
 /// This type mirrors the core [`crate::Context`] API while requiring
@@ -2536,6 +2590,77 @@ impl ThreadSafeContext {
     pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
         let state = self.read_state();
         matches!(state.get_node(handle.id), Some(ThreadSafeNode::Effect(_)))
+    }
+
+    // -- Signal API --------------------------------------------------------
+
+    /// Create an **eager** derived value over the shared graph that recomputes
+    /// immediately whenever one of its dependencies is invalidated.
+    ///
+    /// This is the [`ThreadSafeContext`] counterpart to [`Context::signal`]. A
+    /// signal sits one step beyond [`computed`](Self::computed)/[`memo`](Self::memo)
+    /// on the `Slot -> Cell -> Signal` progression:
+    ///
+    /// - A [`computed`](Self::computed)/[`memo`](Self::memo) slot is **lazy**:
+    ///   invalidation only marks it dirty, and the value is not recomputed until
+    ///   the next read.
+    /// - A `Signal` is **eager**: it recomputes the instant any of its
+    ///   dependencies are invalidated — before the invalidating
+    ///   `set_cell`/`set`/`batch` call returns.
+    ///
+    /// Because it is backed by a memoized slot and recomputes eagerly, a signal
+    /// never exposes an intermediate "unset" value: a dependency change drives
+    /// the value directly from `v1` to `v2`. The memo guard means a
+    /// recomputation that yields an equal value (via `PartialEq`) does not churn
+    /// downstream dependents. Recomputation is pull-based and therefore
+    /// glitch-free.
+    ///
+    /// Internally a signal is a memoized slot plus a small puller effect that
+    /// re-materializes the slot after every invalidation.
+    pub fn signal<T, F>(&self, compute: F) -> ThreadSafeSignalHandle<T>
+    where
+        T: PartialEq + Send + Sync + 'static,
+        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
+    {
+        let slot = self.memo(compute);
+        let slot_id = slot.id;
+        // Eager puller: re-materializes the slot after every invalidation and
+        // registers the slot as a dependency so future invalidations reschedule
+        // it. `refresh_signal_slot` refreshes without deep-cloning the value.
+        let effect = self.effect(move |ctx: &ThreadSafeContext| {
+            ctx.refresh_signal_slot(slot_id);
+        });
+        ThreadSafeSignalHandle::new(slot, effect)
+    }
+
+    /// Read a signal's current value. Always returns a materialized value.
+    pub fn get_signal<T: Clone + Send + Sync + 'static>(
+        &self,
+        handle: &ThreadSafeSignalHandle<T>,
+    ) -> T {
+        self.get(&handle.slot)
+    }
+
+    /// Dispose a signal's eager puller.
+    ///
+    /// Stops eager recomputation; the backing value remains readable and
+    /// reverts to lazy (recomputed on next read) behavior.
+    pub fn dispose_signal<T>(&self, handle: &ThreadSafeSignalHandle<T>) {
+        self.dispose_effect(&handle.effect);
+    }
+
+    /// Check whether a signal's eager puller is still active.
+    pub fn is_signal_active<T>(&self, handle: &ThreadSafeSignalHandle<T>) -> bool {
+        self.is_effect_active(&handle.effect)
+    }
+
+    /// Refresh a signal's backing slot and register it as a dependency of the
+    /// running puller effect, without deep-cloning the value out.
+    fn refresh_signal_slot(&self, id: SlotId) {
+        if let Some(parent_id) = track_dependency(self.context_id(), id) {
+            self.register_dependency(id, parent_id);
+        }
+        let _ = self.refresh_slot(id);
     }
 
     fn schedule_effect(&self, id: SlotId, force: bool) {

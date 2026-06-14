@@ -69,7 +69,7 @@ mod ws_backend;
 #[cfg(feature = "async")]
 pub use async_context::{
     AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncContextId, AsyncEffectHandle,
-    AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView,
+    AsyncSignalHandle, AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView,
 };
 #[cfg(feature = "webrtc")]
 pub use bridge::{BridgeHub, HubError};
@@ -112,7 +112,9 @@ pub use slot::SlotHandle;
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_net::{Str0mNet, Str0mNetChannel, Str0mNetError};
-pub use thread_safe::{ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult};
+pub use thread_safe::{
+    ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,
+};
 #[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
 pub use webrtc_signaling::{WebrtcSignalingError, answer_next_offer, offer_to_peer};
 #[cfg(feature = "webrtc")]

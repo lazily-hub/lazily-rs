@@ -358,6 +358,61 @@ impl Clone for AsyncEffectHandle {
 }
 impl Copy for AsyncEffectHandle {}
 
+/// A typed handle to an **eager** derived value within an [`AsyncContext`].
+///
+/// This is the async counterpart to [`crate::SignalHandle`]. It is a memoized
+/// backing slot ([`AsyncContext::memo_async`]) plus a small puller effect
+/// ([`AsyncContext::effect_async`]) that awaits the slot after every
+/// invalidation, so an upstream change eagerly drives the async recompute to
+/// completion instead of waiting for the next read. See
+/// [`AsyncContext::signal_async`].
+pub struct AsyncSignalHandle<T> {
+    /// Memoized backing slot that holds the derived value.
+    pub(crate) slot: AsyncSlotHandle<T>,
+    /// Puller effect that keeps `slot` eagerly materialized.
+    pub(crate) effect: AsyncEffectHandle,
+}
+
+impl<T> AsyncSignalHandle<T> {
+    /// Read this signal's current value if it has resolved, without awaiting.
+    ///
+    /// Ergonomic alias for [`AsyncContext::get_signal`].
+    pub fn get(&self, ctx: &AsyncContext) -> Option<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        ctx.get_signal(self)
+    }
+
+    /// Await this signal's current value, driving recomputation if needed.
+    ///
+    /// Ergonomic alias for [`AsyncContext::get_signal_async`].
+    pub async fn get_async(&self, ctx: &AsyncContext) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        ctx.get_signal_async(self).await
+    }
+
+    /// Dispose this signal's eager puller. The backing value remains readable
+    /// and reverts to lazy (recomputed on next read) behavior.
+    pub fn dispose(&self, ctx: &AsyncContext) {
+        ctx.dispose_signal(self);
+    }
+
+    /// Check whether this signal's eager puller is still active.
+    pub fn is_active(&self, ctx: &AsyncContext) -> bool {
+        ctx.is_signal_active(self)
+    }
+}
+
+impl<T> Clone for AsyncSignalHandle<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for AsyncSignalHandle<T> {}
+
 pub struct AsyncComputeContext {
     pub(crate) _context_id: AsyncContextId,
     pub(crate) _node_id: SlotId,
@@ -384,7 +439,10 @@ impl AsyncComputeContext {
         }
     }
 
-    pub fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> impl Future<Output = T> + Send
+    pub fn get_async<T>(
+        &self,
+        handle: &AsyncSlotHandle<T>,
+    ) -> impl Future<Output = T> + Send + use<T>
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -394,6 +452,9 @@ impl AsyncComputeContext {
             register_dependency_locked(&mut inner, handle.id, self._node_id);
         }
         let inner_arc = self.inner.clone();
+        // Copy the handle so the returned future does not borrow the `handle`
+        // parameter; this keeps the future independent of caller-local handles.
+        let handle = *handle;
         async move {
             let ctx = AsyncContext {
                 inner: inner_arc,
@@ -402,8 +463,24 @@ impl AsyncComputeContext {
                 #[cfg(feature = "instrumentation")]
                 window1_resolved_hits: AtomicU64::new(0),
             };
-            ctx.get_async(handle).await
+            ctx.get_async(&handle).await
         }
+    }
+
+    /// Await an eager [`AsyncSignalHandle`] from inside a slot/effect callback,
+    /// registering its backing slot as a dependency.
+    ///
+    /// This is the in-callback counterpart to [`AsyncContext::get_signal_async`]
+    /// and is what lets async signals be chained or observed by downstream
+    /// computeds/effects.
+    pub fn get_signal_async<T>(
+        &self,
+        handle: &AsyncSignalHandle<T>,
+    ) -> impl Future<Output = T> + Send + use<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.get_async(&handle.slot)
     }
 }
 
@@ -971,6 +1048,77 @@ impl AsyncContext {
                 inner.free_ids.push(handle.id.0);
             }
         }
+    }
+
+    // -- Signal API --------------------------------------------------------
+
+    /// Create an **eager** async derived value that drives its recomputation to
+    /// completion the instant one of its dependencies is invalidated.
+    ///
+    /// This is the [`AsyncContext`] counterpart to [`Context::signal`]. Where
+    /// [`computed_async`](Self::computed_async)/[`memo_async`](Self::memo_async)
+    /// is lazy (re-resolved on the next `get_async`), a signal is eager: a
+    /// puller effect awaits the backing slot after every invalidation, so by the
+    /// time the spawned recompute finishes the signal already holds its new
+    /// value without anyone reading it.
+    ///
+    /// The signal is backed by a memoized slot, so a recomputation that yields
+    /// an equal value (via `PartialEq`) does not invalidate downstream
+    /// dependents. Recomputation is pull-based and therefore glitch-free.
+    ///
+    /// Because resolution is asynchronous, eager materialization completes on
+    /// the runtime rather than synchronously within the invalidating
+    /// `set_cell`/`batch` call. Use [`get_signal`](Self::get_signal) for a
+    /// non-blocking snapshot or [`get_signal_async`](Self::get_signal_async) to
+    /// await the up-to-date value.
+    pub fn signal_async<T, F, Fut>(&self, compute: F) -> AsyncSignalHandle<T>
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let slot = self.memo_async(compute);
+        // Eager puller: awaits the backing slot after every invalidation. The
+        // synchronous part of `get_async` registers the slot as a dependency of
+        // this effect, so a later invalidation reschedules the puller.
+        let effect = self.effect_async(move |ctx: AsyncComputeContext| {
+            let fut = ctx.get_async(&slot);
+            async move {
+                let _ = fut.await;
+                None::<fn()>
+            }
+        });
+        AsyncSignalHandle { slot, effect }
+    }
+
+    /// Read a signal's current value if it has resolved, without awaiting.
+    pub fn get_signal<T: Clone + Send + Sync + 'static>(
+        &self,
+        handle: &AsyncSignalHandle<T>,
+    ) -> Option<T> {
+        self.get(&handle.slot)
+    }
+
+    /// Await a signal's current value, driving recomputation if needed.
+    pub async fn get_signal_async<T: Clone + Send + Sync + 'static>(
+        &self,
+        handle: &AsyncSignalHandle<T>,
+    ) -> T {
+        self.get_async(&handle.slot).await
+    }
+
+    /// Dispose a signal's eager puller.
+    ///
+    /// Stops eager recomputation; the backing value remains readable and
+    /// reverts to lazy (recomputed on next read) behavior.
+    pub fn dispose_signal<T>(&self, handle: &AsyncSignalHandle<T>) {
+        self.dispose_async_effect(&handle.effect);
+    }
+
+    /// Check whether a signal's eager puller is still active.
+    pub fn is_signal_active<T>(&self, handle: &AsyncSignalHandle<T>) -> bool {
+        let inner = self.inner.lock();
+        matches!(inner.get_node(handle.effect.id), Some(AsyncNode::Effect(_)))
     }
 
     fn flush_async_effects(&self) {
