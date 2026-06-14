@@ -7,16 +7,18 @@ Lazy reactive primitives library for Rust.
 - `src/context.rs` — `Context` struct, dependency graph, thread-local tracking stack
 - `src/slot.rs` — `SlotHandle<T>` (lightweight `Copy` id into Context)
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
+- `src/signal.rs` — eager `Signal` primitive (`ctx.signal`); a memoized Slot plus a puller Effect, exposed on `Context`, `ThreadSafeContext`, and `AsyncContext`
 - `src/async_context.rs` — `AsyncContext` async reactive graph (feature-gated behind `async`)
 - `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
+- `tests/signal.rs` — 19 eager-Signal integration tests (single-threaded + thread-safe)
 - `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests
-- `tests/async_integration.rs` — 16 AsyncContext feature-gated integration tests
+- `tests/async_integration.rs` — AsyncContext feature-gated integration tests (incl. eager `signal_async`)
 
 ## Key Design Decisions
 
-- **Lazy, not eager:** Slots mark dirty on invalidation but only recompute on access
+- **Lazy by default, eager when asked:** Slots mark dirty on invalidation and recompute on access; `ctx.signal()` opts into eager recomputation (memo-slot + puller-effect) with no intermediate unset value (`v1 -> v2`)
 - **PartialEq guard:** `Cell.set()` only invalidates when value actually changes
 - **Memo guard:** `ctx.memo()` slots compare recomputed values and keep downstream caches when values are equal
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)

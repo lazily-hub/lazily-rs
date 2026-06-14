@@ -6,14 +6,15 @@ Lazy reactive primitives for Rust — Context, Slots, Cells with automatic depen
 
 ## Overview
 
-`lazily` provides four core primitives for lazy reactive computation:
+`lazily` provides five core primitives for reactive computation:
 
 - **Context** — owns all reactive state and manages the dependency graph
 - **Slot** — a lazily-computed cached value that automatically tracks dependencies
 - **Cell** — a mutable value that invalidates dependent Slots when changed
+- **Signal** — an eager derived value that recomputes the instant a dependency invalidates, with no intermediate unset value
 - **Effect** — a side-effect callback that automatically reruns after tracked dependencies invalidate
 
-Values are **lazy**: dependents are marked dirty on invalidation but only validated or recomputed when accessed. This contrasts with eager "signal" systems that recompute immediately.
+Values are **lazy by default**: dependents are marked dirty on invalidation but only validated or recomputed when accessed. When you need eager push-style semantics — recompute immediately, observe `v1 -> v2` with no unset window — reach for **`Signal`**, which layers a puller effect over a memoized slot. The `Slot -> Cell -> Signal` progression lets you choose lazy or eager per derived value within one graph.
 `ctx.memo()` Slots use a memo guard: if recomputation produces the same value, downstream dirty caches and effects are left alone.
 Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect reruns happen once after the outermost batch exits.
 
@@ -79,6 +80,8 @@ ctx.batch(|ctx| {
 
 In a web server handling requests, you might have 50 computed values available but any given request only uses 5. With eager reactivity, all 50 recompute on every change. With lazy, only the 5 actually accessed compute.
 
+`lazily` defaults to lazy but does not force the choice on you: derive with `ctx.computed()`/`ctx.memo()` for pull-based laziness, or `ctx.signal()` for the eager column above (UI rendering, real-time mirrors, always-materialized values). Both share the same context, dependency graph, glitch-freedom, and memo guard — pick per value.
+
 ## Core Concepts
 
 ### Context
@@ -102,6 +105,21 @@ For `ctx.memo()` slots, if recomputation returns a value equal to the previous c
 ### Cell
 
 A `CellHandle<T>` holds a mutable value. `cell.set(&ctx, value)` and `ctx.set_cell()` compare old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively marked dirty.
+
+### Signal
+
+A `SignalHandle<T>` is an **eager** derived value — the eager counterpart to a lazy Slot, one step further along the `Slot -> Cell -> Signal` progression. Where a Slot only marks itself dirty on invalidation and recomputes on the next read, a Signal recomputes *the instant a dependency is invalidated*, before the invalidating `set`/`set_cell`/`batch` call returns. The value is always materialized, so observers never see an intermediate unset value — a dependency change drives the value directly from `v1` to `v2`.
+
+```rust
+let n = ctx.cell(1);
+let doubled = ctx.signal(|ctx| n.get(ctx) * 2); // materialized now: 2
+n.set(&ctx, 5);                                  // doubled is already 10 — eager
+assert_eq!(doubled.get(&ctx), 10);
+```
+
+A Signal is **composed from existing primitives**, not a parallel engine: a memoized Slot (`ctx.memo`) supplies glitch-free, pull-based, memo-guarded recomputation, and a small puller `Effect` re-materializes that slot after every invalidation to supply the eagerness. Consequently a Signal inherits the memo guard (an equal recompute suppresses downstream work) and diamond glitch-freedom (`D = f(A, g(A))` never surfaces a mixed new-`A`/old-`g(A)` intermediate), and batched writes settle to one consistent recomputation at batch exit.
+
+`ctx.signal()` requires `T: PartialEq + 'static` (the memo guard); `get_signal` additionally requires `T: Clone`. `signal.dispose(&ctx)` removes the eager puller — the value stays readable but reverts to lazy (recompute-on-read) behavior. The same primitive is available on `ThreadSafeContext` (`signal`, returning a `Send + Sync` `ThreadSafeSignalHandle<T>`) and `AsyncContext` (`signal_async`, with a non-blocking `get_signal` snapshot and an awaiting `get_signal_async`); see `SPEC.md` for the per-context type bounds and the async eagerness caveat.
 
 ### Batch Updates
 
@@ -137,6 +155,10 @@ effect.dispose(&ctx);
 | `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
 | `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
+| `ctx.signal(\|ctx\| T)` | Create an eager derived value (recomputes on invalidation, no unset window); `T: PartialEq + 'static` |
+| `signal.get(&ctx)` | Get the signal's value (`T: Clone`); also `ctx.get_signal(&signal)` |
+| `signal.dispose(&ctx)` | Remove the eager puller; value reverts to lazy recompute-on-read |
+| `signal.is_active(&ctx)` | Check whether the eager puller is still registered |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.is_set(&slot)` | Check if slot has a cached, fresh value |
@@ -157,7 +179,7 @@ the getter retries before returning a fresh value.
 
 ## Design
 
-- **Lazy, not eager:** Slots mark dirty on invalidation but only validate/recompute on access
+- **Lazy by default, eager on demand:** Slots mark dirty on invalidation and validate/recompute on access; `ctx.signal()` opts a value into eager recomputation (a memo-slot + puller-effect composition) with no intermediate unset state
 - **Ergonomic aliases:** `ctx.computed()` names derived values while preserving `ctx.slot()` for low-level terminology
 - **PartialEq guard:** `CellHandle::set()` only invalidates when value actually changes
 - **Memo guard:** Dirty `ctx.memo()` Slots compare recomputed values and suppress downstream recomputation/effect reruns when values are equal

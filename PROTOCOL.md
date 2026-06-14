@@ -312,6 +312,38 @@ got 12→13). The receiver must discard it and request a fresh `Snapshot`.
   value emits no `SlotValue` or downstream `Invalidate`.
 - **Coalesced frontier:** a dependent reached through many changed cells in one
   batch appears at most once per delta.
+- **Eager Signal nodes always carry a value:** an eager `Signal` (see below) is
+  recomputed during the invalidation flush, so when it changes it appears in the
+  delta as a concrete `SlotValue` (never a bare `Invalidate`). A purely lazy slot
+  that was not read before the flush may instead appear as `Invalidate` with no
+  value. Both are valid wire states for the same `SlotValue`/`Invalidate` op set;
+  the distinction is computation timing, not message format.
+
+## Eager Signal Nodes
+
+A `Signal` is the eager derived value in the `Slot -> Cell -> Signal` family: it
+recomputes the instant a dependency invalidates rather than on next read. It is
+**not a new wire type**. A Signal is composed from a memoized backing slot plus a
+local puller effect, and only the backing slot is graph state, so on the wire a
+Signal node is an ordinary slot node:
+
+- **Snapshot:** the backing slot appears as a `NodeSnapshot` with its materialized
+  value in `NodeState` (`Payload`/`SharedBlob`), like any other readable slot.
+- **Delta:** a value change appears as `SlotValue` for the backing slot's
+  `NodeId`. Because the value is eagerly materialized at flush time it is always
+  concrete; eager nodes do not emit bare `Invalidate`.
+- **Memo guard still applies:** an eager recompute that yields an equal value
+  (`PartialEq`) suppresses the `SlotValue` and any downstream `Invalidate`, exactly
+  as for `ctx.memo` slots.
+- **The puller effect is local:** it drives eager recomputation but is not
+  serialized as a node and produces no `TriggerEffect` op. Eagerness is a
+  producer-side scheduling property; remote peers receive the same
+  permission-filtered `Snapshot`/`Delta` state plane regardless of whether a node
+  is lazy or eager.
+
+Peers therefore need no protocol change to consume signals from an eager
+producer — a Signal is observed as a slot that is reliably present in every delta
+that changes it.
 
 ## Permission Boundary
 
