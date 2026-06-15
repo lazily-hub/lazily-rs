@@ -1,0 +1,15 @@
+[book]
+title = "lazily-rs"
+description = "Lazy reactive primitives for Rust — Context, Slots, Cells, Signals, and Effects with automatic dependency tracking."
+authors = ["Brian Takita"]
+language = "en"
+src = "docs"
+
+[output.html]
+git-repository-url = "https://github.com/lazily-hub/lazily-rs"
+edit-url-template = "https://github.com/lazily-hub/lazily-rs/edit/main/{path}"
+default-theme = "rust"
+
+[output.html.fold]
+enable = true
+level = 1
