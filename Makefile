@@ -2,6 +2,8 @@
 
 CARGO ?= cargo
 PYTHON ?= python3
+LAKE ?= lake
+LEAN_SPEC_DIR ?= ../lazily-spec/formal/lean
 
 .PHONY: \
 	check \
@@ -21,6 +23,7 @@ PYTHON ?= python3
 	test-ipc \
 	test-ipc-binary \
 	test-ipc-conformance \
+	test-lean-formal \
 	test-signaling-client \
 	test-webrtc \
 	test-websocket \
@@ -28,7 +31,7 @@ PYTHON ?= python3
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-lean-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -79,6 +82,10 @@ test-ipc-binary:
 
 test-ipc-conformance:
 >$(CARGO) test --locked --features ipc --test conformance
+
+test-lean-formal:
+>test -d "$(LEAN_SPEC_DIR)" || { echo "missing $(LEAN_SPEC_DIR); clone lazily-spec as a sibling or set LEAN_SPEC_DIR"; exit 1; }
+>cd "$(LEAN_SPEC_DIR)" && $(LAKE) build
 
 test-signaling-client:
 >$(CARGO) test --locked --features signaling-client

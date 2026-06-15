@@ -90,3 +90,22 @@ jobs:
 
       - name: Typecheck + test
         run: npm run check
+
+  lean:
+    name: Lean formal model (#lzleanformal)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout canonical lazily-spec
+        uses: actions/checkout@v4
+        with:
+          repository: lazily-hub/lazily-spec
+          path: lazily-spec
+
+      - name: Build Lean formal model
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lazily-spec/formal/lean
+          auto-config: false
+          build: true
+          test: false
+          lint: false
