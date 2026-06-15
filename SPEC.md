@@ -1296,6 +1296,13 @@ Implemented surface:
   header before accepting a descriptor. `IpcMessage` control frames can carry a
   `ShmBlobRef` instead of embedding large bytes inline.
 
+Formal companion: `lazily-spec/formal/lean` models the shared IPC
+Snapshot/Delta state machine in Lean 4 and proves the epoch sequencing,
+fail-closed resync, PartialEq/memo suppression, batch coalescing, and eager
+Signal `slot_value` invariants. It is intentionally a spec-layer oracle; Rust
+implementation behavior remains covered by the crate tests and conformance
+fixtures.
+
 Shared-memory IPC is therefore a supported transport direction, not a separate
 reactive-graph mode: the shared memory segment carries large blob payloads, and
 the ordinary control transport carries framed `IpcMessage`s with blob
