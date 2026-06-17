@@ -1226,19 +1226,23 @@ struct ThreadSafeState {
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
 
+fn node_index(id: SlotId) -> Option<usize> {
+    usize::try_from(id.0).ok()
+}
+
 impl ThreadSafeState {
     fn get_node(&self, id: SlotId) -> Option<&ThreadSafeNode> {
-        self.nodes.get(id.0 as usize).and_then(|opt| opt.as_ref())
+        self.nodes.get(node_index(id)?).and_then(|opt| opt.as_ref())
     }
 
     fn get_node_mut(&mut self, id: SlotId) -> Option<&mut ThreadSafeNode> {
         self.nodes
-            .get_mut(id.0 as usize)
+            .get_mut(node_index(id)?)
             .and_then(|opt| opt.as_mut())
     }
 
     fn insert_node(&mut self, id: SlotId, node: ThreadSafeNode) {
-        let idx = id.0 as usize;
+        let idx = node_index(id).expect("SlotId does not fit usize");
         if idx >= self.nodes.len() {
             self.nodes.resize_with(idx + 1, || None);
         }
@@ -1246,12 +1250,12 @@ impl ThreadSafeState {
     }
 
     fn remove_node(&mut self, id: SlotId) -> Option<ThreadSafeNode> {
-        let idx = id.0 as usize;
+        let idx = node_index(id).expect("SlotId does not fit usize");
         self.nodes.get_mut(idx).and_then(|slot| slot.take())
     }
 
     fn deschedule_effect(&mut self, id: SlotId) {
-        let idx = id.0 as usize;
+        let idx = node_index(id).expect("SlotId does not fit usize");
         if idx < self.scheduled_effects.len() {
             self.scheduled_effects[idx] = false;
         }
@@ -1259,13 +1263,13 @@ impl ThreadSafeState {
 
     #[cfg(test)]
     fn is_effect_scheduled(&self, id: SlotId) -> bool {
-        let idx = id.0 as usize;
+        let idx = node_index(id).expect("SlotId does not fit usize");
         idx < self.scheduled_effects.len() && self.scheduled_effects[idx]
     }
 
     fn fill_dependent_scratch(&mut self, id: SlotId) {
         self.dependent_scratch.clear();
-        let idx = id.0 as usize;
+        let idx = node_index(id).expect("SlotId does not fit usize");
         let deps: &[SlotId] = match self.nodes.get(idx).and_then(|opt| opt.as_ref()) {
             Some(ThreadSafeNode::Slot(slot)) => slot.dependents.as_slice(),
             Some(ThreadSafeNode::Cell(cell)) => cell.dependents.as_slice(),
@@ -1610,7 +1614,7 @@ impl ThreadSafeContext {
         self.inner
             .slot_fast_paths
             .read()
-            .get(id.0 as usize)
+            .get(node_index(id)?)
             .and_then(|opt| opt.as_ref().cloned())
     }
 
@@ -1618,7 +1622,7 @@ impl ThreadSafeContext {
         self.inner
             .cell_fast_paths
             .read()
-            .get(id.0 as usize)
+            .get(node_index(id)?)
             .and_then(|opt| opt.as_ref().cloned())
     }
 
@@ -1954,7 +1958,7 @@ impl ThreadSafeContext {
             revision: 0,
         };
         let mut slot_fast_paths = self.inner.slot_fast_paths.write();
-        let idx = id.0 as usize;
+        let idx = node_index(id).expect("SlotId does not fit usize");
         if idx >= slot_fast_paths.len() {
             slot_fast_paths.resize_with(idx + 1, || None);
         }
@@ -2261,7 +2265,7 @@ impl ThreadSafeContext {
             fast_path: Arc::clone(&fast_path),
         };
         let mut cell_fast_paths = self.inner.cell_fast_paths.write();
-        let idx = id.0 as usize;
+        let idx = node_index(id).expect("SlotId does not fit usize");
         if idx >= cell_fast_paths.len() {
             cell_fast_paths.resize_with(idx + 1, || None);
         }
@@ -2678,7 +2682,7 @@ impl ThreadSafeContext {
             _ => return,
         }
 
-        let idx = id.0 as usize;
+        let idx = node_index(id).expect("SlotId does not fit usize");
         let already_scheduled = if idx < state.scheduled_effects.len() {
             state.scheduled_effects[idx]
         } else {

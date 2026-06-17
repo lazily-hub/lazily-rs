@@ -687,6 +687,20 @@ impl std::error::Error for EncodeError {
     }
 }
 
+#[cfg(feature = "ffi")]
+impl From<serde_json::Error> for EncodeError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
+    }
+}
+
+#[cfg(feature = "ipc-binary")]
+impl From<postcard::Error> for EncodeError {
+    fn from(e: postcard::Error) -> Self {
+        Self::Binary(e)
+    }
+}
+
 #[cfg(any(feature = "ffi", feature = "ipc-binary"))]
 #[derive(Debug)]
 pub enum DecodeError {
@@ -717,6 +731,20 @@ impl std::error::Error for DecodeError {
             #[cfg(feature = "ipc-binary")]
             Self::Binary(e) => Some(e),
         }
+    }
+}
+
+#[cfg(feature = "ffi")]
+impl From<serde_json::Error> for DecodeError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
+    }
+}
+
+#[cfg(feature = "ipc-binary")]
+impl From<postcard::Error> for DecodeError {
+    fn from(e: postcard::Error) -> Self {
+        Self::Binary(e)
     }
 }
 
