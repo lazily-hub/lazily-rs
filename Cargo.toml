@@ -4,7 +4,7 @@ version = "0.11.0"
 edition = "2024"
 description = "Lazy reactive signals with dependency tracking and cache invalidation"
 license = "MIT"
-repository = "https://github.com/btakita/lazily-rs"
+repository = "https://github.com/lazily-hub/lazily-rs"
 keywords = ["reactive", "signals", "lazy", "dependency-tracking", "cache"]
 categories = ["data-structures"]
 # The signaling/ subtree is a standalone TypeScript Cloudflare Worker + client,
