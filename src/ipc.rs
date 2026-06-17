@@ -654,6 +654,7 @@ impl IpcMessage {
     }
 }
 
+#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
 #[derive(Debug)]
 pub enum EncodeError {
     #[cfg(feature = "ffi")]
@@ -686,6 +687,7 @@ impl std::error::Error for EncodeError {
     }
 }
 
+#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
 #[derive(Debug)]
 pub enum DecodeError {
     #[cfg(feature = "ffi")]

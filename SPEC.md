@@ -111,10 +111,14 @@ Lazily-computed cached value with dependency tracking. A Slot is **fresh**, **di
 `ctx.memo()` creates a Slot whose values implement `PartialEq` so dirty caches can be compared against recomputed values.
 
 ```rust
+type ComputeFn = dyn Fn(&Context) -> Rc<dyn Any>;
+type EqualsFn = dyn Fn(&dyn Any, &dyn Any) -> bool;
+
 struct SlotNode {
-    value: Option<Box<dyn Any>>,
-    compute: Rc<dyn Fn(&Context) -> Box<dyn Any>>,
-    equals: Option<Box<dyn Fn(&dyn Any, &dyn Any) -> bool>>,
+    value: Option<Rc<dyn Any>>,
+    type_id: TypeId,
+    compute: Rc<ComputeFn>,
+    equals: Option<Box<EqualsFn>>,
     dependencies: SmallVec<[SlotId; 4]>,
     dependents: SmallVec<[SlotId; 4]>,
     dirty: bool,
@@ -139,7 +143,8 @@ Mutable value container. Changing a Cell's value marks dependent Slots dirty.
 
 ```rust
 struct CellNode {
-    value: Box<dyn Any>,
+    value: Rc<dyn Any>,
+    type_id: TypeId,
     dependents: SmallVec<[SlotId; 4]>,
 }
 ```
@@ -157,8 +162,10 @@ immediately on creation, then rerun after any Cell or Slot read during the last
 run is invalidated.
 
 ```rust
+type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
+
 struct EffectNode {
-    run: Rc<dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>>,
+    run: Rc<EffectFn>,
     dependencies: SmallVec<[SlotId; 4]>,
     cleanup: Option<Box<dyn FnOnce()>>,
     force_run: bool,

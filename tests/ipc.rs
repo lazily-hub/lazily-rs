@@ -335,3 +335,44 @@ mod binary {
         );
     }
 }
+
+#[cfg(feature = "ffi")]
+mod json_codec {
+    use lazily::{
+        DecodeError, EdgeSnapshot, EncodeError, IpcMessage, NodeId, NodeSnapshot, Snapshot,
+    };
+
+    #[test]
+    fn ipc_message_json_round_trip_snapshot() {
+        let snapshot = Snapshot::new(
+            7,
+            vec![
+                NodeSnapshot::payload(NodeId(1), "i32", vec![1, 2, 3]),
+                NodeSnapshot::opaque(NodeId(2), "opaque-type"),
+            ],
+            vec![EdgeSnapshot::new(NodeId(2), NodeId(1))],
+            vec![NodeId(1), NodeId(2)],
+        );
+        let message = IpcMessage::Snapshot(snapshot);
+
+        let encoded = message.encode_json().unwrap();
+        let decoded = IpcMessage::decode_json(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_json_rejects_invalid_bytes() {
+        let result = IpcMessage::decode_json(b"not json");
+        assert!(matches!(result, Err(DecodeError::Json(_))));
+    }
+
+    #[test]
+    fn encode_decode_error_implement_display() {
+        let decode_err = IpcMessage::decode_json(b"not json").unwrap_err();
+        let _ = std::format!("{}", decode_err);
+
+        let encode_err = EncodeError::Json(serde_json::from_str::<()>("bad").unwrap_err());
+        let _ = std::format!("{}", encode_err);
+    }
+}
