@@ -463,8 +463,9 @@ struct InlineSpec {
 /// publish. The seqlock is the inner safety envelope; the outer atomic
 /// `cache_revision` + `dirty`/`force_recompute` checks in `read_fresh` reject
 /// reads racing a publish/invalidation, identically to the `Locked`/`LockFree`
-/// paths. The orderings are modeled exhaustively in
-/// `thread_safe_loom::inline_seqlock_*`.
+/// paths. The orderings are modeled in `thread_safe_loom::inline_seqlock_*`
+/// (raw torn-read rejection exhaustively; the combined envelope model is
+/// preemption-bounded because the unbounded space is non-terminating).
 struct InlineSeqlock {
     seq: AtomicUsize,
     occupied: AtomicBool,
@@ -3098,8 +3099,9 @@ mod tests {
         // is the same envelope as the other strategies and is covered by the
         // single-threaded tests; under concurrent recompute a reader may win the
         // publish race, so exact freshness is not asserted here — only that no
-        // value is ever observed torn). Loom proves the orderings exhaustively
-        // in `thread_safe_loom::inline_seqlock_*`.
+        // value is ever observed torn). Loom proves the orderings in
+        // `thread_safe_loom::inline_seqlock_*` (exhaustive for the raw
+        // seqlock; the combined envelope model is preemption-bounded).
         #[derive(Clone, Copy)]
         struct Pair {
             a: u64,

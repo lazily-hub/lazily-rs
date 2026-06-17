@@ -1,6 +1,7 @@
 #![cfg(feature = "loom")]
 
 use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
 use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use loom::sync::{Arc, Condvar, Mutex};
@@ -1449,7 +1450,19 @@ fn inline_seqlock_reader_never_observes_torn_value() {
 
 #[test]
 fn inline_seqlock_envelope_rejects_torn_and_stale_under_concurrent_publish() {
-    loom::model(|| {
+    // The full 6-atomic envelope (seqlock + cache_revision + dirty) across two
+    // spawned threads plus the driving body makes the unbounded `loom::model`
+    // permutation space non-terminating (>5 min). Cap preemptions at a level
+    // that still exercises every meaningful reader/writer interleaving — a torn
+    // seqlock mid-publish and a stale revision across `read_fresh`'s double
+    // `cache_revision` check — and add a duration safety net so CI never hangs.
+    // The bound is validated by temporarily breaking `read_fresh` (dropping the
+    // revision re-check) and confirming the bounded model still flags the
+    // stale-read regression.
+    let mut builder = loom::model::Builder::new();
+    builder.preemption_bound = Some(4);
+    builder.max_duration = Some(Duration::from_secs(60));
+    builder.check(|| {
         let lock = Arc::new(InlineSeqlockModel::new());
         lock.publish(1);
 

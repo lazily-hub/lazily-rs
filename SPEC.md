@@ -633,11 +633,16 @@ large / non-`Copy` fallback.
   which fall back transparently to the strategy path when the value exceeds the
   inline size/alignment bound.
 - **Loom gate.** The seqlock orderings (single-writer publish vs. concurrent
-  lock-free readers, plus the `cache_revision`/`dirty` envelope) are modeled
-  exhaustively by `cargo test --features loom --test thread_safe_loom`
+  lock-free readers, plus the `cache_revision`/`dirty` envelope) are modeled by
+  `cargo test --features loom --test thread_safe_loom`
   (`inline_seqlock_reader_never_observes_torn_value`,
   `inline_seqlock_envelope_rejects_torn_and_stale_under_concurrent_publish`,
-  `inline_seqlock_read_after_completed_invalidation_is_rejected`), satisfying
+  `inline_seqlock_read_after_completed_invalidation_is_rejected`). The two
+  single-property models run unbounded (exhaustive); the combined envelope model
+  uses a preemption-bounded `Builder` (bound 4, 60 s duration cap) because the
+  full 6-atomic envelope across two threads plus the driving body makes the
+  unbounded permutation space non-terminating — the bound is validated by
+  confirming the model still flags an injected torn-read regression, satisfying
   the lock-strategy Loom gate before landing.
 
 Tokio integration is scoped in two stages:
