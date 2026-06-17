@@ -454,20 +454,52 @@ fn run_driver(
             match rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
                 Ok(Output::Transmit(t)) => {
-                    let _ = socket.send_to(&t.contents, t.destination);
+                    // Surface send failures instead of silently dropping the
+                    // ICE/DTLS/SCTP packet (#lzstr0mpolldrive). Pre-fix this
+                    // was `let _ = socket.send_to(...)` which discarded EVERY
+                    // error: ENOBUFS under send-buffer pressure, ICMP-driven
+                    // ConnectionRefused (peer unreachable), ENETUNREACH/
+                    // EHOSTUNREACH (route flap), EBADF (socket closed) — all
+                    // silently lost packets and the handshake / data path
+                    // just stalled without diagnostics.
+                    //
+                    // `WouldBlock`/`Interrupted` are retryable on a blocking
+                    // socket (transient send-buffer full / signal); str0m will
+                    // re-emit the Transmit on a later `poll_output`, so just
+                    // continue the drain loop. Any other error indicates a
+                    // fatal socket/route condition that re-signaling must
+                    // rebuild from — break the driver.
+                    match socket.send_to(&t.contents, t.destination) {
+                        Ok(_) => {}
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::Interrupted =>
+                        {
+                            continue;
+                        }
+                        Err(_) => break 'outer,
+                    }
                 }
                 Ok(Output::Event(e)) => handle_event(e, &mut cid, &shared),
                 Err(_) => break 'outer,
             }
         };
 
-        // 4. Wait for inbound datagrams up to the deadline, capped so control
-        //    commands are still serviced promptly.
+        // 4. Wait for inbound datagrams. The cap is a *command-poll interval*,
+        //    not a str0m timing parameter: control commands (Send /
+        //    AcceptAnswer / AddRemoteCandidate / Shutdown) are read from
+        //    `cmd_rx` at the top of each `'outer` iteration, so capping the
+        //    recv wait keeps their latency bounded. str0m itself is fed an
+        //    accurate time advance via `Input::Timeout(now)` whenever the
+        //    socket times out without data; calling that "early" (every
+        //    COMMAND_POLL_INTERVAL during idle) is harmless — str0m just
+        //    re-emits its pending deadline if it isn't time yet.
+        const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(15);
         let now = Instant::now();
         let wait = timeout
             .checked_duration_since(now)
             .unwrap_or(Duration::ZERO)
-            .min(Duration::from_millis(15))
+            .min(COMMAND_POLL_INTERVAL)
             .max(Duration::from_millis(1));
         if socket.set_read_timeout(Some(wait)).is_err() {
             break;

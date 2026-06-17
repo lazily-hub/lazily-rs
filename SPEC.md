@@ -1569,6 +1569,27 @@ exercises this contract by bursting 100 × 8 KiB frames through a single
 `Str0mNetChannel` and asserting all 100 arrive in order at the remote peer,
 retrying on `Backpressure` as needed.
 
+##### `Str0mNet` driver I/O error handling (#lzstr0mpolldrive)
+
+The driver's UDP I/O surfaces failures instead of silently dropping packets:
+
+- **`socket.send_to`** — pre-fix this was `let _ = socket.send_to(...)`, which
+  discarded every error: `ENOBUFS` (send-buffer pressure), `ECONNREFUSED` (ICMP
+  port-unreachable, peer down), `ENETUNREACH`/`EHOSTUNREACH` (route flap),
+  `EBADF` (socket closed). The corresponding ICE/DTLS/SCTP packet was silently
+  lost and the handshake stalled without diagnostics. Post-fix,
+  `WouldBlock`/`Interrupted` retryable errors `continue` the drain loop (str0m
+  re-emits the `Transmit` on a later `poll_output`); any other error breaks the
+  driver (`'outer`), surfacing `Closed` so the caller re-signals.
+- **Read-timeout cap as command-poll interval** — `recv_from` waits at most
+  `COMMAND_POLL_INTERVAL` (15 ms) so control commands (`Send` / `AcceptAnswer`
+  / `AddRemoteCandidate` / `Shutdown`) read from `cmd_rx` at the top of each
+  outer iteration stay bounded-latency. This is *not* a str0m timing parameter:
+  str0m is fed an accurate time advance via `Input::Timeout(now)` whenever the
+  socket times out without data, and an "early" `Input::Timeout` (every 15 ms
+  during idle) is harmless — str0m just re-emits its pending deadline if it
+  isn't time yet.
+
 #### Signaling glue: `Str0mNet` over `SignalingClient` (#lzwebrtcwire)
 
 `Str0mNet` exchanges its SDP offer/answer and trickled ICE candidates *out of
