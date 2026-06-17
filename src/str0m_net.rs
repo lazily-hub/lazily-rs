@@ -42,7 +42,7 @@
 use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -66,6 +66,12 @@ pub enum Str0mNetError {
     Sdp(String),
     /// The driver thread is gone (peer dropped or shut down).
     Closed,
+    /// The driver's outbound frame queue is full — the caller is producing
+    /// frames faster than the SCTP channel can drain them. Back off (sleep /
+    /// await) and retry `send_frame`. Surfaced before the unbounded queue
+    /// growth that would otherwise risk memory exhaustion and silent frame
+    /// loss (#lzstr0mframe).
+    Backpressure,
     /// `accept_answer` was called on an answerer (only offerers hold a pending
     /// offer to answer).
     NotOfferer,
@@ -78,6 +84,12 @@ impl std::fmt::Display for Str0mNetError {
             Self::Rtc(e) => write!(f, "str0m net rtc error: {e}"),
             Self::Sdp(e) => write!(f, "str0m net sdp/ice error: {e}"),
             Self::Closed => write!(f, "str0m net driver closed"),
+            Self::Backpressure => {
+                write!(
+                    f,
+                    "str0m net outbound queue full (apply flow control and retry)"
+                )
+            }
             Self::NotOfferer => write!(f, "accept_answer called on a non-offerer peer"),
         }
     }
@@ -110,11 +122,21 @@ enum DriverCmd {
     Shutdown,
 }
 
+/// Maximum number of unsent frames buffered in the driver at once. Above this
+/// threshold [`Str0mNetChannel::send_frame`] returns
+/// [`Str0mNetError::Backpressure`](Self::Backpressure) so callers apply flow
+/// control rather than growing the queue without bound (#lzstr0mframe).
+const MAX_PENDING_FRAMES: usize = 1024;
+
 /// State shared between the public handles and the driver thread.
 struct Shared {
     inbox: Mutex<VecDeque<Vec<u8>>>,
     open: AtomicBool,
     closed: AtomicBool,
+    /// Number of frames currently buffered in the driver's outbound queue
+    /// (`DriverCmd::Send` messages not yet accepted by `Channel::write`). Used
+    /// by [`Str0mNetChannel::send_frame`] to apply backpressure before enqueue.
+    pending_frames: AtomicUsize,
 }
 
 /// A networked str0m DataChannel peer.
@@ -199,6 +221,7 @@ impl Str0mNet {
             inbox: Mutex::new(VecDeque::new()),
             open: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            pending_frames: AtomicUsize::new(0),
         });
         let (cmd_tx, cmd_rx) = channel();
         let candidate_string = local_candidate.to_sdp_string();
@@ -306,6 +329,14 @@ impl DataChannel for Str0mNetChannel {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(Str0mNetError::Closed);
         }
+        // Backpressure gate: reject the enqueue once the driver's outbound
+        // queue is at capacity. Without this check a caller producing frames
+        // faster than the SCTP drain would grow `out_pending` without bound,
+        // and (pre-#lzstr0mframe) the driver's flush loop would silently drop
+        // any frame that hit the `Ok(false)` backpressure path.
+        if self.shared.pending_frames.load(Ordering::Relaxed) >= MAX_PENDING_FRAMES {
+            return Err(Str0mNetError::Backpressure);
+        }
         self.cmd_tx
             .send(DriverCmd::Send(frame))
             .map_err(|_| Str0mNetError::Closed)
@@ -365,7 +396,10 @@ fn run_driver(
                         rtc.add_remote_candidate(c);
                     }
                 }
-                Ok(DriverCmd::Send(bytes)) => out_pending.push_back(bytes),
+                Ok(DriverCmd::Send(bytes)) => {
+                    out_pending.push_back(bytes);
+                    shared.pending_frames.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(TryRecvError::Empty) => break,
                 // All handles dropped without an explicit Shutdown.
                 Err(TryRecvError::Disconnected) => break 'outer,
@@ -378,11 +412,31 @@ fn run_driver(
         {
             while let Some(frame) = out_pending.pop_front() {
                 match rtc.channel(id) {
-                    Some(mut ch) => {
-                        if ch.write(true, &frame).is_err() {
+                    Some(mut ch) => match ch.write(true, &frame) {
+                        // Accepted by the SCTP layer: the frame will be
+                        // transmitted in order. Decrement the backpressure
+                        // counter so `send_frame` can enqueue again.
+                        Ok(true) => {
+                            shared.pending_frames.fetch_sub(1, Ordering::Relaxed);
+                        }
+                        // Ok(false) = SCTP send buffer full (backpressure).
+                        // Err     = channel broken / proto error.
+                        //
+                        // In BOTH cases the frame must be re-queued, not
+                        // dropped. Pre-#lzstr0mframe this branch was a bare
+                        // `if ch.write(...).is_err() { break; }` which (a)
+                        // ignored the `Ok(false)` backpressure signal entirely
+                        // — silently dropping every frame that exceeded the
+                        // SCTP send window — and (b) dropped the frame on `Err`
+                        // too. Re-queue + yield lets the driver advance
+                        // `poll_output` / `recv_from` to drain the buffer (for
+                        // `Ok(false)`) or detect a dead `Rtc` on the next
+                        // `is_alive()` check (for `Err`).
+                        Ok(false) | Err(_) => {
+                            out_pending.push_front(frame);
                             break;
                         }
-                    }
+                    },
                     None => {
                         out_pending.push_front(frame);
                         break;
@@ -443,9 +497,13 @@ fn run_driver(
     }
 
     // The handshake will never complete after this point; mark closed so the
-    // sync sink/source surface `Err`.
+    // sync sink/source surface `Err`. Reset the backpressure counter too: any
+    // remaining queued frames will never be delivered, so `send_frame` should
+    // surface `Closed` (via the cmd_tx drop / closed atomic) rather than
+    // `Backpressure` forever.
     shared.open.store(false, Ordering::SeqCst);
     shared.closed.store(true, Ordering::SeqCst);
+    shared.pending_frames.store(0, Ordering::SeqCst);
 }
 
 fn handle_event(event: Event, cid: &mut Option<ChannelId>, shared: &Shared) {

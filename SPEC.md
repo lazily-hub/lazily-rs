@@ -1543,6 +1543,32 @@ clock. `tests/str0m_net.rs` exercises a real two-socket round trip over
 `127.0.0.1` (real UDP/DTLS/SCTP/timers); a cross-host round trip through the live
 signaling Worker is operator-gated.
 
+##### `Str0mNet` outbound backpressure contract (#lzstr0mframe)
+
+The `Str0mNet` driver's outbound frame queue is **bounded** at
+`MAX_PENDING_FRAMES` (1024). When a caller's `send_frame` rate exceeds the SCTP
+drain rate, the driver applies backpressure on two layers:
+
+1. **`Channel::write` backpressure (`Ok(false)`)** — str0m returns `Ok(false)`
+   when the SCTP send buffer is full. The driver's flush loop **re-queues the
+   frame and yields** (rather than popping it), so the next `poll_output` /
+   `recv_from` cycle can drain the SCTP window and accept the frame on the
+   following iteration. Pre-#lzstr0mframe this branch was a bare
+   `if ch.write(...).is_err() { break; }` that ignored the `bool`, silently
+   dropping every frame that hit the `Ok(false)` path — violating the
+   ordered/reliable DataChannel invariant `WebRtcSink`/`WebRtcSource` rely on.
+2. **Queue cap (`Str0mNetError::Backpressure`)** — once the driver's
+   `out_pending` VecDeque reaches `MAX_PENDING_FRAMES`, `send_frame` itself
+   returns `Err(Str0mNetError::Backpressure)` so the caller applies flow control
+   (sleep / await / shed load) instead of growing memory without bound. The
+   counter is decremented when `Channel::write` accepts the frame (`Ok(true)`)
+   and reset to zero on driver exit (the queue will never drain after close).
+
+The regression test `burst_of_frames_arrives_in_order_under_backpressure`
+exercises this contract by bursting 100 × 8 KiB frames through a single
+`Str0mNetChannel` and asserting all 100 arrive in order at the remote peer,
+retrying on `Backpressure` as needed.
+
 #### Signaling glue: `Str0mNet` over `SignalingClient` (#lzwebrtcwire)
 
 `Str0mNet` exchanges its SDP offer/answer and trickled ICE candidates *out of
