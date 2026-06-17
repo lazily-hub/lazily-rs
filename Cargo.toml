@@ -67,6 +67,12 @@ required-features = ["tokio"]
 name = "instrumentation_profile"
 required-features = ["instrumentation"]
 
+# #lzwebrtcrunbook: operator driver for the live two-host WebRTC e2e run (#h6qb).
+# See tasks/software/runbook-lazily-webrtc-live-e2e.md.
+[[example]]
+name = "webrtc_live_e2e"
+required-features = ["signaling-client", "webrtc-str0m"]
+
 [[bench]]
 name = "context"
 harness = false
