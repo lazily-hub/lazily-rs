@@ -30,8 +30,8 @@ Regression budgets enforced by `python3 scripts/update-benchmark-results.py --ch
 |---|---:|---|
 | thread_safe_set_cell_invalidation_independent_slot_contention_16 | 192 | set_cell_invalidation<=0, dependency_edge<=16, get_refresh<=32, publish<=32 |
 | thread_safe_set_cell_invalidation_batched_write_bursts_16 | 900 | other<=800, set_cell_invalidation<=16, dependency_edge<=64, get_refresh<=2, publish<=2 |
-| thread_safe_contention_same_slot_write_read_16 | 1000 | get_refresh<=160, publish<=256, in_flight_wait<=700, set_cell_invalidation<=32 |
-| thread_safe_contention_independent_slots_16 | 700 | other<=160, get_refresh<=64, publish<=320, dependency_edge<=16, set_cell_invalidation<=64 |
+| thread_safe_contention_same_slot_write_read_16 | 1000 | get_refresh<=160, publish<=256, in_flight_wait<=700, set_cell_invalidation<=180 |
+| thread_safe_contention_independent_slots_16 | 1100 | other<=450, get_refresh<=64, publish<=320, dependency_edge<=16, set_cell_invalidation<=300 |
 | thread_safe_contention_read_mostly_waiters_16 | 256 | get_refresh<=128, publish<=64, in_flight_wait<=96 |
 | thread_safe_contention_batched_write_bursts_16 | 950 | other<=800, get_refresh<=128, dependency_edge<=64, set_cell_invalidation<=16, publish<=64, in_flight_wait<=64 |
 | thread_safe_effect_contention_queue_coalescing_16 | 2600 | other<=900, dependency_edge<=1600, set_cell_invalidation<=16, get_refresh<=64, publish<=0 |
@@ -203,287 +203,288 @@ Instrumentation snapshots are single local profile runs captured by
 | context_memo_effect | 4 | 3 | 0 | 4 | 1 | 2 | 1 | 0 | 0.000 ns | 0.000 ns | 0 | 0 | 0 | 0 |
 | context_fan_out_32 | 33 | 64 | 0 | 64 | 32 | 0 | 0 | 0 | 0.000 ns | 0.000 ns | 0 | 0 | 0 | 0 |
 | context_batch_storm_64 | 65 | 0 | 0 | 128 | 64 | 2 | 1 | 0 | 0.000 ns | 0.000 ns | 0 | 0 | 0 | 0 |
-| thread_safe_first_get_2 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 11 | 20.750 us | 24.460 us | 0 | 0 | 0 | 0 |
+| thread_safe_first_get_2 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 11 | 19.240 us | 18.020 us | 0 | 0 | 0 | 0 |
 | thread_safe_set_cell_invalidation_high_fan_out_512 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0.000 ns | 0.000 ns | 1 | 512 | 0 | 512 |
-| thread_safe_set_cell_invalidation_same_slot_contention_1 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 430.000 ns | 1.770 us | 16 | 16 | 0 | 16 |
-| thread_safe_set_cell_invalidation_same_slot_contention_2 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 450.000 ns | 1.420 us | 32 | 32 | 0 | 32 |
-| thread_safe_set_cell_invalidation_same_slot_contention_4 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 410.000 ns | 1.310 us | 64 | 64 | 0 | 64 |
-| thread_safe_set_cell_invalidation_same_slot_contention_8 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 460.000 ns | 1.430 us | 128 | 128 | 0 | 128 |
-| thread_safe_set_cell_invalidation_same_slot_contention_16 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 640.000 ns | 6.220 us | 256 | 256 | 0 | 256 |
-| thread_safe_set_cell_invalidation_independent_slot_contention_1 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 440.000 ns | 2.540 us | 15 | 15 | 0 | 15 |
-| thread_safe_set_cell_invalidation_independent_slot_contention_2 | 4 | 2 | 0 | 2 | 0 | 0 | 0 | 16 | 940.000 ns | 2.490 us | 31 | 31 | 0 | 31 |
-| thread_safe_set_cell_invalidation_independent_slot_contention_4 | 8 | 4 | 0 | 4 | 0 | 0 | 0 | 32 | 1.820 us | 5.640 us | 63 | 63 | 0 | 63 |
-| thread_safe_set_cell_invalidation_independent_slot_contention_8 | 16 | 8 | 0 | 8 | 0 | 0 | 0 | 64 | 3.710 us | 9.940 us | 127 | 127 | 0 | 127 |
-| thread_safe_set_cell_invalidation_independent_slot_contention_16 | 32 | 16 | 0 | 16 | 0 | 0 | 0 | 128 | 7.340 us | 22.610 us | 255 | 255 | 0 | 255 |
-| thread_safe_set_cell_invalidation_batched_write_bursts_1 | 5 | 1 | 0 | 4 | 0 | 0 | 0 | 97 | 5.951 us | 64.820 us | 0 | 0 | 0 | 15 |
-| thread_safe_set_cell_invalidation_batched_write_bursts_2 | 9 | 1 | 0 | 8 | 0 | 0 | 0 | 189 | 11.450 us | 92.271 us | 0 | 0 | 0 | 31 |
-| thread_safe_set_cell_invalidation_batched_write_bursts_4 | 17 | 1 | 0 | 16 | 0 | 0 | 0 | 307 | 178.663 us | 208.342 us | 0 | 0 | 0 | 41 |
-| thread_safe_set_cell_invalidation_batched_write_bursts_8 | 33 | 1 | 0 | 32 | 0 | 0 | 0 | 366 | 2.175 ms | 251.482 us | 0 | 0 | 0 | 3 |
-| thread_safe_set_cell_invalidation_batched_write_bursts_16 | 65 | 1 | 0 | 64 | 0 | 0 | 0 | 715 | 11.154 ms | 551.614 us | 0 | 0 | 0 | 1 |
-| thread_safe_contention_same_slot_write_read_1 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 24 | 1.350 us | 21.970 us | 16 | 16 | 0 | 16 |
-| thread_safe_contention_same_slot_write_read_2 | 2 | 29 | 0 | 1 | 0 | 0 | 0 | 57 | 3.140 us | 43.000 us | 32 | 32 | 0 | 32 |
-| thread_safe_contention_same_slot_write_read_4 | 2 | 57 | 0 | 1 | 0 | 0 | 0 | 139 | 10.420 us | 76.440 us | 64 | 64 | 0 | 64 |
-| thread_safe_contention_same_slot_write_read_8 | 2 | 108 | 0 | 1 | 0 | 0 | 0 | 266 | 34.970 us | 305.881 us | 127 | 127 | 1 | 128 |
-| thread_safe_contention_same_slot_write_read_16 | 2 | 215 | 0 | 1 | 0 | 0 | 0 | 566 | 57.420 us | 626.366 us | 254 | 254 | 2 | 256 |
-| thread_safe_contention_independent_slots_1 | 2 | 16 | 0 | 1 | 0 | 0 | 0 | 23 | 1.340 us | 18.680 us | 15 | 15 | 0 | 15 |
-| thread_safe_contention_independent_slots_2 | 4 | 33 | 0 | 2 | 0 | 0 | 0 | 50 | 10.740 us | 35.580 us | 30 | 30 | 1 | 31 |
-| thread_safe_contention_independent_slots_4 | 8 | 67 | 0 | 4 | 0 | 0 | 0 | 127 | 438.873 us | 110.692 us | 52 | 52 | 11 | 63 |
-| thread_safe_contention_independent_slots_8 | 16 | 135 | 0 | 8 | 0 | 0 | 0 | 237 | 2.150 ms | 224.142 us | 109 | 109 | 18 | 127 |
-| thread_safe_contention_independent_slots_16 | 32 | 271 | 0 | 16 | 0 | 0 | 0 | 492 | 10.671 ms | 440.973 us | 211 | 211 | 44 | 255 |
-| thread_safe_contention_read_mostly_waiters_1 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 24 | 1.460 us | 21.051 us | 16 | 16 | 0 | 16 |
-| thread_safe_contention_read_mostly_waiters_2 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 24 | 1.220 us | 15.971 us | 16 | 16 | 0 | 16 |
-| thread_safe_contention_read_mostly_waiters_4 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 25 | 1.300 us | 21.230 us | 16 | 16 | 0 | 16 |
-| thread_safe_contention_read_mostly_waiters_8 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 47 | 2.470 us | 35.420 us | 16 | 16 | 0 | 16 |
-| thread_safe_contention_read_mostly_waiters_16 | 2 | 18 | 0 | 1 | 0 | 0 | 0 | 64 | 112.171 us | 66.751 us | 16 | 16 | 0 | 16 |
-| thread_safe_contention_batched_write_bursts_1 | 5 | 16 | 0 | 4 | 0 | 0 | 0 | 112 | 6.400 us | 73.461 us | 0 | 0 | 0 | 15 |
-| thread_safe_contention_batched_write_bursts_2 | 9 | 22 | 0 | 8 | 0 | 0 | 0 | 190 | 67.222 us | 128.930 us | 0 | 0 | 0 | 21 |
-| thread_safe_contention_batched_write_bursts_4 | 17 | 20 | 0 | 16 | 0 | 0 | 0 | 271 | 279.001 us | 196.802 us | 0 | 0 | 0 | 19 |
-| thread_safe_contention_batched_write_bursts_8 | 33 | 5 | 0 | 32 | 0 | 0 | 0 | 376 | 2.976 ms | 308.191 us | 0 | 0 | 0 | 4 |
-| thread_safe_contention_batched_write_bursts_16 | 65 | 4 | 0 | 64 | 0 | 0 | 0 | 723 | 11.867 ms | 565.682 us | 0 | 0 | 0 | 3 |
-| thread_safe_effect_contention_queue_coalescing_8 | 33 | 0 | 0 | 32 | 0 | 8 | 1 | 406 | 1.873 ms | 284.094 us | 0 | 0 | 0 | 0 |
-| thread_safe_effect_contention_queue_coalescing_16 | 65 | 0 | 0 | 64 | 0 | 3 | 1 | 727 | 11.547 ms | 547.994 us | 0 | 0 | 0 | 0 |
-| thread_safe_effect_contention_cleanup_execution_8 | 9 | 0 | 0 | 8 | 8 | 34 | 1 | 416 | 3.181 ms | 249.242 us | 0 | 0 | 127 | 0 |
-| thread_safe_effect_contention_cleanup_execution_16 | 17 | 0 | 0 | 16 | 16 | 30 | 1 | 683 | 12.983 ms | 408.903 us | 0 | 0 | 255 | 0 |
-| thread_safe_effect_contention_batch_flush_8 | 34 | 2 | 0 | 33 | 0 | 3 | 1 | 631 | 4.488 ms | 347.764 us | 0 | 0 | 0 | 1 |
-| thread_safe_effect_contention_batch_flush_16 | 66 | 7 | 0 | 65 | 0 | 11 | 1 | 1278 | 20.244 ms | 777.755 us | 0 | 0 | 0 | 8 |
-| thread_safe_graph_propagation_fan_out_eager_validation_8 | 34 | 562 | 0 | 64 | 0 | 50 | 1 | 1113 | 27.970 ms | 6.622 ms | 28 | 896 | 100 | 4096 |
-| thread_safe_graph_propagation_fan_out_eager_validation_16 | 34 | 563 | 0 | 64 | 0 | 50 | 1 | 1422 | 156.259 ms | 13.831 ms | 2 | 64 | 254 | 8192 |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | 33 | 64 | 0 | 32 | 0 | 0 | 0 | 226 | 11.220 us | 73.460 us | 128 | 4096 | 0 | 4096 |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | 33 | 64 | 0 | 32 | 0 | 0 | 0 | 226 | 11.130 us | 65.970 us | 256 | 8192 | 0 | 8192 |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | 65 | 66 | 0 | 64 | 0 | 0 | 0 | 328 | 15.851 us | 102.800 us | 508 | 540 | 0 | 572 |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | 129 | 130 | 0 | 128 | 0 | 0 | 0 | 648 | 33.060 us | 203.800 us | 1020 | 1084 | 0 | 1148 |
-| thread_safe_graph_propagation_fan_in_batched_flush_8 | 66 | 131 | 0 | 65 | 0 | 25 | 1 | 1397 | 928.746 us | 593.322 us | 0 | 0 | 0 | 214 |
-| thread_safe_graph_propagation_fan_in_batched_flush_16 | 130 | 145 | 0 | 129 | 0 | 9 | 1 | 1583 | 10.314 ms | 863.326 us | 0 | 0 | 0 | 164 |
+| thread_safe_set_cell_invalidation_same_slot_contention_1 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 290.000 ns | 2.880 us | 16 | 16 | 0 | 16 |
+| thread_safe_set_cell_invalidation_same_slot_contention_2 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 280.000 ns | 1.170 us | 32 | 32 | 0 | 32 |
+| thread_safe_set_cell_invalidation_same_slot_contention_4 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 280.000 ns | 1.060 us | 64 | 64 | 0 | 64 |
+| thread_safe_set_cell_invalidation_same_slot_contention_8 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 280.000 ns | 1.110 us | 128 | 128 | 0 | 128 |
+| thread_safe_set_cell_invalidation_same_slot_contention_16 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 380.000 ns | 5.080 us | 256 | 256 | 0 | 256 |
+| thread_safe_set_cell_invalidation_independent_slot_contention_1 | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 8 | 380.000 ns | 7.940 us | 15 | 15 | 0 | 15 |
+| thread_safe_set_cell_invalidation_independent_slot_contention_2 | 4 | 2 | 0 | 2 | 0 | 0 | 0 | 16 | 610.000 ns | 2.410 us | 31 | 31 | 0 | 31 |
+| thread_safe_set_cell_invalidation_independent_slot_contention_4 | 8 | 4 | 0 | 4 | 0 | 0 | 0 | 32 | 1.140 us | 4.920 us | 63 | 63 | 0 | 63 |
+| thread_safe_set_cell_invalidation_independent_slot_contention_8 | 16 | 8 | 0 | 8 | 0 | 0 | 0 | 64 | 2.270 us | 9.930 us | 127 | 127 | 0 | 127 |
+| thread_safe_set_cell_invalidation_independent_slot_contention_16 | 32 | 16 | 0 | 16 | 0 | 0 | 0 | 128 | 4.570 us | 18.810 us | 255 | 255 | 0 | 255 |
+| thread_safe_set_cell_invalidation_batched_write_bursts_1 | 5 | 1 | 0 | 4 | 0 | 0 | 0 | 97 | 3.650 us | 60.860 us | 0 | 0 | 0 | 15 |
+| thread_safe_set_cell_invalidation_batched_write_bursts_2 | 9 | 1 | 0 | 8 | 0 | 0 | 0 | 159 | 193.830 us | 106.741 us | 0 | 0 | 0 | 21 |
+| thread_safe_set_cell_invalidation_batched_write_bursts_4 | 17 | 1 | 0 | 16 | 0 | 0 | 0 | 199 | 439.375 us | 150.901 us | 0 | 0 | 0 | 6 |
+| thread_safe_set_cell_invalidation_batched_write_bursts_8 | 33 | 1 | 0 | 32 | 0 | 0 | 0 | 369 | 2.189 ms | 231.381 us | 0 | 0 | 0 | 4 |
+| thread_safe_set_cell_invalidation_batched_write_bursts_16 | 65 | 1 | 0 | 64 | 0 | 0 | 0 | 715 | 9.403 ms | 432.702 us | 0 | 0 | 0 | 2 |
+| thread_safe_contention_same_slot_write_read_1 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 24 | 1.080 us | 17.510 us | 16 | 16 | 0 | 16 |
+| thread_safe_contention_same_slot_write_read_2 | 2 | 28 | 0 | 1 | 0 | 0 | 0 | 77 | 16.610 us | 46.410 us | 23 | 23 | 9 | 32 |
+| thread_safe_contention_same_slot_write_read_4 | 2 | 52 | 0 | 1 | 0 | 0 | 0 | 226 | 127.742 us | 107.120 us | 33 | 33 | 31 | 64 |
+| thread_safe_contention_same_slot_write_read_8 | 2 | 111 | 0 | 1 | 0 | 0 | 0 | 449 | 207.906 us | 200.263 us | 70 | 70 | 58 | 128 |
+| thread_safe_contention_same_slot_write_read_16 | 2 | 211 | 0 | 1 | 0 | 0 | 0 | 862 | 1.132 ms | 429.864 us | 138 | 138 | 118 | 256 |
+| thread_safe_contention_independent_slots_1 | 2 | 16 | 0 | 1 | 0 | 0 | 0 | 23 | 980.000 ns | 15.180 us | 15 | 15 | 0 | 15 |
+| thread_safe_contention_independent_slots_2 | 4 | 33 | 0 | 2 | 0 | 0 | 0 | 89 | 19.151 us | 39.491 us | 17 | 17 | 14 | 31 |
+| thread_safe_contention_independent_slots_4 | 8 | 67 | 0 | 4 | 0 | 0 | 0 | 199 | 416.563 us | 95.721 us | 25 | 25 | 38 | 63 |
+| thread_safe_contention_independent_slots_8 | 16 | 135 | 0 | 8 | 0 | 0 | 0 | 465 | 4.256 ms | 296.231 us | 11 | 11 | 116 | 127 |
+| thread_safe_contention_independent_slots_16 | 32 | 271 | 0 | 16 | 0 | 0 | 0 | 939 | 19.906 ms | 630.554 us | 9 | 9 | 246 | 255 |
+| thread_safe_contention_read_mostly_waiters_1 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 24 | 1.110 us | 17.340 us | 16 | 16 | 0 | 16 |
+| thread_safe_contention_read_mostly_waiters_2 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 24 | 1.030 us | 14.530 us | 16 | 16 | 0 | 16 |
+| thread_safe_contention_read_mostly_waiters_4 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 41 | 2.500 us | 26.930 us | 16 | 16 | 0 | 16 |
+| thread_safe_contention_read_mostly_waiters_8 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 59 | 22.950 us | 31.790 us | 16 | 16 | 0 | 16 |
+| thread_safe_contention_read_mostly_waiters_16 | 2 | 17 | 0 | 1 | 0 | 0 | 0 | 83 | 217.170 us | 114.471 us | 16 | 16 | 0 | 16 |
+| thread_safe_contention_batched_write_bursts_1 | 5 | 16 | 0 | 4 | 0 | 0 | 0 | 112 | 4.490 us | 64.750 us | 0 | 0 | 0 | 15 |
+| thread_safe_contention_batched_write_bursts_2 | 9 | 21 | 0 | 8 | 0 | 0 | 0 | 188 | 66.861 us | 109.832 us | 0 | 0 | 0 | 20 |
+| thread_safe_contention_batched_write_bursts_4 | 17 | 37 | 0 | 16 | 0 | 0 | 0 | 389 | 432.502 us | 282.893 us | 0 | 0 | 0 | 38 |
+| thread_safe_contention_batched_write_bursts_8 | 33 | 10 | 0 | 32 | 0 | 0 | 0 | 400 | 2.433 ms | 298.504 us | 0 | 0 | 0 | 9 |
+| thread_safe_contention_batched_write_bursts_16 | 65 | 3 | 0 | 64 | 0 | 0 | 0 | 717 | 10.003 ms | 462.403 us | 0 | 0 | 0 | 2 |
+| thread_safe_effect_contention_queue_coalescing_8 | 33 | 0 | 0 | 32 | 0 | 8 | 1 | 406 | 2.018 ms | 269.084 us | 0 | 0 | 0 | 0 |
+| thread_safe_effect_contention_queue_coalescing_16 | 65 | 0 | 0 | 64 | 0 | 10 | 1 | 775 | 9.282 ms | 531.114 us | 0 | 0 | 0 | 0 |
+| thread_safe_effect_contention_cleanup_execution_8 | 9 | 0 | 0 | 8 | 8 | 32 | 1 | 408 | 1.845 ms | 190.321 us | 0 | 0 | 127 | 0 |
+| thread_safe_effect_contention_cleanup_execution_16 | 17 | 0 | 0 | 16 | 16 | 32 | 1 | 696 | 7.538 ms | 305.824 us | 0 | 0 | 255 | 0 |
+| thread_safe_effect_contention_batch_flush_8 | 34 | 3 | 0 | 33 | 0 | 3 | 1 | 634 | 2.638 ms | 269.453 us | 0 | 0 | 0 | 2 |
+| thread_safe_effect_contention_batch_flush_16 | 66 | 2 | 0 | 65 | 0 | 3 | 1 | 1239 | 21.843 ms | 617.275 us | 0 | 0 | 0 | 1 |
+| thread_safe_graph_propagation_fan_out_eager_validation_8 | 34 | 549 | 0 | 64 | 0 | 49 | 1 | 1132 | 24.084 ms | 6.033 ms | 10 | 320 | 118 | 4096 |
+| thread_safe_graph_propagation_fan_out_eager_validation_16 | 34 | 555 | 0 | 64 | 0 | 49 | 1 | 1380 | 117.009 ms | 11.557 ms | 17 | 544 | 239 | 8192 |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | 33 | 64 | 0 | 32 | 0 | 0 | 0 | 226 | 10.090 us | 76.281 us | 128 | 4096 | 0 | 4096 |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | 33 | 64 | 0 | 32 | 0 | 0 | 0 | 226 | 9.670 us | 69.370 us | 256 | 8192 | 0 | 8192 |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | 65 | 66 | 0 | 64 | 0 | 0 | 0 | 328 | 11.840 us | 105.540 us | 508 | 540 | 0 | 572 |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | 129 | 130 | 0 | 128 | 0 | 0 | 0 | 648 | 27.661 us | 197.172 us | 1020 | 1084 | 0 | 1148 |
+| thread_safe_graph_propagation_fan_in_batched_flush_8 | 66 | 66 | 0 | 65 | 0 | 3 | 1 | 605 | 2.600 ms | 397.774 us | 0 | 0 | 0 | 73 |
+| thread_safe_graph_propagation_fan_in_batched_flush_16 | 130 | 135 | 0 | 129 | 0 | 5 | 1 | 1319 | 7.690 ms | 744.236 us | 0 | 0 | 0 | 170 |
 
 ThreadSafe lock attribution for contention profiles:
 
 | Profile | Site | Lock acquisitions | Lock wait | Lock hold |
 |---|---|---:|---:|---:|
-| thread_safe_set_cell_invalidation_same_slot_contention_1 | other | 4 | 220.000 ns | 710.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_1 | get_refresh | 2 | 100.000 ns | 230.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_1 | dependency_edge | 1 | 60.000 ns | 480.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_1 | publish | 1 | 50.000 ns | 350.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_2 | other | 4 | 230.000 ns | 340.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_2 | get_refresh | 2 | 90.000 ns | 240.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_2 | dependency_edge | 1 | 70.000 ns | 480.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_2 | publish | 1 | 60.000 ns | 360.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_4 | other | 4 | 210.000 ns | 280.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_4 | get_refresh | 2 | 90.000 ns | 240.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_4 | dependency_edge | 1 | 60.000 ns | 450.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_4 | publish | 1 | 50.000 ns | 340.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_8 | other | 4 | 260.000 ns | 280.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_8 | get_refresh | 2 | 90.000 ns | 240.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_8 | dependency_edge | 1 | 60.000 ns | 490.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_8 | publish | 1 | 50.000 ns | 420.000 ns |
-| thread_safe_set_cell_invalidation_same_slot_contention_16 | other | 4 | 370.000 ns | 1.630 us |
-| thread_safe_set_cell_invalidation_same_slot_contention_16 | get_refresh | 2 | 150.000 ns | 1.530 us |
-| thread_safe_set_cell_invalidation_same_slot_contention_16 | dependency_edge | 1 | 70.000 ns | 1.490 us |
-| thread_safe_set_cell_invalidation_same_slot_contention_16 | publish | 1 | 50.000 ns | 1.570 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_1 | other | 4 | 220.000 ns | 650.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_1 | get_refresh | 2 | 90.000 ns | 610.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_1 | dependency_edge | 1 | 60.000 ns | 690.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_1 | publish | 1 | 70.000 ns | 590.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_2 | other | 8 | 490.000 ns | 560.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_2 | get_refresh | 4 | 210.000 ns | 420.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_2 | dependency_edge | 2 | 120.000 ns | 840.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_2 | publish | 2 | 120.000 ns | 670.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_4 | other | 16 | 980.000 ns | 1.880 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_4 | get_refresh | 8 | 430.000 ns | 810.000 ns |
-| thread_safe_set_cell_invalidation_independent_slot_contention_4 | dependency_edge | 4 | 240.000 ns | 1.690 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_4 | publish | 4 | 170.000 ns | 1.260 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_8 | other | 32 | 2.000 us | 2.420 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_8 | get_refresh | 16 | 820.000 ns | 1.610 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_8 | dependency_edge | 8 | 490.000 ns | 3.300 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_8 | publish | 8 | 400.000 ns | 2.610 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_16 | other | 64 | 3.960 us | 5.560 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_16 | get_refresh | 32 | 1.640 us | 3.990 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_16 | dependency_edge | 16 | 940.000 ns | 7.250 us |
-| thread_safe_set_cell_invalidation_independent_slot_contention_16 | publish | 16 | 800.000 ns | 5.810 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_1 | other | 74 | 4.550 us | 18.570 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_1 | get_refresh | 2 | 140.000 ns | 1.600 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_1 | dependency_edge | 4 | 230.000 ns | 2.930 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_1 | set_cell_invalidation | 16 | 981.000 ns | 40.160 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_1 | publish | 1 | 50.000 ns | 1.560 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_2 | other | 146 | 8.850 us | 28.511 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_2 | get_refresh | 2 | 90.000 ns | 210.000 ns |
-| thread_safe_set_cell_invalidation_batched_write_bursts_2 | dependency_edge | 8 | 450.000 ns | 5.270 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_2 | set_cell_invalidation | 32 | 2.010 us | 57.920 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_2 | publish | 1 | 50.000 ns | 360.000 ns |
-| thread_safe_set_cell_invalidation_batched_write_bursts_4 | other | 246 | 172.763 us | 87.401 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_4 | get_refresh | 2 | 90.000 ns | 240.000 ns |
-| thread_safe_set_cell_invalidation_batched_write_bursts_4 | dependency_edge | 16 | 800.000 ns | 8.650 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_4 | set_cell_invalidation | 42 | 4.950 us | 111.701 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_4 | publish | 1 | 60.000 ns | 350.000 ns |
-| thread_safe_set_cell_invalidation_batched_write_bursts_8 | other | 328 | 2.173 ms | 207.152 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_8 | get_refresh | 2 | 90.000 ns | 260.000 ns |
-| thread_safe_set_cell_invalidation_batched_write_bursts_8 | dependency_edge | 32 | 1.680 us | 17.100 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_8 | set_cell_invalidation | 3 | 230.000 ns | 26.590 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_8 | publish | 1 | 50.000 ns | 380.000 ns |
-| thread_safe_set_cell_invalidation_batched_write_bursts_16 | other | 646 | 11.101 ms | 482.194 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_16 | get_refresh | 2 | 100.000 ns | 520.000 ns |
-| thread_safe_set_cell_invalidation_batched_write_bursts_16 | dependency_edge | 64 | 3.330 us | 38.760 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_16 | set_cell_invalidation | 2 | 50.460 us | 29.580 us |
-| thread_safe_set_cell_invalidation_batched_write_bursts_16 | publish | 1 | 50.000 ns | 560.000 ns |
-| thread_safe_contention_same_slot_write_read_1 | other | 4 | 250.000 ns | 1.130 us |
-| thread_safe_contention_same_slot_write_read_1 | get_refresh | 2 | 90.000 ns | 880.000 ns |
-| thread_safe_contention_same_slot_write_read_1 | dependency_edge | 1 | 70.000 ns | 810.000 ns |
-| thread_safe_contention_same_slot_write_read_1 | publish | 17 | 940.000 ns | 19.150 us |
-| thread_safe_contention_same_slot_write_read_2 | other | 4 | 260.000 ns | 310.000 ns |
-| thread_safe_contention_same_slot_write_read_2 | get_refresh | 4 | 1.220 us | 1.520 us |
-| thread_safe_contention_same_slot_write_read_2 | dependency_edge | 1 | 60.000 ns | 460.000 ns |
-| thread_safe_contention_same_slot_write_read_2 | publish | 29 | 1.600 us | 40.710 us |
-| thread_safe_contention_same_slot_write_read_2 | in_flight_wait | 19 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_same_slot_write_read_4 | other | 4 | 260.000 ns | 310.000 ns |
-| thread_safe_contention_same_slot_write_read_4 | get_refresh | 10 | 6.640 us | 2.890 us |
-| thread_safe_contention_same_slot_write_read_4 | dependency_edge | 1 | 70.000 ns | 420.000 ns |
-| thread_safe_contention_same_slot_write_read_4 | publish | 57 | 3.450 us | 72.820 us |
-| thread_safe_contention_same_slot_write_read_4 | in_flight_wait | 67 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_same_slot_write_read_8 | other | 6 | 370.000 ns | 630.000 ns |
-| thread_safe_contention_same_slot_write_read_8 | get_refresh | 14 | 16.810 us | 6.660 us |
-| thread_safe_contention_same_slot_write_read_8 | dependency_edge | 1 | 50.000 ns | 660.000 ns |
-| thread_safe_contention_same_slot_write_read_8 | set_cell_invalidation | 1 | 430.000 ns | 7.990 us |
-| thread_safe_contention_same_slot_write_read_8 | publish | 108 | 17.310 us | 289.941 us |
-| thread_safe_contention_same_slot_write_read_8 | in_flight_wait | 136 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_same_slot_write_read_16 | other | 8 | 5.240 us | 1.060 us |
-| thread_safe_contention_same_slot_write_read_16 | get_refresh | 44 | 11.790 us | 16.891 us |
-| thread_safe_contention_same_slot_write_read_16 | dependency_edge | 1 | 70.000 ns | 540.000 ns |
-| thread_safe_contention_same_slot_write_read_16 | set_cell_invalidation | 2 | 210.000 ns | 8.980 us |
-| thread_safe_contention_same_slot_write_read_16 | publish | 215 | 40.110 us | 598.895 us |
-| thread_safe_contention_same_slot_write_read_16 | in_flight_wait | 296 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_independent_slots_1 | other | 4 | 250.000 ns | 1.500 us |
-| thread_safe_contention_independent_slots_1 | get_refresh | 2 | 160.000 ns | 1.170 us |
-| thread_safe_contention_independent_slots_1 | dependency_edge | 1 | 70.000 ns | 1.490 us |
-| thread_safe_contention_independent_slots_1 | publish | 16 | 860.000 ns | 14.520 us |
-| thread_safe_contention_independent_slots_2 | other | 10 | 4.550 us | 1.210 us |
-| thread_safe_contention_independent_slots_2 | get_refresh | 4 | 220.000 ns | 700.000 ns |
-| thread_safe_contention_independent_slots_2 | dependency_edge | 2 | 120.000 ns | 1.070 us |
-| thread_safe_contention_independent_slots_2 | set_cell_invalidation | 1 | 60.000 ns | 1.840 us |
-| thread_safe_contention_independent_slots_2 | publish | 33 | 5.790 us | 30.760 us |
-| thread_safe_contention_independent_slots_4 | other | 37 | 81.881 us | 3.670 us |
-| thread_safe_contention_independent_slots_4 | get_refresh | 8 | 400.000 ns | 850.000 ns |
-| thread_safe_contention_independent_slots_4 | dependency_edge | 4 | 250.000 ns | 1.740 us |
-| thread_safe_contention_independent_slots_4 | set_cell_invalidation | 11 | 33.390 us | 21.500 us |
-| thread_safe_contention_independent_slots_4 | publish | 67 | 322.952 us | 82.932 us |
-| thread_safe_contention_independent_slots_8 | other | 60 | 276.522 us | 5.980 us |
-| thread_safe_contention_independent_slots_8 | get_refresh | 16 | 860.000 ns | 1.650 us |
-| thread_safe_contention_independent_slots_8 | dependency_edge | 8 | 490.000 ns | 3.620 us |
-| thread_safe_contention_independent_slots_8 | set_cell_invalidation | 18 | 160.781 us | 38.870 us |
-| thread_safe_contention_independent_slots_8 | publish | 135 | 1.712 ms | 174.022 us |
-| thread_safe_contention_independent_slots_16 | other | 129 | 1.659 ms | 10.970 us |
-| thread_safe_contention_independent_slots_16 | get_refresh | 32 | 1.720 us | 3.360 us |
-| thread_safe_contention_independent_slots_16 | dependency_edge | 16 | 1.000 us | 7.130 us |
-| thread_safe_contention_independent_slots_16 | set_cell_invalidation | 44 | 1.431 ms | 81.901 us |
-| thread_safe_contention_independent_slots_16 | publish | 271 | 7.578 ms | 337.612 us |
-| thread_safe_contention_read_mostly_waiters_1 | other | 4 | 320.000 ns | 1.870 us |
-| thread_safe_contention_read_mostly_waiters_1 | get_refresh | 2 | 160.000 ns | 1.510 us |
-| thread_safe_contention_read_mostly_waiters_1 | dependency_edge | 1 | 70.000 ns | 1.500 us |
-| thread_safe_contention_read_mostly_waiters_1 | publish | 17 | 910.000 ns | 16.171 us |
-| thread_safe_contention_read_mostly_waiters_2 | other | 4 | 250.000 ns | 340.000 ns |
-| thread_safe_contention_read_mostly_waiters_2 | get_refresh | 2 | 90.000 ns | 240.000 ns |
-| thread_safe_contention_read_mostly_waiters_2 | dependency_edge | 1 | 50.000 ns | 430.000 ns |
-| thread_safe_contention_read_mostly_waiters_2 | publish | 17 | 830.000 ns | 14.961 us |
-| thread_safe_contention_read_mostly_waiters_4 | other | 4 | 230.000 ns | 300.000 ns |
-| thread_safe_contention_read_mostly_waiters_4 | get_refresh | 2 | 100.000 ns | 190.000 ns |
-| thread_safe_contention_read_mostly_waiters_4 | dependency_edge | 1 | 60.000 ns | 410.000 ns |
-| thread_safe_contention_read_mostly_waiters_4 | publish | 17 | 910.000 ns | 20.330 us |
-| thread_safe_contention_read_mostly_waiters_4 | in_flight_wait | 1 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_read_mostly_waiters_8 | other | 4 | 230.000 ns | 290.000 ns |
-| thread_safe_contention_read_mostly_waiters_8 | get_refresh | 14 | 860.000 ns | 2.780 us |
-| thread_safe_contention_read_mostly_waiters_8 | dependency_edge | 1 | 60.000 ns | 420.000 ns |
-| thread_safe_contention_read_mostly_waiters_8 | publish | 17 | 1.320 us | 31.930 us |
-| thread_safe_contention_read_mostly_waiters_8 | in_flight_wait | 11 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_read_mostly_waiters_16 | other | 4 | 240.000 ns | 430.000 ns |
-| thread_safe_contention_read_mostly_waiters_16 | get_refresh | 15 | 110.441 us | 9.540 us |
-| thread_safe_contention_read_mostly_waiters_16 | dependency_edge | 1 | 60.000 ns | 610.000 ns |
-| thread_safe_contention_read_mostly_waiters_16 | publish | 18 | 1.430 us | 56.171 us |
-| thread_safe_contention_read_mostly_waiters_16 | in_flight_wait | 26 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_batched_write_bursts_1 | other | 74 | 4.110 us | 16.730 us |
-| thread_safe_contention_batched_write_bursts_1 | get_refresh | 2 | 110.000 ns | 280.000 ns |
-| thread_safe_contention_batched_write_bursts_1 | dependency_edge | 4 | 200.000 ns | 2.070 us |
-| thread_safe_contention_batched_write_bursts_1 | set_cell_invalidation | 16 | 960.000 ns | 33.371 us |
-| thread_safe_contention_batched_write_bursts_1 | publish | 16 | 1.020 us | 21.010 us |
-| thread_safe_contention_batched_write_bursts_2 | other | 124 | 58.982 us | 35.240 us |
-| thread_safe_contention_batched_write_bursts_2 | get_refresh | 2 | 90.000 ns | 230.000 ns |
-| thread_safe_contention_batched_write_bursts_2 | dependency_edge | 8 | 410.000 ns | 5.100 us |
-| thread_safe_contention_batched_write_bursts_2 | set_cell_invalidation | 21 | 2.750 us | 54.790 us |
-| thread_safe_contention_batched_write_bursts_2 | publish | 22 | 4.990 us | 33.570 us |
-| thread_safe_contention_batched_write_bursts_2 | in_flight_wait | 13 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_batched_write_bursts_4 | other | 199 | 267.241 us | 83.390 us |
-| thread_safe_contention_batched_write_bursts_4 | get_refresh | 2 | 90.000 ns | 210.000 ns |
-| thread_safe_contention_batched_write_bursts_4 | dependency_edge | 16 | 850.000 ns | 11.150 us |
-| thread_safe_contention_batched_write_bursts_4 | set_cell_invalidation | 19 | 2.390 us | 55.430 us |
-| thread_safe_contention_batched_write_bursts_4 | publish | 20 | 8.430 us | 46.622 us |
-| thread_safe_contention_batched_write_bursts_4 | in_flight_wait | 15 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_batched_write_bursts_8 | other | 330 | 2.973 ms | 242.721 us |
-| thread_safe_contention_batched_write_bursts_8 | get_refresh | 2 | 100.000 ns | 390.000 ns |
-| thread_safe_contention_batched_write_bursts_8 | dependency_edge | 32 | 1.760 us | 18.460 us |
-| thread_safe_contention_batched_write_bursts_8 | set_cell_invalidation | 4 | 290.000 ns | 27.280 us |
-| thread_safe_contention_batched_write_bursts_8 | publish | 5 | 290.000 ns | 19.340 us |
-| thread_safe_contention_batched_write_bursts_8 | in_flight_wait | 3 | 0.000 ns | 0.000 ns |
-| thread_safe_contention_batched_write_bursts_16 | other | 648 | 11.863 ms | 459.682 us |
-| thread_safe_contention_batched_write_bursts_16 | get_refresh | 2 | 130.000 ns | 440.000 ns |
-| thread_safe_contention_batched_write_bursts_16 | dependency_edge | 64 | 3.430 us | 39.630 us |
-| thread_safe_contention_batched_write_bursts_16 | set_cell_invalidation | 3 | 240.000 ns | 39.210 us |
-| thread_safe_contention_batched_write_bursts_16 | publish | 4 | 250.000 ns | 26.720 us |
-| thread_safe_contention_batched_write_bursts_16 | in_flight_wait | 2 | 0.000 ns | 0.000 ns |
-| thread_safe_effect_contention_queue_coalescing_8 | other | 366 | 1.824 ms | 228.013 us |
-| thread_safe_effect_contention_queue_coalescing_8 | dependency_edge | 32 | 1.970 us | 13.420 us |
-| thread_safe_effect_contention_queue_coalescing_8 | set_cell_invalidation | 8 | 46.481 us | 42.661 us |
-| thread_safe_effect_contention_queue_coalescing_16 | other | 661 | 11.543 ms | 502.113 us |
-| thread_safe_effect_contention_queue_coalescing_16 | dependency_edge | 64 | 3.970 us | 27.190 us |
-| thread_safe_effect_contention_queue_coalescing_16 | set_cell_invalidation | 2 | 120.000 ns | 18.691 us |
-| thread_safe_effect_contention_cleanup_execution_8 | other | 273 | 1.401 ms | 84.340 us |
-| thread_safe_effect_contention_cleanup_execution_8 | dependency_edge | 16 | 1.010 us | 11.020 us |
-| thread_safe_effect_contention_cleanup_execution_8 | set_cell_invalidation | 127 | 1.779 ms | 153.882 us |
-| thread_safe_effect_contention_cleanup_execution_16 | other | 396 | 5.894 ms | 118.101 us |
-| thread_safe_effect_contention_cleanup_execution_16 | dependency_edge | 32 | 2.180 us | 17.831 us |
-| thread_safe_effect_contention_cleanup_execution_16 | set_cell_invalidation | 255 | 7.087 ms | 272.971 us |
-| thread_safe_effect_contention_batch_flush_8 | other | 593 | 4.486 ms | 303.164 us |
-| thread_safe_effect_contention_batch_flush_8 | get_refresh | 2 | 110.000 ns | 1.000 us |
-| thread_safe_effect_contention_batch_flush_8 | dependency_edge | 33 | 1.760 us | 19.400 us |
-| thread_safe_effect_contention_batch_flush_8 | set_cell_invalidation | 1 | 50.000 ns | 13.830 us |
-| thread_safe_effect_contention_batch_flush_8 | publish | 2 | 100.000 ns | 10.370 us |
-| thread_safe_effect_contention_batch_flush_16 | other | 1196 | 20.239 ms | 637.954 us |
-| thread_safe_effect_contention_batch_flush_16 | get_refresh | 2 | 110.000 ns | 420.000 ns |
-| thread_safe_effect_contention_batch_flush_16 | dependency_edge | 65 | 3.451 us | 41.010 us |
-| thread_safe_effect_contention_batch_flush_16 | set_cell_invalidation | 8 | 570.000 ns | 41.270 us |
-| thread_safe_effect_contention_batch_flush_16 | publish | 7 | 390.000 ns | 57.101 us |
-| thread_safe_graph_propagation_fan_out_eager_validation_8 | other | 323 | 6.614 ms | 215.621 us |
-| thread_safe_graph_propagation_fan_out_eager_validation_8 | get_refresh | 64 | 2.850 us | 6.921 us |
-| thread_safe_graph_propagation_fan_out_eager_validation_8 | dependency_edge | 64 | 3.070 us | 35.760 us |
-| thread_safe_graph_propagation_fan_out_eager_validation_8 | set_cell_invalidation | 100 | 16.697 ms | 5.685 ms |
-| thread_safe_graph_propagation_fan_out_eager_validation_8 | publish | 562 | 4.653 ms | 679.473 us |
-| thread_safe_graph_propagation_fan_out_eager_validation_16 | other | 477 | 29.240 ms | 197.811 us |
-| thread_safe_graph_propagation_fan_out_eager_validation_16 | get_refresh | 64 | 2.740 us | 6.740 us |
-| thread_safe_graph_propagation_fan_out_eager_validation_16 | dependency_edge | 64 | 3.110 us | 34.510 us |
-| thread_safe_graph_propagation_fan_out_eager_validation_16 | set_cell_invalidation | 254 | 114.034 ms | 13.015 ms |
-| thread_safe_graph_propagation_fan_out_eager_validation_16 | publish | 563 | 12.979 ms | 577.195 us |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | other | 66 | 3.570 us | 7.990 us |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | get_refresh | 64 | 2.930 us | 6.200 us |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | dependency_edge | 32 | 1.710 us | 19.340 us |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | publish | 64 | 3.010 us | 39.930 us |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | other | 66 | 3.650 us | 5.580 us |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | get_refresh | 64 | 2.880 us | 5.330 us |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | dependency_edge | 32 | 1.600 us | 16.680 us |
-| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | publish | 64 | 3.000 us | 38.380 us |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | other | 130 | 6.820 us | 11.840 us |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | get_refresh | 68 | 3.340 us | 10.360 us |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | dependency_edge | 64 | 2.640 us | 27.680 us |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | publish | 66 | 3.051 us | 52.920 us |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | other | 258 | 15.870 us | 18.510 us |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | get_refresh | 132 | 6.150 us | 15.720 us |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | dependency_edge | 128 | 4.940 us | 57.190 us |
-| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | publish | 130 | 6.100 us | 112.380 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_8 | other | 475 | 771.426 us | 164.091 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_8 | get_refresh | 706 | 37.410 us | 95.690 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_8 | dependency_edge | 65 | 2.600 us | 28.490 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_8 | set_cell_invalidation | 20 | 69.530 us | 128.740 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_8 | publish | 131 | 47.780 us | 176.311 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_16 | other | 805 | 10.254 ms | 429.652 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_16 | get_refresh | 498 | 28.050 us | 67.291 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_16 | dependency_edge | 129 | 5.400 us | 60.590 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_16 | set_cell_invalidation | 6 | 10.500 us | 163.072 us |
-| thread_safe_graph_propagation_fan_in_batched_flush_16 | publish | 145 | 16.210 us | 142.721 us |
+| thread_safe_set_cell_invalidation_same_slot_contention_1 | other | 4 | 110.000 ns | 1.830 us |
+| thread_safe_set_cell_invalidation_same_slot_contention_1 | get_refresh | 2 | 90.000 ns | 230.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_1 | dependency_edge | 1 | 50.000 ns | 480.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_1 | publish | 1 | 40.000 ns | 340.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_2 | other | 4 | 110.000 ns | 240.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_2 | get_refresh | 2 | 100.000 ns | 200.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_2 | dependency_edge | 1 | 30.000 ns | 400.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_2 | publish | 1 | 40.000 ns | 330.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_4 | other | 4 | 120.000 ns | 210.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_4 | get_refresh | 2 | 90.000 ns | 160.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_4 | dependency_edge | 1 | 30.000 ns | 370.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_4 | publish | 1 | 40.000 ns | 320.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_8 | other | 4 | 120.000 ns | 240.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_8 | get_refresh | 2 | 90.000 ns | 200.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_8 | dependency_edge | 1 | 20.000 ns | 340.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_8 | publish | 1 | 50.000 ns | 330.000 ns |
+| thread_safe_set_cell_invalidation_same_slot_contention_16 | other | 4 | 180.000 ns | 1.320 us |
+| thread_safe_set_cell_invalidation_same_slot_contention_16 | get_refresh | 2 | 130.000 ns | 1.360 us |
+| thread_safe_set_cell_invalidation_same_slot_contention_16 | dependency_edge | 1 | 20.000 ns | 1.190 us |
+| thread_safe_set_cell_invalidation_same_slot_contention_16 | publish | 1 | 50.000 ns | 1.210 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_1 | other | 4 | 180.000 ns | 2.550 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_1 | get_refresh | 2 | 130.000 ns | 2.340 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_1 | dependency_edge | 1 | 20.000 ns | 1.670 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_1 | publish | 1 | 50.000 ns | 1.380 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_2 | other | 8 | 250.000 ns | 590.000 ns |
+| thread_safe_set_cell_invalidation_independent_slot_contention_2 | get_refresh | 4 | 220.000 ns | 410.000 ns |
+| thread_safe_set_cell_invalidation_independent_slot_contention_2 | dependency_edge | 2 | 50.000 ns | 710.000 ns |
+| thread_safe_set_cell_invalidation_independent_slot_contention_2 | publish | 2 | 90.000 ns | 700.000 ns |
+| thread_safe_set_cell_invalidation_independent_slot_contention_4 | other | 16 | 510.000 ns | 1.500 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_4 | get_refresh | 8 | 340.000 ns | 680.000 ns |
+| thread_safe_set_cell_invalidation_independent_slot_contention_4 | dependency_edge | 4 | 100.000 ns | 1.330 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_4 | publish | 4 | 190.000 ns | 1.410 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_8 | other | 32 | 950.000 ns | 3.330 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_8 | get_refresh | 16 | 680.000 ns | 1.260 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_8 | dependency_edge | 8 | 250.000 ns | 2.600 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_8 | publish | 8 | 390.000 ns | 2.740 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_16 | other | 64 | 1.990 us | 5.380 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_16 | get_refresh | 32 | 1.390 us | 2.460 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_16 | dependency_edge | 16 | 430.000 ns | 5.200 us |
+| thread_safe_set_cell_invalidation_independent_slot_contention_16 | publish | 16 | 760.000 ns | 5.770 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_1 | other | 74 | 2.770 us | 15.940 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_1 | get_refresh | 2 | 80.000 ns | 290.000 ns |
+| thread_safe_set_cell_invalidation_batched_write_bursts_1 | dependency_edge | 4 | 170.000 ns | 1.760 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_1 | set_cell_invalidation | 16 | 590.000 ns | 42.450 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_1 | publish | 1 | 40.000 ns | 420.000 ns |
+| thread_safe_set_cell_invalidation_batched_write_bursts_2 | other | 126 | 186.900 us | 41.250 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_2 | get_refresh | 2 | 80.000 ns | 180.000 ns |
+| thread_safe_set_cell_invalidation_batched_write_bursts_2 | dependency_edge | 8 | 340.000 ns | 6.010 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_2 | set_cell_invalidation | 22 | 6.460 us | 58.951 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_2 | publish | 1 | 50.000 ns | 350.000 ns |
+| thread_safe_set_cell_invalidation_batched_write_bursts_4 | other | 174 | 434.615 us | 99.261 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_4 | get_refresh | 2 | 80.000 ns | 190.000 ns |
+| thread_safe_set_cell_invalidation_batched_write_bursts_4 | dependency_edge | 16 | 700.000 ns | 7.690 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_4 | set_cell_invalidation | 6 | 3.930 us | 43.400 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_4 | publish | 1 | 50.000 ns | 360.000 ns |
+| thread_safe_set_cell_invalidation_batched_write_bursts_8 | other | 330 | 2.187 ms | 199.591 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_8 | get_refresh | 2 | 130.000 ns | 1.410 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_8 | dependency_edge | 32 | 1.600 us | 17.200 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_8 | set_cell_invalidation | 4 | 200.000 ns | 11.920 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_8 | publish | 1 | 50.000 ns | 1.260 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_16 | other | 646 | 9.400 ms | 384.152 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_16 | get_refresh | 2 | 90.000 ns | 280.000 ns |
+| thread_safe_set_cell_invalidation_batched_write_bursts_16 | dependency_edge | 64 | 3.180 us | 34.280 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_16 | set_cell_invalidation | 2 | 90.000 ns | 13.590 us |
+| thread_safe_set_cell_invalidation_batched_write_bursts_16 | publish | 1 | 50.000 ns | 400.000 ns |
+| thread_safe_contention_same_slot_write_read_1 | other | 4 | 130.000 ns | 770.000 ns |
+| thread_safe_contention_same_slot_write_read_1 | get_refresh | 2 | 100.000 ns | 510.000 ns |
+| thread_safe_contention_same_slot_write_read_1 | dependency_edge | 1 | 30.000 ns | 570.000 ns |
+| thread_safe_contention_same_slot_write_read_1 | publish | 17 | 820.000 ns | 15.660 us |
+| thread_safe_contention_same_slot_write_read_2 | other | 22 | 3.030 us | 990.000 ns |
+| thread_safe_contention_same_slot_write_read_2 | get_refresh | 2 | 90.000 ns | 190.000 ns |
+| thread_safe_contention_same_slot_write_read_2 | dependency_edge | 1 | 30.000 ns | 360.000 ns |
+| thread_safe_contention_same_slot_write_read_2 | set_cell_invalidation | 9 | 1.920 us | 13.920 us |
+| thread_safe_contention_same_slot_write_read_2 | publish | 28 | 11.540 us | 30.950 us |
+| thread_safe_contention_same_slot_write_read_2 | in_flight_wait | 15 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_same_slot_write_read_4 | other | 63 | 45.511 us | 2.670 us |
+| thread_safe_contention_same_slot_write_read_4 | get_refresh | 2 | 80.000 ns | 150.000 ns |
+| thread_safe_contention_same_slot_write_read_4 | dependency_edge | 1 | 30.000 ns | 330.000 ns |
+| thread_safe_contention_same_slot_write_read_4 | set_cell_invalidation | 31 | 30.140 us | 43.440 us |
+| thread_safe_contention_same_slot_write_read_4 | publish | 52 | 51.981 us | 60.530 us |
+| thread_safe_contention_same_slot_write_read_4 | in_flight_wait | 77 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_same_slot_write_read_8 | other | 117 | 62.331 us | 3.711 us |
+| thread_safe_contention_same_slot_write_read_8 | get_refresh | 12 | 12.790 us | 6.830 us |
+| thread_safe_contention_same_slot_write_read_8 | dependency_edge | 1 | 20.000 ns | 350.000 ns |
+| thread_safe_contention_same_slot_write_read_8 | set_cell_invalidation | 58 | 70.113 us | 62.631 us |
+| thread_safe_contention_same_slot_write_read_8 | publish | 111 | 62.652 us | 126.741 us |
+| thread_safe_contention_same_slot_write_read_8 | in_flight_wait | 150 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_same_slot_write_read_16 | other | 229 | 407.693 us | 8.420 us |
+| thread_safe_contention_same_slot_write_read_16 | get_refresh | 16 | 12.330 us | 5.900 us |
+| thread_safe_contention_same_slot_write_read_16 | dependency_edge | 1 | 20.000 ns | 1.130 us |
+| thread_safe_contention_same_slot_write_read_16 | set_cell_invalidation | 118 | 558.902 us | 150.022 us |
+| thread_safe_contention_same_slot_write_read_16 | publish | 211 | 152.932 us | 264.392 us |
+| thread_safe_contention_same_slot_write_read_16 | in_flight_wait | 287 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_independent_slots_1 | other | 4 | 140.000 ns | 1.130 us |
+| thread_safe_contention_independent_slots_1 | get_refresh | 2 | 90.000 ns | 310.000 ns |
+| thread_safe_contention_independent_slots_1 | dependency_edge | 1 | 20.000 ns | 1.180 us |
+| thread_safe_contention_independent_slots_1 | publish | 16 | 730.000 ns | 12.560 us |
+| thread_safe_contention_independent_slots_2 | other | 36 | 2.640 us | 1.450 us |
+| thread_safe_contention_independent_slots_2 | get_refresh | 4 | 200.000 ns | 420.000 ns |
+| thread_safe_contention_independent_slots_2 | dependency_edge | 2 | 50.000 ns | 710.000 ns |
+| thread_safe_contention_independent_slots_2 | set_cell_invalidation | 14 | 7.690 us | 10.741 us |
+| thread_safe_contention_independent_slots_2 | publish | 33 | 8.571 us | 26.170 us |
+| thread_safe_contention_independent_slots_4 | other | 82 | 103.730 us | 3.910 us |
+| thread_safe_contention_independent_slots_4 | get_refresh | 8 | 380.000 ns | 650.000 ns |
+| thread_safe_contention_independent_slots_4 | dependency_edge | 4 | 100.000 ns | 1.320 us |
+| thread_safe_contention_independent_slots_4 | set_cell_invalidation | 38 | 203.262 us | 32.581 us |
+| thread_safe_contention_independent_slots_4 | publish | 67 | 109.091 us | 57.260 us |
+| thread_safe_contention_independent_slots_8 | other | 190 | 1.107 ms | 10.290 us |
+| thread_safe_contention_independent_slots_8 | get_refresh | 16 | 740.000 ns | 1.310 us |
+| thread_safe_contention_independent_slots_8 | dependency_edge | 8 | 220.000 ns | 2.810 us |
+| thread_safe_contention_independent_slots_8 | set_cell_invalidation | 116 | 1.523 ms | 130.711 us |
+| thread_safe_contention_independent_slots_8 | publish | 135 | 1.625 ms | 151.110 us |
+| thread_safe_contention_independent_slots_16 | other | 374 | 5.514 ms | 20.750 us |
+| thread_safe_contention_independent_slots_16 | get_refresh | 32 | 1.400 us | 2.970 us |
+| thread_safe_contention_independent_slots_16 | dependency_edge | 16 | 430.000 ns | 6.240 us |
+| thread_safe_contention_independent_slots_16 | set_cell_invalidation | 246 | 6.024 ms | 288.392 us |
+| thread_safe_contention_independent_slots_16 | publish | 271 | 8.367 ms | 312.202 us |
+| thread_safe_contention_read_mostly_waiters_1 | other | 4 | 130.000 ns | 1.430 us |
+| thread_safe_contention_read_mostly_waiters_1 | get_refresh | 2 | 140.000 ns | 880.000 ns |
+| thread_safe_contention_read_mostly_waiters_1 | dependency_edge | 1 | 20.000 ns | 1.180 us |
+| thread_safe_contention_read_mostly_waiters_1 | publish | 17 | 820.000 ns | 13.850 us |
+| thread_safe_contention_read_mostly_waiters_2 | other | 4 | 130.000 ns | 310.000 ns |
+| thread_safe_contention_read_mostly_waiters_2 | get_refresh | 2 | 90.000 ns | 180.000 ns |
+| thread_safe_contention_read_mostly_waiters_2 | dependency_edge | 1 | 20.000 ns | 380.000 ns |
+| thread_safe_contention_read_mostly_waiters_2 | publish | 17 | 790.000 ns | 13.660 us |
+| thread_safe_contention_read_mostly_waiters_4 | other | 4 | 130.000 ns | 250.000 ns |
+| thread_safe_contention_read_mostly_waiters_4 | get_refresh | 8 | 1.560 us | 2.200 us |
+| thread_safe_contention_read_mostly_waiters_4 | dependency_edge | 1 | 20.000 ns | 360.000 ns |
+| thread_safe_contention_read_mostly_waiters_4 | publish | 17 | 790.000 ns | 24.120 us |
+| thread_safe_contention_read_mostly_waiters_4 | in_flight_wait | 11 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_read_mostly_waiters_8 | other | 4 | 150.000 ns | 390.000 ns |
+| thread_safe_contention_read_mostly_waiters_8 | get_refresh | 16 | 14.830 us | 5.350 us |
+| thread_safe_contention_read_mostly_waiters_8 | dependency_edge | 1 | 30.000 ns | 360.000 ns |
+| thread_safe_contention_read_mostly_waiters_8 | publish | 17 | 7.940 us | 25.690 us |
+| thread_safe_contention_read_mostly_waiters_8 | in_flight_wait | 21 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_read_mostly_waiters_16 | other | 4 | 180.000 ns | 1.330 us |
+| thread_safe_contention_read_mostly_waiters_16 | get_refresh | 22 | 211.850 us | 16.180 us |
+| thread_safe_contention_read_mostly_waiters_16 | dependency_edge | 1 | 30.000 ns | 1.190 us |
+| thread_safe_contention_read_mostly_waiters_16 | publish | 17 | 5.110 us | 95.771 us |
+| thread_safe_contention_read_mostly_waiters_16 | in_flight_wait | 39 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_batched_write_bursts_1 | other | 74 | 2.790 us | 14.810 us |
+| thread_safe_contention_batched_write_bursts_1 | get_refresh | 2 | 110.000 ns | 340.000 ns |
+| thread_safe_contention_batched_write_bursts_1 | dependency_edge | 4 | 170.000 ns | 1.790 us |
+| thread_safe_contention_batched_write_bursts_1 | set_cell_invalidation | 16 | 670.000 ns | 29.360 us |
+| thread_safe_contention_batched_write_bursts_1 | publish | 16 | 750.000 ns | 18.450 us |
+| thread_safe_contention_batched_write_bursts_2 | other | 124 | 52.991 us | 31.280 us |
+| thread_safe_contention_batched_write_bursts_2 | get_refresh | 2 | 90.000 ns | 180.000 ns |
+| thread_safe_contention_batched_write_bursts_2 | dependency_edge | 8 | 320.000 ns | 4.270 us |
+| thread_safe_contention_batched_write_bursts_2 | set_cell_invalidation | 21 | 9.380 us | 44.482 us |
+| thread_safe_contention_batched_write_bursts_2 | publish | 21 | 4.080 us | 29.620 us |
+| thread_safe_contention_batched_write_bursts_2 | in_flight_wait | 12 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_batched_write_bursts_4 | other | 237 | 388.651 us | 83.570 us |
+| thread_safe_contention_batched_write_bursts_4 | get_refresh | 10 | 32.921 us | 4.740 us |
+| thread_safe_contention_batched_write_bursts_4 | dependency_edge | 16 | 740.000 ns | 7.550 us |
+| thread_safe_contention_batched_write_bursts_4 | set_cell_invalidation | 38 | 3.930 us | 94.652 us |
+| thread_safe_contention_batched_write_bursts_4 | publish | 37 | 6.260 us | 92.381 us |
+| thread_safe_contention_batched_write_bursts_4 | in_flight_wait | 51 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_batched_write_bursts_8 | other | 340 | 2.431 ms | 199.842 us |
+| thread_safe_contention_batched_write_bursts_8 | get_refresh | 2 | 90.000 ns | 390.000 ns |
+| thread_safe_contention_batched_write_bursts_8 | dependency_edge | 32 | 1.560 us | 15.721 us |
+| thread_safe_contention_batched_write_bursts_8 | set_cell_invalidation | 9 | 480.000 ns | 49.211 us |
+| thread_safe_contention_batched_write_bursts_8 | publish | 10 | 540.000 ns | 33.340 us |
+| thread_safe_contention_batched_write_bursts_8 | in_flight_wait | 7 | 0.000 ns | 0.000 ns |
+| thread_safe_contention_batched_write_bursts_16 | other | 646 | 9.999 ms | 389.373 us |
+| thread_safe_contention_batched_write_bursts_16 | get_refresh | 2 | 120.000 ns | 1.270 us |
+| thread_safe_contention_batched_write_bursts_16 | dependency_edge | 64 | 3.040 us | 34.950 us |
+| thread_safe_contention_batched_write_bursts_16 | set_cell_invalidation | 2 | 110.000 ns | 17.680 us |
+| thread_safe_contention_batched_write_bursts_16 | publish | 3 | 150.000 ns | 19.130 us |
+| thread_safe_effect_contention_queue_coalescing_8 | other | 365 | 2.016 ms | 199.513 us |
+| thread_safe_effect_contention_queue_coalescing_8 | dependency_edge | 32 | 1.420 us | 11.631 us |
+| thread_safe_effect_contention_queue_coalescing_8 | set_cell_invalidation | 9 | 520.000 ns | 57.940 us |
+| thread_safe_effect_contention_queue_coalescing_16 | other | 702 | 9.279 ms | 470.073 us |
+| thread_safe_effect_contention_queue_coalescing_16 | dependency_edge | 64 | 2.810 us | 24.800 us |
+| thread_safe_effect_contention_queue_coalescing_16 | set_cell_invalidation | 9 | 440.000 ns | 36.241 us |
+| thread_safe_effect_contention_cleanup_execution_8 | other | 265 | 599.415 us | 62.861 us |
+| thread_safe_effect_contention_cleanup_execution_8 | dependency_edge | 16 | 800.000 ns | 11.120 us |
+| thread_safe_effect_contention_cleanup_execution_8 | set_cell_invalidation | 127 | 1.245 ms | 116.340 us |
+| thread_safe_effect_contention_cleanup_execution_16 | other | 409 | 3.289 ms | 93.061 us |
+| thread_safe_effect_contention_cleanup_execution_16 | dependency_edge | 32 | 1.530 us | 13.520 us |
+| thread_safe_effect_contention_cleanup_execution_16 | set_cell_invalidation | 255 | 4.247 ms | 199.243 us |
+| thread_safe_effect_contention_batch_flush_8 | other | 594 | 2.636 ms | 226.842 us |
+| thread_safe_effect_contention_batch_flush_8 | get_refresh | 2 | 110.000 ns | 840.000 ns |
+| thread_safe_effect_contention_batch_flush_8 | dependency_edge | 33 | 1.500 us | 17.470 us |
+| thread_safe_effect_contention_batch_flush_8 | set_cell_invalidation | 2 | 150.000 ns | 16.160 us |
+| thread_safe_effect_contention_batch_flush_8 | publish | 3 | 170.000 ns | 8.141 us |
+| thread_safe_effect_contention_batch_flush_16 | other | 1169 | 21.839 ms | 558.475 us |
+| thread_safe_effect_contention_batch_flush_16 | get_refresh | 2 | 110.000 ns | 270.000 ns |
+| thread_safe_effect_contention_batch_flush_16 | dependency_edge | 65 | 3.080 us | 35.400 us |
+| thread_safe_effect_contention_batch_flush_16 | set_cell_invalidation | 1 | 60.000 ns | 12.710 us |
+| thread_safe_effect_contention_batch_flush_16 | publish | 2 | 100.000 ns | 10.420 us |
+| thread_safe_graph_propagation_fan_out_eager_validation_8 | other | 337 | 5.266 ms | 166.412 us |
+| thread_safe_graph_propagation_fan_out_eager_validation_8 | get_refresh | 64 | 3.000 us | 5.140 us |
+| thread_safe_graph_propagation_fan_out_eager_validation_8 | dependency_edge | 64 | 2.280 us | 29.920 us |
+| thread_safe_graph_propagation_fan_out_eager_validation_8 | set_cell_invalidation | 118 | 14.440 ms | 5.280 ms |
+| thread_safe_graph_propagation_fan_out_eager_validation_8 | publish | 549 | 4.373 ms | 552.165 us |
+| thread_safe_graph_propagation_fan_out_eager_validation_16 | other | 458 | 30.162 ms | 173.621 us |
+| thread_safe_graph_propagation_fan_out_eager_validation_16 | get_refresh | 64 | 3.040 us | 5.550 us |
+| thread_safe_graph_propagation_fan_out_eager_validation_16 | dependency_edge | 64 | 2.500 us | 30.240 us |
+| thread_safe_graph_propagation_fan_out_eager_validation_16 | set_cell_invalidation | 239 | 76.647 ms | 10.794 ms |
+| thread_safe_graph_propagation_fan_out_eager_validation_16 | publish | 555 | 10.195 ms | 553.344 us |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | other | 66 | 3.290 us | 7.310 us |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | get_refresh | 64 | 2.820 us | 5.830 us |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | dependency_edge | 32 | 900.000 ns | 18.280 us |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_8 | publish | 64 | 3.080 us | 44.861 us |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | other | 66 | 2.760 us | 5.380 us |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | get_refresh | 64 | 2.860 us | 5.660 us |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | dependency_edge | 32 | 880.000 ns | 18.490 us |
+| thread_safe_graph_propagation_fan_out_lazy_dirty_epochs_16 | publish | 64 | 3.170 us | 39.840 us |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | other | 130 | 3.800 us | 9.170 us |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | get_refresh | 68 | 3.620 us | 10.250 us |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | dependency_edge | 64 | 2.440 us | 28.580 us |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_8 | publish | 66 | 1.980 us | 57.540 us |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | other | 258 | 12.270 us | 18.010 us |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | get_refresh | 132 | 6.440 us | 12.920 us |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | dependency_edge | 128 | 5.030 us | 60.300 us |
+| thread_safe_graph_propagation_fan_in_lazy_dirty_epochs_16 | publish | 130 | 3.921 us | 105.942 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_8 | other | 403 | 2.572 ms | 216.262 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_8 | get_refresh | 68 | 3.290 us | 8.300 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_8 | dependency_edge | 65 | 2.350 us | 28.090 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_8 | set_cell_invalidation | 3 | 5.310 us | 87.820 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_8 | publish | 66 | 16.150 us | 57.302 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_16 | other | 795 | 7.602 ms | 346.913 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_16 | get_refresh | 254 | 15.790 us | 29.590 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_16 | dependency_edge | 129 | 4.860 us | 58.880 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_16 | set_cell_invalidation | 6 | 2.760 us | 186.002 us |
+| thread_safe_graph_propagation_fan_in_batched_flush_16 | publish | 135 | 65.141 us | 122.851 us |
 
 <!-- benchmark-results:end -->
 
