@@ -1,12 +1,12 @@
-//! Integration tests for the `Machine` state machine primitive.
+//! Integration tests for the `StateMachine` state machine primitive.
 //!
-//! A `Machine` wraps a `CellHandle<S>` + transition function, exposing
+//! A `StateMachine` wraps a `CellHandle<S>` + transition function, exposing
 //! `send(event)`, `state()`, `on_transition()`, and `state_is()`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use lazily::{Context, Machine};
+use lazily::{Context, StateMachine};
 
 // -- Basic FSM --------------------------------------------------------------
 
@@ -25,7 +25,7 @@ enum Tick {
 #[test]
 fn machine_transitions_through_all_states() {
     let ctx = Context::new();
-    let m = Machine::new(&ctx, Light::Red, |s, _: &Tick| match s {
+    let m = StateMachine::new(&ctx, Light::Red, |s, _: &Tick| match s {
         Light::Red => Some(Light::Green),
         Light::Green => Some(Light::Yellow),
         Light::Yellow => Some(Light::Red),
@@ -57,8 +57,8 @@ enum DoorEvent {
     FullyClosed,
 }
 
-fn garage_door(ctx: &Context) -> Machine<Door, DoorEvent> {
-    Machine::new(ctx, Door::Closed, |s, e| match (s, e) {
+fn garage_door(ctx: &Context) -> StateMachine<Door, DoorEvent> {
+    StateMachine::new(ctx, Door::Closed, |s, e| match (s, e) {
         (Door::Closed, DoorEvent::ButtonPressed) => Some(Door::Opening),
         (Door::Opening, DoorEvent::FullyOpen) => Some(Door::Open),
         (Door::Open, DoorEvent::ButtonPressed) => Some(Door::Closing),
@@ -93,7 +93,7 @@ fn machine_self_transition_is_accepted_but_no_invalidation() {
     let call_count = Rc::new(RefCell::new(0usize));
     let call_count_inner = call_count.clone();
 
-    let m = Machine::new(&ctx, 0i32, move |s, _: &()| {
+    let m = StateMachine::new(&ctx, 0i32, move |s, _: &()| {
         *call_count_inner.borrow_mut() += 1;
         Some(*s)
     });

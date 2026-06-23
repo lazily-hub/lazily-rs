@@ -275,14 +275,14 @@ ctx.batch(|ctx| {
 ### State Machine
 
 A finite state machine built on top of `CellHandle` and the reactive graph.
-`Machine<S, E>` wraps a `CellHandle<S>` as the current state and a pure
+`StateMachine<S, E>` wraps a `CellHandle<S>` as the current state and a pure
 transition function `Fn(&S, &E) -> Option<S>`.
 
 ```rust
-use lazily::{Context, Machine};
+use lazily::{Context, StateMachine};
 
 let ctx = Context::new();
-let m = Machine::new(&ctx, Door::Closed, |s, e| match (s, e) {
+let m = StateMachine::new(&ctx, Door::Closed, |s, e| match (s, e) {
     (Door::Closed, DoorEvent::Button) => Some(Door::Opening),
     (Door::Opening, DoorEvent::Open) => Some(Door::Open),
     _ => None,
@@ -296,7 +296,7 @@ assert_eq!(m.state(&ctx), Door::Opening);
 
 | Method | Description |
 |--------|-------------|
-| `Machine::new(ctx, initial, transition_fn)` | Create with initial state + pure transition function |
+| `StateMachine::new(ctx, initial, transition_fn)` | Create with initial state + pure transition function |
 | `send(ctx, event) -> bool` | Evaluate transition; `true` if accepted, `false` if rejected (`None`) |
 | `state(ctx) -> S` | Read the current state |
 | `state_handle() -> CellHandle<S>` | Underlying cell for reactive dependencies |
@@ -309,7 +309,7 @@ assert_eq!(m.state(&ctx), Door::Opening);
 - **Reactive integration:** Any `ctx.computed`, `ctx.memo`, `ctx.signal`, or `ctx.effect` that reads `state_handle()` automatically recomputes/reruns on transition.
 - **On-enter / on-exit:** Use `ctx.effect` with cleanup — the effect body is on-enter, the returned cleanup closure is on-exit (runs before the next rerun). Alternatively, use `on_transition` for a single `(old, new)` observer.
 - **Batch atomicity:** `ctx.batch()` coalesces multiple `send()` calls — effects fire once after the batch settles.
-- **Single-threaded:** `Machine` is backed by `Context` (single-threaded `RefCell`). For cross-thread use, mirror the pattern with `ThreadSafeContext`.
+- **Single-threaded:** `StateMachine` is backed by `Context` (single-threaded `RefCell`). For cross-thread use, mirror the pattern with `ThreadSafeContext`.
 
 ### Regression property harness
 

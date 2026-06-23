@@ -10,27 +10,27 @@ type TransitionFn<S, E> = dyn Fn(&S, &E) -> Option<S>;
 
 /// A finite state machine backed by a reactive [`Context`].
 ///
-/// `Machine` wraps a [`CellHandle<S>`] as the current state and a pure
+/// `StateMachine` wraps a [`CellHandle<S>`] as the current state and a pure
 /// transition function `Fn(&S, &E) -> Option<S>`. Sending an event evaluates
 /// the transition function; if it returns `Some(new_state)` the cell is
 /// updated, triggering any dependent slots/signals/effects. If it returns
 /// `None` the transition is rejected (guard).
 ///
 /// Because the state lives in a [`CellHandle`], any `ctx.computed`,
-/// `ctx.signal`, or `ctx.effect` that reads [`Machine::state_handle`]
+/// `ctx.signal`, or `ctx.effect` that reads [`StateMachine::state_handle`]
 /// automatically recomputes or reruns when the machine transitions — no
 /// manual notification wiring is needed.
 ///
 /// # Threading
 ///
-/// `Machine` is single-threaded (backed by [`Context`] which uses `RefCell`).
+/// `StateMachine` is single-threaded (backed by [`Context`] which uses `RefCell`).
 /// For cross-thread state machines, mirror the pattern using
 /// [`ThreadSafeContext`](crate::ThreadSafeContext).
 ///
 /// # Example
 ///
 /// ```no_run
-/// use lazily::{Context, Machine};
+/// use lazily::{Context, StateMachine};
 ///
 /// #[derive(PartialEq, Clone, Debug)]
 /// enum Light { Red, Green, Yellow }
@@ -39,7 +39,7 @@ type TransitionFn<S, E> = dyn Fn(&S, &E) -> Option<S>;
 /// enum Tick { Advance }
 ///
 /// let ctx = Context::new();
-/// let m = Machine::new(&ctx, Light::Red, |s, _: &Tick| match s {
+/// let m = StateMachine::new(&ctx, Light::Red, |s, _: &Tick| match s {
 ///     Light::Red    => Some(Light::Green),
 ///     Light::Green  => Some(Light::Yellow),
 ///     Light::Yellow => Some(Light::Red),
@@ -48,7 +48,7 @@ type TransitionFn<S, E> = dyn Fn(&S, &E) -> Option<S>;
 /// m.send(&ctx, Tick::Advance);
 /// assert_eq!(m.state(&ctx), Light::Green);
 /// ```
-pub struct Machine<S, E>
+pub struct StateMachine<S, E>
 where
     S: PartialEq + Clone + 'static,
     E: 'static,
@@ -57,7 +57,7 @@ where
     transition: Rc<TransitionFn<S, E>>,
 }
 
-impl<S, E> Machine<S, E>
+impl<S, E> StateMachine<S, E>
 where
     S: PartialEq + Clone + 'static,
     E: 'static,
