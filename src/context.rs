@@ -676,10 +676,15 @@ impl Context {
     pub fn dispose_effect(&self, handle: &EffectHandle) {
         let (dependencies, cleanup) = {
             let mut inner = self.inner.borrow_mut();
+            // Deschedule and drain any pending flush entry BEFORE recycling the
+            // id, mirroring ThreadSafeContext::dispose_effect. A stale
+            // pending_effects entry can alias a recycled id (free_ids is LIFO)
+            // and trigger a spurious run of a freshly allocated node.
+            inner.pending_effects.retain(|queued| *queued != handle.id);
+            inner.scheduled_effects.remove(&handle.id);
             let Some(Node::Effect(effect)) = Self::take_node(&mut inner.nodes, handle.id) else {
                 return;
             };
-            inner.scheduled_effects.remove(&handle.id);
             inner.free_ids.push(handle.id.0);
             (effect.dependencies, effect.cleanup)
         };
@@ -1092,5 +1097,37 @@ mod tests {
             assert!(inner.free_ids.is_empty());
             assert!(matches!(inner.nodes[2].as_ref(), Some(Node::Slot(_))));
         }
+    }
+
+    #[test]
+    fn dispose_effect_drains_pending_effects_queue() {
+        // A disposed effect must not leave a stale entry in `pending_effects`.
+        // Such an entry can alias a recycled id (free_ids is LIFO) and trigger
+        // a spurious run of a freshly allocated node during a later flush.
+        // Mirrors ThreadSafeContext::dispose_effect (thread_safe.rs:2577-2578).
+        let ctx = Context::new();
+        let cell = ctx.cell(0i32);
+        let effect = ctx.effect(move |ctx| {
+            let _ = ctx.get_cell(&cell);
+        });
+
+        // Simulate the effect being scheduled (pending) but not yet flushed,
+        // which happens when another effect's body invalidates it mid-flush.
+        ctx.schedule_effect(effect.id, true);
+        {
+            let inner = ctx.inner.borrow();
+            assert!(inner.pending_effects.contains(&effect.id));
+            assert!(inner.scheduled_effects.contains(&effect.id));
+        }
+
+        effect.dispose(&ctx);
+
+        let inner = ctx.inner.borrow();
+        assert!(
+            !inner.pending_effects.contains(&effect.id),
+            "dispose must drain the pending_effects queue"
+        );
+        assert!(!inner.scheduled_effects.contains(&effect.id));
+        assert_eq!(inner.free_ids.as_slice(), &[effect.id.0]);
     }
 }
