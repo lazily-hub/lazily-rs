@@ -20,6 +20,8 @@ Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect
 
 ## Development
 
+**Minimum supported Rust version (MSRV): 1.88** — declared via `rust-version` in `Cargo.toml`. The crate uses `let_chains` (stabilized in 1.88) pervasively.
+
 Run the local CI-equivalent suite with:
 
 ```bash
