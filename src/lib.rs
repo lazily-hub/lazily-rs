@@ -54,6 +54,7 @@ mod signal;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
 mod slot;
+mod state_machine;
 #[cfg(feature = "webrtc-str0m")]
 mod str0m_backend;
 #[cfg(feature = "webrtc-str0m")]
@@ -108,6 +109,7 @@ pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
 pub use slot::SlotHandle;
+pub use state_machine::Machine;
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]
