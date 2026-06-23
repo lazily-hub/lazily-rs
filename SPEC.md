@@ -309,7 +309,58 @@ assert_eq!(m.state(&ctx), Door::Opening);
 - **Reactive integration:** Any `ctx.computed`, `ctx.memo`, `ctx.signal`, or `ctx.effect` that reads `state_handle()` automatically recomputes/reruns on transition.
 - **On-enter / on-exit:** Use `ctx.effect` with cleanup — the effect body is on-enter, the returned cleanup closure is on-exit (runs before the next rerun). Alternatively, use `on_transition` for a single `(old, new)` observer.
 - **Batch atomicity:** `ctx.batch()` coalesces multiple `send()` calls — effects fire once after the batch settles.
-- **Single-threaded:** `StateMachine` is backed by `Context` (single-threaded `RefCell`). For cross-thread use, mirror the pattern with `ThreadSafeContext`.
+- **Single-threaded:** `StateMachine` is backed by `Context` (single-threaded `RefCell`).
+
+#### `ThreadSafeStateMachine` — cross-thread
+
+`ThreadSafeStateMachine<S, E>` is the lock-backed counterpart to
+`StateMachine`, mirroring the same API over [`ThreadSafeContext`](#threadsafcontext).
+The transition function and state must be `Send + Sync + 'static`, so the
+machine and its owning context can be shared across OS threads. The machine is
+`Clone` — cloning yields another handle to the same state cell and transition
+function.
+
+```rust
+use lazily::{ThreadSafeContext, ThreadSafeStateMachine};
+use std::sync::Arc;
+
+let ctx = Arc::new(ThreadSafeContext::new());
+let m = ThreadSafeStateMachine::new(&ctx, Door::Closed, |s, e| match (s, e) {
+    (Door::Closed, DoorEvent::Button) => Some(Door::Opening),
+    _ => None,
+});
+
+m.send(&ctx, DoorEvent::Button);
+assert_eq!(m.state(&ctx), Door::Opening);
+```
+
+`on_transition` returns an `EffectHandle` (dispose via
+`ctx.dispose_effect`); `state_is` returns a `ThreadSafeSignalHandle<bool>`.
+Observers fire synchronously within the invalidating `send`/`batch` call,
+preserving the glitch-free pull-based ordering of `ThreadSafeContext`.
+
+#### `AsyncStateMachine` — Tokio (`async` feature)
+
+`AsyncStateMachine<S, E>` is the async counterpart, backed by
+[`AsyncContext`](#asynccontext). The state lives in an `AsyncCellHandle<S>`;
+because cells are the synchronous input layer of `AsyncContext`, `send` and
+`state` are synchronous. Reactive observers use the async effect/signal APIs:
+`on_transition` returns an `AsyncEffectHandle` and `state_is` returns an
+`AsyncSignalHandle<bool>`. Because resolution is asynchronous, eager
+recomputation settles on the runtime rather than synchronously within `send`.
+
+```rust
+use lazily::{AsyncContext, AsyncStateMachine};
+
+let ctx = AsyncContext::new();
+let m = AsyncStateMachine::new(&ctx, Door::Closed, |s, e| match (s, e) {
+    (Door::Closed, DoorEvent::Button) => Some(Door::Opening),
+    _ => None,
+});
+
+m.send(&ctx, DoorEvent::Button);
+assert_eq!(m.state(&ctx), Door::Opening);
+```
 
 ### Regression property harness
 

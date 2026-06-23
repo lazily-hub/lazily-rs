@@ -109,7 +109,9 @@ pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
 pub use slot::SlotHandle;
-pub use state_machine::StateMachine;
+#[cfg(feature = "async")]
+pub use state_machine::AsyncStateMachine;
+pub use state_machine::{StateMachine, ThreadSafeStateMachine};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]
