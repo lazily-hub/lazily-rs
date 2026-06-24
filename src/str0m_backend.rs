@@ -80,7 +80,14 @@ struct Peer {
     cid: Option<ChannelId>,
     open: bool,
     inbox: VecDeque<Vec<u8>>,
+    dropped_inbox_frames: usize,
 }
+
+/// Maximum inbound frames buffered for one loopback endpoint at once. Above this
+/// threshold the oldest frame is dropped, matching the network str0m inbox cap
+/// so deterministic loopback tests cannot grow memory without bound
+/// (#lzstr0mloopbackinbox).
+const MAX_INBOX_FRAMES: usize = 1024;
 
 impl Peer {
     fn new(addr: SocketAddr, now: Instant) -> Result<Self, Str0mError> {
@@ -92,6 +99,7 @@ impl Peer {
             cid: None,
             open: false,
             inbox: VecDeque::new(),
+            dropped_inbox_frames: 0,
         })
     }
 }
@@ -201,7 +209,7 @@ impl LoopbackState {
                 peer.open = true;
             }
             Event::ChannelData(data) => {
-                self.peer_mut(side).inbox.push_back(data.data);
+                push_inbox_frame(self.peer_mut(side), data.data);
             }
             _ => {}
         }
@@ -220,6 +228,14 @@ impl LoopbackState {
             Side::Right => &self.right,
         }
     }
+}
+
+fn push_inbox_frame(peer: &mut Peer, frame: Vec<u8>) {
+    if peer.inbox.len() >= MAX_INBOX_FRAMES {
+        peer.inbox.pop_front();
+        peer.dropped_inbox_frames += 1;
+    }
+    peer.inbox.push_back(frame);
 }
 
 /// In-process loopback of two str0m peers connected by a real DataChannel.
@@ -297,6 +313,16 @@ pub struct Str0mChannel {
     side: Side,
 }
 
+impl Str0mChannel {
+    /// Number of inbound loopback frames dropped because this endpoint's receive
+    /// buffer reached `MAX_INBOX_FRAMES`. Non-zero means the consumer is not
+    /// draining [`DataChannel::try_recv_frame`] fast enough and should resync or
+    /// assert on the loss.
+    pub fn dropped_inbox_frames(&self) -> usize {
+        self.state.borrow().peer(self.side).dropped_inbox_frames
+    }
+}
+
 impl DataChannel for Str0mChannel {
     type Error = Str0mError;
 
@@ -341,6 +367,34 @@ mod tests {
         IpcMessage, IpcSink, IpcSource, NodeId, NodeSnapshot, OpKind, PeerId, PeerPermissions,
         Snapshot,
     };
+
+    #[test]
+    fn loopback_inbox_caps_at_capacity_and_counts_drops() {
+        let link = Str0mLoopback::connect().expect("str0m loopback handshake to converge");
+        let channel = link.endpoint(Side::Right);
+
+        {
+            let mut state = link.state.borrow_mut();
+            let peer = state.peer_mut(Side::Right);
+            for i in 0..(MAX_INBOX_FRAMES + 50) {
+                push_inbox_frame(peer, i.to_le_bytes().to_vec());
+            }
+        }
+
+        let first_kept = 50usize.to_le_bytes().to_vec();
+        let last_kept = (MAX_INBOX_FRAMES + 50 - 1).to_le_bytes().to_vec();
+        let state = link.state.borrow();
+        let peer = state.peer(Side::Right);
+        assert_eq!(
+            peer.inbox.len(),
+            MAX_INBOX_FRAMES,
+            "loopback inbox must be capped at MAX_INBOX_FRAMES"
+        );
+        assert_eq!(peer.inbox.front(), Some(&first_kept));
+        assert_eq!(peer.inbox.back(), Some(&last_kept));
+        drop(state);
+        assert_eq!(channel.dropped_inbox_frames(), 50);
+    }
 
     #[test]
     fn loopback_datachannel_carries_a_snapshot() {
