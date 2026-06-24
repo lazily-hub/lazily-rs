@@ -1172,6 +1172,22 @@ impl AsyncContext {
                 }
             };
             if let Some(fn_arc) = effect_fn {
+                // Abort any prior still-running task so the re-run does not race
+                // it (#lzasyncrerunabort). Pre-fix the spawn below overwrote
+                // `in_flight` without aborting, so a dependency that changed again
+                // mid-`.await` left the old task running concurrently — double
+                // execution plus a leaked (overwritten) cleanup. The cleanup of a
+                // *completed* prior run still lives in `e.cleanup` and is drained
+                // inside the spawned task below; aborting only cancels an
+                // unfinished `.await`, never an already-stored cleanup.
+                {
+                    let mut inner = self.inner.lock();
+                    if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id)
+                        && let Some(prior) = e.in_flight.take()
+                    {
+                        prior.abort();
+                    }
+                }
                 let inner_for_ctx = ctx_inner.clone();
                 let join = tokio::spawn(async move {
                     {
@@ -1808,6 +1824,58 @@ mod tests {
         ctx.set_cell(&cell, 2);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(cleanup_count.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[tokio::test]
+    async fn effect_rerun_aborts_prior_inflight() {
+        // Re-invalidating an effect_async dependency while the effect body is
+        // still .awaiting must abort the prior run, not spawn a second concurrent
+        // one. Pre-#lzasyncrerunabort the prior in_flight was overwritten without
+        // abort: the effect body completed twice and the overwritten run's
+        // cleanup was leaked (never invoked).
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i32);
+        let done_count = Arc::new(AtomicU64::new(0));
+        let cleanup_count = Arc::new(AtomicU64::new(0));
+        let done_clone = done_count.clone();
+        let cleanup_clone = cleanup_count.clone();
+        let handle = ctx.effect_async(move |ctx| {
+            let _v = ctx.get_cell(&cell);
+            let d = done_clone.clone();
+            let c = cleanup_clone.clone();
+            async move {
+                // Started; yield to the scheduler so the body is genuinely
+                // in-flight at the sleep when the dependency flips.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Past the await = the run completed (only reached if NOT aborted).
+                d.fetch_add(1, Ordering::Relaxed);
+                let c = c.clone();
+                Some(move || {
+                    c.fetch_add(1, Ordering::Relaxed);
+                })
+            }
+        });
+
+        // First run is now parked in its sleep await.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        ctx.set_cell(&cell, 2); // re-invalidate mid-flight
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        // Exactly one completed run; the aborted prior run never passed its await.
+        assert_eq!(
+            done_count.load(Ordering::Relaxed),
+            1,
+            "prior in-flight effect must be aborted on re-run, not double-executed"
+        );
+
+        // The single surviving cleanup must fire on dispose (not be leaked).
+        ctx.dispose_async_effect(&handle);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            cleanup_count.load(Ordering::Relaxed),
+            1,
+            "the surviving run's cleanup must run exactly once on dispose"
+        );
     }
 
     #[tokio::test]
