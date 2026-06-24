@@ -1020,12 +1020,13 @@ impl AsyncContext {
     }
 
     pub fn dispose_async_effect(&self, handle: &AsyncEffectHandle) {
-        {
+        let cleanup = {
             let mut inner = self.inner.lock();
             inner.pending_async_effects.retain(|&id| id != handle.id);
-            match inner.get_node_mut(handle.id) {
+            let cleanup = match inner.get_node_mut(handle.id) {
                 Some(AsyncNode::Effect(e)) => {
                     let deps = e.dependencies.clone();
+                    let prior_cleanup = e.cleanup.take();
                     for dep_id in &deps {
                         match inner.get_node_mut(*dep_id) {
                             Some(AsyncNode::Slot(s)) => {
@@ -1037,6 +1038,7 @@ impl AsyncContext {
                             _ => {}
                         }
                     }
+                    prior_cleanup
                 }
                 _ => return,
             };
@@ -1047,6 +1049,10 @@ impl AsyncContext {
                 inner.nodes[idx] = None;
                 inner.free_ids.push(handle.id.0);
             }
+            cleanup
+        };
+        if let Some(cleanup) = cleanup {
+            cleanup();
         }
     }
 

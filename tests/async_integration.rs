@@ -107,6 +107,30 @@ async fn async_context_effect_async_cleanup_before_rerun() {
     assert!(cleanup_ran.load(Ordering::Relaxed));
 }
 
+#[tokio::test]
+async fn async_context_effect_async_cleanup_runs_on_dispose() {
+    let ctx = AsyncContext::new();
+    let cell = ctx.cell(0i32);
+    let cleanup_ran = Arc::new(AtomicBool::new(false));
+    let cleanup_clone = cleanup_ran.clone();
+    let handle: AsyncEffectHandle = ctx.effect_async(move |ctx| {
+        let _v = ctx.get_cell(&cell);
+        let c = cleanup_clone.clone();
+        async move {
+            Some(move || {
+                c.store(true, Ordering::Relaxed);
+            })
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!cleanup_ran.load(Ordering::Relaxed));
+    ctx.dispose_async_effect(&handle);
+    assert!(
+        cleanup_ran.load(Ordering::Relaxed),
+        "dispose_async_effect must run the effect's stored cleanup (SPEC: 'Dispose async effect and await cleanup')"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn async_context_concurrent_reads_dedup() {
     let ctx = Arc::new(AsyncContext::new());
