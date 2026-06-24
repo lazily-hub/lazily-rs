@@ -148,6 +148,11 @@ struct Shared {
     /// the consumer was not draining (`try_recv_frame`). Monotonically
     /// increasing; read via [`Str0mNet::dropped_inbox_frames`].
     dropped_inbox_frames: AtomicUsize,
+    /// Last driver-side failure (e.g. an SDP answer that parses but fails
+    /// `accept_answer` application — ICE/DTLS fingerprint or mid mismatch).
+    /// Surfaces a cause when [`Str0mNet::wait_open`] times out instead of the
+    /// previously silent hang (#lzstr0mnetacceptanswer).
+    last_error: Mutex<Option<String>>,
 }
 
 /// A networked str0m DataChannel peer.
@@ -234,6 +239,7 @@ impl Str0mNet {
             closed: AtomicBool::new(false),
             pending_frames: AtomicUsize::new(0),
             dropped_inbox_frames: AtomicUsize::new(0),
+            last_error: Mutex::new(None),
         });
         let (cmd_tx, cmd_rx) = channel();
         let candidate_string = local_candidate.to_sdp_string();
@@ -295,6 +301,14 @@ impl Str0mNet {
     /// resync (#lzstr0mnetinbox).
     pub fn dropped_inbox_frames(&self) -> usize {
         self.shared.dropped_inbox_frames.load(Ordering::Relaxed)
+    }
+
+    /// Last driver-side failure (e.g. an SDP answer that parses but fails
+    /// `accept_answer` application — ICE/DTLS fingerprint or mid mismatch).
+    /// Returns the most recent apply-time failure so a `wait_open` timeout
+    /// has a diagnosable cause instead of a silent hang (#lzstr0mnetacceptanswer).
+    pub fn last_error(&self) -> Option<String> {
+        self.shared.last_error.lock().clone()
     }
 
     /// Block until the data channel opens or `timeout` elapses. Returns whether
@@ -407,8 +421,10 @@ fn run_driver(
                 Ok(DriverCmd::AcceptAnswer(sdp)) => {
                     if let (Some(p), Ok(answer)) =
                         (pending.take(), SdpAnswer::from_sdp_string(&sdp))
+                        && let Err(e) = rtc.sdp_api().accept_answer(p, answer)
                     {
-                        let _ = rtc.sdp_api().accept_answer(p, answer);
+                        *shared.last_error.lock() =
+                            Some(format!("accept_answer apply failed: {e}"));
                     }
                 }
                 Ok(DriverCmd::AddRemoteCandidate(s)) => {
@@ -595,7 +611,23 @@ mod tests {
             closed: AtomicBool::new(false),
             pending_frames: AtomicUsize::new(0),
             dropped_inbox_frames: AtomicUsize::new(0),
+            last_error: Mutex::new(None),
         }
+    }
+
+    #[test]
+    fn last_error_round_trips_apply_failure() {
+        let shared = make_shared();
+        assert!(
+            shared.last_error.lock().is_none(),
+            "last_error starts clear on a fresh peer"
+        );
+        *shared.last_error.lock() = Some("fingerprint mismatch".to_string());
+        assert_eq!(
+            shared.last_error.lock().clone(),
+            Some("fingerprint mismatch".to_string()),
+            "apply-time failure must be stored and readable for wait_open diagnosis"
+        );
     }
 
     #[test]

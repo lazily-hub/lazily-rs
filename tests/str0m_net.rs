@@ -41,6 +41,13 @@ fn networked_datachannel_carries_a_permission_filtered_snapshot() {
         answerer.wait_open(Duration::from_secs(15)),
         "answerer data channel should open over real UDP"
     );
+    // A successful handshake must not record an apply-time failure
+    // (#lzstr0mnetacceptanswer).
+    assert!(
+        offerer.last_error().is_none(),
+        "happy-path open must leave last_error clear: {:?}",
+        offerer.last_error()
+    );
 
     // offerer -> answerer, with the offerer applying per-peer read filtering.
     let peer = PeerId(1);
