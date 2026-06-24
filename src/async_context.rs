@@ -233,6 +233,7 @@ pub(crate) struct AsyncContextInner {
     batch_depth: usize,
     batched_cells: HashSet<SlotId>,
     pending_async_effects: Vec<SlotId>,
+    scheduled_async_effects: HashSet<SlotId>,
 }
 
 impl AsyncContextInner {
@@ -567,6 +568,7 @@ impl AsyncContext {
                 batch_depth: 0,
                 batched_cells: HashSet::new(),
                 pending_async_effects: Vec::new(),
+                scheduled_async_effects: HashSet::new(),
             })),
             #[cfg(feature = "instrumentation")]
             window1_hook: Mutex::new(None),
@@ -665,10 +667,7 @@ impl AsyncContext {
             };
             if is_effect {
                 let mut inner = self.inner.lock();
-                if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(*dep_id) {
-                    e.force_run = true;
-                    inner.pending_async_effects.push(*dep_id);
-                }
+                Self::schedule_async_effect(&mut inner, *dep_id);
             } else {
                 self.invalidate_async_slot(*dep_id);
             }
@@ -776,10 +775,7 @@ impl AsyncContext {
         drop(old_notifier);
         for dep_id in &effect_dependents {
             let mut inner = self.inner.lock();
-            if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(*dep_id) {
-                e.force_run = true;
-                inner.pending_async_effects.push(*dep_id);
-            }
+            Self::schedule_async_effect(&mut inner, *dep_id);
         }
         for dep_id in slot_dependents {
             self.invalidate_async_slot(dep_id);
@@ -1014,7 +1010,7 @@ impl AsyncContext {
                 in_flight: None,
             };
             inner.insert_node(id, AsyncNode::Effect(node));
-            inner.pending_async_effects.push(id);
+            Self::schedule_async_effect(&mut inner, id);
         }
         let handle = AsyncEffectHandle { id };
         self.flush_async_effects();
@@ -1025,6 +1021,7 @@ impl AsyncContext {
         let (cleanup, in_flight) = {
             let mut inner = self.inner.lock();
             inner.pending_async_effects.retain(|&id| id != handle.id);
+            inner.scheduled_async_effects.remove(&handle.id);
             let (cleanup, in_flight) = match inner.get_node_mut(handle.id) {
                 Some(AsyncNode::Effect(e)) => {
                     let deps = e.dependencies.clone();
@@ -1133,11 +1130,21 @@ impl AsyncContext {
         matches!(inner.get_node(handle.effect.id), Some(AsyncNode::Effect(_)))
     }
 
+    fn schedule_async_effect(inner: &mut AsyncContextInner, id: SlotId) {
+        if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(id) {
+            e.force_run = true;
+        }
+        if inner.scheduled_async_effects.insert(id) {
+            inner.pending_async_effects.push(id);
+        }
+    }
+
     fn flush_async_effects(&self) {
         let effect_ids: Vec<SlotId>;
         {
             let mut inner = self.inner.lock();
             effect_ids = inner.pending_async_effects.drain(..).collect();
+            inner.scheduled_async_effects.clear();
         }
         let ctx_inner = self.inner.clone();
         for effect_id in effect_ids {
@@ -1908,5 +1915,44 @@ mod tests {
         let v2 = ctx.get_async(&slot).await;
         assert_eq!(v2, 11);
         assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn async_schedule_effect_dedupes_pending_queue() {
+        let ctx = AsyncContext::new();
+        let rt = Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let cell = ctx.cell(0i32);
+        let effect = ctx.effect_async(move |ctx| {
+            let _ = ctx.get_cell(&cell);
+            async { None::<fn()> }
+        });
+        rt.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(20)).await });
+        {
+            let mut inner = ctx.inner.lock();
+            AsyncContext::schedule_async_effect(&mut inner, effect.id);
+            AsyncContext::schedule_async_effect(&mut inner, effect.id);
+            AsyncContext::schedule_async_effect(&mut inner, effect.id);
+            let count = inner
+                .pending_async_effects
+                .iter()
+                .filter(|&&id| id == effect.id)
+                .count();
+            assert_eq!(
+                count, 1,
+                "pending_async_effects must dedupe the same effect id; got {:?}",
+                inner.pending_async_effects
+            );
+            assert!(inner.scheduled_async_effects.contains(&effect.id));
+        }
+        ctx.flush_async_effects();
+        {
+            let inner = ctx.inner.lock();
+            assert!(
+                !inner.scheduled_async_effects.contains(&effect.id),
+                "flush must clear scheduled_async_effects"
+            );
+        }
+        rt.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(20)).await });
     }
 }
