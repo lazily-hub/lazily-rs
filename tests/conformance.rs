@@ -482,10 +482,7 @@ fn conformance_arena_blob_descriptor_and_header() {
     );
 
     // round-trip
-    assert_eq!(
-        arena.read_blob(desc).unwrap(),
-        &fixture.input.payload[..]
-    );
+    assert_eq!(arena.read_blob(desc).unwrap(), &fixture.input.payload[..]);
 }
 
 #[cfg(feature = "ipc-binary")]
