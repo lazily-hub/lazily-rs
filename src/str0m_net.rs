@@ -128,6 +128,13 @@ enum DriverCmd {
 /// control rather than growing the queue without bound (#lzstr0mframe).
 const MAX_PENDING_FRAMES: usize = 1024;
 
+/// Maximum number of inbound frames buffered for the consumer in
+/// [`Shared::inbox`]. Above this threshold the oldest frame is dropped (and
+/// counted in `dropped_inbox_frames`) so a slow consumer cannot grow receive
+/// memory without bound (#lzstr0mnetinbox). str0m's SCTP stack still owns
+/// wire-level reliability; this cap is the local memory safety valve.
+const MAX_INBOX_FRAMES: usize = 1024;
+
 /// State shared between the public handles and the driver thread.
 struct Shared {
     inbox: Mutex<VecDeque<Vec<u8>>>,
@@ -137,6 +144,10 @@ struct Shared {
     /// (`DriverCmd::Send` messages not yet accepted by `Channel::write`). Used
     /// by [`Str0mNetChannel::send_frame`] to apply backpressure before enqueue.
     pending_frames: AtomicUsize,
+    /// Inbound frames dropped because `inbox` reached `MAX_INBOX_FRAMES` while
+    /// the consumer was not draining (`try_recv_frame`). Monotonically
+    /// increasing; read via [`Str0mNet::dropped_inbox_frames`].
+    dropped_inbox_frames: AtomicUsize,
 }
 
 /// A networked str0m DataChannel peer.
@@ -222,6 +233,7 @@ impl Str0mNet {
             open: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             pending_frames: AtomicUsize::new(0),
+            dropped_inbox_frames: AtomicUsize::new(0),
         });
         let (cmd_tx, cmd_rx) = channel();
         let candidate_string = local_candidate.to_sdp_string();
@@ -275,6 +287,14 @@ impl Str0mNet {
     /// Whether the data channel is currently open.
     pub fn is_open(&self) -> bool {
         self.shared.open.load(Ordering::SeqCst) && !self.shared.closed.load(Ordering::SeqCst)
+    }
+
+    /// Number of inbound frames dropped because the receive buffer was
+    /// saturated (`MAX_INBOX_FRAMES`). Non-zero indicates the consumer is not
+    /// calling `try_recv_frame` fast enough; sustained drops warrant a Snapshot
+    /// resync (#lzstr0mnetinbox).
+    pub fn dropped_inbox_frames(&self) -> usize {
+        self.shared.dropped_inbox_frames.load(Ordering::Relaxed)
     }
 
     /// Block until the data channel opens or `timeout` elapses. Returns whether
@@ -538,6 +558,15 @@ fn run_driver(
     shared.pending_frames.store(0, Ordering::SeqCst);
 }
 
+fn push_inbox_frame(shared: &Shared, frame: Vec<u8>) {
+    let mut inbox = shared.inbox.lock();
+    if inbox.len() >= MAX_INBOX_FRAMES {
+        inbox.pop_front();
+        shared.dropped_inbox_frames.fetch_add(1, Ordering::Relaxed);
+    }
+    inbox.push_back(frame);
+}
+
 fn handle_event(event: Event, cid: &mut Option<ChannelId>, shared: &Shared) {
     match event {
         Event::ChannelOpen(id, _label) => {
@@ -545,12 +574,67 @@ fn handle_event(event: Event, cid: &mut Option<ChannelId>, shared: &Shared) {
             shared.open.store(true, Ordering::SeqCst);
         }
         Event::ChannelData(data) => {
-            shared.inbox.lock().push_back(data.data);
+            push_inbox_frame(shared, data.data);
         }
         Event::ChannelClose(_) => {
             shared.open.store(false, Ordering::SeqCst);
             shared.closed.store(true, Ordering::SeqCst);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_shared() -> Shared {
+        Shared {
+            inbox: Mutex::new(VecDeque::new()),
+            open: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            pending_frames: AtomicUsize::new(0),
+            dropped_inbox_frames: AtomicUsize::new(0),
+        }
+    }
+
+    #[test]
+    fn inbox_caps_at_max_inbox_frames_and_counts_drops() {
+        let shared = make_shared();
+        for _ in 0..(MAX_INBOX_FRAMES + 50) {
+            push_inbox_frame(&shared, vec![0u8]);
+        }
+        {
+            let inbox = shared.inbox.lock();
+            assert_eq!(
+                inbox.len(),
+                MAX_INBOX_FRAMES,
+                "inbox must be capped at MAX_INBOX_FRAMES"
+            );
+            assert_eq!(
+                shared.dropped_inbox_frames.load(Ordering::Relaxed),
+                50,
+                "overflowing frames must be counted as dropped"
+            );
+        }
+        push_inbox_frame(&shared, vec![42u8]);
+        {
+            let inbox = shared.inbox.lock();
+            assert_eq!(
+                inbox.len(),
+                MAX_INBOX_FRAMES,
+                "capped inbox must not grow further"
+            );
+            assert_eq!(
+                inbox.back().map(|v| v[0]),
+                Some(42u8),
+                "drop-oldest ring semantics must retain the newest frame"
+            );
+            assert_eq!(
+                shared.dropped_inbox_frames.load(Ordering::Relaxed),
+                51,
+                "one more drop to make room for the new frame"
+            );
+        }
     }
 }
