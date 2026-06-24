@@ -131,6 +131,59 @@ async fn async_context_effect_async_cleanup_runs_on_dispose() {
     );
 }
 
+#[tokio::test]
+async fn async_context_dispose_aborts_in_flight_effect_rerun() {
+    let ctx = AsyncContext::new();
+    let cell = ctx.cell(0i32);
+
+    let park = Arc::new(tokio::sync::Notify::new());
+    let a_cleanup = Arc::new(AtomicU64::new(0));
+    let park_for_a = park.clone();
+    let a_cleanup_for_a = a_cleanup.clone();
+    let handle_a: AsyncEffectHandle = ctx.effect_async(move |ctx| {
+        let _ = ctx.get_cell(&cell);
+        let p = park_for_a.clone();
+        let c = a_cleanup_for_a.clone();
+        async move {
+            p.notified().await;
+            Some(move || {
+                c.fetch_add(1, Ordering::Relaxed);
+            })
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    ctx.dispose_async_effect(&handle_a);
+
+    let b_ran = Arc::new(AtomicU64::new(0));
+    let b_ran_for_b = b_ran.clone();
+    let handle_b: AsyncEffectHandle = ctx.effect_async(move |ctx| {
+        let _ = ctx.get_cell(&cell);
+        let c = b_ran_for_b.clone();
+        async move {
+            Some(move || {
+                c.fetch_add(1, Ordering::Relaxed);
+            })
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    park.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    ctx.dispose_async_effect(&handle_b);
+    assert_eq!(
+        b_ran.load(Ordering::Relaxed),
+        1,
+        "B's cleanup must run exactly once; A's aborted in-flight task must not have overwritten B's node"
+    );
+    assert_eq!(
+        a_cleanup.load(Ordering::Relaxed),
+        0,
+        "A's aborted in-flight run must not commit a cleanup into the recycled-id node"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn async_context_concurrent_reads_dedup() {
     let ctx = Arc::new(AsyncContext::new());

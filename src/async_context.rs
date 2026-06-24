@@ -215,6 +215,7 @@ pub(crate) struct AsyncEffectNode {
     pub(crate) dependencies: EdgeVec,
     pub(crate) dependents: EdgeVec,
     pub(crate) force_run: bool,
+    pub(crate) in_flight: Option<JoinHandle<()>>,
 }
 
 #[allow(dead_code)]
@@ -1010,6 +1011,7 @@ impl AsyncContext {
                 dependencies: EdgeVec::new(),
                 dependents: EdgeVec::new(),
                 force_run: true,
+                in_flight: None,
             };
             inner.insert_node(id, AsyncNode::Effect(node));
             inner.pending_async_effects.push(id);
@@ -1020,13 +1022,14 @@ impl AsyncContext {
     }
 
     pub fn dispose_async_effect(&self, handle: &AsyncEffectHandle) {
-        let cleanup = {
+        let (cleanup, in_flight) = {
             let mut inner = self.inner.lock();
             inner.pending_async_effects.retain(|&id| id != handle.id);
-            let cleanup = match inner.get_node_mut(handle.id) {
+            let (cleanup, in_flight) = match inner.get_node_mut(handle.id) {
                 Some(AsyncNode::Effect(e)) => {
                     let deps = e.dependencies.clone();
                     let prior_cleanup = e.cleanup.take();
+                    let prior_in_flight = e.in_flight.take();
                     for dep_id in &deps {
                         match inner.get_node_mut(*dep_id) {
                             Some(AsyncNode::Slot(s)) => {
@@ -1038,7 +1041,7 @@ impl AsyncContext {
                             _ => {}
                         }
                     }
-                    prior_cleanup
+                    (prior_cleanup, prior_in_flight)
                 }
                 _ => return,
             };
@@ -1049,8 +1052,11 @@ impl AsyncContext {
                 inner.nodes[idx] = None;
                 inner.free_ids.push(handle.id.0);
             }
-            cleanup
+            (cleanup, in_flight)
         };
+        if let Some(in_flight) = in_flight {
+            in_flight.abort();
+        }
         if let Some(cleanup) = cleanup {
             cleanup();
         }
@@ -1160,7 +1166,7 @@ impl AsyncContext {
             };
             if let Some(fn_arc) = effect_fn {
                 let inner_for_ctx = ctx_inner.clone();
-                tokio::spawn(async move {
+                let join = tokio::spawn(async move {
                     {
                         let mut inner = inner_for_ctx.lock();
                         if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id)
@@ -1191,6 +1197,10 @@ impl AsyncContext {
                         }
                     }
                 });
+                let mut inner = self.inner.lock();
+                if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id) {
+                    e.in_flight = Some(join);
+                }
             }
         }
     }
