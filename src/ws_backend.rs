@@ -24,7 +24,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
@@ -42,6 +42,14 @@ use crate::webrtc_transport::DataChannel;
 /// WebSocket can drain is surfaced flow control instead of growing the queue
 /// without bound (#lzwsunbounded).
 const WS_OUTBOUND_CAPACITY: usize = 1024;
+
+/// Maximum inbound frames buffered for the consumer at once. Above this
+/// threshold the oldest frame is dropped (and counted in
+/// `dropped_inbound_frames`) so a consumer slower than the socket reader cannot
+/// grow receive memory without bound — the same backpressure class already
+/// applied to the str0m inbox (#lzstr0mnetinbox) and the WS outbound
+/// (#lzwsunbounded) (#lzwsinboundunbounded).
+const WS_INBOUND_CAPACITY: usize = 1024;
 
 /// Error from a [`WsDataChannel`].
 #[derive(Debug)]
@@ -90,6 +98,10 @@ impl Drop for AbortOnDrop {
 pub struct WsDataChannel {
     outbound: mpsc::Sender<Vec<u8>>,
     inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    /// Inbound frames dropped because `inbound` reached
+    /// `WS_INBOUND_CAPACITY` while the consumer lagged. Read via
+    /// [`WsDataChannel::dropped_inbound_frames`] (#lzwsinboundunbounded).
+    dropped_inbound: Arc<AtomicUsize>,
     open: Arc<AtomicBool>,
     _driver: Arc<AbortOnDrop>,
 }
@@ -105,14 +117,31 @@ impl WsDataChannel {
     {
         let (tx, rx) = mpsc::channel(WS_OUTBOUND_CAPACITY);
         let inbound = Arc::new(Mutex::new(VecDeque::new()));
+        let dropped_inbound = Arc::new(AtomicUsize::new(0));
         let open = Arc::new(AtomicBool::new(true));
-        let driver = tokio::spawn(drive(ws, rx, inbound.clone(), open.clone()));
+        let driver = tokio::spawn(drive(
+            ws,
+            rx,
+            inbound.clone(),
+            dropped_inbound.clone(),
+            open.clone(),
+        ));
         Self {
             outbound: tx,
             inbound,
+            dropped_inbound,
             open,
             _driver: Arc::new(AbortOnDrop(driver)),
         }
+    }
+
+    /// Number of inbound frames dropped because the receive buffer was
+    /// saturated (`WS_INBOUND_CAPACITY`). Non-zero indicates the consumer is
+    /// not calling [`DataChannel::try_recv_frame`] fast enough and frames are
+    /// being shed to bound memory; the application should drain faster or
+    /// resync (#lzwsinboundunbounded).
+    pub fn dropped_inbound_frames(&self) -> usize {
+        self.dropped_inbound.load(Ordering::Relaxed)
     }
 }
 
@@ -122,6 +151,7 @@ async fn drive<S>(
     ws: WebSocketStream<S>,
     mut outbound_rx: mpsc::Receiver<Vec<u8>>,
     inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    dropped_inbound: Arc<AtomicUsize>,
     open: Arc<AtomicBool>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -144,11 +174,11 @@ async fn drive<S>(
             },
             incoming = read.next() => match incoming {
                 Some(Ok(Message::Binary(payload))) => {
-                    inbound.lock().push_back(payload);
+                    push_inbound(&inbound, &dropped_inbound, payload);
                 }
                 // Tolerate text frames carrying the same JSON payload.
                 Some(Ok(Message::Text(text))) => {
-                    inbound.lock().push_back(text.into_bytes());
+                    push_inbound(&inbound, &dropped_inbound, text.into_bytes());
                 }
                 // Control frames (ping/pong) are handled by tungstenite; ignore here.
                 Some(Ok(_)) => {}
@@ -158,6 +188,19 @@ async fn drive<S>(
         }
     }
     open.store(false, Ordering::SeqCst);
+}
+
+/// Push one inbound frame onto the receive queue, capping it at
+/// `WS_INBOUND_CAPACITY`. When the cap is saturated the oldest frame is dropped
+/// and counted in `dropped_inbound` so a slow consumer cannot grow receive
+/// memory without bound (#lzwsinboundunbounded).
+fn push_inbound(inbound: &Mutex<VecDeque<Vec<u8>>>, dropped_inbound: &AtomicUsize, frame: Vec<u8>) {
+    let mut queue = inbound.lock();
+    if queue.len() >= WS_INBOUND_CAPACITY {
+        queue.pop_front();
+        dropped_inbound.fetch_add(1, Ordering::Relaxed);
+    }
+    queue.push_back(frame);
 }
 
 impl DataChannel for WsDataChannel {
@@ -251,6 +294,47 @@ mod tests {
             hit_backpressure,
             "send_frame must surface Backpressure once the bounded outbound buffer fills (instead of growing without bound)"
         );
+    }
+
+    #[test]
+    fn inbound_caps_at_capacity_and_counts_drops() {
+        // Direct unit test of the receive-side backpressure: a slow consumer
+        // (never calling try_recv_frame) must not grow inbound memory without
+        // bound; overflow is shed oldest-first and counted (#lzwsinboundunbounded).
+        let inbound = Arc::new(Mutex::new(VecDeque::new()));
+        let dropped = Arc::new(AtomicUsize::new(0));
+
+        for i in 0..(WS_INBOUND_CAPACITY + 50) {
+            push_inbound(&inbound, &dropped, vec![i as u8]);
+        }
+
+        {
+            let queue = inbound.lock();
+            assert_eq!(
+                queue.len(),
+                WS_INBOUND_CAPACITY,
+                "inbound must be capped at WS_INBOUND_CAPACITY"
+            );
+            assert_eq!(
+                queue.front().map(|v| v[0]),
+                Some(50u8),
+                "the oldest 50 overflowed frames must have been shed"
+            );
+        }
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            50,
+            "overflowing frames must be counted as dropped"
+        );
+
+        // Pushing past the cap keeps it pinned and the drop counter monotonically
+        // increasing.
+        push_inbound(&inbound, &dropped, vec![255u8]);
+        let queue = inbound.lock();
+        assert_eq!(queue.len(), WS_INBOUND_CAPACITY);
+        assert_eq!(queue.back().map(|v| v[0]), Some(255u8));
+        drop(queue);
+        assert_eq!(dropped.load(Ordering::Relaxed), 51);
     }
 
     #[tokio::test]
