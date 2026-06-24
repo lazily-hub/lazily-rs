@@ -9,9 +9,10 @@
 //! in-process and WebRTC transports. [`WsDataChannel`] bridges the two with a
 //! background tokio task and a pair of queues:
 //!
-//! - **outbound:** [`DataChannel::send_frame`] pushes onto an unbounded mpsc
-//!   (a sync, non-blocking enqueue); the driver task drains it and writes each
-//!   frame as one binary WebSocket message.
+//! - **outbound:** [`DataChannel::send_frame`] pushes onto a bounded mpsc
+//!   (`WS_OUTBOUND_CAPACITY`, a sync non-blocking enqueue that surfaces
+//!   [`WsError::Backpressure`] when full); the driver task drains it and writes
+//!   each frame as one binary WebSocket message.
 //! - **inbound:** the driver task reads WebSocket messages and pushes their
 //!   payloads onto a shared queue that [`DataChannel::try_recv_frame`] pops.
 //!
@@ -35,17 +36,34 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::webrtc_transport::DataChannel;
 
+/// Maximum outbound frames buffered in the driver channel at once. Above this
+/// threshold [`WsDataChannel::send_frame`] returns
+/// [`WsError::Backpressure`](Self::Backpressure) so a producer faster than the
+/// WebSocket can drain is surfaced flow control instead of growing the queue
+/// without bound (#lzwsunbounded).
+const WS_OUTBOUND_CAPACITY: usize = 1024;
+
 /// Error from a [`WsDataChannel`].
 #[derive(Debug)]
 pub enum WsError {
     /// The channel was closed (driver task ended or peer hung up).
     Closed,
+    /// The outbound buffer is full (`WS_OUTBOUND_CAPACITY`) — the producer is
+    /// generating frames faster than the WebSocket can drain them. Back off
+    /// (sleep / await) and retry `send_frame` (#lzwsunbounded).
+    Backpressure,
 }
 
 impl std::fmt::Display for WsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "websocket data channel closed"),
+            Self::Backpressure => {
+                write!(
+                    f,
+                    "websocket outbound buffer full (apply flow control and retry)"
+                )
+            }
         }
     }
 }
@@ -70,7 +88,7 @@ impl Drop for AbortOnDrop {
 /// connection (the queues and driver are reference-counted).
 #[derive(Clone)]
 pub struct WsDataChannel {
-    outbound: mpsc::UnboundedSender<Vec<u8>>,
+    outbound: mpsc::Sender<Vec<u8>>,
     inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
     open: Arc<AtomicBool>,
     _driver: Arc<AbortOnDrop>,
@@ -85,7 +103,7 @@ impl WsDataChannel {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(WS_OUTBOUND_CAPACITY);
         let inbound = Arc::new(Mutex::new(VecDeque::new()));
         let open = Arc::new(AtomicBool::new(true));
         let driver = tokio::spawn(drive(ws, rx, inbound.clone(), open.clone()));
@@ -102,7 +120,7 @@ impl WsDataChannel {
 /// inbound socket messages, until either side closes.
 async fn drive<S>(
     ws: WebSocketStream<S>,
-    mut outbound_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut outbound_rx: mpsc::Receiver<Vec<u8>>,
     inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
     open: Arc<AtomicBool>,
 ) where
@@ -149,8 +167,13 @@ impl DataChannel for WsDataChannel {
         if !self.is_open() {
             return Err(WsError::Closed);
         }
-        // Non-blocking enqueue; the driver task performs the actual async write.
-        self.outbound.send(frame).map_err(|_| WsError::Closed)
+        // Non-blocking bounded enqueue; the driver task performs the actual
+        // async write. try_send surfaces backpressure when the buffer is full
+        // instead of growing without bound (#lzwsunbounded).
+        self.outbound.try_send(frame).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => WsError::Backpressure,
+            mpsc::error::TrySendError::Closed(_) => WsError::Closed,
+        })
     }
 
     fn try_recv_frame(&self) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -205,6 +228,29 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         None
+    }
+
+    #[tokio::test]
+    async fn ws_send_frame_surfaces_backpressure_when_buffer_fills() {
+        let (client, _server) = loopback().await;
+        // The default #[tokio::test] runtime is single-threaded, so a tight
+        // sync loop never yields to the driver task: the bounded outbound
+        // channel fills without being drained.
+        let mut hit_backpressure = false;
+        for _ in 0..(WS_OUTBOUND_CAPACITY * 2) {
+            match client.send_frame(vec![0u8; 4]) {
+                Ok(()) => {}
+                Err(WsError::Backpressure) => {
+                    hit_backpressure = true;
+                    break;
+                }
+                Err(WsError::Closed) => break,
+            }
+        }
+        assert!(
+            hit_backpressure,
+            "send_frame must surface Backpressure once the bounded outbound buffer fills (instead of growing without bound)"
+        );
     }
 
     #[tokio::test]
