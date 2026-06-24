@@ -20,7 +20,7 @@
 
 use lazily::{
     Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeSnapshot, NodeState,
-    PeerId, PeerPermissions, Snapshot,
+    PeerId, PeerPermissions, SHM_BLOB_HEADER_LEN, ShmBlobArena, Snapshot,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -88,6 +88,60 @@ fn assert_str(v: &serde_json::Value, key: &str) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| panic!("assertions should contain string field '{key}'"))
+}
+
+// ---------------------------------------------------------------------------
+// Arena host fixture loader (the arena is not a wire type, so it carries
+// `input` / `expected` instead of `wire`).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ArenaFixture {
+    #[allow(dead_code)]
+    description: String,
+    #[allow(dead_code)]
+    protocol_version: u64,
+    kind: String,
+    input: ArenaInput,
+    expected: ArenaExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArenaInput {
+    capacity: usize,
+    epoch: u64,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArenaDescriptor {
+    offset: u64,
+    len: u64,
+    generation: u64,
+    epoch: u64,
+    checksum: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArenaExpected {
+    descriptor: ArenaDescriptor,
+    header_bytes: Vec<u8>,
+    #[allow(dead_code)]
+    payload_region: Vec<u8>,
+}
+
+fn load_arena_fixture(name: &str) -> ArenaFixture {
+    let spec_path = format!("{SPEC_FIXTURES_DIR}/{name}");
+    let local_path = format!("{FIXTURES_DIR}/{name}");
+    let path = if std::path::Path::new(&spec_path).exists() {
+        spec_path
+    } else {
+        local_path
+    };
+    let raw =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read fixture {path}: {e}"));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("failed to parse arena fixture {path}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +444,47 @@ fn conformance_ipc_message_transport_agnostic_bytes() {
     assert_eq!(
         serde_json::from_slice::<IpcMessage>(&ffi_buffer).unwrap(),
         message
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ShmBlobArena host fixture (not a wire type — locks the arena byte contract
+// across lazily-rs / lazily-py / lazily-zig).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn conformance_arena_blob_descriptor_and_header() {
+    let fixture = load_arena_fixture("arena_blob.json");
+    assert_eq!(fixture.kind, "Arena");
+
+    let mut arena = ShmBlobArena::with_capacity(fixture.input.capacity).unwrap();
+    let desc = arena
+        .write_blob(fixture.input.epoch, &fixture.input.payload)
+        .unwrap();
+
+    let expected = &fixture.expected.descriptor;
+    assert_eq!(desc.offset, expected.offset);
+    assert_eq!(desc.len, expected.len);
+    assert_eq!(desc.generation, expected.generation);
+    assert_eq!(desc.epoch, expected.epoch);
+    assert_eq!(desc.checksum, expected.checksum);
+
+    // 40-byte LZSH header byte-identical across rs / py / zig.
+    let bytes = arena.bytes();
+    assert_eq!(
+        &bytes[..SHM_BLOB_HEADER_LEN],
+        &fixture.expected.header_bytes[..]
+    );
+    let plen = fixture.input.payload.len();
+    assert_eq!(
+        &bytes[SHM_BLOB_HEADER_LEN..SHM_BLOB_HEADER_LEN + plen],
+        &fixture.expected.payload_region[..]
+    );
+
+    // round-trip
+    assert_eq!(
+        arena.read_blob(desc).unwrap(),
+        &fixture.input.payload[..]
     );
 }
 
