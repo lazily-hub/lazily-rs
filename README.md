@@ -249,11 +249,15 @@ erased-value storage.
 
 See [BENCHMARKS.md](BENCHMARKS.md) for full benchmark results, regression budgets, lock attribution, and instrumentation profiles.
 
-For large-graph evidence, see the [Scale (≥1M cells)](BENCHMARKS.md#scale-1m-cells--lzscalebench) section (a criterion-tracked `scale` group): a spreadsheet-shaped graph of ~2M nodes builds in ~0.13 s and fully recomputes from cold in ~0.10 s, while a single-cell edit + bounded viewport read recomputes only the viewport (~11.5 µs / 1,000 cells, ~5,000× cheaper than a full recalc). Reproduce with:
+For large-graph evidence, see the [Scale (≥1M cells)](BENCHMARKS.md#scale-1m-cells--lzscalebench) section (a criterion-tracked `scale` group): a spreadsheet-shaped graph of ~2M nodes builds in ~0.13 s and fully recomputes from cold in ~0.10 s, while a single-cell edit + bounded viewport read recomputes only the viewport (~11.5 µs / 1,000 cells, ~5,000× cheaper than a full recalc).
+
+**Google Sheets scale (10,000,000 cells/workbook — the documented limit).** Run at the full Sheets cap, lazily builds the whole workbook in **~0.7 s**, recomputes it cold in **~0.5 s**, and still does a viewport edit in **~11 µs** (scale-independent). (Microsoft Excel's 1,048,576 × 16,384 = 17,179,869,184-cell grid is *capacity*, not populated cells — lazily's sparse arena only pays for populated cells, so the limit is populated-cells vs RAM, not the grid.)
+
+> **A "cell count" here counts two cells per row** — the benchmark models a column of formulas `=A_i + A_{i-1}`, so each row is **one input cell `A_i` plus one formula cell**. `N` rows ⇒ `N` inputs + `N` formulas = `2N` cells, matching how a real sheet mixes value cells and formula cells. (Each formula *depends on* two inputs, but is itself a single cell.) So "10M cells" = 5,000,000 inputs + 5,000,000 formulas.
 
 ```bash
-cargo bench --features scale-bench --bench scale
-LAZILY_SCALE_N=2000000 cargo bench --features scale-bench --bench scale
+cargo bench --features scale-bench --bench scale                     # default 1M (2M nodes)
+LAZILY_SCALE_N=5000000 cargo bench --features scale-bench --bench scale   # Google Sheets 10M cells
 ```
 
 ## Multi-Language
