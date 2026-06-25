@@ -249,6 +249,13 @@ erased-value storage.
 
 See [BENCHMARKS.md](BENCHMARKS.md) for full benchmark results, regression budgets, lock attribution, and instrumentation profiles.
 
+For large-graph evidence, see the [Scale (≥1M cells)](BENCHMARKS.md#scale-1m-cells--lzscalebench) section: a spreadsheet-shaped graph of ~2M nodes builds in ~0.1 s, fully recomputes in ~0.05 s, and a single-cell edit + bounded viewport read recomputes only the viewport (~38 µs / 1,000 cells). Reproduce with:
+
+```bash
+cargo bench --features scale-bench --bench scale
+LAZILY_SCALE_N=2000000 cargo bench --features scale-bench --bench scale
+```
+
 ## Multi-Language
 
 lazily is implemented across three languages with shared semantics:
