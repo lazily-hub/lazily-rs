@@ -55,6 +55,7 @@ mod instrumentation;
 #[cfg(feature = "ipc")]
 mod ipc;
 mod reconcile;
+mod sem_tree;
 #[cfg(feature = "distributed")]
 mod seq_crdt;
 mod signal;
@@ -142,6 +143,7 @@ pub use ipc::{
     ShmBlobRef, Snapshot,
 };
 pub use reconcile::{DiffOp, apply_to_map, reconcile};
+pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]
 pub use seq_crdt::{Position, SeqCrdt};
 pub use signal::SignalHandle;

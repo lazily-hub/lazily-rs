@@ -502,6 +502,28 @@ matched old block's key so identity flows through an edit (the reconciler emits 
 not remove+insert); an `Inserted` block gets its own key. This is why agent-doc leans on
 in-band anchors — the cheapest way to buy stable identity over fundamentally unstable text.
 
+### Memoized semantic tree (`SemTree`, `#lzsemtree`)
+
+The syntactic `CellTree` holds *input* cells; the **semantic** tree (unresolved prompts,
+drainable heads, section summaries) is a layer of **memoized `computed` nodes** derived from
+it. `SemTree::build` creates one `memo` slot per node that folds
+`(node value, child derived values) -> D`.
+
+Because each node has its own memo slot and a parent reads its *children's* derived slots
+(not their raw cells), the derivation MUST be **incremental and glitch-free**:
+
+- Editing one node recomputes only that node's **ancestor chain** — a **sibling subtree's**
+  derived value MUST stay cached (it is not in the dirty cone). This is the lazy-pull win:
+  cost is proportional to the diff, not the document.
+- The **memo guard** means a node edit that does **not** change the folded result MUST NOT
+  cause a downstream consumer of an ancestor to re-run (the value version doesn't bump).
+
+Incrementality covers value edits, removals, and reorders of children; a child *insertion*
+adds a node the captured fold doesn't know about yet, so structural growth calls `build`
+again (cheap — only slot allocation; unchanged subtrees still won't recompute later). The
+rule: don't materialize semantics eagerly — derive them as memoized computeds and pay only
+for what actually changed.
+
 ## Dependency Tracking
 
 Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` approach).
