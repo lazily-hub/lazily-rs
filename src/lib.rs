@@ -61,6 +61,7 @@ mod signal;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
 mod slot;
+mod stable_id;
 mod state_machine;
 #[cfg(feature = "webrtc-str0m")]
 mod str0m_backend;
@@ -147,6 +148,9 @@ pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
 pub use slot::SlotHandle;
+pub use stable_id::{
+    Alignment, Block, BlockKey, Match, align, assign_stable_keys, block_key, similarity,
+};
 #[cfg(feature = "async")]
 pub use state_machine::AsyncStateMachine;
 pub use state_machine::{StateMachine, ThreadSafeStateMachine};

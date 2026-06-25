@@ -481,6 +481,27 @@ the atomic-move path, so reactivity is proportional to what actually changed. Th
 per-item op set, applied per-cell, is the enabling step for per-cell CRDT merge of document
 trees (replacing whole-subtree replacement).
 
+### Manufactured identity for text (`#lzstableid`)
+
+Plain markdown has no node ids, so reconciliation needs identity *manufactured* from text.
+`block_key` / `align` / `assign_stable_keys` provide it in three layers of decreasing
+certainty:
+
+- **Anchored ids** — an in-band marker/id on a block (agent-doc emits these). Exact, and
+  MUST survive an arbitrary rewrite of the block body (matched by id, classified `Same`).
+- **Content-derived keys** — a hash of the block's *normalized* text (whitespace collapsed),
+  so an unchanged block keeps its key across reflow/rewrap/reorder; an edit changes it.
+- **Alignment** — a block with no exact key match is matched to the most-similar unmatched
+  old block above a threshold (word-LCS ratio `2·|LCS|/(|a|+|b|)`, nearest index breaking
+  ties) and classified `Edited`; otherwise `Inserted`. Unmatched old blocks are `Removed`.
+  This distinguishes an *edit* from a real *insert*; a true rewrite legitimately reads as
+  insert+remove — no identity remains to preserve.
+
+`assign_stable_keys` is the bridge to `#lzkeyrecon`: a `Same`/`Edited` block reuses its
+matched old block's key so identity flows through an edit (the reconciler emits `Update`,
+not remove+insert); an `Inserted` block gets its own key. This is why agent-doc leans on
+in-band anchors — the cheapest way to buy stable identity over fundamentally unstable text.
+
 ## Dependency Tracking
 
 Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` approach).
