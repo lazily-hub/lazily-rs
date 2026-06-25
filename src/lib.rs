@@ -41,6 +41,8 @@ mod async_context;
 mod bridge;
 mod cell;
 mod context;
+#[cfg(feature = "distributed")]
+mod crdt;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
 mod effect;
@@ -76,6 +78,11 @@ pub use async_context::{
 pub use bridge::{BridgeHub, HubError};
 pub use cell::CellHandle;
 pub use context::Context;
+#[cfg(feature = "distributed")]
+pub use crdt::{
+    CellCrdt, Hlc, HlcStamp, LwwRegister, MergeMechanism, MvRegister, PnCounter, ReplicatedCell,
+    UnsupportedMechanism, VersionVector,
+};
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
 pub use effect::{EffectCallbackResult, EffectHandle};
