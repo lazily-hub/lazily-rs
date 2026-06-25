@@ -54,6 +54,7 @@ pub mod ffi;
 mod instrumentation;
 #[cfg(feature = "ipc")]
 mod ipc;
+mod reconcile;
 mod signal;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
@@ -137,6 +138,7 @@ pub use ipc::{
     IpcValue, NodeSnapshot, NodeState, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError,
     ShmBlobRef, Snapshot,
 };
+pub use reconcile::{DiffOp, apply_to_map, reconcile};
 pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};

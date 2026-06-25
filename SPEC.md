@@ -458,6 +458,29 @@ classification and per-cell merge rules in the cell model apply to entries uncha
 keyed collection (and the tree composed from it) is a *composition* of cells, not a new
 cell kind.
 
+### Keyed reconciliation (`#lzkeyrecon`)
+
+`reconcile(old, new)` diffs two keyed sequences **by stable key, not position**, and
+returns the minimal `{Insert, Remove, Move, Update}` op set that transforms `old` into
+`new`:
+
+- Keys in `old` only → `Remove`; keys in `new` only → `Insert{index}`; keys in both with a
+  changed value → `Update`.
+- **Move-minimization** is mandatory: of the keys present in both, those already in relative
+  order (the longest-increasing-subsequence over their old indices) MUST stay put; only the
+  remainder emit `Move{to}`. Move count therefore equals `(keys in both) − |LIS|`, which is
+  the minimum number of single-element moves — strictly fewer than a remove-all + insert-all
+  whenever any key is shared. `index`/`to` are positions in the final sequence; applied in
+  emitted order (removes, then inserts/moves left-to-right, then updates) they reproduce
+  `new`.
+
+`apply_to_map` (and the `CellMap::reconcile` convenience) drive a reactive `CellMap` from
+the op set. Conformance for the reactive application: a **stable** entry (in the LIS, value
+unchanged) MUST NOT have its value cell invalidated by a sibling reorder — moves go through
+the atomic-move path, so reactivity is proportional to what actually changed. This minimal
+per-item op set, applied per-cell, is the enabling step for per-cell CRDT merge of document
+trees (replacing whole-subtree replacement).
+
 ## Dependency Tracking
 
 Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` approach).
