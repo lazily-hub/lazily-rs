@@ -392,6 +392,38 @@ pub struct SlotId(u64);
 
 Both `SlotHandle<T>` and `CellHandle<T>` wrap a `SlotId` with `PhantomData<T>` for type safety.
 
+## Keyed cell collections (`CellFamily` / `CellMap`)
+
+`CellMap<K, V>` and `CellFamily<K, V>` add a *keyed* layer over the flat `SlotId`
+address space: a hash collection whose **membership is itself reactive**, with one
+independently-tracked value cell per entry.
+
+- **`CellMap<K, V>`** — a `K → CellHandle<V>` map with two independent reactivity
+  surfaces:
+  - **Per-entry value reactivity.** Each entry is its own cell, so a reader that
+    depends on entry `a` is invalidated only when `a` changes — never when a sibling
+    entry `b` changes. This is the *fine-grained* model; it is the opposite of a coarse
+    `Cell<HashMap<K, V>>`, where any single-entry write replaces the whole map and
+    invalidates every reader.
+  - **Reactive membership.** The set of keys is tracked by a dedicated membership cell
+    (a monotonically bumped version). `keys()`, `len()`, and `contains_key()` subscribe
+    to membership only, so they recompute when a key is **added or removed**, never when
+    an existing value changes. Mutators bump membership via an untracked write so they
+    never register a spurious dependency on the caller's frame.
+- **`CellFamily<K, V>`** — a parameterized factory (à la Recoil/Jotai `atomFamily`)
+  layered on `CellMap`: it lazily mints and caches one cell per distinct key on first
+  `get(key)`, via a `Fn(&K) -> V` factory. Repeated `get`s of the same key return the
+  same cell.
+
+Conformance: a keyed collection MUST keep value reactivity and membership reactivity
+independent (an entry-value write MUST NOT invalidate membership readers, and vice
+versa), and MUST return a stable cell handle for the lifetime of a key. Entry removal
+clears the removed entry's dependents; the underlying `SlotId` is not required to be
+recycled (the runtime exposes no node-free API today). Each entry remains an ordinary
+cell, so the single-writer / multi-write classification and per-cell merge rules in the
+cell model apply to entries unchanged — a keyed collection is a *composition* of cells,
+not a new cell kind.
+
 ## Dependency Tracking
 
 Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` approach).

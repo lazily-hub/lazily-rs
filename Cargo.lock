@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "lazily"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "arc-swap",
  "criterion",
