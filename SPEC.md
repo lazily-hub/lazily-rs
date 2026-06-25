@@ -524,6 +524,34 @@ again (cheap — only slot allocation; unchanged subtrees still won't recompute 
 rule: don't materialize semantics eagerly — derive them as memoized computeds and pay only
 for what actually changed.
 
+### Free-text CRDT + re-parse (`TextCrdt`, `#lztextcrdt`)
+
+The anchored layers above buy identity for *controlled* structure. For arbitrary prose with
+no anchors under **concurrent** edits, the merge unit drops to **characters**. `TextCrdt`
+merges keystrokes; the structural tree is then a **projection** of the merged text
+(re-parse), not the merge unit itself.
+
+- **Algorithm** — a Fugue/RGA-style tree CRDT. Each inserted character is an element with a
+  unique `OpId` and a **left origin** (the element it was typed after). The sequence is the
+  in-order traversal of the origin tree, same-origin siblings ordered by `OpId` descending.
+  Deletes are tombstones. `order` is therefore a pure function of the element set, so
+  `merge` (union of elements, tombstones sticky) MUST be commutative, associative, and
+  idempotent, and concurrent inserts at the same point MUST converge deterministically with
+  both preserved.
+- **Re-parse** — `parse_blocks` splits merged text into blocks; feed them through
+  `assign_stable_keys` (`#lzstableid`) + `reconcile` (`#lzkeyrecon`) to project the merged
+  text onto the keyed tree. An unchanged block keeps its key (identity) across the
+  text-CRDT merge.
+- **Honest floor** — a true rewrite *is* a replace: there is no character identity to
+  preserve through it. The anchored layer keeps per-node lineage; the free-text layer's
+  guarantee is "merge the text, re-derive the tree," which is the correct floor for prose
+  the user can edit arbitrarily.
+
+Together, the seven primitives (`#lzcellmove` atomic move → `#lzordtree` ordered keyed tree
+→ `#lzkeyrecon` keyed reconciliation → `#lzseqcrdt` sequence order → `#lzstableid`
+manufactured identity → `#lzsemtree` memoized semantics → `#lztextcrdt` free-text CRDT) are
+the substrate for a reactive, per-cell-mergeable agent-doc document.
+
 ## Dependency Tracking
 
 Uses a thread-local tracking stack (mirroring lazily-zig's `TrackingFrame` approach).
