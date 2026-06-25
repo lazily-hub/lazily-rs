@@ -99,12 +99,33 @@ pub use ffi::{
     lazily_ffi_ipc_message_clone_binary, lazily_ffi_ipc_message_kind_binary,
     lazily_ffi_ipc_message_validate_binary,
 };
+#[cfg(all(feature = "ffi", feature = "ipc-msgpack"))]
+pub use ffi::{
+    lazily_ffi_channel_recv_msgpack, lazily_ffi_channel_send_msgpack,
+    lazily_ffi_ipc_message_clone_msgpack, lazily_ffi_ipc_message_kind_msgpack,
+    lazily_ffi_ipc_message_validate_msgpack,
+};
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{
     InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeLockSite,
     ThreadSafeLockSiteSnapshot,
 };
-#[cfg(all(feature = "ipc", any(feature = "ffi", feature = "ipc-binary")))]
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
+pub use ipc::IpcCodec;
+#[cfg(all(
+    feature = "ipc",
+    any(
+        feature = "ffi",
+        feature = "webrtc",
+        feature = "ipc-binary",
+        feature = "ipc-msgpack"
+    )
+))]
 pub use ipc::{DecodeError, EncodeError};
 #[cfg(feature = "ipc")]
 pub use ipc::{

@@ -84,11 +84,12 @@ impl Default for LazilyFfiBytes {
 
 /// Opaque in-process FFI message channel.
 ///
-/// The handle queues canonical JSON-encoded [`IpcMessage`] frames. It is a
-/// local ownership/ABI adapter; it is not a second graph state model.
+/// The handle queues decoded [`IpcMessage`] values. Send functions validate the
+/// caller's codec, and receive functions serialize into the requested codec.
+/// It is a local ownership/ABI adapter, not a second graph state model.
 #[derive(Debug, Default)]
 pub struct LazilyFfiChannel {
-    queue: VecDeque<Vec<u8>>,
+    queue: VecDeque<IpcMessage>,
 }
 
 /// Create an empty FFI channel handle.
@@ -135,8 +136,7 @@ pub unsafe extern "C" fn lazily_ffi_channel_send_json(
         let channel = unsafe { channel_mut(channel) }?;
         let bytes = unsafe { bytes_from_raw(ptr, len) }?;
         let message = decode_message_json(bytes)?;
-        let encoded = encode_message_json(&message)?;
-        channel.queue.push_back(encoded);
+        channel.queue.push_back(message);
         Ok(())
     })
 }
@@ -162,8 +162,8 @@ pub unsafe extern "C" fn lazily_ffi_channel_recv_json(
 
         let channel = unsafe { channel_mut(channel) }?;
         match channel.queue.pop_front() {
-            Some(bytes) => {
-                *out = LazilyFfiBytes::from_vec(bytes);
+            Some(message) => {
+                *out = LazilyFfiBytes::from_vec(encode_message_json(&message)?);
                 Ok(())
             }
             None => Err(LazilyFfiStatus::Empty),
@@ -280,8 +280,7 @@ pub unsafe extern "C" fn lazily_ffi_channel_send_binary(
         let channel = unsafe { channel_mut(channel) }?;
         let bytes = unsafe { bytes_from_raw(ptr, len) }?;
         let message = decode_message_binary(bytes)?;
-        let encoded = encode_message_binary(&message)?;
-        channel.queue.push_back(encoded);
+        channel.queue.push_back(message);
         Ok(())
     })
 }
@@ -306,8 +305,8 @@ pub unsafe extern "C" fn lazily_ffi_channel_recv_binary(
 
         let channel = unsafe { channel_mut(channel) }?;
         match channel.queue.pop_front() {
-            Some(bytes) => {
-                *out = LazilyFfiBytes::from_vec(bytes);
+            Some(message) => {
+                *out = LazilyFfiBytes::from_vec(encode_message_binary(&message)?);
                 Ok(())
             }
             None => Err(LazilyFfiStatus::Empty),
@@ -390,6 +389,135 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_clone_binary(
     })
 }
 
+/// Send one MessagePack-encoded `IpcMessage` through the FFI channel.
+///
+/// Requires the `ipc-msgpack` feature. MessagePack encoding uses named fields
+/// so frames remain cross-language and canonical-JSON-compatible.
+///
+/// # Safety
+///
+/// `channel` must be a live pointer returned by `lazily_ffi_channel_new`.
+/// `ptr..ptr+len` must be readable for `len` bytes when `len > 0`.
+#[cfg(feature = "ipc-msgpack")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lazily_ffi_channel_send_msgpack(
+    channel: *mut LazilyFfiChannel,
+    ptr: *const u8,
+    len: usize,
+) -> LazilyFfiStatus {
+    ffi_guard(|| {
+        let channel = unsafe { channel_mut(channel) }?;
+        let bytes = unsafe { bytes_from_raw(ptr, len) }?;
+        let message = decode_message_msgpack(bytes)?;
+        channel.queue.push_back(message);
+        Ok(())
+    })
+}
+
+/// Receive one MessagePack-encoded `IpcMessage` from the FFI channel.
+///
+/// Requires the `ipc-msgpack` feature.
+///
+/// # Safety
+///
+/// `channel` must be a live pointer returned by `lazily_ffi_channel_new`.
+/// `out` must point to writable storage for one [`LazilyFfiBytes`].
+#[cfg(feature = "ipc-msgpack")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lazily_ffi_channel_recv_msgpack(
+    channel: *mut LazilyFfiChannel,
+    out: *mut LazilyFfiBytes,
+) -> LazilyFfiStatus {
+    ffi_guard(|| {
+        let out = unsafe { out_bytes_mut(out) }?;
+        *out = LazilyFfiBytes::empty();
+
+        let channel = unsafe { channel_mut(channel) }?;
+        match channel.queue.pop_front() {
+            Some(message) => {
+                *out = LazilyFfiBytes::from_vec(encode_message_msgpack(&message)?);
+                Ok(())
+            }
+            None => Err(LazilyFfiStatus::Empty),
+        }
+    })
+}
+
+/// Validate that a byte slice is a MessagePack-encoded `IpcMessage`.
+///
+/// Requires the `ipc-msgpack` feature.
+///
+/// # Safety
+///
+/// `ptr..ptr+len` must be readable for `len` bytes when `len > 0`.
+#[cfg(feature = "ipc-msgpack")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lazily_ffi_ipc_message_validate_msgpack(
+    ptr: *const u8,
+    len: usize,
+) -> LazilyFfiStatus {
+    ffi_guard(|| {
+        let bytes = unsafe { bytes_from_raw(ptr, len) }?;
+        decode_message_msgpack(bytes)?;
+        Ok(())
+    })
+}
+
+/// Return the variant kind for a MessagePack-encoded `IpcMessage`.
+///
+/// Requires the `ipc-msgpack` feature.
+///
+/// # Safety
+///
+/// `ptr..ptr+len` must be readable for `len` bytes when `len > 0`. `out_kind`
+/// must point to writable storage for one [`LazilyFfiMessageKind`].
+#[cfg(feature = "ipc-msgpack")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lazily_ffi_ipc_message_kind_msgpack(
+    ptr: *const u8,
+    len: usize,
+    out_kind: *mut LazilyFfiMessageKind,
+) -> LazilyFfiStatus {
+    ffi_guard(|| {
+        let out_kind = unsafe { out_kind.as_mut() }.ok_or(LazilyFfiStatus::NullPointer)?;
+        *out_kind = LazilyFfiMessageKind::Unknown;
+
+        let bytes = unsafe { bytes_from_raw(ptr, len) }?;
+        let message = decode_message_msgpack(bytes)?;
+        *out_kind = match message {
+            IpcMessage::Snapshot(_) => LazilyFfiMessageKind::Snapshot,
+            IpcMessage::Delta(_) => LazilyFfiMessageKind::Delta,
+        };
+        Ok(())
+    })
+}
+
+/// Validate and return canonical MessagePack bytes for a serialized `IpcMessage`.
+///
+/// Requires the `ipc-msgpack` feature.
+///
+/// # Safety
+///
+/// `ptr..ptr+len` must be readable for `len` bytes when `len > 0`. `out` must
+/// point to writable storage for one [`LazilyFfiBytes`].
+#[cfg(feature = "ipc-msgpack")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lazily_ffi_ipc_message_clone_msgpack(
+    ptr: *const u8,
+    len: usize,
+    out: *mut LazilyFfiBytes,
+) -> LazilyFfiStatus {
+    ffi_guard(|| {
+        let out = unsafe { out_bytes_mut(out) }?;
+        *out = LazilyFfiBytes::empty();
+
+        let bytes = unsafe { bytes_from_raw(ptr, len) }?;
+        let message = decode_message_msgpack(bytes)?;
+        *out = LazilyFfiBytes::from_vec(encode_message_msgpack(&message)?);
+        Ok(())
+    })
+}
+
 /// Free an FFI byte buffer returned by this module.
 ///
 /// # Safety
@@ -421,21 +549,37 @@ fn ffi_guard(operation: impl FnOnce() -> Result<(), LazilyFfiStatus>) -> LazilyF
 }
 
 fn decode_message_json(bytes: &[u8]) -> Result<IpcMessage, LazilyFfiStatus> {
-    serde_json::from_slice(bytes).map_err(|_| LazilyFfiStatus::InvalidMessage)
+    IpcMessage::decode_json(bytes).map_err(|_| LazilyFfiStatus::InvalidMessage)
 }
 
 fn encode_message_json(message: &IpcMessage) -> Result<Vec<u8>, LazilyFfiStatus> {
-    serde_json::to_vec(message).map_err(|_| LazilyFfiStatus::EncodeFailed)
+    message
+        .encode_json()
+        .map_err(|_| LazilyFfiStatus::EncodeFailed)
 }
 
 #[cfg(feature = "ipc-binary")]
 fn decode_message_binary(bytes: &[u8]) -> Result<IpcMessage, LazilyFfiStatus> {
-    postcard::from_bytes(bytes).map_err(|_| LazilyFfiStatus::InvalidMessage)
+    IpcMessage::decode_binary(bytes).map_err(|_| LazilyFfiStatus::InvalidMessage)
 }
 
 #[cfg(feature = "ipc-binary")]
 fn encode_message_binary(message: &IpcMessage) -> Result<Vec<u8>, LazilyFfiStatus> {
-    postcard::to_allocvec(message).map_err(|_| LazilyFfiStatus::EncodeFailed)
+    message
+        .encode_binary()
+        .map_err(|_| LazilyFfiStatus::EncodeFailed)
+}
+
+#[cfg(feature = "ipc-msgpack")]
+fn decode_message_msgpack(bytes: &[u8]) -> Result<IpcMessage, LazilyFfiStatus> {
+    IpcMessage::decode_msgpack(bytes).map_err(|_| LazilyFfiStatus::InvalidMessage)
+}
+
+#[cfg(feature = "ipc-msgpack")]
+fn encode_message_msgpack(message: &IpcMessage) -> Result<Vec<u8>, LazilyFfiStatus> {
+    message
+        .encode_msgpack()
+        .map_err(|_| LazilyFfiStatus::EncodeFailed)
 }
 
 unsafe fn channel_ref<'a>(

@@ -1473,18 +1473,18 @@ pub enum LazilyFfiMessageKind {
 ```
 
 The `ffi` feature exports `extern "C"` functions for creating/freeing an opaque
-`LazilyFfiChannel`, validating/classifying JSON-encoded `IpcMessage` frames,
+`LazilyFfiChannel`, validating/classifying encoded `IpcMessage` frames,
 enqueueing accepted frames, receiving Rust-owned `LazilyFfiBytes` frames, and
 freeing buffers allocated by Rust. All allocation ownership is explicit: the
 caller owns input bytes, Rust owns output buffers until the paired free function
 is called. Errors return `LazilyFfiStatus`; panics must be caught before crossing the C ABI.
 
 The implemented channel is a local ABI adapter. It decodes each accepted frame
-as `IpcMessage`, then re-encodes canonical JSON bytes before enqueueing or
-returning a cloned frame. That keeps FFI byte transport aligned with IPC,
-WebSocket, and WebRTC data transport while leaving snapshot export, delta
-application to a live graph, and richer typed convenience APIs as higher-level
-work on top of the same message plane.
+as `IpcMessage`, stores the decoded message, then re-encodes with the requested
+receive/clone codec. That keeps FFI byte transport aligned with IPC, WebSocket,
+and WebRTC data transport while leaving snapshot export, delta application to a
+live graph, and richer typed convenience APIs as higher-level work on top of the
+same message plane.
 
 The FFI layer may expose convenience helpers for local cells, but those helpers
 still encode/decode through the same `type_tag` + payload registry used by
@@ -1504,27 +1504,33 @@ FFI consumers) via `crate-type = ["lib", "cdylib"]` in `Cargo.toml`.
   headers) and `diplomat` (multi-language binding generation). The current
   `cbindgen` approach is sufficient for C ABI consumers.
 
-### Binary serialization (`ipc-binary` feature)
+### Frame codecs (`ffi` / `webrtc` / `ipc-msgpack` / `ipc-binary` features)
 
-The `ipc-binary` feature adds optional binary serialization via `postcard`
-alongside the default JSON codec. Binary frames are significantly smaller and
-faster for performance-critical paths between same-language or
-binary-aware peers.
+`IpcMessage` frames have one semantic schema and several negotiated codecs:
 
-- `IpcMessage::encode_binary()` / `IpcMessage::decode_binary()` — postcard
-  encode/decode on the `IpcMessage` type.
 - `IpcMessage::encode_json()` / `IpcMessage::decode_json()` — JSON
-  encode/decode (gated behind the `ffi` feature which pulls in `serde_json`).
+  encode/decode (gated behind `ffi` or `webrtc`, which pull in `serde_json`).
+- `IpcMessage::encode_msgpack()` / `IpcMessage::decode_msgpack()` — named
+  MessagePack encode/decode via `rmp-serde` (`ipc-msgpack`). This is the
+  preferred cross-language binary codec because field names survive the frame.
+- `IpcMessage::encode_binary()` / `IpcMessage::decode_binary()` — postcard
+  encode/decode (`ipc-binary`). This is compact but not self-describing.
+- `IpcCodec` — negotiated codec token (`json`, `msgpack`, `postcard`) used by
+  transports such as WebRTC.
 - FFI binary functions: `lazily_ffi_channel_send_binary`,
   `lazily_ffi_channel_recv_binary`, `lazily_ffi_ipc_message_validate_binary`,
   `lazily_ffi_ipc_message_kind_binary`, `lazily_ffi_ipc_message_clone_binary`
   — mirror the JSON FFI functions but use the postcard codec.
-- `EncodeError` / `DecodeError` — codec-agnostic error types with `Json` and
-  `Binary` variants gated by their respective features.
+- FFI MessagePack functions: `lazily_ffi_channel_send_msgpack`,
+  `lazily_ffi_channel_recv_msgpack`, `lazily_ffi_ipc_message_validate_msgpack`,
+  `lazily_ffi_ipc_message_kind_msgpack`, `lazily_ffi_ipc_message_clone_msgpack`
+  — mirror the JSON FFI functions but use named MessagePack.
+- `EncodeError` / `DecodeError` — codec-agnostic error types with `Json`,
+  `Msgpack`, and `Binary` variants gated by their respective features.
 
-The binary codec is **not** self-describing; peers must agree on the schema.
-For cross-language use, JSON remains the default; binary is for
-same-Rust or postcard-aware transports.
+JSON remains the canonical/debug/default form. MessagePack is the cross-language
+production binary form. Postcard remains for same-Rust or explicitly
+postcard-aware peers.
 
 ### WebRTC data channel transport (`webrtc-data` feature)
 
@@ -1572,7 +1578,8 @@ impl IpcSource for WebRtcDataChannel {
   single-writer epoch contract. Unordered/unreliable channels are only
   acceptable for optional lossy telemetry, never for graph state.
 - **Framing**: each `IpcMessage` is length-prefixed (4-byte LE length +
-  payload). Binary or JSON codec negotiated during capability handshake.
+  payload). `json`, `msgpack`, or `postcard` codec negotiated during capability
+  handshake.
 - **Back-pressure**: `send` blocks or yields when the SCTP congestion
   window is full; the caller must not flood faster than the channel drains.
 - **Reconnect**: on channel close or SCTP failure, the transport signals
@@ -1594,7 +1601,7 @@ impl IpcSource for WebRtcDataChannel {
 - `tests/webrtc_data.rs` — gated behind `#[cfg(feature = "webrtc-data")]`
 - Loopback test: create two str0m sessions back-to-back, send
   `IpcMessage::Snapshot` and `IpcMessage::Delta`, verify round-trip
-- Codec negotiation: JSON and binary on the same channel
+- Codec negotiation: JSON, MessagePack, and postcard on the same channel
 - Ordered delivery: send 100 deltas, verify epoch order on recv
 - `make test-webrtc-data` target in Makefile
 

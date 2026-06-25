@@ -3554,7 +3554,8 @@ mod cross_language_channel_compatibility_spec {
             "No Rust references, trait objects, closures, or typed handles cross the boundary",
             "The `ffi` feature exports `extern \"C\"` functions",
             "The implemented channel is a local ABI adapter",
-            "re-encodes canonical JSON bytes",
+            "stores the decoded message",
+            "re-encodes with the requested",
             "must be caught before crossing the C ABI",
             "`type_tag` + payload registry",
         ] {

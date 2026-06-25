@@ -77,6 +77,13 @@ fn assert_round_trip_json(message: &IpcMessage, fixture: &Fixture) {
     );
 }
 
+#[cfg(feature = "ipc-msgpack")]
+fn assert_round_trip_msgpack(message: &IpcMessage) {
+    let encoded = message.encode_msgpack().unwrap();
+    let decoded = IpcMessage::decode_msgpack(&encoded).unwrap();
+    assert_eq!(decoded, *message);
+}
+
 fn assert_u64(v: &serde_json::Value, key: &str) -> u64 {
     v.get(key)
         .and_then(|v| v.as_u64())
@@ -445,6 +452,23 @@ fn conformance_ipc_message_transport_agnostic_bytes() {
         serde_json::from_slice::<IpcMessage>(&ffi_buffer).unwrap(),
         message
     );
+}
+
+#[cfg(feature = "ipc-msgpack")]
+#[test]
+fn conformance_msgpack_round_trips_canonical_fixtures() {
+    for name in [
+        "snapshot_minimal.json",
+        "snapshot_multi_node.json",
+        "snapshot_shared_blob.json",
+        "delta_sequential.json",
+        "delta_non_sequential.json",
+        "delta_shared_blob.json",
+    ] {
+        let fixture = load_fixture(name);
+        let message = parse_wire(&fixture);
+        assert_round_trip_msgpack(&message);
+    }
 }
 
 // ---------------------------------------------------------------------------

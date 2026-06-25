@@ -336,6 +336,67 @@ mod binary {
     }
 }
 
+#[cfg(feature = "ipc-msgpack")]
+mod msgpack {
+    use lazily::{
+        DecodeError, EdgeSnapshot, EncodeError, IpcCodec, IpcMessage, NodeId, NodeSnapshot,
+        Snapshot,
+    };
+
+    #[test]
+    fn ipc_message_msgpack_round_trips_snapshot() {
+        let snapshot = Snapshot::new(
+            7,
+            vec![
+                NodeSnapshot::payload(NodeId(1), "i32", vec![1, 2, 3]),
+                NodeSnapshot::opaque(NodeId(2), "opaque-type"),
+            ],
+            vec![EdgeSnapshot::new(NodeId(2), NodeId(1))],
+            vec![NodeId(1), NodeId(2)],
+        );
+        let message = IpcMessage::Snapshot(snapshot);
+
+        let encoded = message.encode_msgpack().unwrap();
+        let decoded = IpcMessage::decode_msgpack(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+        assert_eq!(IpcCodec::MessagePack.name(), "msgpack");
+        assert_eq!(IpcCodec::MessagePack.decode(&encoded).unwrap(), message);
+        assert!(serde_json::from_slice::<IpcMessage>(&encoded).is_err());
+    }
+
+    #[test]
+    fn ipc_message_msgpack_rejects_invalid_bytes() {
+        let result = IpcMessage::decode_msgpack(b"garbage");
+        assert!(matches!(result, Err(DecodeError::Msgpack(_))));
+    }
+
+    #[test]
+    fn encode_decode_error_implement_display() {
+        let decode_err = IpcMessage::decode_msgpack(b"garbage").unwrap_err();
+        let _ = std::format!("{}", decode_err);
+
+        let encode_err =
+            EncodeError::Msgpack(rmp_serde::to_vec_named(&failing_serialize()).unwrap_err());
+        let _ = std::format!("{}", encode_err);
+    }
+
+    fn failing_serialize() -> impl serde::Serialize {
+        struct Failing;
+
+        impl serde::Serialize for Failing {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("expected failure"))
+            }
+        }
+
+        Failing
+    }
+}
+
 #[cfg(feature = "ffi")]
 mod json_codec {
     use lazily::{

@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 
 use crate::distributed::{PeerId, PeerPermissions};
-use crate::ipc::{IpcMessage, IpcSink, IpcSource};
+use crate::ipc::{DecodeError, EncodeError, IpcCodec, IpcMessage, IpcSink, IpcSource};
 
 /// Minimal ordered, reliable, bidirectional byte-frame channel.
 ///
@@ -56,8 +56,10 @@ pub trait DataChannel {
 pub enum WebRtcTransportError<E> {
     /// Underlying [`DataChannel`] error.
     Channel(E),
-    /// Frame (de)serialization failure.
-    Codec(serde_json::Error),
+    /// Frame serialization failure.
+    Encode(EncodeError),
+    /// Frame deserialization failure.
+    Decode(DecodeError),
     /// The channel was closed.
     Closed,
 }
@@ -66,7 +68,8 @@ impl<E: std::fmt::Display> std::fmt::Display for WebRtcTransportError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Channel(e) => write!(f, "data channel error: {e}"),
-            Self::Codec(e) => write!(f, "frame codec error: {e}"),
+            Self::Encode(e) => write!(f, "frame encode error: {e}"),
+            Self::Decode(e) => write!(f, "frame decode error: {e}"),
             Self::Closed => write!(f, "data channel closed"),
         }
     }
@@ -84,21 +87,38 @@ pub struct WebRtcSink<C> {
     channel: C,
     permissions: PeerPermissions,
     peer: PeerId,
+    codec: IpcCodec,
 }
 
 impl<C> WebRtcSink<C> {
     /// Wrap a channel with the local permission view and the remote peer id.
     pub fn new(channel: C, permissions: PeerPermissions, peer: PeerId) -> Self {
+        Self::with_codec(channel, permissions, peer, IpcCodec::Json)
+    }
+
+    /// Wrap a channel with an explicitly negotiated frame codec.
+    pub fn with_codec(
+        channel: C,
+        permissions: PeerPermissions,
+        peer: PeerId,
+        codec: IpcCodec,
+    ) -> Self {
         Self {
             channel,
             permissions,
             peer,
+            codec,
         }
     }
 
     /// Borrow the underlying channel.
     pub fn channel(&self) -> &C {
         &self.channel
+    }
+
+    /// Return the configured frame codec.
+    pub fn codec(&self) -> IpcCodec {
+        self.codec
     }
 }
 
@@ -117,7 +137,10 @@ impl<C: DataChannel> IpcSink for WebRtcSink<C> {
                 IpcMessage::Delta(d.filter_readable(&self.permissions, self.peer))
             }
         };
-        let frame = serde_json::to_vec(&filtered).map_err(WebRtcTransportError::Codec)?;
+        let frame = self
+            .codec
+            .encode(&filtered)
+            .map_err(WebRtcTransportError::Encode)?;
         self.channel
             .send_frame(frame)
             .map_err(WebRtcTransportError::Channel)
@@ -130,17 +153,28 @@ impl<C: DataChannel> IpcSink for WebRtcSink<C> {
 /// enforcement is the graph-apply layer's responsibility (see the module note).
 pub struct WebRtcSource<C> {
     channel: C,
+    codec: IpcCodec,
 }
 
 impl<C> WebRtcSource<C> {
     /// Wrap a channel as an IPC source.
     pub fn new(channel: C) -> Self {
-        Self { channel }
+        Self::with_codec(channel, IpcCodec::Json)
+    }
+
+    /// Wrap a channel as an IPC source with an explicitly negotiated codec.
+    pub fn with_codec(channel: C, codec: IpcCodec) -> Self {
+        Self { channel, codec }
     }
 
     /// Borrow the underlying channel.
     pub fn channel(&self) -> &C {
         &self.channel
+    }
+
+    /// Return the configured frame codec.
+    pub fn codec(&self) -> IpcCodec {
+        self.codec
     }
 }
 
@@ -153,11 +187,11 @@ impl<C: DataChannel> IpcSource for WebRtcSource<C> {
             .try_recv_frame()
             .map_err(WebRtcTransportError::Channel)?
         {
-            Some(frame) => {
-                let message =
-                    serde_json::from_slice(&frame).map_err(WebRtcTransportError::Codec)?;
-                Ok(Some(message))
-            }
+            Some(frame) => Ok(Some(
+                self.codec
+                    .decode(&frame)
+                    .map_err(WebRtcTransportError::Decode)?,
+            )),
             None => {
                 if self.channel.is_open() {
                     Ok(None)

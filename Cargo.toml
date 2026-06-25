@@ -25,6 +25,7 @@ ffi = ["ipc", "dep:serde_json"]
 instrumentation = []
 ipc = ["serde"]
 ipc-binary = ["ipc", "dep:postcard"]
+ipc-msgpack = ["ipc", "dep:rmp-serde"]
 loom = []
 serde = ["dep:serde", "smallvec?/serde"]
 # #jpf1: WebRTC DataChannel IPC transport — abstraction layer (sync IpcSink/Source
@@ -49,6 +50,7 @@ arc-swap = "1"
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
 parking_lot = "0.12"
 postcard = { version = "1", optional = true, features = ["alloc"] }
+rmp-serde = { version = "1", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 smallvec = { version = "1", optional = true }
@@ -60,6 +62,7 @@ tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls
 criterion = "0.8"
 loom = "0.7"
 proptest = "1"
+rmp-serde = "1"
 serde_json = "1"
 
 [[example]]

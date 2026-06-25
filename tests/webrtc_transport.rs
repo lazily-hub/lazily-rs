@@ -8,8 +8,9 @@
 #![cfg(feature = "webrtc")]
 
 use lazily::{
-    Delta, DeltaOp, InMemoryDataChannel, IpcMessage, IpcSink, IpcSource, NodeId, NodeSnapshot,
-    OpKind, PeerId, PeerPermissions, Snapshot, WebRtcSink, WebRtcSource, WebRtcTransportError,
+    Delta, DeltaOp, InMemoryDataChannel, IpcCodec, IpcMessage, IpcSink, IpcSource, NodeId,
+    NodeSnapshot, OpKind, PeerId, PeerPermissions, Snapshot, WebRtcSink, WebRtcSource,
+    WebRtcTransportError,
 };
 
 const PEER: PeerId = PeerId(7);
@@ -42,6 +43,20 @@ fn loopback(
     (WebRtcSink::new(a, perms, PEER), WebRtcSource::new(b))
 }
 
+fn loopback_with_codec(
+    perms: PeerPermissions,
+    codec: IpcCodec,
+) -> (
+    WebRtcSink<InMemoryDataChannel>,
+    WebRtcSource<InMemoryDataChannel>,
+) {
+    let (a, b) = InMemoryDataChannel::pair();
+    (
+        WebRtcSink::with_codec(a, perms, PEER, codec),
+        WebRtcSource::with_codec(b, codec),
+    )
+}
+
 fn node_ids(s: &Snapshot) -> Vec<u64> {
     s.nodes.iter().map(|n| n.node.0).collect()
 }
@@ -56,6 +71,21 @@ fn snapshot_round_trips() {
         other => panic!("expected snapshot, got {other:?}"),
     }
     assert!(source.recv().unwrap().is_none());
+}
+
+#[cfg(feature = "ipc-msgpack")]
+#[test]
+fn snapshot_round_trips_with_msgpack_codec() {
+    let (mut sink, mut source) = loopback_with_codec(perms_for(&[1, 2, 3]), IpcCodec::MessagePack);
+    assert_eq!(sink.codec(), IpcCodec::MessagePack);
+    assert_eq!(source.codec(), IpcCodec::MessagePack);
+
+    sink.send(&IpcMessage::Snapshot(snapshot(&[1, 2, 3])))
+        .unwrap();
+    match source.recv().unwrap().expect("a message") {
+        IpcMessage::Snapshot(s) => assert_eq!(node_ids(&s), vec![1, 2, 3]),
+        other => panic!("expected snapshot, got {other:?}"),
+    }
 }
 
 #[test]

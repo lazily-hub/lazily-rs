@@ -356,16 +356,28 @@ serialization, on all channels without exception.
 
 ## Serialization
 
-### JSON (default)
+### JSON (canonical/default)
 
 `serde_json` with derived `Serialize`/`Deserialize`. All examples above use
-JSON. This is the cross-language default.
+JSON. This is the canonical text form, the default transport codec, and the
+fixture format that every language binding must be able to render for debugging
+and agent inspection.
 
-### Binary (optional)
+### MessagePack (optional, cross-language binary)
+
+Named MessagePack encoding via the `ipc-msgpack` feature. It preserves the same
+serde field names as JSON while reducing frame size and parse cost for
+production transports. Peers negotiate this as codec `"msgpack"` and must still
+be able to render any frame back to canonical JSON for diagnostics.
+
+MessagePack frames decode through `IpcMessage::decode_msgpack(bytes)` and encode
+through `IpcMessage::encode_msgpack()`.
+
+### Postcard (optional, Rust/same-schema binary)
 
 `postcard` compact binary encoding via the `ipc-binary` feature. Smaller and
 faster than JSON, but **not self-describing** — peers must agree on the schema.
-For same-language or postcard-aware transports only.
+For same-language Rust or postcard-aware transports only.
 
 Binary frames decode through `IpcMessage::decode_binary(bytes)` and encode
 through `IpcMessage::encode_binary()`.
@@ -411,7 +423,7 @@ Each non-local session starts with a handshake:
 |-------|-------------|
 | Protocol id | `"lazily-ipc"` |
 | Protocol major version | `1` |
-| Codec | `"json"` or `"binary"` |
+| Codec | `"json"`, `"msgpack"`, or `"postcard"` |
 | Maximum frame size | Negotiated maximum |
 | Ordered/reliable | Required for graph state |
 | PeerId | Session participant |

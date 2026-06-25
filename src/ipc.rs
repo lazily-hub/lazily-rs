@@ -632,15 +632,114 @@ pub enum IpcMessage {
     Delta(Delta),
 }
 
+/// Negotiated codec for serialized [`IpcMessage`] frames.
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpcCodec {
+    /// Canonical, inspectable JSON frame encoding.
+    #[cfg(any(feature = "ffi", feature = "webrtc"))]
+    Json,
+    /// Named MessagePack encoding for cross-language binary frames.
+    #[cfg(feature = "ipc-msgpack")]
+    MessagePack,
+    /// Compact postcard encoding for Rust/same-schema peers.
+    #[cfg(feature = "ipc-binary")]
+    Postcard,
+}
+
+#[cfg(any(feature = "ffi", feature = "webrtc"))]
+#[allow(clippy::derivable_impls)]
+impl Default for IpcCodec {
+    fn default() -> Self {
+        Self::Json
+    }
+}
+
+#[cfg(all(not(any(feature = "ffi", feature = "webrtc")), feature = "ipc-msgpack"))]
+impl Default for IpcCodec {
+    fn default() -> Self {
+        Self::MessagePack
+    }
+}
+
+#[cfg(all(
+    not(any(feature = "ffi", feature = "webrtc", feature = "ipc-msgpack")),
+    feature = "ipc-binary"
+))]
+impl Default for IpcCodec {
+    fn default() -> Self {
+        Self::Postcard
+    }
+}
+
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
+impl IpcCodec {
+    /// Stable negotiation token for capability handshakes.
+    pub const fn name(self) -> &'static str {
+        match self {
+            #[cfg(any(feature = "ffi", feature = "webrtc"))]
+            Self::Json => "json",
+            #[cfg(feature = "ipc-msgpack")]
+            Self::MessagePack => "msgpack",
+            #[cfg(feature = "ipc-binary")]
+            Self::Postcard => "postcard",
+        }
+    }
+
+    /// Encode an IPC message with this codec.
+    pub fn encode(self, message: &IpcMessage) -> Result<Vec<u8>, EncodeError> {
+        match self {
+            #[cfg(any(feature = "ffi", feature = "webrtc"))]
+            Self::Json => message.encode_json(),
+            #[cfg(feature = "ipc-msgpack")]
+            Self::MessagePack => message.encode_msgpack(),
+            #[cfg(feature = "ipc-binary")]
+            Self::Postcard => message.encode_binary(),
+        }
+    }
+
+    /// Decode an IPC message with this codec.
+    pub fn decode(self, bytes: &[u8]) -> Result<IpcMessage, DecodeError> {
+        match self {
+            #[cfg(any(feature = "ffi", feature = "webrtc"))]
+            Self::Json => IpcMessage::decode_json(bytes),
+            #[cfg(feature = "ipc-msgpack")]
+            Self::MessagePack => IpcMessage::decode_msgpack(bytes),
+            #[cfg(feature = "ipc-binary")]
+            Self::Postcard => IpcMessage::decode_binary(bytes),
+        }
+    }
+}
+
 impl IpcMessage {
-    #[cfg(feature = "ffi")]
+    #[cfg(any(feature = "ffi", feature = "webrtc"))]
     pub fn encode_json(&self) -> Result<Vec<u8>, EncodeError> {
         serde_json::to_vec(self).map_err(EncodeError::Json)
     }
 
-    #[cfg(feature = "ffi")]
+    #[cfg(any(feature = "ffi", feature = "webrtc"))]
     pub fn decode_json(bytes: &[u8]) -> Result<Self, DecodeError> {
         serde_json::from_slice(bytes).map_err(DecodeError::Json)
+    }
+
+    #[cfg(feature = "ipc-msgpack")]
+    pub fn encode_msgpack(&self) -> Result<Vec<u8>, EncodeError> {
+        rmp_serde::to_vec_named(self).map_err(EncodeError::Msgpack)
+    }
+
+    #[cfg(feature = "ipc-msgpack")]
+    pub fn decode_msgpack(bytes: &[u8]) -> Result<Self, DecodeError> {
+        rmp_serde::from_slice(bytes).map_err(DecodeError::Msgpack)
     }
 
     #[cfg(feature = "ipc-binary")]
@@ -654,43 +753,71 @@ impl IpcMessage {
     }
 }
 
-#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
 #[derive(Debug)]
 pub enum EncodeError {
-    #[cfg(feature = "ffi")]
+    #[cfg(any(feature = "ffi", feature = "webrtc"))]
     Json(serde_json::Error),
+    #[cfg(feature = "ipc-msgpack")]
+    Msgpack(rmp_serde::encode::Error),
     #[cfg(feature = "ipc-binary")]
     Binary(postcard::Error),
 }
 
-#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
 impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(feature = "ffi")]
+            #[cfg(any(feature = "ffi", feature = "webrtc"))]
             Self::Json(e) => write!(f, "JSON encode: {e}"),
+            #[cfg(feature = "ipc-msgpack")]
+            Self::Msgpack(e) => write!(f, "MessagePack encode: {e}"),
             #[cfg(feature = "ipc-binary")]
             Self::Binary(e) => write!(f, "binary encode: {e}"),
         }
     }
 }
 
-#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
 impl std::error::Error for EncodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            #[cfg(feature = "ffi")]
+            #[cfg(any(feature = "ffi", feature = "webrtc"))]
             Self::Json(e) => Some(e),
+            #[cfg(feature = "ipc-msgpack")]
+            Self::Msgpack(e) => Some(e),
             #[cfg(feature = "ipc-binary")]
             Self::Binary(e) => Some(e),
         }
     }
 }
 
-#[cfg(feature = "ffi")]
+#[cfg(any(feature = "ffi", feature = "webrtc"))]
 impl From<serde_json::Error> for EncodeError {
     fn from(e: serde_json::Error) -> Self {
         Self::Json(e)
+    }
+}
+
+#[cfg(feature = "ipc-msgpack")]
+impl From<rmp_serde::encode::Error> for EncodeError {
+    fn from(e: rmp_serde::encode::Error) -> Self {
+        Self::Msgpack(e)
     }
 }
 
@@ -701,43 +828,71 @@ impl From<postcard::Error> for EncodeError {
     }
 }
 
-#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
 #[derive(Debug)]
 pub enum DecodeError {
-    #[cfg(feature = "ffi")]
+    #[cfg(any(feature = "ffi", feature = "webrtc"))]
     Json(serde_json::Error),
+    #[cfg(feature = "ipc-msgpack")]
+    Msgpack(rmp_serde::decode::Error),
     #[cfg(feature = "ipc-binary")]
     Binary(postcard::Error),
 }
 
-#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(feature = "ffi")]
+            #[cfg(any(feature = "ffi", feature = "webrtc"))]
             Self::Json(e) => write!(f, "JSON decode: {e}"),
+            #[cfg(feature = "ipc-msgpack")]
+            Self::Msgpack(e) => write!(f, "MessagePack decode: {e}"),
             #[cfg(feature = "ipc-binary")]
             Self::Binary(e) => write!(f, "binary decode: {e}"),
         }
     }
 }
 
-#[cfg(any(feature = "ffi", feature = "ipc-binary"))]
+#[cfg(any(
+    feature = "ffi",
+    feature = "webrtc",
+    feature = "ipc-binary",
+    feature = "ipc-msgpack"
+))]
 impl std::error::Error for DecodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            #[cfg(feature = "ffi")]
+            #[cfg(any(feature = "ffi", feature = "webrtc"))]
             Self::Json(e) => Some(e),
+            #[cfg(feature = "ipc-msgpack")]
+            Self::Msgpack(e) => Some(e),
             #[cfg(feature = "ipc-binary")]
             Self::Binary(e) => Some(e),
         }
     }
 }
 
-#[cfg(feature = "ffi")]
+#[cfg(any(feature = "ffi", feature = "webrtc"))]
 impl From<serde_json::Error> for DecodeError {
     fn from(e: serde_json::Error) -> Self {
         Self::Json(e)
+    }
+}
+
+#[cfg(feature = "ipc-msgpack")]
+impl From<rmp_serde::decode::Error> for DecodeError {
+    fn from(e: rmp_serde::decode::Error) -> Self {
+        Self::Msgpack(e)
     }
 }
 
