@@ -48,6 +48,8 @@ GROUP_ORDER = {
     "tokio_sync_concurrent_contention": 21,
     "tokio_sync_batch": 22,
     "tokio_sync_effect": 23,
+    # #lzscalebench: >=1M-node scale group (feature-gated `scale-bench`).
+    "scale": 24,
 }
 SET_CELL_INVALIDATION_CASE_ORDER = {
     "high_fan_out": 0,
@@ -944,7 +946,8 @@ def main() -> int:
     if args.check:
         pass
     elif not args.no_run:
-        run(["cargo", "bench", "--features", "instrumentation,async,tokio"])
+        # `scale-bench` enables the gated >=1M-node `scale` group (#lzscalebench).
+        run(["cargo", "bench", "--features", "instrumentation,async,tokio,scale-bench"])
         run_instrumentation_profile(args.profile_output)
     else:
         run_instrumentation_profile(args.profile_output)
