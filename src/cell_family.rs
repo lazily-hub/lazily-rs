@@ -66,13 +66,21 @@ struct CellMapInner<K, V> {
     entries: RefCell<HashMap<K, CellHandle<V>>>,
     /// Insertion-ordered authoritative key list (snapshot returned by `keys`).
     order: RefCell<Vec<K>>,
-    /// Reactive membership signal. Holds a monotonic version that is bumped on
-    /// every add/remove; reading it (in `keys`/`len`/`contains_key`) subscribes
-    /// the caller to membership changes without coupling to entry values.
+    /// Reactive *set-membership* signal. Holds a monotonic version bumped only
+    /// when the **set** of keys changes (add/remove). Reading it (in
+    /// `len`/`contains_key`/`is_empty`) subscribes the caller to membership
+    /// changes without coupling to entry values *or to pure reordering*.
     membership: CellHandle<u64>,
     /// Plain (untracked) mirror of the membership version so mutators can bump
     /// the reactive cell without registering a spurious dependency.
     version: StdCell<u64>,
+    /// Reactive *order* signal. Bumped on add/remove **and on move/reorder**.
+    /// `keys` subscribes here so an atomic ordered move (`#lzcellmove`)
+    /// invalidates key-order readers without disturbing `len`/`contains_key`
+    /// readers that only care about set identity.
+    order_signal: CellHandle<u64>,
+    /// Untracked mirror of the order version.
+    order_version: StdCell<u64>,
 }
 
 impl<K, V> Clone for CellMap<K, V> {
@@ -96,16 +104,30 @@ where
                 order: RefCell::new(Vec::new()),
                 membership: ctx.cell(0u64),
                 version: StdCell::new(0),
+                order_signal: ctx.cell(0u64),
+                order_version: StdCell::new(0),
             }),
         }
     }
 
+    /// Bump the *order* signal (invalidates `keys` readers). Add/remove also
+    /// bump this; a pure move bumps **only** this.
+    fn bump_order(&self, ctx: &Context) {
+        let next = self.inner.order_version.get().wrapping_add(1);
+        self.inner.order_version.set(next);
+        ctx.set_cell(&self.inner.order_signal, next);
+    }
+
+    /// Bump set-membership (invalidates `len`/`contains_key` readers). Always
+    /// paired with an order bump because add/remove change order too.
     fn bump_membership(&self, ctx: &Context) {
         let next = self.inner.version.get().wrapping_add(1);
         self.inner.version.set(next);
         // A write, not a tracked read: membership readers are invalidated, but
         // no dependency is registered on whatever frame called the mutator.
         ctx.set_cell(&self.inner.membership, next);
+        // The key set changed, so the ordered key list changed too.
+        self.bump_order(ctx);
     }
 
     /// Return the value cell for `key`, minting it with `default` (computed via
@@ -170,11 +192,81 @@ where
         true
     }
 
-    /// Reactive snapshot of the keys in insertion order. Subscribes the caller
-    /// to membership changes (add/remove), not to per-entry value changes.
+    /// Reactive snapshot of the keys in their current order. Subscribes the
+    /// caller to **order** changes (add/remove **and move/reorder**), not to
+    /// per-entry value changes.
     pub fn keys(&self, ctx: &Context) -> Vec<K> {
-        let _ = ctx.get_cell(&self.inner.membership);
+        let _ = ctx.get_cell(&self.inner.order_signal);
         self.inner.order.borrow().clone()
+    }
+
+    /// Current 0-based position of `key` in the order, or `None` if absent.
+    /// Non-reactive.
+    pub fn position(&self, key: &K) -> Option<usize> {
+        self.inner.order.borrow().iter().position(|k| k == key)
+    }
+
+    /// Atomically move `key` to `index` in the order (`#lzcellmove`).
+    ///
+    /// This is the *atomic, optimized* reorder: the entry keeps the **same**
+    /// value cell, the same dependents, and its CRDT lineage — unlike the naive
+    /// `remove` + `entry` which re-mints the cell and bumps membership twice.
+    /// Only the order signal is bumped (once), so `keys` readers recompute but
+    /// `len`/`contains_key` readers — which track set identity, not order —
+    /// stay cached.
+    ///
+    /// `index` is clamped to `[0, len)`. Returns whether `key` was present.
+    pub fn move_to(&self, ctx: &Context, key: &K, index: usize) -> bool {
+        let mut order = self.inner.order.borrow_mut();
+        let Some(from) = order.iter().position(|k| k == key) else {
+            return false;
+        };
+        let to = index.min(order.len().saturating_sub(1));
+        if from == to {
+            return true; // no-op: do not invalidate readers needlessly.
+        }
+        let k = order.remove(from);
+        order.insert(to, k);
+        drop(order);
+        self.bump_order(ctx);
+        true
+    }
+
+    /// Atomically move `key` to just before `anchor` in the order
+    /// (`#lzcellmove`). No-op if either key is absent or already adjacent in the
+    /// requested position. Returns whether the move could be expressed.
+    pub fn move_before(&self, ctx: &Context, key: &K, anchor: &K) -> bool {
+        let Some(anchor_idx) = self.position(anchor) else {
+            return false;
+        };
+        let from = match self.position(key) {
+            Some(i) => i,
+            None => return false,
+        };
+        // Removing `key` first shifts `anchor` left by one when key precedes it.
+        let target = if from < anchor_idx {
+            anchor_idx - 1
+        } else {
+            anchor_idx
+        };
+        self.move_to(ctx, key, target)
+    }
+
+    /// Atomically move `key` to just after `anchor` in the order (`#lzcellmove`).
+    pub fn move_after(&self, ctx: &Context, key: &K, anchor: &K) -> bool {
+        let Some(anchor_idx) = self.position(anchor) else {
+            return false;
+        };
+        let from = match self.position(key) {
+            Some(i) => i,
+            None => return false,
+        };
+        let target = if from <= anchor_idx {
+            anchor_idx
+        } else {
+            anchor_idx + 1
+        };
+        self.move_to(ctx, key, target)
     }
 
     /// Reactive entry count. Subscribes the caller to membership changes only.
@@ -342,6 +434,114 @@ mod tests {
         c7.set(&ctx, 100);
         assert_eq!(fam.get(&ctx, 7).get(&ctx), 100);
         assert_eq!(fam.map().len_untracked(), 1);
+    }
+
+    #[test]
+    fn move_to_reorders_keys_and_keeps_cell_identity() {
+        let ctx = Context::new();
+        let map: CellMap<&str, i32> = CellMap::new(&ctx);
+        let a = map.entry(&ctx, "a", 1);
+        map.entry(&ctx, "b", 2);
+        map.entry(&ctx, "c", 3);
+        assert_eq!(map.keys(&ctx), vec!["a", "b", "c"]);
+
+        // Move "c" to the front.
+        assert!(map.move_to(&ctx, &"c", 0));
+        assert_eq!(map.keys(&ctx), vec!["c", "a", "b"]);
+
+        // The moved entry keeps the SAME value cell (identity + value intact).
+        assert_eq!(map.handle(&"a").unwrap().id, a.id);
+        assert_eq!(map.get(&ctx, &"a"), Some(1));
+        assert_eq!(map.get(&ctx, &"c"), Some(3));
+
+        // Absent key -> false, no reorder.
+        assert!(!map.move_to(&ctx, &"z", 0));
+        assert_eq!(map.keys(&ctx), vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn pure_move_invalidates_order_but_not_membership_readers() {
+        let ctx = Context::new();
+        let map: CellMap<&str, i32> = CellMap::new(&ctx);
+        map.entry(&ctx, "a", 1);
+        map.entry(&ctx, "b", 2);
+        map.entry(&ctx, "c", 3);
+
+        let order_reader = ctx.computed({
+            let map = map.clone();
+            move |ctx| map.keys(ctx).join(",")
+        });
+        let count = ctx.computed({
+            let map = map.clone();
+            move |ctx| map.len(ctx)
+        });
+        let has_b = ctx.computed({
+            let map = map.clone();
+            move |ctx| map.contains_key(ctx, &"b")
+        });
+        assert_eq!(ctx.get(&order_reader), "a,b,c");
+        assert_eq!(ctx.get(&count), 3);
+        assert!(ctx.get(&has_b));
+
+        // A pure reorder must invalidate the order reader...
+        assert!(map.move_to(&ctx, &"a", 2));
+        assert_eq!(ctx.get(&order_reader), "b,c,a");
+        // ...but NOT the set-identity readers (len / contains_key stay cached).
+        assert!(
+            ctx.is_set(&count),
+            "len reader must stay cached on pure move"
+        );
+        assert!(
+            ctx.is_set(&has_b),
+            "contains_key reader must stay cached on pure move"
+        );
+        assert_eq!(ctx.get(&count), 3);
+    }
+
+    #[test]
+    fn move_to_is_noop_when_position_unchanged() {
+        let ctx = Context::new();
+        let map: CellMap<&str, i32> = CellMap::new(&ctx);
+        map.entry(&ctx, "a", 1);
+        map.entry(&ctx, "b", 2);
+
+        let order_reader = ctx.computed({
+            let map = map.clone();
+            move |ctx| map.keys(ctx).join(",")
+        });
+        assert_eq!(ctx.get(&order_reader), "a,b");
+
+        // Moving to its current index is a no-op and must not invalidate.
+        assert!(map.move_to(&ctx, &"a", 0));
+        assert!(
+            ctx.is_set(&order_reader),
+            "no-op move must not invalidate keys readers"
+        );
+        // Index past the end clamps to last position.
+        assert!(map.move_to(&ctx, &"a", 99));
+        assert_eq!(ctx.get(&order_reader), "b,a");
+    }
+
+    #[test]
+    fn move_before_and_after_place_relative_to_anchor() {
+        let ctx = Context::new();
+        let map: CellMap<i32, i32> = CellMap::new(&ctx);
+        for k in 0..4 {
+            map.entry(&ctx, k, k * 10);
+        }
+        assert_eq!(map.keys(&ctx), vec![0, 1, 2, 3]);
+
+        // Move 3 before 1.
+        assert!(map.move_before(&ctx, &3, &1));
+        assert_eq!(map.keys(&ctx), vec![0, 3, 1, 2]);
+
+        // Move 0 after 2.
+        assert!(map.move_after(&ctx, &0, &2));
+        assert_eq!(map.keys(&ctx), vec![3, 1, 2, 0]);
+
+        // Unknown anchor / key -> false.
+        assert!(!map.move_before(&ctx, &3, &99));
+        assert!(!map.move_after(&ctx, &99, &2));
     }
 
     #[test]

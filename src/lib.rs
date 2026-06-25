@@ -41,6 +41,7 @@ mod async_context;
 mod bridge;
 mod cell;
 mod cell_family;
+mod cell_tree;
 mod context;
 #[cfg(feature = "distributed")]
 mod crdt;
@@ -79,6 +80,7 @@ pub use async_context::{
 pub use bridge::{BridgeHub, HubError};
 pub use cell::CellHandle;
 pub use cell_family::{CellFamily, CellMap};
+pub use cell_tree::CellTree;
 pub use context::Context;
 #[cfg(feature = "distributed")]
 pub use crdt::{

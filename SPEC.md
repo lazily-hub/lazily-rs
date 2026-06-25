@@ -405,24 +405,58 @@ independently-tracked value cell per entry.
     entry `b` changes. This is the *fine-grained* model; it is the opposite of a coarse
     `Cell<HashMap<K, V>>`, where any single-entry write replaces the whole map and
     invalidates every reader.
-  - **Reactive membership.** The set of keys is tracked by a dedicated membership cell
-    (a monotonically bumped version). `keys()`, `len()`, and `contains_key()` subscribe
-    to membership only, so they recompute when a key is **added or removed**, never when
-    an existing value changes. Mutators bump membership via an untracked write so they
-    never register a spurious dependency on the caller's frame.
+  - **Reactive membership and order (two independent signals).** Two version cells are
+    tracked separately: a **set-membership** signal (bumped when a key is added or
+    removed) and an **order** signal (bumped on add/remove **and** on move/reorder).
+    `len()`, `is_empty()`, and `contains_key()` subscribe to set-membership only;
+    `keys()` subscribes to the order signal. So adding/removing invalidates both; a
+    **pure reorder invalidates only `keys()` readers**, leaving `len()`/`contains_key()`
+    readers cached. Mutators bump via an untracked write so they never register a
+    spurious dependency on the caller's frame.
 - **`CellFamily<K, V>`** — a parameterized factory (à la Recoil/Jotai `atomFamily`)
   layered on `CellMap`: it lazily mints and caches one cell per distinct key on first
   `get(key)`, via a `Fn(&K) -> V` factory. Repeated `get`s of the same key return the
   same cell.
 
-Conformance: a keyed collection MUST keep value reactivity and membership reactivity
-independent (an entry-value write MUST NOT invalidate membership readers, and vice
-versa), and MUST return a stable cell handle for the lifetime of a key. Entry removal
-clears the removed entry's dependents; the underlying `SlotId` is not required to be
-recycled (the runtime exposes no node-free API today). Each entry remains an ordinary
-cell, so the single-writer / multi-write classification and per-cell merge rules in the
-cell model apply to entries unchanged — a keyed collection is a *composition* of cells,
-not a new cell kind.
+### Atomic ordered move (`#lzcellmove`)
+
+`CellMap` exposes `move_to(key, index)`, `move_before(key, anchor)`, and
+`move_after(key, anchor)`: the **atomic, optimized** reorder. A move MUST keep the
+entry's **same value cell** (handle identity), its dependents, and its CRDT lineage —
+unlike the naive `remove` + `entry`, which re-mints the cell and bumps membership twice.
+A move MUST bump only the order signal (once), and MUST be a no-op (no invalidation) when
+the requested position equals the current position. `index` is clamped to `[0, len)`.
+
+### Ordered keyed tree (`CellTree`, `#lzordtree`)
+
+`CellTree<Id, V>` is a **shallow-or-deep, ordered, stably-keyed tree** composed from the
+primitives above — the document shape (root → components → items, each with a stable id)
+that keyed reconciliation (`#lzkeyrecon`) and per-cell CRDT merge build on. Each node is
+`(id, value_cell, ordered children)`:
+
+- **Stable `id`** survives reorder and value edits.
+- **`value` cell** gives per-node value reactivity: editing node `X` MUST invalidate only
+  readers of `X`, never a sibling or descendant.
+- **Ordered children** are a `CellMap`-backed reactive collection, so `child_ids()`/`len()`
+  and order are reactive **per level**: a reader of one node's children MUST NOT be
+  invalidated by a membership/order change in a *sibling* subtree or a deeper descendant.
+  `move_child*` inherit the atomic-move guarantee (child node keeps identity + subtree).
+
+`CellTree` is cheap to `Clone` (`Rc` to shared node state), giving **structural sharing**:
+the same subtree node may be held in several places. Conformance: per-node value
+reactivity, per-level membership/order reactivity, and atomic child move MUST hold; a
+`CellTree` is a *composition* of cells (value cells + a keyed ordered collection), not a
+new cell kind.
+
+Conformance: a keyed collection MUST keep value reactivity, set-membership reactivity, and
+order reactivity independent (an entry-value write MUST NOT invalidate membership or order
+readers; a pure reorder MUST NOT invalidate membership readers), and MUST return a stable
+cell handle for the lifetime of a key. Entry removal clears the removed entry's dependents;
+the underlying `SlotId` is not required to be recycled (the runtime exposes no node-free
+API today). Each entry remains an ordinary cell, so the single-writer / multi-write
+classification and per-cell merge rules in the cell model apply to entries unchanged — a
+keyed collection (and the tree composed from it) is a *composition* of cells, not a new
+cell kind.
 
 ## Dependency Tracking
 
