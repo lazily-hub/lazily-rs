@@ -227,6 +227,13 @@ pub(crate) enum AsyncNode {
 
 pub(crate) struct AsyncContextInner {
     pub(crate) nodes: Vec<Option<AsyncNode>>,
+    /// Per-index generation counter, parallel to `nodes`. Bumped every time the
+    /// node at an index is disposed and its `SlotId` recycled into `free_ids`
+    /// (#lzasyncdispose2). A task spawned for an effect captures the generation
+    /// at spawn time and re-checks it before writing cleanup/edges/`in_flight`
+    /// back, so a run still in-flight across its `.await` can never alias a
+    /// freshly-allocated node that reused the recycled id.
+    generations: Vec<u64>,
     next_id: u64,
     free_ids: Vec<u64>,
     pub(crate) context_id: AsyncContextId,
@@ -252,6 +259,15 @@ impl AsyncContextInner {
         usize::try_from(id.0).ok()
     }
 
+    /// Current generation of the node slot `id` maps to. A never-allocated index
+    /// reads as `0`, which matches the generation a freshly-allocated node sees.
+    pub(crate) fn generation(&self, id: SlotId) -> u64 {
+        Self::node_index(id)
+            .and_then(|idx| self.generations.get(idx))
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub(crate) fn get_node(&self, id: SlotId) -> Option<&AsyncNode> {
         Self::node_index(id)
             .and_then(|idx| self.nodes.get(idx))
@@ -268,6 +284,9 @@ impl AsyncContextInner {
         let index = Self::node_index(id).expect("SlotId does not fit usize");
         if self.nodes.len() <= index {
             self.nodes.resize_with(index + 1, || None);
+        }
+        if self.generations.len() <= index {
+            self.generations.resize(index + 1, 0);
         }
         self.nodes[index] = Some(node);
     }
@@ -418,6 +437,11 @@ impl<T> Copy for AsyncSignalHandle<T> {}
 pub struct AsyncComputeContext {
     pub(crate) _context_id: AsyncContextId,
     pub(crate) _node_id: SlotId,
+    /// Generation of `_node_id` captured when this context's run was spawned.
+    /// Live dependency-edge writes keyed by `_node_id` are skipped once the
+    /// node's current generation diverges — i.e. the node was disposed and its
+    /// id potentially recycled mid-run (#lzasyncdispose2).
+    pub(crate) _node_gen: u64,
     pub(crate) inner: Arc<Mutex<AsyncContextInner>>,
     pub(crate) dependencies: Arc<Mutex<HashSet<SlotId>>>,
 }
@@ -429,7 +453,9 @@ impl AsyncComputeContext {
     {
         self.dependencies.lock().insert(handle.id);
         let mut inner = self.inner.lock();
-        register_dependency_locked(&mut inner, handle.id, self._node_id);
+        if inner.generation(self._node_id) == self._node_gen {
+            register_dependency_locked(&mut inner, handle.id, self._node_id);
+        }
         match inner.get_node(handle.id) {
             Some(AsyncNode::Cell(cell)) => cell
                 .value
@@ -451,7 +477,9 @@ impl AsyncComputeContext {
         self.dependencies.lock().insert(handle.id);
         {
             let mut inner = self.inner.lock();
-            register_dependency_locked(&mut inner, handle.id, self._node_id);
+            if inner.generation(self._node_id) == self._node_gen {
+                register_dependency_locked(&mut inner, handle.id, self._node_id);
+            }
         }
         let inner_arc = self.inner.clone();
         // Copy the handle so the returned future does not borrow the `handle`
@@ -510,11 +538,13 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
 
     let deps_arc = Arc::new(Mutex::new(HashSet::new()));
     let deps_for_extract = deps_arc.clone();
+    let slot_gen = inner.generation(slot_id);
 
     let join_handle = tokio::spawn(async move {
         let compute_ctx = AsyncComputeContext {
             _context_id: context_id,
             _node_id: slot_id,
+            _node_gen: slot_gen,
             inner: inner_for_compute.clone(),
             dependencies: deps_arc,
         };
@@ -562,6 +592,7 @@ impl AsyncContext {
         Self {
             inner: Arc::new(Mutex::new(AsyncContextInner {
                 nodes: Vec::new(),
+                generations: Vec::new(),
                 next_id: 0,
                 free_ids: Vec::new(),
                 context_id,
@@ -1047,6 +1078,13 @@ impl AsyncContext {
                 && idx < inner.nodes.len()
             {
                 inner.nodes[idx] = None;
+                // Bump the generation BEFORE recycling the id so any task still
+                // in-flight for this effect fails its generation re-check and
+                // cannot write into the node a future `alloc_id` reuses here
+                // (#lzasyncdispose2).
+                if idx < inner.generations.len() {
+                    inner.generations[idx] += 1;
+                }
                 inner.free_ids.push(handle.id.0);
             }
             (cleanup, in_flight)
@@ -1189,10 +1227,20 @@ impl AsyncContext {
                     }
                 }
                 let inner_for_ctx = ctx_inner.clone();
+                // Capture the generation of this effect at spawn time. Every
+                // write keyed by `effect_id` below re-checks it so a run still
+                // in-flight after a concurrent `dispose_async_effect` (which
+                // bumps the generation and recycles the id) can never alias a
+                // freshly-allocated node that reused the id (#lzasyncdispose2).
+                let effect_gen = {
+                    let inner = self.inner.lock();
+                    inner.generation(effect_id)
+                };
                 let join = tokio::spawn(async move {
                     {
                         let mut inner = inner_for_ctx.lock();
-                        if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id)
+                        if inner.generation(effect_id) == effect_gen
+                            && let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id)
                             && let Some(cleanup) = e.cleanup.take()
                         {
                             drop(inner);
@@ -1207,6 +1255,7 @@ impl AsyncContext {
                             inner.context_id
                         },
                         _node_id: effect_id,
+                        _node_gen: effect_gen,
                         inner: inner_for_ctx.clone(),
                         dependencies: deps_arc,
                     };
@@ -1214,14 +1263,28 @@ impl AsyncContext {
                     let deps = deps_for_extract.lock().clone();
                     {
                         let mut inner = inner_for_ctx.lock();
-                        AsyncContext::update_effect_dependencies(&mut inner, effect_id, &deps);
-                        if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id) {
-                            e.cleanup = cleanup;
+                        if inner.generation(effect_id) == effect_gen {
+                            AsyncContext::update_effect_dependencies(&mut inner, effect_id, &deps);
+                            if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id) {
+                                e.cleanup = cleanup;
+                            }
+                        } else {
+                            // The effect was disposed (and its id possibly
+                            // recycled) while this run was in-flight. Never write
+                            // cleanup/edges into the aliased node; instead run
+                            // THIS run's own cleanup so its side effects are
+                            // still undone rather than leaked (#lzasyncdispose2).
+                            drop(inner);
+                            if let Some(cleanup) = cleanup {
+                                cleanup();
+                            }
                         }
                     }
                 });
                 let mut inner = self.inner.lock();
-                if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id) {
+                if inner.generation(effect_id) == effect_gen
+                    && let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id)
+                {
                     e.in_flight = Some(join);
                 }
             }
@@ -1697,6 +1760,116 @@ mod tests {
                 assert!(!s.dependencies.contains(&cell_a.id));
                 assert!(s.dependencies.contains(&cell_b.id));
             }
+        }
+    }
+
+    // #lzasyncdispose2: disposing an effect bumps the per-index generation and
+    // recycles the SlotId; the next allocation reuses the id but sees the
+    // bumped generation, which is what lets an in-flight stale run detect that
+    // it no longer owns the node.
+    #[tokio::test]
+    async fn dispose_bumps_generation_then_id_recycles_fresh() {
+        let ctx = Arc::new(AsyncContext::new());
+        let cell = ctx.cell(1i32);
+        let effect_a = ctx.effect_async(move |c| {
+            let _v = c.get_cell(&cell);
+            async move { None::<fn()> }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let a_id = effect_a.id;
+        let g0 = ctx.inner.lock().generation(a_id);
+
+        // Allocate B's dependency BEFORE dispose so the recycled id goes to the
+        // effect (free_ids LIFO), not to this cell.
+        let cell_b = ctx.cell(2i32);
+        ctx.dispose_async_effect(&effect_a);
+        let g1 = ctx.inner.lock().generation(a_id);
+        assert_eq!(g1, g0 + 1, "dispose must bump the node generation");
+
+        // Reuse the recycled id with a fresh effect; the bumped generation
+        // sticks so any task still holding `g0` can detect the reuse.
+        let effect_b = ctx.effect_async(move |c| {
+            let _v = c.get_cell(&cell_b);
+            async move { None::<fn()> }
+        });
+        assert_eq!(
+            effect_b.id, a_id,
+            "free_ids LIFO should recycle A's id for B"
+        );
+        assert_eq!(
+            ctx.inner.lock().generation(effect_b.id),
+            g1,
+            "recycled node keeps the bumped generation",
+        );
+    }
+
+    // #lzasyncdispose2: a run still in-flight after its effect was disposed (and
+    // its id recycled to a NEW effect) must not write its edges/cleanup into the
+    // aliased node. `dispose`'s `abort()` is the first defense; this guards the
+    // window where the run already passed its `.await` and `abort()` lost the
+    // race. We exercise that second defense directly by replaying a stale-
+    // generation compute context against a recycled id.
+    #[tokio::test]
+    async fn stale_generation_context_does_not_alias_recycled_effect() {
+        let ctx = Arc::new(AsyncContext::new());
+        let cell = ctx.cell(1i32);
+        let effect_a = ctx.effect_async(move |c| {
+            let _v = c.get_cell(&cell);
+            async move { None::<fn()> }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let a_id = effect_a.id;
+
+        // Capture a compute context exactly as A's in-flight run would hold it.
+        // Each lock is its own statement so the (non-reentrant) guards do not
+        // overlap.
+        let ctx_id = ctx.inner.lock().context_id;
+        let a_gen = ctx.inner.lock().generation(a_id);
+        let stale_ctx = AsyncComputeContext {
+            _context_id: ctx_id,
+            _node_id: a_id,
+            _node_gen: a_gen,
+            inner: ctx.inner.clone(),
+            dependencies: Arc::new(Mutex::new(HashSet::new())),
+        };
+
+        // Allocate B's dependency BEFORE dispose so the recycled id (free_ids
+        // LIFO) goes to the effect, then dispose A and allocate B reusing the id.
+        let cell_b = ctx.cell(99i32);
+        ctx.dispose_async_effect(&effect_a);
+        let effect_b = ctx.effect_async(move |c| {
+            let _v = c.get_cell(&cell_b);
+            async move { None::<fn()> }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            effect_b.id, a_id,
+            "B must reuse A's recycled id for the test"
+        );
+
+        // A's stale run replays a dependency read on `cell`. Pre-fix this wrote
+        // an edge `cell -> a_id` and `a_id.dependencies += cell`, aliasing B.
+        let _ = stale_ctx.get_cell(&cell);
+
+        let inner = ctx.inner.lock();
+        match inner.get_node(a_id) {
+            Some(AsyncNode::Effect(e)) => {
+                assert!(
+                    e.dependencies.contains(&cell_b.id),
+                    "B's real dependency must stay intact",
+                );
+                assert!(
+                    !e.dependencies.contains(&cell.id),
+                    "stale-generation write must not alias B with A's old dependency",
+                );
+            }
+            _ => panic!("recycled node should be B's effect"),
+        }
+        if let Some(AsyncNode::Cell(c)) = inner.get_node(cell.id) {
+            assert!(
+                !c.dependents.contains(&a_id),
+                "`cell` must not gain a phantom dependent via the stale write",
+            );
         }
     }
 
