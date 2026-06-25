@@ -40,6 +40,7 @@ mod async_context;
 #[cfg(feature = "webrtc")]
 mod bridge;
 mod cell;
+mod cell_family;
 mod context;
 #[cfg(feature = "distributed")]
 mod crdt;
@@ -77,6 +78,7 @@ pub use async_context::{
 #[cfg(feature = "webrtc")]
 pub use bridge::{BridgeHub, HubError};
 pub use cell::CellHandle;
+pub use cell_family::{CellFamily, CellMap};
 pub use context::Context;
 #[cfg(feature = "distributed")]
 pub use crdt::{

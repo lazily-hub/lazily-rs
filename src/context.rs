@@ -86,6 +86,10 @@ pub(crate) struct SlotNode {
     pub(crate) dependents: EdgeVec,
     pub(crate) dirty: bool,
     pub(crate) force_recompute: bool,
+    /// True while this slot is actively refreshing/recomputing. Used to detect
+    /// dependency cycles (a slot that reads itself directly or transitively)
+    /// before the pull-based recompute walk overflows the stack.
+    pub(crate) in_progress: bool,
 }
 
 pub(crate) struct CellNode {
@@ -143,6 +147,22 @@ struct BatchGuard<'a> {
 impl Drop for BatchGuard<'_> {
     fn drop(&mut self) {
         self.ctx.finish_batch();
+    }
+}
+
+/// RAII guard that clears a slot's `in_progress` cycle-detection flag when the
+/// refresh of that slot completes (or unwinds).
+struct RefreshGuard<'a> {
+    ctx: &'a Context,
+    id: SlotId,
+}
+
+impl Drop for RefreshGuard<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.ctx.inner.borrow_mut();
+        if let Some(Node::Slot(slot)) = Context::get_node_mut(&mut inner.nodes, self.id) {
+            slot.in_progress = false;
+        }
     }
 }
 
@@ -351,6 +371,7 @@ impl Context {
             dependents: EdgeVec::new(),
             dirty: false,
             force_recompute: false,
+            in_progress: false,
         };
         self.insert_node(id, Node::Slot(node));
         SlotHandle::new(id)
@@ -410,7 +431,43 @@ impl Context {
     /// Returns true only when the slot's computed value changed. Downstream
     /// dependents use this as the memoization guard: a dirty dependency whose
     /// value recomputes equal does not force them to recompute.
+    /// Mark a slot as actively refreshing, returning a RAII guard that clears
+    /// the flag on drop. Returns `None` for non-slot ids (nothing to refresh).
+    ///
+    /// Panics if the slot is already in-progress: that means the recompute walk
+    /// has re-entered a slot still on the call stack, i.e. a dependency cycle.
+    /// Surfacing it as a deterministic panic turns an otherwise-divergent
+    /// infinite recompute / stack overflow into a recoverable error a caller
+    /// can `catch_unwind` and render as a `#CIRCULAR!`-style value.
+    fn enter_refresh(&self, id: SlotId) -> Option<RefreshGuard<'_>> {
+        let mut inner = self.inner.borrow_mut();
+        match Self::get_node_mut(&mut inner.nodes, id) {
+            Some(Node::Slot(slot)) => {
+                if slot.in_progress {
+                    drop(inner);
+                    panic!(
+                        "lazily: circular dependency detected at slot {id:?}; a \
+                         computed/memo slot depends on itself (directly or \
+                         transitively) and would recompute infinitely. Break the \
+                         cycle (e.g. via a base case or an untracked read)."
+                    );
+                }
+                slot.in_progress = true;
+                Some(RefreshGuard { ctx: self, id })
+            }
+            _ => None,
+        }
+    }
+
     fn refresh_slot(&self, id: SlotId) -> bool {
+        // Cycle guard: mark this slot in-progress for the duration of the
+        // refresh. If the pull-based walk re-enters the same slot (a slot that
+        // depends on itself directly or transitively), `enter_refresh` panics
+        // with a diagnostic instead of recursing into a stack overflow.
+        let Some(_cycle_guard) = self.enter_refresh(id) else {
+            return false;
+        };
+
         let dependencies = {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
@@ -1129,5 +1186,86 @@ mod tests {
         );
         assert!(!inner.scheduled_effects.contains(&effect.id));
         assert_eq!(inner.free_ids.as_slice(), &[effect.id.0]);
+    }
+
+    // -- Cycle detection (#lzcycledetect) ----------------------------------
+
+    fn cycle_panic_message(result: Box<dyn std::any::Any + Send>) -> String {
+        result
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| result.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn two_slot_dependency_cycle_panics_instead_of_overflowing() {
+        let ctx = Context::new();
+        // `a` reads `b` (wired after both exist); `b` reads `a`.
+        let link: std::rc::Rc<std::cell::RefCell<Option<SlotHandle<i32>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let link_a = std::rc::Rc::clone(&link);
+        let a = ctx.computed(move |ctx| match *link_a.borrow() {
+            Some(b) => ctx.get(&b) + 1,
+            None => 0,
+        });
+        let b = ctx.computed(move |ctx| ctx.get(&a) + 1);
+        *link.borrow_mut() = Some(b);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.get(&a)));
+        assert!(
+            result.is_err(),
+            "circular dependency must panic, not diverge"
+        );
+        let msg = cycle_panic_message(result.unwrap_err());
+        assert!(
+            msg.contains("circular dependency"),
+            "unexpected panic message: {msg}"
+        );
+
+        // The in-progress flags must be cleared by the RAII guards so the
+        // context is not wedged after the panic is caught.
+        {
+            let inner = ctx.inner.borrow();
+            for node in inner.nodes.iter().flatten() {
+                if let Node::Slot(slot) = node {
+                    assert!(!slot.in_progress, "in_progress must be cleared on unwind");
+                }
+            }
+        }
+        let fresh = ctx.computed(|_| 42i32);
+        assert_eq!(ctx.get(&fresh), 42, "context must still work after a cycle");
+    }
+
+    #[test]
+    fn self_referential_slot_panics() {
+        let ctx = Context::new();
+        let link: std::rc::Rc<std::cell::RefCell<Option<SlotHandle<i32>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let link_self = std::rc::Rc::clone(&link);
+        let s = ctx.computed(move |ctx| match *link_self.borrow() {
+            Some(me) => ctx.get(&me) + 1,
+            None => 0,
+        });
+        *link.borrow_mut() = Some(s);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.get(&s)));
+        assert!(result.is_err(), "self-referential slot must panic");
+        let msg = cycle_panic_message(result.unwrap_err());
+        assert!(msg.contains("circular dependency"), "got: {msg}");
+    }
+
+    #[test]
+    fn diamond_dependencies_do_not_false_positive() {
+        // A diamond (`d` <- b,c <- a) reads `a` twice but is acyclic; the
+        // cycle guard must not misfire on shared, non-nested dependencies.
+        let ctx = Context::new();
+        let a = ctx.cell(1i32);
+        let b = ctx.computed(move |ctx| ctx.get_cell(&a) + 1);
+        let c = ctx.computed(move |ctx| ctx.get_cell(&a) + 2);
+        let d = ctx.computed(move |ctx| ctx.get(&b) + ctx.get(&c));
+        assert_eq!(ctx.get(&d), (1 + 1) + (1 + 2));
+        a.set(&ctx, 10);
+        assert_eq!(ctx.get(&d), (10 + 1) + (10 + 2));
     }
 }

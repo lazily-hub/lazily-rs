@@ -44,6 +44,11 @@ signaling-client = ["distributed", "serde", "dep:serde_json", "dep:tokio", "dep:
 std_sync_mutex = []
 tokio = ["dep:tokio"]
 vec_edges = []
+# #lzscalebench: gates the heavy >=1M-node scale benchmark so the default
+# `cargo bench` (and `make benchmark-check`) stays fast and BENCHMARKS.md's
+# generated section is unaffected. Run explicitly:
+#   cargo bench --features scale-bench --bench scale
+scale-bench = []
 
 [dependencies]
 arc-swap = "1"
@@ -82,6 +87,14 @@ required-features = ["signaling-client", "webrtc-str0m"]
 [[bench]]
 name = "context"
 harness = false
+
+# #lzscalebench: >=1M-node scale benchmark. Gated behind `scale-bench` so it is
+# skipped by the default `cargo bench` / `make benchmark-check` and only runs on
+# `cargo bench --features scale-bench --bench scale`.
+[[bench]]
+name = "scale"
+harness = false
+required-features = ["scale-bench"]
 
 [[bench]]
 name = "profile"

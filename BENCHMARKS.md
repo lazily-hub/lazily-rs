@@ -488,6 +488,40 @@ ThreadSafe lock attribution for contention profiles:
 
 <!-- benchmark-results:end -->
 
+## Scale (≥1M cells) — `#lzscalebench`
+
+The generated section above is the criterion micro-benchmark suite (fan-out tops
+out at 512). To make the ">1M cells / spreadsheet backend" claim evidence-backed,
+a separate scale benchmark builds a spreadsheet-shaped graph of `N` input cells +
+`N` formula slots (`formula[i] = input[i] + input[i-1]`). It is **not** part of
+`make benchmark-check` (gated behind the `scale-bench` feature) and is run on
+demand:
+
+```text
+cargo bench --features scale-bench --bench scale
+LAZILY_SCALE_N=2000000 cargo bench --features scale-bench --bench scale
+```
+
+Representative single run at `N = 1_000_000` (2,000,000 nodes; viewport = 1,000),
+release build on x86_64 Linux (numbers vary by machine — reproduce locally):
+
+| phase | total | per-node |
+|---|---:|---:|
+| build (2,000,000 nodes) | 0.100 s | 50.2 ns |
+| cold full recalc (1,000,000) | 0.046 s | 46.4 ns |
+| warm cached reads (1,000,000) | 0.042 s | 42.1 ns |
+| 1 input edit + viewport recalc (1,000) | 0.038 ms | 38.3 ns |
+| invalidate all inputs (1,000,000) | 0.023 s | 23.5 ns |
+| full recalc after invalidate (1,000,000) | 0.040 s | 40.4 ns |
+
+Memory: ~414 MiB RSS after building 2,000,000 nodes (~216 B/node).
+
+Takeaways: (1) 2M nodes build and fully recompute in ~0.1 s / ~0.05 s; (2) the
+**lazy pull-based** model means a single-cell edit followed by a bounded viewport
+read recomputes only the viewport (~38 µs for 1,000 cells) instead of the whole
+sheet — the property a viewport-rendered spreadsheet needs; (3) memory is ~216
+B/node, so 1M populated formula cells land in the low hundreds of MiB.
+
 ## Multi-Language
 
 lazily is implemented across three languages with shared semantics:
