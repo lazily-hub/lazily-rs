@@ -1946,6 +1946,32 @@ only the small irreversible-effect tail pays for consensus.
   graph — this gates how much of the derived plane can live remotely at all.
 - Delta-state vs op-based CRDT encoding on the wire, reusing `lazily-serde`.
 
+### Move-aware sequence CRDT (`SeqCrdt`, `#lzseqcrdt`)
+
+The register CRDTs above merge a cell's *value*; a document tree also needs
+**mergeable sibling order**. `SeqCrdt<Id, V>` is the order layer: a coordinator-
+free ordered sequence of keyed elements, the concurrency substrate beneath keyed
+reconciliation (`#lzkeyrecon`).
+
+- **Fractional-index positions.** Each element holds an orderable byte key
+  (tiebroken by the minting peer). Inserting between two neighbours generates a
+  key strictly between theirs, so concurrent inserts into the same gap on
+  different replicas both survive and converge to one deterministic order.
+- **Move-awareness (the requirement).** A move MUST be a *single* LWW
+  reassignment of the element's position (highest HLC stamp wins) — **not** a
+  delete + reinsert. So a reorder keeps the element's identity and value, and two
+  concurrent moves of the same element converge to the later one **without
+  duplicating it** (the failure mode of naive RGA delete+reinsert moves).
+- **Independent registers.** Value, position, and tombstone are separate LWW
+  registers, so a concurrent *move* and *value edit* of one element do not
+  conflict; both apply. Removal is an LWW tombstone, so it converges and a
+  concurrent resurrection is decided by stamp order.
+- **Merge** is per-element LWW of value/position/tombstone plus adoption of
+  unknown elements — commutative, associative, idempotent — and advances the
+  local HLC past observed stamps so later local writes still win. This keeps the
+  IPC `Snapshot`/`Delta` single-producer mirror as-is; the sequence CRDT lives
+  only at the multi-writer boundary (pairs with `#lzcrdtplane`).
+
 ## Internet-scale peer discovery: signaling server (`#yxjw`)
 
 The CRDT cell plane (above) is leaderless and local-first, but peers still have

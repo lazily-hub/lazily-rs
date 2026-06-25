@@ -55,6 +55,8 @@ mod instrumentation;
 #[cfg(feature = "ipc")]
 mod ipc;
 mod reconcile;
+#[cfg(feature = "distributed")]
+mod seq_crdt;
 mod signal;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
@@ -139,6 +141,8 @@ pub use ipc::{
     ShmBlobRef, Snapshot,
 };
 pub use reconcile::{DiffOp, apply_to_map, reconcile};
+#[cfg(feature = "distributed")]
+pub use seq_crdt::{Position, SeqCrdt};
 pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
