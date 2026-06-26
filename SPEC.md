@@ -2088,6 +2088,40 @@ reconciliation (`#lzkeyrecon`).
   re-merges it as a tombstone (still skipped), and a genuine resurrection carries
   a newer stamp and wins by LWW regardless.
 
+### Distributed wire transport (`CrdtSync`, `#lzcrdtplane5`)
+
+The plane rides the existing `lazily-ipc` transport. A third `IpcMessage` variant,
+`IpcMessage::CrdtSync(CrdtSync)`, carries multi-writer plane traffic beside the
+single-producer `Snapshot`/`Delta` mirror (which is untouched):
+
+- **`WireStamp { wall_time, logical, peer }`** — a plain-integer wire mirror of `HlcStamp`
+  (same `(wall, logical, peer)` total order), so the wire format is codec-stable and usable
+  whether or not a peer compiles the `distributed` feature. The `distributed` + `ipc`
+  integration owns the lossless `HlcStamp ↔ WireStamp` conversion.
+- **`CrdtOp { node, key: Option<NodeKey>, stamp: WireStamp, state: IpcValue }`** — one
+  state-based (CvRDT) op: the converged register/sequence/text `state` for a node, tagged
+  with the producing stamp and an optional wire-stable `NodeKey` (`#lzwirekey`) that
+  survives `NodeId` churn.
+- **`CrdtSync { frontier: Vec<(peer, WireStamp)>, ops: Vec<CrdtOp> }`** — an anti-entropy
+  frame: the sender's per-peer **stamp-frontier** advertisement plus an op batch. This
+  resolves the "delta-state vs op-based encoding" prototype gate above in favour of
+  **state-based** sync (the registers and Seq/Text CRDTs all merge by state).
+
+The frame round-trips through every codec (JSON / MessagePack / postcard) and is classified
+by the FFI message kind (`LazilyFfiMessageKind::CrdtSync`). `CrdtSync::filter_readable(peer)`
+drops ops for non-readable nodes entirely (omission, not redaction — like `Delta`), keeping
+the frontier advertisement (metadata, not node content) so the receiver still computes a
+sound watermark. Convergence (`merge` is a commutative/associative/idempotent semilattice)
+and the watermark/GC safety contract (a collectable tombstone is observed by every replica)
+are formally proven in `../lazily-spec/formal/lean/LazilyFormal/CRDT.lean` and documented in
+[`protocol.md`](../lazily-spec/protocol.md) §Distributed.
+
+The wire format, codec round-trips, permission filtering, and point-to-point
+`IpcSink`/`IpcSource` delivery land in `#lzcrdtplane5a`. Wiring the plane to live
+`merge: crdt` root cells (local edits → `CrdtOp`s; remote `CrdtOp`s → `ReplicatedCell`
+ingress merge driving the reactive graph + Seq/Text GC) plus `BridgeHub` fan-out of
+`CrdtSync` is the runtime-integration slice `#lzcrdtplane5b`.
+
 ## Internet-scale peer discovery: signaling server (`#yxjw`)
 
 The CRDT cell plane (above) is leaderless and local-first, but peers still have

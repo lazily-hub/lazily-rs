@@ -128,6 +128,13 @@ pub use instrumentation::{
     feature = "ipc-msgpack"
 ))]
 pub use ipc::IpcCodec;
+#[cfg(feature = "ipc")]
+pub use ipc::{
+    CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, IpcPayload,
+    IpcSink, IpcSource, IpcValue, KeyIndex, NODE_KEY_MAX_LEN, NODE_KEY_MAX_SEGMENTS, NodeKey,
+    NodeKeyError, NodeSnapshot, NodeState, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError,
+    ShmBlobRef, Snapshot, WireStamp,
+};
 #[cfg(all(
     feature = "ipc",
     any(
@@ -138,13 +145,6 @@ pub use ipc::IpcCodec;
     )
 ))]
 pub use ipc::{DecodeError, EncodeError};
-#[cfg(feature = "ipc")]
-pub use ipc::{
-    Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, IpcPayload, IpcSink, IpcSource,
-    IpcValue, KeyIndex, NODE_KEY_MAX_LEN, NODE_KEY_MAX_SEGMENTS, NodeKey, NodeKeyError,
-    NodeSnapshot, NodeState, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, ShmBlobRef,
-    Snapshot,
-};
 pub use reconcile::{DiffOp, apply_to_map, reconcile};
 pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]

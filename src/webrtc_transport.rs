@@ -136,6 +136,9 @@ impl<C: DataChannel> IpcSink for WebRtcSink<C> {
             IpcMessage::Delta(d) => {
                 IpcMessage::Delta(d.filter_readable(&self.permissions, self.peer))
             }
+            IpcMessage::CrdtSync(s) => {
+                IpcMessage::CrdtSync(s.filter_readable(&self.permissions, self.peer))
+            }
         };
         let frame = self
             .codec

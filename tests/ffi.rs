@@ -1,9 +1,9 @@
 #![cfg(feature = "ffi")]
 
 use lazily::{
-    Delta, DeltaOp, EdgeSnapshot, IpcMessage, LazilyFfiBytes, LazilyFfiMessageKind,
-    LazilyFfiStatus, NodeId, NodeSnapshot, Snapshot, lazily_ffi_bytes_free,
-    lazily_ffi_channel_free, lazily_ffi_channel_len, lazily_ffi_channel_new,
+    CrdtOp, CrdtSync, Delta, DeltaOp, EdgeSnapshot, IpcMessage, LazilyFfiBytes,
+    LazilyFfiMessageKind, LazilyFfiStatus, NodeId, NodeSnapshot, Snapshot, WireStamp,
+    lazily_ffi_bytes_free, lazily_ffi_channel_free, lazily_ffi_channel_len, lazily_ffi_channel_new,
     lazily_ffi_channel_recv_json, lazily_ffi_channel_send_json, lazily_ffi_ipc_message_clone_json,
     lazily_ffi_ipc_message_kind_json, lazily_ffi_ipc_message_validate_json,
 };
@@ -40,6 +40,41 @@ fn ffi_message_helpers_validate_classify_and_clone_ipc_messages() {
         serde_json::from_slice::<IpcMessage>(&cloned).unwrap(),
         snapshot
     );
+}
+
+#[test]
+fn ffi_classifies_crdt_sync_message_kind() {
+    let sync = IpcMessage::CrdtSync(CrdtSync::new(
+        vec![(
+            1,
+            WireStamp {
+                wall_time: 9,
+                logical: 0,
+                peer: 1,
+            },
+        )],
+        vec![CrdtOp::new(
+            NodeId(1),
+            WireStamp {
+                wall_time: 9,
+                logical: 0,
+                peer: 1,
+            },
+            vec![1, 2],
+        )],
+    ));
+    let json = serde_json::to_vec(&sync).unwrap();
+
+    let mut kind = LazilyFfiMessageKind::Unknown;
+    assert_eq!(
+        unsafe { lazily_ffi_ipc_message_validate_json(json.as_ptr(), json.len()) },
+        LazilyFfiStatus::Ok
+    );
+    assert_eq!(
+        unsafe { lazily_ffi_ipc_message_kind_json(json.as_ptr(), json.len(), &mut kind) },
+        LazilyFfiStatus::Ok
+    );
+    assert_eq!(kind, LazilyFfiMessageKind::CrdtSync);
 }
 
 #[test]

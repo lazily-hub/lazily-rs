@@ -1140,12 +1140,120 @@ impl KeyIndex {
 }
 
 /// Tagged IPC protocol message.
+/// A wire-stable mirror of a hybrid-logical-clock stamp — all plain integers, so
+/// the IPC layer carries CRDT causal-stability metadata without depending on the
+/// `distributed` feature's [`HlcStamp`](crate::HlcStamp).
+///
+/// Total order is `(wall_time, logical, peer)`, identical to `HlcStamp`, so the
+/// two convert losslessly; the `distributed` + `ipc` integration layer
+/// (`#lzcrdtplane5b`) owns that conversion. Defining it here keeps the wire
+/// format usable (and codec-stable) whether or not `distributed` is compiled in.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct WireStamp {
+    /// Wall-clock microseconds since the Unix epoch.
+    pub wall_time: u64,
+    /// Logical counter advancing causality within equal `wall_time`.
+    pub logical: u64,
+    /// Originating peer; final tiebreak so equal `(wall, logical)` is a total order.
+    pub peer: u64,
+}
+
+/// One CRDT cell op on the wire (state-based / CvRDT): the converged register,
+/// sequence, or text `state` for `node`, tagged with the [`WireStamp`] that
+/// produced it and the optional wire-stable [`NodeKey`] that survives `NodeId`
+/// churn (`#lzwirekey`).
+///
+/// The receiver merges `state` into its local replica. Because every cell CRDT
+/// merge is commutative, associative, and idempotent, out-of-order, duplicated,
+/// or batched delivery all converge — so a `CrdtOp` is safe to resend.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CrdtOp {
+    /// Target node (volatile id; pair with `key` for stable addressing).
+    pub node: NodeId,
+    /// Wire-stable keyed address, if the producer assigned one.
+    pub key: Option<NodeKey>,
+    /// The HLC stamp that produced this state.
+    pub stamp: WireStamp,
+    /// The converged CRDT state to merge into the receiver's replica.
+    pub state: IpcValue,
+}
+
+impl CrdtOp {
+    /// Construct a keyless op (addressed only by `node`).
+    pub fn new(node: NodeId, stamp: WireStamp, state: impl Into<IpcValue>) -> Self {
+        Self {
+            node,
+            key: None,
+            stamp,
+            state: state.into(),
+        }
+    }
+
+    /// Construct an op carrying a wire-stable [`NodeKey`].
+    pub fn keyed(node: NodeId, key: NodeKey, stamp: WireStamp, state: impl Into<IpcValue>) -> Self {
+        Self {
+            node,
+            key: Some(key),
+            stamp,
+            state: state.into(),
+        }
+    }
+}
+
+/// A CRDT anti-entropy sync frame (the multi-writer plane, `#lzcrdtplane5`): the
+/// sender advertises its per-peer **stamp frontier** (the highest [`WireStamp`]
+/// it has observed from each peer) and ships a batch of [`CrdtOp`]s.
+///
+/// The `frontier` is the `StampFrontier` exchange: it lets the receiver compute
+/// which ops it is still missing (anti-entropy) and feeds the causal-stability
+/// watermark — `min` over membership — that drives tombstone GC
+/// (`SeqCrdt::gc` / `TextCrdt::gc_with`). The exchange is bounded, idempotent,
+/// and resumable; re-sending a frame the receiver already has is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CrdtSync {
+    /// Per-peer highest observed stamp: `(peer, stamp)`, the sender's frontier.
+    pub frontier: Vec<(u64, WireStamp)>,
+    /// The op batch this frame ships.
+    pub ops: Vec<CrdtOp>,
+}
+
+impl CrdtSync {
+    /// Construct a sync frame from a frontier advertisement and an op batch.
+    pub fn new(frontier: Vec<(u64, WireStamp)>, ops: Vec<CrdtOp>) -> Self {
+        Self { frontier, ops }
+    }
+
+    /// Return a peer-specific frame that omits ops for non-readable nodes
+    /// entirely (omission, not redaction — mirroring [`Delta::filter_readable`]).
+    ///
+    /// The `frontier` advertisement is retained: it names peers and stamps, not
+    /// node content, and the receiver needs the full frontier to compute its
+    /// causal-stability watermark soundly.
+    pub fn filter_readable(&self, permissions: &PeerPermissions, peer: PeerId) -> Self {
+        let ops = self
+            .ops
+            .iter()
+            .filter(|op| can_read(permissions, peer, op.node))
+            .cloned()
+            .collect();
+        Self {
+            frontier: self.frontier.clone(),
+            ops,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IpcMessage {
     /// Full graph image.
     Snapshot(Snapshot),
     /// Incremental graph update.
     Delta(Delta),
+    /// A CRDT anti-entropy sync frame: op batch + stamp-frontier advertisement
+    /// for the multi-writer plane (`#lzcrdtplane5`).
+    CrdtSync(CrdtSync),
 }
 
 /// Negotiated codec for serialized [`IpcMessage`] frames.
@@ -1435,6 +1543,11 @@ pub trait IpcSink {
     /// Send a delta.
     fn send_delta(&mut self, delta: &Delta) -> Result<(), Self::Error> {
         self.send(&IpcMessage::Delta(delta.clone()))
+    }
+
+    /// Send a CRDT anti-entropy sync frame (multi-writer plane, `#lzcrdtplane5`).
+    fn send_crdt_sync(&mut self, sync: &CrdtSync) -> Result<(), Self::Error> {
+        self.send(&IpcMessage::CrdtSync(sync.clone()))
     }
 }
 

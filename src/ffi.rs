@@ -39,6 +39,8 @@ pub enum LazilyFfiMessageKind {
     Snapshot = 1,
     /// Incremental graph update.
     Delta = 2,
+    /// CRDT anti-entropy sync frame (multi-writer plane, `#lzcrdtplane5`).
+    CrdtSync = 3,
 }
 
 /// Byte buffer allocated by Rust and returned across the FFI boundary.
@@ -231,6 +233,7 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_kind_json(
         *out_kind = match message {
             IpcMessage::Snapshot(_) => LazilyFfiMessageKind::Snapshot,
             IpcMessage::Delta(_) => LazilyFfiMessageKind::Delta,
+            IpcMessage::CrdtSync(_) => LazilyFfiMessageKind::CrdtSync,
         };
         Ok(())
     })
@@ -358,6 +361,7 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_kind_binary(
         *out_kind = match message {
             IpcMessage::Snapshot(_) => LazilyFfiMessageKind::Snapshot,
             IpcMessage::Delta(_) => LazilyFfiMessageKind::Delta,
+            IpcMessage::CrdtSync(_) => LazilyFfiMessageKind::CrdtSync,
         };
         Ok(())
     })
@@ -487,6 +491,7 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_kind_msgpack(
         *out_kind = match message {
             IpcMessage::Snapshot(_) => LazilyFfiMessageKind::Snapshot,
             IpcMessage::Delta(_) => LazilyFfiMessageKind::Delta,
+            IpcMessage::CrdtSync(_) => LazilyFfiMessageKind::CrdtSync,
         };
         Ok(())
     })

@@ -1,9 +1,10 @@
 #![cfg(feature = "ipc")]
 
 use lazily::{
-    Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, KeyIndex, NODE_KEY_MAX_SEGMENTS,
-    NodeId, NodeKey, NodeKeyError, NodeSnapshot, NodeState, OpKind, PeerId, PeerPermissions,
-    RemoteOp, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, Snapshot,
+    CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, KeyIndex,
+    NODE_KEY_MAX_SEGMENTS, NodeId, NodeKey, NodeKeyError, NodeSnapshot, NodeState, OpKind, PeerId,
+    PeerPermissions, RemoteOp, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, Snapshot,
+    WireStamp,
 };
 
 const PEER_A: PeerId = PeerId(1);
@@ -168,6 +169,122 @@ fn delta_filter_omits_non_readable_ops_without_redaction() {
             },
         ]
     );
+}
+
+#[test]
+fn crdt_sync_round_trips_through_serde() {
+    let sync = CrdtSync::new(
+        vec![
+            (
+                1,
+                WireStamp {
+                    wall_time: 200,
+                    logical: 0,
+                    peer: 1,
+                },
+            ),
+            (
+                2,
+                WireStamp {
+                    wall_time: 180,
+                    logical: 3,
+                    peer: 2,
+                },
+            ),
+        ],
+        vec![
+            CrdtOp::new(
+                NodeId(1),
+                WireStamp {
+                    wall_time: 200,
+                    logical: 0,
+                    peer: 1,
+                },
+                vec![10, 20],
+            ),
+            CrdtOp::keyed(
+                NodeId(2),
+                NodeKey::new("scores/alice").unwrap(),
+                WireStamp {
+                    wall_time: 180,
+                    logical: 3,
+                    peer: 2,
+                },
+                vec![30],
+            ),
+        ],
+    );
+    let json = serde_json::to_string(&IpcMessage::CrdtSync(sync.clone())).unwrap();
+    let back: IpcMessage = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(back, IpcMessage::CrdtSync(sync));
+}
+
+#[test]
+fn crdt_sync_filter_omits_non_readable_ops_but_keeps_frontier() {
+    let frontier = vec![
+        (
+            1,
+            WireStamp {
+                wall_time: 200,
+                logical: 0,
+                peer: 1,
+            },
+        ),
+        (
+            2,
+            WireStamp {
+                wall_time: 200,
+                logical: 0,
+                peer: 2,
+            },
+        ),
+    ];
+    let sync = CrdtSync::new(
+        frontier.clone(),
+        vec![
+            CrdtOp::new(
+                NodeId(1),
+                WireStamp {
+                    wall_time: 1,
+                    logical: 0,
+                    peer: 1,
+                },
+                vec![1],
+            ),
+            CrdtOp::new(
+                NodeId(2),
+                WireStamp {
+                    wall_time: 2,
+                    logical: 0,
+                    peer: 1,
+                },
+                vec![2],
+            ),
+            CrdtOp::new(
+                NodeId(3),
+                WireStamp {
+                    wall_time: 3,
+                    logical: 0,
+                    peer: 1,
+                },
+                vec![3],
+            ),
+        ],
+    );
+    let mut permissions = PeerPermissions::new();
+    permissions.allow_many(PEER_A, OpKind::Read, [NodeId(1), NodeId(3)]);
+
+    let filtered = sync.filter_readable(&permissions, PEER_A);
+
+    // Node 2's op is dropped entirely (omission, not redaction); 1 and 3 stay.
+    assert_eq!(
+        filtered.ops.iter().map(|op| op.node).collect::<Vec<_>>(),
+        vec![NodeId(1), NodeId(3)],
+    );
+    // The stamp-frontier advertisement is metadata, retained in full so the
+    // receiver can still compute a sound causal-stability watermark.
+    assert_eq!(filtered.frontier, frontier);
 }
 
 #[test]
@@ -409,8 +526,8 @@ fn key_index_survives_nodeid_churn() {
 #[cfg(feature = "ipc-binary")]
 mod binary {
     use lazily::{
-        DecodeError, Delta, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeKey, NodeSnapshot,
-        Snapshot,
+        CrdtOp, CrdtSync, DecodeError, Delta, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeKey,
+        NodeSnapshot, Snapshot, WireStamp,
     };
 
     #[test]
@@ -466,6 +583,49 @@ mod binary {
             vec![NodeId(1), NodeId(2)],
         );
         let message = IpcMessage::Snapshot(snapshot);
+
+        let encoded = message.encode_binary().unwrap();
+        let decoded = IpcMessage::decode_binary(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_binary_round_trips_crdt_sync() {
+        // Postcard is positional: the CrdtSync frontier, the optional NodeKey,
+        // and both keyed and unkeyed ops must survive the binary round-trip.
+        let sync = CrdtSync::new(
+            vec![(
+                1,
+                WireStamp {
+                    wall_time: 200,
+                    logical: 0,
+                    peer: 1,
+                },
+            )],
+            vec![
+                CrdtOp::new(
+                    NodeId(1),
+                    WireStamp {
+                        wall_time: 200,
+                        logical: 0,
+                        peer: 1,
+                    },
+                    vec![9],
+                ),
+                CrdtOp::keyed(
+                    NodeId(2),
+                    NodeKey::new("scores/alice").unwrap(),
+                    WireStamp {
+                        wall_time: 180,
+                        logical: 1,
+                        peer: 2,
+                    },
+                    vec![8, 7],
+                ),
+            ],
+        );
+        let message = IpcMessage::CrdtSync(sync);
 
         let encoded = message.encode_binary().unwrap();
         let decoded = IpcMessage::decode_binary(&encoded).unwrap();

@@ -192,6 +192,12 @@ fn authorize_inbound(peer: PeerId, perms: &PeerPermissions, message: &IpcMessage
             .collect(),
         // A peer is not the snapshot authority; it cannot push full state.
         IpcMessage::Snapshot(_) => Vec::new(),
+        // CrdtSync carries multi-writer plane traffic. Its wire format and
+        // per-peer read-filtering land in #lzcrdtplane5a; BridgeHub fan-out of
+        // the CRDT plane (translating sync frames to/from replica state) is the
+        // runtime-integration slice #lzcrdtplane5b. Point-to-point CrdtSync over
+        // an IpcSink/IpcSource pair already works today.
+        IpcMessage::CrdtSync(_) => Vec::new(),
     }
 }
 
