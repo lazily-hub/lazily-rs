@@ -133,6 +133,74 @@ fn derived_slot_updates_on_transition() {
     assert_eq!(label.get(&ctx), "opening");
 }
 
+#[derive(PartialEq, Clone, Debug)]
+enum ActiveDoor {
+    Primary,
+    Secondary,
+}
+
+#[derive(Debug)]
+enum ActiveDoorEvent {
+    Toggle,
+}
+
+#[test]
+fn derived_slot_drops_stale_machine_dependency_after_branch_switch() {
+    let ctx = Context::new();
+    let active = StateMachine::new(
+        &ctx,
+        ActiveDoor::Primary,
+        |s, _: &ActiveDoorEvent| match s {
+            ActiveDoor::Primary => Some(ActiveDoor::Secondary),
+            ActiveDoor::Secondary => Some(ActiveDoor::Primary),
+        },
+    );
+    let primary = garage_door(&ctx);
+    let secondary = garage_door(&ctx);
+    let active_state = active.state_handle();
+    let primary_state = primary.state_handle();
+    let secondary_state = secondary.state_handle();
+
+    let recomputes = Rc::new(RefCell::new(0usize));
+    let recomputes_inner = recomputes.clone();
+    let selected_label = ctx.memo(move |ctx| {
+        *recomputes_inner.borrow_mut() += 1;
+        match active_state.get(ctx) {
+            ActiveDoor::Primary => match primary_state.get(ctx) {
+                Door::Closed => "primary:closed",
+                Door::Opening => "primary:opening",
+                Door::Open => "primary:open",
+                Door::Closing => "primary:closing",
+            },
+            ActiveDoor::Secondary => match secondary_state.get(ctx) {
+                Door::Closed => "secondary:closed",
+                Door::Opening => "secondary:opening",
+                Door::Open => "secondary:open",
+                Door::Closing => "secondary:closing",
+            },
+        }
+    });
+
+    assert_eq!(selected_label.get(&ctx), "primary:closed");
+    primary.send(&ctx, DoorEvent::ButtonPressed);
+    assert_eq!(selected_label.get(&ctx), "primary:opening");
+    active.send(&ctx, ActiveDoorEvent::Toggle);
+    assert_eq!(selected_label.get(&ctx), "secondary:closed");
+    let after_switch = *recomputes.borrow();
+
+    primary.send(&ctx, DoorEvent::FullyOpen);
+    assert_eq!(selected_label.get(&ctx), "secondary:closed");
+    assert_eq!(
+        *recomputes.borrow(),
+        after_switch,
+        "branch switch must remove the stale primary state dependency"
+    );
+
+    secondary.send(&ctx, DoorEvent::ButtonPressed);
+    assert_eq!(selected_label.get(&ctx), "secondary:opening");
+    assert_eq!(*recomputes.borrow(), after_switch + 1);
+}
+
 #[test]
 fn eager_signal_tracks_machine_state() {
     let ctx = Context::new();
@@ -266,6 +334,41 @@ fn disposing_on_transition_stops_observing() {
 
     m.send(&ctx, DoorEvent::FullyOpen);
     assert_eq!(*count.borrow(), 1);
+}
+
+#[test]
+fn recreating_on_transition_observer_starts_fresh_after_dispose() {
+    let ctx = Context::new();
+    let m = garage_door(&ctx);
+
+    let first = Rc::new(RefCell::new(Vec::<(Door, Door)>::new()));
+    let first_inner = first.clone();
+    let observer = m.on_transition(&ctx, move |old, new| {
+        first_inner.borrow_mut().push((old.clone(), new.clone()));
+    });
+
+    m.send(&ctx, DoorEvent::ButtonPressed);
+    observer.dispose(&ctx);
+
+    let second = Rc::new(RefCell::new(Vec::<(Door, Door)>::new()));
+    let second_inner = second.clone();
+    let _observer = m.on_transition(&ctx, move |old, new| {
+        second_inner.borrow_mut().push((old.clone(), new.clone()));
+    });
+
+    m.send(&ctx, DoorEvent::FullyOpen);
+    m.send(&ctx, DoorEvent::ButtonPressed);
+
+    assert_eq!(
+        first.borrow().clone(),
+        vec![(Door::Closed, Door::Opening)],
+        "disposed observer must not leak callbacks after recreation"
+    );
+    assert_eq!(
+        second.borrow().clone(),
+        vec![(Door::Opening, Door::Open), (Door::Open, Door::Closing)],
+        "new observer should seed from current state and only see future transitions"
+    );
 }
 
 // -- Batch transitions ------------------------------------------------------

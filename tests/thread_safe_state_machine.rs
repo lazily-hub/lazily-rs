@@ -6,6 +6,7 @@
 //! `state_is()`.
 
 use std::sync::Arc;
+use std::sync::Barrier;
 use std::sync::Mutex;
 
 use lazily::{ThreadSafeContext, ThreadSafeStateMachine};
@@ -133,6 +134,74 @@ fn thread_safe_derived_slot_updates_on_transition() {
     assert_eq!(ctx.get(&label), "closed");
     m.send(&ctx, DoorEvent::ButtonPressed);
     assert_eq!(ctx.get(&label), "opening");
+}
+
+#[derive(PartialEq, Clone, Debug)]
+enum ActiveDoor {
+    Primary,
+    Secondary,
+}
+
+#[derive(Debug)]
+enum ActiveDoorEvent {
+    Toggle,
+}
+
+#[test]
+fn thread_safe_derived_slot_drops_stale_machine_dependency_after_branch_switch() {
+    let ctx = ThreadSafeContext::new();
+    let active = ThreadSafeStateMachine::new(
+        &ctx,
+        ActiveDoor::Primary,
+        |s, _: &ActiveDoorEvent| match s {
+            ActiveDoor::Primary => Some(ActiveDoor::Secondary),
+            ActiveDoor::Secondary => Some(ActiveDoor::Primary),
+        },
+    );
+    let primary = garage_door(&ctx);
+    let secondary = garage_door(&ctx);
+    let active_state = active.state_handle();
+    let primary_state = primary.state_handle();
+    let secondary_state = secondary.state_handle();
+
+    let recomputes = Arc::new(Mutex::new(0usize));
+    let recomputes_inner = recomputes.clone();
+    let selected_label = ctx.memo(move |ctx| {
+        *recomputes_inner.lock().unwrap() += 1;
+        match ctx.get_cell(&active_state) {
+            ActiveDoor::Primary => match ctx.get_cell(&primary_state) {
+                Door::Closed => "primary:closed",
+                Door::Opening => "primary:opening",
+                Door::Open => "primary:open",
+                Door::Closing => "primary:closing",
+            },
+            ActiveDoor::Secondary => match ctx.get_cell(&secondary_state) {
+                Door::Closed => "secondary:closed",
+                Door::Opening => "secondary:opening",
+                Door::Open => "secondary:open",
+                Door::Closing => "secondary:closing",
+            },
+        }
+    });
+
+    assert_eq!(ctx.get(&selected_label), "primary:closed");
+    primary.send(&ctx, DoorEvent::ButtonPressed);
+    assert_eq!(ctx.get(&selected_label), "primary:opening");
+    active.send(&ctx, ActiveDoorEvent::Toggle);
+    assert_eq!(ctx.get(&selected_label), "secondary:closed");
+    let after_switch = *recomputes.lock().unwrap();
+
+    primary.send(&ctx, DoorEvent::FullyOpen);
+    assert_eq!(ctx.get(&selected_label), "secondary:closed");
+    assert_eq!(
+        *recomputes.lock().unwrap(),
+        after_switch,
+        "branch switch must remove the stale primary state dependency"
+    );
+
+    secondary.send(&ctx, DoorEvent::ButtonPressed);
+    assert_eq!(ctx.get(&selected_label), "secondary:opening");
+    assert_eq!(*recomputes.lock().unwrap(), after_switch + 1);
 }
 
 #[test]
@@ -274,6 +343,44 @@ fn thread_safe_disposing_on_transition_stops_observing() {
     assert_eq!(*count.lock().unwrap(), 1);
 }
 
+#[test]
+fn thread_safe_recreating_on_transition_observer_starts_fresh_after_dispose() {
+    let ctx = ThreadSafeContext::new();
+    let m = garage_door(&ctx);
+
+    let first = Arc::new(Mutex::new(Vec::<(Door, Door)>::new()));
+    let first_inner = first.clone();
+    let observer = m.on_transition(&ctx, move |old, new| {
+        first_inner.lock().unwrap().push((old.clone(), new.clone()));
+    });
+
+    m.send(&ctx, DoorEvent::ButtonPressed);
+    ctx.dispose_effect(&observer);
+
+    let second = Arc::new(Mutex::new(Vec::<(Door, Door)>::new()));
+    let second_inner = second.clone();
+    let _observer = m.on_transition(&ctx, move |old, new| {
+        second_inner
+            .lock()
+            .unwrap()
+            .push((old.clone(), new.clone()));
+    });
+
+    m.send(&ctx, DoorEvent::FullyOpen);
+    m.send(&ctx, DoorEvent::ButtonPressed);
+
+    assert_eq!(
+        first.lock().unwrap().clone(),
+        vec![(Door::Closed, Door::Opening)],
+        "disposed observer must not leak callbacks after recreation"
+    );
+    assert_eq!(
+        second.lock().unwrap().clone(),
+        vec![(Door::Opening, Door::Open), (Door::Open, Door::Closing)],
+        "new observer should seed from current state and only see future transitions"
+    );
+}
+
 // -- Batch transitions ------------------------------------------------------
 
 #[test]
@@ -311,4 +418,49 @@ fn thread_safe_machine_shares_state_across_threads() {
     let from_thread = handle.join().unwrap();
     assert_eq!(from_thread, 10);
     assert_eq!(m.state(&ctx), 10);
+}
+
+#[test]
+fn thread_safe_machine_handles_concurrent_send_and_state_reads() {
+    let ctx = Arc::new(ThreadSafeContext::new());
+    let m = ThreadSafeStateMachine::new(&ctx, 0usize, |_, next: &usize| Some(*next));
+    let start = Arc::new(Barrier::new(5));
+
+    let writer_ctx = Arc::clone(&ctx);
+    let writer_machine = m.clone();
+    let writer_start = Arc::clone(&start);
+    let writer = std::thread::spawn(move || {
+        writer_start.wait();
+        for value in 1..=250 {
+            assert!(writer_machine.send(&writer_ctx, value));
+        }
+    });
+
+    let readers = (0..4)
+        .map(|_| {
+            let reader_ctx = Arc::clone(&ctx);
+            let reader_machine = m.clone();
+            let reader_start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                reader_start.wait();
+                let mut last_seen = 0usize;
+                for _ in 0..250 {
+                    let current = reader_machine.state(&reader_ctx);
+                    assert!(current <= 250);
+                    last_seen = last_seen.max(current);
+                }
+                last_seen
+            })
+        })
+        .collect::<Vec<_>>();
+
+    writer.join().unwrap();
+    let max_seen = readers
+        .into_iter()
+        .map(|reader| reader.join().unwrap())
+        .max()
+        .unwrap_or(0);
+
+    assert_eq!(m.state(&ctx), 250);
+    assert!(max_seen <= 250);
 }
