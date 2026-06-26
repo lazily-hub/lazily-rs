@@ -91,7 +91,7 @@ pub use context::Context;
 #[cfg(feature = "distributed")]
 pub use crdt::{
     CellCrdt, CrdtPlane, Hlc, HlcStamp, LwwRegister, MergeMechanism, MvRegister, PnCounter,
-    ReplicatedCell, StampFrontier, UnsupportedMechanism, VersionVector,
+    RegisterCrdt, ReplicatedCell, StampFrontier, UnsupportedMechanism, VersionVector,
 };
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};

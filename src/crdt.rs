@@ -44,9 +44,13 @@ use crate::distributed::PeerId;
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum MergeMechanism {
     /// Conflict-free replicated data type (this module). Converges without
-    /// coordination; the only mechanism implemented today.
+    /// coordination; covers the multi-value ([`MvRegister`]) and counter
+    /// ([`PnCounter`]) register shapes, which retain concurrent writes rather
+    /// than picking a single winner.
     Crdt,
-    /// Last-writer-wins by HLC/Lamport timestamp at the cell level. Reserved.
+    /// Last-writer-wins by [`HlcStamp`] at the cell level, backed by
+    /// [`LwwRegister`]: the highest stamp wins and the losing concurrent write
+    /// is dropped. The "current value" mechanism most reactive cells want.
     Lww,
     /// Operational transform (server-ordered op rebase). Reserved.
     Ot,
@@ -75,7 +79,7 @@ impl std::error::Error for UnsupportedMechanism {}
 impl MergeMechanism {
     /// Whether this mechanism has a working implementation in this build.
     pub fn is_implemented(self) -> bool {
-        matches!(self, MergeMechanism::Crdt)
+        matches!(self, MergeMechanism::Crdt | MergeMechanism::Lww)
     }
 
     /// Fail-closed gate: returns `Ok` only for an implemented mechanism, never
@@ -186,6 +190,19 @@ pub trait CellCrdt {
     fn value(&self) -> Self::Value;
 }
 
+/// A [`CellCrdt`] that names the cell-level [`MergeMechanism`] it implements,
+/// so a [`ReplicatedCell`] can report (and a `merge:` selector can choose) the
+/// register kind backing a cell.
+///
+/// The three register shapes map to two mechanisms: [`LwwRegister`] is the
+/// dedicated last-writer-wins mechanism ([`MergeMechanism::Lww`]); the
+/// concurrency-retaining shapes — [`MvRegister`] and [`PnCounter`] — are the
+/// general coordination-free [`MergeMechanism::Crdt`].
+pub trait RegisterCrdt: CellCrdt {
+    /// The `merge:` mechanism a cell backed by this register declares.
+    const MECHANISM: MergeMechanism;
+}
+
 /// Last-writer-wins register: the highest [`HlcStamp`] wins. The default
 /// "current value" register most reactive cells want; silently drops the losing
 /// side of a concurrent write.
@@ -236,6 +253,10 @@ impl<T: Clone + PartialEq> CellCrdt for LwwRegister<T> {
     fn value(&self) -> T {
         self.value.clone()
     }
+}
+
+impl<T: Clone + PartialEq> RegisterCrdt for LwwRegister<T> {
+    const MECHANISM: MergeMechanism = MergeMechanism::Lww;
 }
 
 /// A version vector: per-peer event counters used to detect causal dominance.
@@ -443,6 +464,10 @@ impl<T: Clone + PartialEq> CellCrdt for MvRegister<T> {
     }
 }
 
+impl<T: Clone + PartialEq> RegisterCrdt for MvRegister<T> {
+    const MECHANISM: MergeMechanism = MergeMechanism::Crdt;
+}
+
 /// Positive-negative counter: per-peer increment and decrement tallies merged
 /// by per-peer maximum. Value is `sum(incr) - sum(decr)`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -493,6 +518,10 @@ impl CellCrdt for PnCounter {
     }
 }
 
+impl RegisterCrdt for PnCounter {
+    const MECHANISM: MergeMechanism = MergeMechanism::Crdt;
+}
+
 /// A multi-write **root** cell backed by a CRDT (`merge: crdt`).
 ///
 /// It owns a CRDT replica and a reactive [`CellHandle`]. A local write or a
@@ -510,9 +539,6 @@ where
     C: CellCrdt,
     C::Value: PartialEq + Clone + 'static,
 {
-    /// The merge mechanism this cell declares.
-    pub const MERGE: MergeMechanism = MergeMechanism::Crdt;
-
     /// Bind a CRDT replica to a fresh reactive root cell in `ctx`, seeded with
     /// the replica's current value.
     pub fn bind(ctx: &Context, crdt: C) -> Self {
@@ -563,6 +589,53 @@ where
         } else {
             false
         }
+    }
+}
+
+impl<C> ReplicatedCell<C>
+where
+    C: RegisterCrdt,
+    C::Value: PartialEq + Clone + 'static,
+{
+    /// The `merge:` mechanism this cell declares, derived from its backing
+    /// register: [`MergeMechanism::Lww`] for an [`LwwRegister`],
+    /// [`MergeMechanism::Crdt`] for [`MvRegister`]/[`PnCounter`].
+    pub const MERGE: MergeMechanism = C::MECHANISM;
+
+    /// The `merge:` mechanism this cell declares (the value form of
+    /// [`MERGE`](Self::MERGE)).
+    pub fn mechanism(&self) -> MergeMechanism {
+        C::MECHANISM
+    }
+}
+
+impl<T> ReplicatedCell<LwwRegister<T>>
+where
+    T: Clone + PartialEq + 'static,
+{
+    /// Bind a last-writer-wins cell (`merge: lww`) seeded with `value` written
+    /// at `stamp`.
+    pub fn lww(ctx: &Context, value: T, stamp: HlcStamp) -> Self {
+        Self::bind(ctx, LwwRegister::new(value, stamp))
+    }
+}
+
+impl<T> ReplicatedCell<MvRegister<T>>
+where
+    T: Clone + PartialEq + 'static,
+{
+    /// Bind a multi-value cell (`merge: crdt`) that retains concurrent writes
+    /// as a set until a causally-later write supersedes them. Starts empty.
+    pub fn multi_value(ctx: &Context) -> Self {
+        Self::bind(ctx, MvRegister::new())
+    }
+}
+
+impl ReplicatedCell<PnCounter> {
+    /// Bind a PN-counter cell (`merge: crdt`) — per-peer increment/decrement
+    /// tallies merged by per-peer max. Starts at zero.
+    pub fn counter(ctx: &Context) -> Self {
+        Self::bind(ctx, PnCounter::new())
     }
 }
 
@@ -661,17 +734,20 @@ impl CrdtPlane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn peer(n: u64) -> PeerId {
         PeerId(n)
     }
 
     #[test]
-    fn merge_mechanism_only_crdt_is_implemented() {
-        assert!(MergeMechanism::Crdt.is_implemented());
-        assert_eq!(MergeMechanism::Crdt.resolve(), Ok(MergeMechanism::Crdt));
+    fn merge_mechanism_crdt_and_lww_are_implemented() {
+        for m in [MergeMechanism::Crdt, MergeMechanism::Lww] {
+            assert!(m.is_implemented());
+            assert_eq!(m.resolve(), Ok(m));
+        }
+        // The remaining mechanisms stay reserved and fail closed.
         for m in [
-            MergeMechanism::Lww,
             MergeMechanism::Ot,
             MergeMechanism::Lease,
             MergeMechanism::Custom,
@@ -778,7 +854,8 @@ mod tests {
             ReplicatedCell::bind(&ctx, LwwRegister::new(1i32, HlcStamp::new(1, 0, peer(1))));
         assert_eq!(
             ReplicatedCell::<LwwRegister<i32>>::MERGE,
-            MergeMechanism::Crdt
+            MergeMechanism::Lww,
+            "an LwwRegister-backed cell declares the lww mechanism"
         );
 
         let handle = replica.handle();
@@ -963,5 +1040,176 @@ mod tests {
             local > HlcStamp::new(1_000, 5, peer(2)),
             "local clock dominates the observed remote causal past"
         );
+    }
+
+    // --- #lzcrdtplane2: MergeMechanism <-> register wiring + constructors ---
+
+    #[test]
+    fn registers_declare_their_merge_mechanism() {
+        assert_eq!(
+            <LwwRegister<i32> as RegisterCrdt>::MECHANISM,
+            MergeMechanism::Lww
+        );
+        assert_eq!(
+            <MvRegister<i32> as RegisterCrdt>::MECHANISM,
+            MergeMechanism::Crdt
+        );
+        assert_eq!(<PnCounter as RegisterCrdt>::MECHANISM, MergeMechanism::Crdt);
+    }
+
+    #[test]
+    fn replicated_cell_constructors_pick_the_right_mechanism() {
+        let ctx = Context::new();
+
+        let lww = ReplicatedCell::lww(&ctx, 7i32, HlcStamp::new(1, 0, peer(1)));
+        assert_eq!(lww.mechanism(), MergeMechanism::Lww);
+        assert_eq!(lww.value(), 7);
+
+        let mv: ReplicatedCell<MvRegister<i32>> = ReplicatedCell::multi_value(&ctx);
+        assert_eq!(mv.mechanism(), MergeMechanism::Crdt);
+        assert!(mv.value().is_empty());
+
+        let pn = ReplicatedCell::counter(&ctx);
+        assert_eq!(pn.mechanism(), MergeMechanism::Crdt);
+        assert_eq!(pn.value(), 0);
+    }
+
+    #[test]
+    fn lww_constructor_drives_the_reactive_graph() {
+        let ctx = Context::new();
+        let mut cell = ReplicatedCell::lww(&ctx, 1i32, HlcStamp::new(1, 0, peer(1)));
+        let doubled = {
+            let h = cell.handle();
+            ctx.computed(move |ctx| ctx.get_cell(&h) * 2)
+        };
+        assert_eq!(ctx.get(&doubled), 2);
+        // A higher-stamped remote write converges and recomputes downstream.
+        cell.merge_remote(&ctx, &LwwRegister::new(10i32, HlcStamp::new(5, 0, peer(2))));
+        assert_eq!(ctx.get(&doubled), 20);
+    }
+
+    #[test]
+    fn pn_counter_constructor_increments_through_update() {
+        let ctx = Context::new();
+        let mut cell = ReplicatedCell::counter(&ctx);
+        cell.update(&ctx, |c| c.increment(peer(1), 3));
+        cell.update(&ctx, |c| c.decrement(peer(1), 1));
+        assert_eq!(cell.value(), 2);
+        assert_eq!(ctx.get_cell(&cell.handle()), 2);
+    }
+
+    // --- #lzcrdtplane2: register merge-law property tests (proptest) ---
+
+    /// A deterministic LWW register from a `(wall, logical, peer)` tuple. The
+    /// value is a function of the stamp because a stamp uniquely identifies a
+    /// write — equal stamps necessarily carry equal values, so the
+    /// last-writer-wins merge stays a well-defined semilattice.
+    fn lww_from(parts: (u64, u64, u64)) -> LwwRegister<i32> {
+        let (wall, logical, p) = parts;
+        let v = (wall * 100 + logical * 10 + p) as i32;
+        LwwRegister::new(v, HlcStamp::new(wall, logical, peer(p)))
+    }
+
+    fn merged_lww(a: &LwwRegister<i32>, b: &LwwRegister<i32>) -> LwwRegister<i32> {
+        let mut out = a.clone();
+        out.merge_from(b);
+        out
+    }
+
+    /// A PN counter from per-peer (incr, decr) tallies for peers 1..=3.
+    fn pn_from(tallies: [(u64, u64); 3]) -> PnCounter {
+        let mut c = PnCounter::new();
+        for (i, (inc, dec)) in tallies.iter().enumerate() {
+            let p = peer(i as u64 + 1);
+            c.increment(p, *inc);
+            c.decrement(p, *dec);
+        }
+        c
+    }
+
+    fn merged_pn(a: &PnCounter, b: &PnCounter) -> PnCounter {
+        let mut out = a.clone();
+        out.merge_from(b);
+        out
+    }
+
+    proptest! {
+        // LWW merge is commutative, associative, and idempotent: the surviving
+        // value/stamp is the maximum stamp regardless of merge order/grouping.
+        #[test]
+        fn lww_merge_is_a_semilattice(
+            x in (0u64..4, 0u64..4, 1u64..4),
+            y in (0u64..4, 0u64..4, 1u64..4),
+            z in (0u64..4, 0u64..4, 1u64..4),
+        ) {
+            let (a, b, c) = (lww_from(x), lww_from(y), lww_from(z));
+
+            // Commutative.
+            prop_assert_eq!(merged_lww(&a, &b).value(), merged_lww(&b, &a).value());
+
+            // Associative.
+            let left = merged_lww(&merged_lww(&a, &b), &c);
+            let right = merged_lww(&a, &merged_lww(&b, &c));
+            prop_assert_eq!(left.value(), right.value());
+
+            // Idempotent.
+            let once = merged_lww(&a, &b);
+            let twice = merged_lww(&once, &b);
+            prop_assert_eq!(once.value(), twice.value());
+            prop_assert!(!once.clone().merge_from(&b), "re-merge is a no-op");
+        }
+
+        // PN counter merge is commutative, associative, and idempotent.
+        #[test]
+        fn pn_counter_merge_is_a_semilattice(
+            x in prop::array::uniform3((0u64..50, 0u64..50)),
+            y in prop::array::uniform3((0u64..50, 0u64..50)),
+            z in prop::array::uniform3((0u64..50, 0u64..50)),
+        ) {
+            let (a, b, c) = (pn_from(x), pn_from(y), pn_from(z));
+
+            prop_assert_eq!(merged_pn(&a, &b).value(), merged_pn(&b, &a).value());
+
+            let left = merged_pn(&merged_pn(&a, &b), &c);
+            let right = merged_pn(&a, &merged_pn(&b, &c));
+            prop_assert_eq!(left.value(), right.value());
+
+            let once = merged_pn(&a, &b);
+            prop_assert!(!once.clone().merge_from(&b), "re-merge is a no-op");
+        }
+
+        // StampFrontier merge is commutative, associative, and idempotent
+        // (per-peer max of a totally-ordered stamp).
+        #[test]
+        fn stamp_frontier_merge_is_a_semilattice(
+            xs in prop::collection::vec((1u64..5, 0u64..8), 0..6),
+            ys in prop::collection::vec((1u64..5, 0u64..8), 0..6),
+            zs in prop::collection::vec((1u64..5, 0u64..8), 0..6),
+        ) {
+            let build = |obs: &[(u64, u64)]| {
+                let mut f = StampFrontier::new();
+                for &(p, w) in obs {
+                    f.observe(peer(p), HlcStamp::new(w, 0, peer(p)));
+                }
+                f
+            };
+            let (a, b, c) = (build(&xs), build(&ys), build(&zs));
+
+            let mut ab = a.clone();
+            ab.merge(&b);
+            let mut ba = b.clone();
+            ba.merge(&a);
+            prop_assert_eq!(&ab, &ba, "commutative");
+
+            let mut left = ab.clone();
+            left.merge(&c);
+            let mut bc = b.clone();
+            bc.merge(&c);
+            let mut right = a.clone();
+            right.merge(&bc);
+            prop_assert_eq!(&left, &right, "associative");
+
+            prop_assert!(!ab.clone().merge(&b), "idempotent: re-merge changes nothing");
+        }
     }
 }
