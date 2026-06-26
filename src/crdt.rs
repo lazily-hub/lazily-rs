@@ -26,6 +26,7 @@
 //! converge regardless of delivery order or duplication.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::Context;
 use crate::cell::CellHandle;
@@ -268,6 +269,104 @@ impl VersionVector {
     }
 }
 
+/// A per-peer frontier of the highest [`HlcStamp`] observed from each peer.
+///
+/// This is deliberately distinct from [`VersionVector`], which is a Lamport
+/// *counter* vector consumed internally by [`MvRegister`] and has no public
+/// minimum. The distributed cell plane's tombstone GC needs an
+/// `HlcStamp`-keyed watermark — deletes are stamped with [`HlcStamp`], not a
+/// counter — and the **causal-stability frontier** is the *minimum* observed
+/// stamp across every known peer: the causal point every replica has durably
+/// observed, below which a tombstone is collectable everywhere. A single
+/// replica's local clock is explicitly **not** a sound watermark; only this
+/// cross-peer minimum is.
+///
+/// `observe`/`merge` are commutative, associative, and idempotent (per-peer
+/// `max` of a totally-ordered stamp), so two replicas that exchange frontiers
+/// in any order converge to the same map.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StampFrontier(BTreeMap<PeerId, HlcStamp>);
+
+impl StampFrontier {
+    /// An empty frontier — no peer observed yet.
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    /// Record that `stamp` was observed from `peer`, keeping the higher of the
+    /// stored and new stamp (per-peer `max`). Returns `true` iff the stored
+    /// stamp advanced.
+    pub fn observe(&mut self, peer: PeerId, stamp: HlcStamp) -> bool {
+        match self.0.get(&peer) {
+            Some(&cur) if cur >= stamp => false,
+            _ => {
+                self.0.insert(peer, stamp);
+                true
+            }
+        }
+    }
+
+    /// The highest stamp observed from `peer`, if any.
+    pub fn get(&self, peer: PeerId) -> Option<HlcStamp> {
+        self.0.get(&peer).copied()
+    }
+
+    /// Merge another frontier into this one, taking the per-peer `max` stamp.
+    /// Commutative, associative, idempotent. Returns `true` iff any entry
+    /// advanced.
+    pub fn merge(&mut self, other: &StampFrontier) -> bool {
+        let mut changed = false;
+        for (&peer, &stamp) in &other.0 {
+            changed |= self.observe(peer, stamp);
+        }
+        changed
+    }
+
+    /// The causal-stability frontier across `membership`: the minimum observed
+    /// stamp over every expected peer.
+    ///
+    /// Returns `None` until **every** peer in `membership` has been observed at
+    /// least once. A member with no observed stamp may still produce an op
+    /// causally earlier than anything seen so far, so nothing is yet stable —
+    /// the frontier is only meaningful once the full membership is accounted
+    /// for. An empty `membership` likewise yields `None`.
+    pub fn frontier<I>(&self, membership: I) -> Option<HlcStamp>
+    where
+        I: IntoIterator<Item = PeerId>,
+    {
+        let mut min: Option<HlcStamp> = None;
+        for peer in membership {
+            let stamp = self.get(peer)?;
+            min = Some(match min {
+                Some(m) => m.min(stamp),
+                None => stamp,
+            });
+        }
+        min
+    }
+
+    /// `true` iff every entry in `other` is `<=` the corresponding entry in
+    /// `self` — i.e. `self` causally dominates or equals `other` on every peer
+    /// `other` knows about.
+    pub fn dominates(&self, other: &StampFrontier) -> bool {
+        other
+            .0
+            .iter()
+            .all(|(peer, stamp)| self.0.get(peer).is_some_and(|cur| cur >= stamp))
+    }
+
+    /// Number of peers with at least one observed stamp.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// `true` iff no peer has been observed yet.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Multi-value register: surfaces concurrent writes as a set rather than
 /// dropping a loser. Each write is tagged with a [`VersionVector`]; a merge
 /// keeps only values whose vector is not dominated by another.
@@ -467,6 +566,98 @@ where
     }
 }
 
+/// The multi-writer coordination skeleton for one shared session (Phase 1 of
+/// the distributed CRDT cell plane, `#lzcrdtplane`).
+///
+/// Today the plane owns only the pieces needed to compute a sound GC watermark:
+/// the local replica identity, its hybrid logical clock ([`Hlc`]), the expected
+/// peer membership, and the [`StampFrontier`]. It stamps local events
+/// ([`tick`](Self::tick)), folds observed remote stamps into both the clock and
+/// the frontier ([`observe_remote`](Self::observe_remote)), and exposes the
+/// causal-stability frontier ([`stability_frontier`](Self::stability_frontier))
+/// the tombstone GC will consume.
+///
+/// Anti-entropy exchange, the causal op log, and frontier-driven
+/// `SeqCrdt`/`TextCrdt` GC are added in later phases (`#lzcrdtplane3`/`4`); there
+/// is no transport here. With `< 2` live writers the plane is inert and the IPC
+/// Snapshot/Delta mirror is unaffected.
+#[derive(Debug, Clone)]
+pub struct CrdtPlane {
+    peer: PeerId,
+    clock: Hlc,
+    membership: BTreeSet<PeerId>,
+    frontier: StampFrontier,
+}
+
+impl CrdtPlane {
+    /// Create a plane for the local `peer`, which is a member of its own
+    /// session from the start.
+    pub fn new(peer: PeerId) -> Self {
+        let mut membership = BTreeSet::new();
+        membership.insert(peer);
+        Self {
+            peer,
+            clock: Hlc::new(peer),
+            membership,
+            frontier: StampFrontier::new(),
+        }
+    }
+
+    /// The local replica identity.
+    pub fn peer(&self) -> PeerId {
+        self.peer
+    }
+
+    /// Declare `peer` an expected member of the session.
+    ///
+    /// [`stability_frontier`](Self::stability_frontier) stays `None` until every
+    /// member — including any added here — has been observed, so adding a peer
+    /// that has not yet produced an op correctly withholds the frontier.
+    pub fn add_peer(&mut self, peer: PeerId) {
+        self.membership.insert(peer);
+    }
+
+    /// The expected peer membership (including the local peer), in `PeerId`
+    /// order.
+    pub fn membership(&self) -> impl Iterator<Item = PeerId> + '_ {
+        self.membership.iter().copied()
+    }
+
+    /// Stamp a local event at wall time `now_micros`: advance the clock via
+    /// [`Hlc::send`] and record the resulting stamp in the frontier under the
+    /// local peer. Returns the fresh local stamp.
+    pub fn tick(&mut self, now_micros: u64) -> HlcStamp {
+        let stamp = self.clock.send(now_micros);
+        self.frontier.observe(self.peer, stamp);
+        stamp
+    }
+
+    /// Observe a `remote` stamp at wall time `now_micros`: add its originating
+    /// peer to membership, record it in the frontier under that peer, and feed
+    /// it to [`Hlc::recv`] so the local clock dominates the observed causal
+    /// past. Returns the local receive stamp.
+    pub fn observe_remote(&mut self, remote: HlcStamp, now_micros: u64) -> HlcStamp {
+        self.membership.insert(remote.peer);
+        self.frontier.observe(remote.peer, remote);
+        self.clock.recv(remote, now_micros)
+    }
+
+    /// The causal-stability frontier: the minimum stamp observed across every
+    /// expected member, or `None` until all members are seen.
+    ///
+    /// A tombstone whose stamp is `<=` this value is collectable on every
+    /// replica; this is the watermark `#lzcrdtplane4` will drive periodic
+    /// `SeqCrdt::gc` / `TextCrdt::gc_with` from.
+    pub fn stability_frontier(&self) -> Option<HlcStamp> {
+        self.frontier.frontier(self.membership.iter().copied())
+    }
+
+    /// Immutable access to the per-peer stamp frontier.
+    pub fn frontier(&self) -> &StampFrontier {
+        &self.frontier
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,5 +834,134 @@ mod tests {
         assert_eq!(a.value(), b.value());
         assert_eq!(a.value(), 9, "highest HLC stamp wins on both replicas");
         assert_eq!(ctx_a.get_cell(&a.handle()), ctx_b.get_cell(&b.handle()));
+    }
+
+    // --- #lzcrdtplane1: StampFrontier ---
+
+    #[test]
+    fn stamp_frontier_keeps_per_peer_max() {
+        let mut f = StampFrontier::new();
+        assert!(f.is_empty());
+
+        assert!(f.observe(peer(1), HlcStamp::new(10, 0, peer(1))));
+        // A strictly higher stamp from the same peer advances.
+        assert!(f.observe(peer(1), HlcStamp::new(20, 0, peer(1))));
+        // An older stamp is ignored (idempotent / out-of-order safe).
+        assert!(!f.observe(peer(1), HlcStamp::new(15, 0, peer(1))));
+        // Re-observing the current stamp is a no-op.
+        assert!(!f.observe(peer(1), HlcStamp::new(20, 0, peer(1))));
+
+        assert_eq!(f.get(peer(1)), Some(HlcStamp::new(20, 0, peer(1))));
+        assert_eq!(f.get(peer(2)), None);
+        assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn stamp_frontier_merge_is_commutative_and_idempotent() {
+        let a_stamp = HlcStamp::new(30, 0, peer(1));
+        let b_stamp = HlcStamp::new(40, 1, peer(2));
+
+        let mut left = StampFrontier::new();
+        left.observe(peer(1), a_stamp);
+        let mut right = StampFrontier::new();
+        right.observe(peer(2), b_stamp);
+
+        let mut lr = left.clone();
+        lr.merge(&right);
+        let mut rl = right.clone();
+        rl.merge(&left);
+        assert_eq!(lr, rl, "merge is commutative");
+
+        // Idempotent: merging again changes nothing.
+        assert!(!lr.merge(&right));
+        assert!(!lr.merge(&left));
+
+        assert_eq!(lr.get(peer(1)), Some(a_stamp));
+        assert_eq!(lr.get(peer(2)), Some(b_stamp));
+    }
+
+    #[test]
+    fn stamp_frontier_is_min_over_membership_and_none_until_all_seen() {
+        let mut f = StampFrontier::new();
+        let s1 = HlcStamp::new(50, 0, peer(1));
+        let s2 = HlcStamp::new(40, 0, peer(2));
+        let members = [peer(1), peer(2)];
+
+        // Empty membership has no stable point.
+        assert_eq!(f.frontier(std::iter::empty()), None);
+
+        f.observe(peer(1), s1);
+        // Peer 2 unseen -> no frontier yet (it could still produce an earlier op).
+        assert_eq!(f.frontier(members), None);
+
+        f.observe(peer(2), s2);
+        // Now every member is seen: the frontier is the minimum stamp.
+        assert_eq!(f.frontier(members), Some(s2));
+    }
+
+    #[test]
+    fn stamp_frontier_dominates() {
+        let mut bigger = StampFrontier::new();
+        bigger.observe(peer(1), HlcStamp::new(20, 0, peer(1)));
+        bigger.observe(peer(2), HlcStamp::new(30, 0, peer(2)));
+
+        let mut smaller = StampFrontier::new();
+        smaller.observe(peer(1), HlcStamp::new(10, 0, peer(1)));
+
+        assert!(bigger.dominates(&smaller));
+        assert!(!smaller.dominates(&bigger));
+        assert!(bigger.dominates(&bigger), "dominance is reflexive");
+    }
+
+    // --- #lzcrdtplane1: CrdtPlane skeleton ---
+
+    #[test]
+    fn crdt_plane_tick_advances_self_frontier() {
+        let mut plane = CrdtPlane::new(peer(1));
+        // Single-writer session: as soon as the local peer ticks, the frontier
+        // is its own stamp (membership is just itself).
+        assert_eq!(plane.stability_frontier(), None);
+
+        let s1 = plane.tick(100);
+        let s2 = plane.tick(200);
+        assert!(s2 > s1, "ticks produce monotonically increasing stamps");
+        assert_eq!(plane.stability_frontier(), Some(s2));
+        assert_eq!(plane.frontier().get(peer(1)), Some(s2));
+    }
+
+    #[test]
+    fn crdt_plane_frontier_withheld_until_every_member_seen() {
+        let mut plane = CrdtPlane::new(peer(1));
+        plane.add_peer(peer(2));
+
+        plane.tick(100);
+        // Peer 2 is an expected member but unseen -> no stable frontier.
+        assert_eq!(plane.stability_frontier(), None);
+
+        // Observe a remote op from peer 2 older than our local stamp.
+        plane.observe_remote(HlcStamp::new(50, 0, peer(2)), 110);
+        assert_eq!(
+            plane.stability_frontier(),
+            Some(HlcStamp::new(50, 0, peer(2))),
+            "frontier is the minimum across both members"
+        );
+        assert_eq!(
+            plane.membership().collect::<Vec<_>>(),
+            vec![peer(1), peer(2)]
+        );
+    }
+
+    #[test]
+    fn crdt_plane_observe_remote_advances_local_clock() {
+        let mut plane = CrdtPlane::new(peer(1));
+        // Observe a remote stamp far in the future, then take a local tick at an
+        // earlier wall time: the HLC must keep the local stamp causally after
+        // the observed remote one.
+        plane.observe_remote(HlcStamp::new(1_000, 5, peer(2)), 100);
+        let local = plane.tick(200);
+        assert!(
+            local > HlcStamp::new(1_000, 5, peer(2)),
+            "local clock dominates the observed remote causal past"
+        );
     }
 }
