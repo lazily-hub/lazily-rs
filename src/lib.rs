@@ -149,7 +149,7 @@ pub use ipc::{
     )
 ))]
 pub use ipc::{DecodeError, EncodeError};
-pub use reconcile::{DiffOp, apply_to_map, reconcile};
+pub use reconcile::{DiffOp, apply_to_map, apply_to_tree, reconcile};
 pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]
 pub use seq_crdt::{Position, SeqCrdt};

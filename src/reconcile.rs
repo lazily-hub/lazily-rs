@@ -10,8 +10,9 @@
 //! This is the algorithm that turns a structural document edit into **minimal
 //! per-item ops** instead of a whole-subtree replace — the enabling step for
 //! per-cell CRDT merge. [`apply_to_map`] (and [`CellMap::reconcile`]) drive a
-//! reactive [`CellMap`] from the op set so that an unchanged ("stable") entry's
-//! value cell is **never invalidated** by a sibling reorder.
+//! reactive [`CellMap`] from the op set, while [`apply_to_tree`] applies the
+//! same keyed child edits to a [`CellTree`] level. In both cases an unchanged
+//! ("stable") entry's value cell is **never invalidated** by a sibling reorder.
 //!
 //! ```
 //! use lazily::{reconcile, DiffOp, Context, CellMap};
@@ -35,6 +36,7 @@ use std::hash::Hash;
 
 use crate::Context;
 use crate::cell_family::CellMap;
+use crate::cell_tree::CellTree;
 
 /// A single reconciliation operation, keyed by stable id.
 ///
@@ -148,6 +150,37 @@ where
             }
             DiffOp::Update { key, value } => {
                 map.set(ctx, key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// Apply a reconcile op set to one level of a live [`CellTree`].
+///
+/// This is the tree-shaped companion to [`apply_to_map`]: inserts attach a leaf
+/// child and move it into place, moves use [`CellTree::move_child`], removes
+/// detach the child subtree, and updates write only the child node's value.
+pub fn apply_to_tree<K, V>(ctx: &Context, tree: &CellTree<K, V>, ops: &[DiffOp<K, V>])
+where
+    K: Eq + Hash + Clone + 'static,
+    V: PartialEq + Clone + 'static,
+{
+    for op in ops {
+        match op {
+            DiffOp::Remove { key } => {
+                tree.remove_child(ctx, key);
+            }
+            DiffOp::Insert { key, value, index } => {
+                tree.insert_child(ctx, key.clone(), value.clone());
+                tree.move_child(ctx, key, *index);
+            }
+            DiffOp::Move { key, to } => {
+                tree.move_child(ctx, key, *to);
+            }
+            DiffOp::Update { key, value } => {
+                if let Some(child) = tree.child(key) {
+                    child.set(ctx, value.clone());
+                }
             }
         }
     }
@@ -355,5 +388,55 @@ mod tests {
         assert!(!map.contains_key(&ctx, &"b"));
         // "a" kept its SAME value cell across the reconcile (updated in place).
         assert_eq!(map.handle(&"a").unwrap().id, a.id);
+    }
+
+    #[test]
+    fn apply_to_tree_round_trips_reconcile_ops() {
+        let ctx = Context::new();
+        let root = CellTree::leaf(&ctx, "root", 0);
+        for (k, v) in [("a", 1), ("b", 2), ("c", 3)] {
+            root.insert_child(&ctx, k, v);
+        }
+        let a = root.child(&"a").unwrap();
+        a.insert_child(&ctx, "a1", 100);
+        let old = [("a", 1), ("b", 2), ("c", 3)];
+        let new = [("c", 3), ("a", 9), ("d", 4)];
+        let ops = reconcile(&old, &new);
+
+        apply_to_tree(&ctx, &root, &ops);
+
+        assert_eq!(root.child_ids(&ctx), vec!["c", "a", "d"]);
+        assert_eq!(root.child(&"a").unwrap().get(&ctx), 9);
+        assert_eq!(root.child(&"d").unwrap().get(&ctx), 4);
+        assert!(root.child(&"b").is_none());
+        assert_eq!(root.child(&"a").unwrap().child_ids(&ctx), vec!["a1"]);
+    }
+
+    #[test]
+    fn apply_to_tree_pure_move_spares_child_value_reader() {
+        let ctx = Context::new();
+        let root = CellTree::leaf(&ctx, "root", 0);
+        for (k, v) in [("a", 1), ("b", 2), ("c", 3)] {
+            root.insert_child(&ctx, k, v);
+        }
+        let a = root.child(&"a").unwrap();
+        let a_view = ctx.computed({
+            let a = a.clone();
+            move |ctx| a.get(ctx) * 10
+        });
+        assert_eq!(ctx.get(&a_view), 10);
+
+        let ops = reconcile(
+            &[("a", 1), ("b", 2), ("c", 3)],
+            &[("a", 1), ("c", 3), ("b", 2)],
+        );
+        apply_to_tree(&ctx, &root, &ops);
+
+        assert_eq!(root.child_ids(&ctx), vec!["a", "c", "b"]);
+        assert!(
+            ctx.is_set(&a_view),
+            "stable child value must not be invalidated by sibling moves"
+        );
+        assert_eq!(ctx.get(&a_view), 10);
     }
 }
