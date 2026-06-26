@@ -227,6 +227,12 @@ impl CrdtPlaneRuntime {
     /// Re-delivering a frame the receiver already has is a no-op (the op log
     /// dedups by stamp), so the exchange is idempotent and resumable.
     pub fn ingest(&mut self, ctx: &Context, sync: &CrdtSync, now_micros: u64) -> usize {
+        for (_, wire) in &sync.frontier {
+            let stamp = HlcStamp::from(*wire);
+            if stamp.peer != self.plane.peer() {
+                self.plane.observe_remote(stamp, now_micros);
+            }
+        }
         let incoming = sync
             .ops
             .iter()
@@ -255,7 +261,7 @@ impl CrdtPlaneRuntime {
     /// This replica's stamp frontier in wire form — the per-peer highest observed
     /// stamp it advertises so a peer can compute what it is missing.
     pub fn wire_frontier(&self) -> Vec<(u64, WireStamp)> {
-        self.log
+        self.plane
             .frontier()
             .iter()
             .map(|(peer, stamp)| (peer.0, WireStamp::from(stamp)))

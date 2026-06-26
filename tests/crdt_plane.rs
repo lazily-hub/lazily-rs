@@ -9,9 +9,9 @@
 #![cfg(all(feature = "distributed", feature = "webrtc"))]
 
 use lazily::{
-    Context, CrdtPlaneRuntime, HlcStamp, InMemoryDataChannel, IpcMessage, IpcSink, IpcSource,
-    LwwRegister, NodeId, NodeKey, OpKind, PeerId, PeerPermissions, WebRtcSink, WebRtcSource,
-    WireStamp,
+    BridgeHub, Context, CrdtPlaneRuntime, DataChannel, HlcStamp, InMemoryDataChannel, IpcMessage,
+    IpcSink, IpcSource, LwwRegister, NodeId, NodeKey, OpKind, PeerId, PeerPermissions, SeqCrdt,
+    WebRtcSink, WebRtcSource, WireStamp,
 };
 
 /// Read+write grant on `node` for both peers, so nothing is filtered out.
@@ -21,6 +21,13 @@ fn perms(node: u64) -> PeerPermissions {
         p.allow_many(peer, OpKind::Read, [NodeId(node)]);
         p.allow_many(peer, OpKind::Write, [NodeId(node)]);
     }
+    p
+}
+
+fn peer_perms(peer: PeerId, reads: &[u64], writes: &[u64]) -> PeerPermissions {
+    let mut p = PeerPermissions::new();
+    p.allow_many(peer, OpKind::Read, reads.iter().map(|&n| NodeId(n)));
+    p.allow_many(peer, OpKind::Write, writes.iter().map(|&n| NodeId(n)));
     p
 }
 
@@ -45,6 +52,27 @@ fn drain(
             rt.ingest(ctx, &sync, now);
         }
     }
+}
+
+fn attach(hub: &mut BridgeHub, peer: PeerId, p: PeerPermissions) -> InMemoryDataChannel {
+    let (peer_end, hub_end) = InMemoryDataChannel::pair();
+    hub.attach(
+        peer,
+        p.clone(),
+        WebRtcSink::new(hub_end.clone(), p, peer),
+        WebRtcSource::new(hub_end),
+    );
+    peer_end
+}
+
+fn send_raw(ch: &InMemoryDataChannel, message: &IpcMessage) {
+    ch.send_frame(serde_json::to_vec(message).unwrap()).unwrap();
+}
+
+fn recv_raw(ch: &InMemoryDataChannel) -> Option<IpcMessage> {
+    ch.try_recv_frame()
+        .unwrap()
+        .map(|f| serde_json::from_slice(&f).unwrap())
 }
 
 #[test]
@@ -114,6 +142,132 @@ fn two_replicas_converge_over_the_transport_and_drive_the_reactive_graph() {
     drain(&mut b, &ctx_b, &mut b_source, 500);
     assert_eq!(b.value::<LwwRegister<i64>>(node), Some(111));
     assert_eq!(ctx_b.get(&b_doubled), 222);
+}
+
+#[test]
+fn duplicate_crdt_sync_delivery_over_bridge_applies_once() {
+    let node = NodeId(9);
+    let ctx_a = Context::new();
+    let mut a = CrdtPlaneRuntime::new(PeerId(1));
+    a.register(node, None, lww_cell(&ctx_a, seed(1)));
+    let op = a
+        .local_update::<LwwRegister<i64>, _>(&ctx_a, node, 100, |r, s| {
+            r.set(77, s);
+        })
+        .unwrap();
+    let frame = a.sync_frame();
+    assert_eq!(frame.ops, vec![op]);
+
+    let ctx_b = Context::new();
+    let mut b = CrdtPlaneRuntime::new(PeerId(2));
+    b.register(node, None, lww_cell(&ctx_b, seed(2)));
+
+    let mut hub = BridgeHub::new();
+    let pa = attach(&mut hub, PeerId(1), peer_perms(PeerId(1), &[9], &[9]));
+    let pb = attach(&mut hub, PeerId(2), peer_perms(PeerId(2), &[9], &[]));
+
+    send_raw(&pa, &IpcMessage::CrdtSync(frame.clone()));
+    send_raw(&pa, &IpcMessage::CrdtSync(frame));
+    assert_eq!(
+        hub.poll().unwrap(),
+        2,
+        "the bridge forwards duplicate sync frames; runtime ingest owns idempotency"
+    );
+
+    let mut applied = 0;
+    while let Some(message) = recv_raw(&pb) {
+        if let IpcMessage::CrdtSync(sync) = message {
+            applied += b.ingest(&ctx_b, &sync, 200);
+        }
+    }
+
+    assert_eq!(applied, 1, "duplicate delivery applies the op only once");
+    assert_eq!(b.value::<LwwRegister<i64>>(node), Some(77));
+}
+
+#[test]
+fn frontier_only_sync_controls_seq_tombstone_gc() {
+    let ctx = Context::new();
+    let mut rt = CrdtPlaneRuntime::new(PeerId(1));
+    rt.plane_mut().add_peer(PeerId(2));
+
+    let mut seq = SeqCrdt::new(PeerId(1));
+    seq.insert_back("row", 1, 100);
+    assert!(seq.remove(&"row", 200));
+    assert_eq!(seq.tombstone_count(), 1);
+
+    rt.plane_mut().tick(250);
+    assert_eq!(
+        rt.plane().gc_seq(&mut seq),
+        0,
+        "peer 2 is expected but unseen, so the frontier is withheld"
+    );
+
+    let behind = WireStamp {
+        wall_time: 150,
+        logical: 0,
+        peer: 2,
+    };
+    let caught_up = WireStamp {
+        wall_time: 300,
+        logical: 0,
+        peer: 2,
+    };
+
+    assert_eq!(
+        rt.ingest(&ctx, &lazily::CrdtSync::new(vec![(2, behind)], vec![]), 260),
+        0,
+        "frontier-only sync carries no ops"
+    );
+    assert_eq!(
+        rt.plane().gc_seq(&mut seq),
+        0,
+        "a partial frontier below the delete must not collect it"
+    );
+
+    assert_eq!(
+        rt.ingest(
+            &ctx,
+            &lazily::CrdtSync::new(vec![(2, caught_up)], vec![]),
+            310
+        ),
+        0,
+        "frontier-only catch-up still carries no ops"
+    );
+    assert_eq!(
+        rt.plane().gc_seq(&mut seq),
+        1,
+        "once every member's frontier covers the delete, the tombstone is collectable"
+    );
+    assert_eq!(seq.tombstone_count(), 0);
+}
+
+#[test]
+fn keyed_crdt_op_survives_nodeid_churn_on_ingest() {
+    let key = NodeKey::new("scores/alice").unwrap();
+
+    let ctx_a = Context::new();
+    let mut a = CrdtPlaneRuntime::new(PeerId(1));
+    a.register(NodeId(1), Some(key.clone()), lww_cell(&ctx_a, seed(1)));
+
+    let ctx_b = Context::new();
+    let mut b = CrdtPlaneRuntime::new(PeerId(2));
+    b.register(NodeId(2), Some(key), lww_cell(&ctx_b, seed(2)));
+
+    let op = a
+        .local_update::<LwwRegister<i64>, _>(&ctx_a, NodeId(1), 100, |r, s| {
+            r.set(88, s);
+        })
+        .unwrap();
+    let frame = lazily::CrdtSync::new(a.wire_frontier(), vec![op]);
+
+    assert_eq!(b.ingest(&ctx_b, &frame, 200), 1);
+    assert_eq!(
+        b.value::<LwwRegister<i64>>(NodeId(2)),
+        Some(88),
+        "the receiver resolves the producer's stable key to its current local NodeId"
+    );
+    assert_eq!(b.value::<LwwRegister<i64>>(NodeId(1)), None);
 }
 
 #[test]

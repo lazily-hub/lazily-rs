@@ -354,46 +354,64 @@ mod tests {
     fn crdt_sync_fans_out_to_readers_only() {
         use crate::ipc::{CrdtOp, WireStamp};
 
-        // A may read+write N1; B may read N1; C may read only N2.
+        // A sends mixed-node CRDT state; B may read N1, C may read only N2.
         let (a, b, c) = (PeerId(1), PeerId(2), PeerId(3));
         let mut hub = BridgeHub::new();
-        let pa = attach(&mut hub, a, perms(a, &[1], &[1]));
+        let pa = attach(&mut hub, a, perms(a, &[1, 2, 3], &[1, 2, 3]));
         let pb = attach(&mut hub, b, perms(b, &[1], &[]));
         let pc = attach(&mut hub, c, perms(c, &[2], &[]));
 
-        // A pushes a CRDT sync frame carrying converged state for N1.
-        let stamp = WireStamp {
+        let stamp_1 = WireStamp {
             wall_time: 7,
             logical: 0,
             peer: 1,
         };
+        let stamp_2 = WireStamp {
+            wall_time: 8,
+            logical: 0,
+            peer: 1,
+        };
+        let stamp_3 = WireStamp {
+            wall_time: 9,
+            logical: 0,
+            peer: 1,
+        };
         let sync = CrdtSync::new(
-            vec![(1, stamp)],
-            vec![CrdtOp::new(NodeId(1), stamp, IpcValue::from(vec![42u8]))],
+            vec![(1, stamp_3)],
+            vec![
+                CrdtOp::new(NodeId(1), stamp_1, IpcValue::from(vec![42u8])),
+                CrdtOp::new(NodeId(2), stamp_2, IpcValue::from(vec![43u8])),
+                CrdtOp::new(NodeId(3), stamp_3, IpcValue::from(vec![44u8])),
+            ],
         );
         send(&pa, &IpcMessage::CrdtSync(sync));
         let routed = hub.poll().unwrap();
 
-        // B (reads N1) gets the op; C (cannot read N1) gets a frame with no ops,
-        // which is dropped; A never echoes.
+        // Each target gets only the ops it can read. The frontier advert is
+        // retained because it carries causal progress, not node payload.
         match recv(&pb).expect("B should receive the N1 sync frame") {
             IpcMessage::CrdtSync(s) => {
                 assert_eq!(s.ops.len(), 1);
                 assert_eq!(s.ops[0].node, NodeId(1));
                 assert_eq!(s.ops[0].state, IpcValue::from(vec![42u8]));
-                assert_eq!(s.frontier, vec![(1, stamp)], "frontier advert retained");
+                assert_eq!(s.frontier, vec![(1, stamp_3)], "frontier advert retained");
+            }
+            other => panic!("expected a CrdtSync frame, got {other:?}"),
+        }
+        match recv(&pc).expect("C should receive the N2 sync frame") {
+            IpcMessage::CrdtSync(s) => {
+                assert_eq!(s.ops.len(), 1);
+                assert_eq!(s.ops[0].node, NodeId(2));
+                assert_eq!(s.ops[0].state, IpcValue::from(vec![43u8]));
+                assert_eq!(s.frontier, vec![(1, stamp_3)], "frontier advert retained");
             }
             other => panic!("expected a CrdtSync frame, got {other:?}"),
         }
         assert!(
-            recv(&pc).is_none(),
-            "C may not read N1 — its filtered frame has no ops and is not sent"
-        );
-        assert!(
             recv(&pa).is_none(),
             "A must not receive its own echoed frame"
         );
-        assert_eq!(routed, 1, "exactly one sync frame routed (to B)");
+        assert_eq!(routed, 2, "exactly two sync frames routed (to B and C)");
     }
 
     /// Phase 2: one hub bridging a *WebSocket* peer to an *in-process* peer —
