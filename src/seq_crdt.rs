@@ -229,6 +229,41 @@ where
             .collect()
     }
 
+    /// Number of tombstoned-but-not-yet-collected entries — the GC-pressure
+    /// gauge the "memory bloat" critique is about.
+    pub fn tombstone_count(&self) -> usize {
+        self.entries.values().filter(|e| e.deleted.value()).count()
+    }
+
+    /// Garbage-collect causally-stable tombstones (#lztombgc).
+    ///
+    /// Mechanism only: the caller supplies `is_stable`, the policy that decides
+    /// when a tombstone has been observed by *every* replica (the "all replicas
+    /// are aware of the deletion" condition). The distributed plane
+    /// (`#lzcrdtplane`) computes that frontier from its anti-entropy version
+    /// vectors; this method just drops the entries.
+    ///
+    /// Dropping a stable tombstone is observationally inert: [`order`](Self::order)
+    /// and [`contains`](Self::contains) already skip tombstoned entries. If an
+    /// un-collected replica later merges the entry back, it is re-adopted as a
+    /// tombstone (still skipped); a genuine resurrection carries a newer stamp and
+    /// so wins by LWW regardless. Returns the number of entries collected.
+    pub fn gc_with(&mut self, is_stable: impl Fn(crate::crdt::HlcStamp) -> bool) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, e| !(e.deleted.value() && is_stable(e.deleted.stamp())));
+        before - self.entries.len()
+    }
+
+    /// Convenience over [`gc_with`](Self::gc_with): collect every tombstone whose
+    /// stamp is `<= watermark`. `watermark` must be a frontier the caller knows
+    /// every replica has observed — so no in-flight op below it can still
+    /// resurrect the element — i.e. the version-vector minimum the distributed
+    /// plane maintains, not just this replica's local clock.
+    pub fn gc(&mut self, watermark: crate::crdt::HlcStamp) -> usize {
+        self.gc_with(|s| s <= watermark)
+    }
+
     /// Merge another replica's state in (commutative, associative, idempotent):
     /// per-element LWW of value, position, and tombstone; unknown elements are
     /// adopted. Advances the local clock past everything observed so later local
@@ -422,6 +457,70 @@ mod tests {
         ba.merge(&a, 20);
         assert_eq!(ab.order(), ba.order(), "merge must be commutative");
         assert!(!ab.contains(&"b"), "tombstone converges");
+    }
+
+    #[test]
+    fn gc_collects_stable_tombstones_only() {
+        let mut s: SeqCrdt<&str, i32> = SeqCrdt::new(peer(1));
+        for (i, k) in ["a", "b", "c"].iter().enumerate() {
+            s.insert_back(k, i as i32, i as u64 + 1);
+        }
+        s.remove(&"b", 10);
+        assert_eq!(s.tombstone_count(), 1);
+
+        // A predicate that calls nothing stable collects nothing.
+        assert_eq!(s.gc_with(|_| false), 0);
+        assert_eq!(s.entries.len(), 3);
+
+        // Marking everything stable collects exactly the tombstone; live order
+        // and values are untouched (observationally inert).
+        assert_eq!(s.gc_with(|_| true), 1);
+        assert_eq!(s.entries.len(), 2);
+        assert_eq!(s.order(), vec!["a", "c"]);
+        assert!(!s.contains(&"b"));
+        assert_eq!(s.tombstone_count(), 0);
+    }
+
+    #[test]
+    fn gc_watermark_is_a_frontier_below_which_tombstones_are_collected() {
+        let mut s: SeqCrdt<&str, i32> = SeqCrdt::new(peer(1));
+        s.insert_back("a", 0, 1);
+        s.insert_back("b", 1, 2);
+        s.remove(&"a", 5); // tombstone stamp at wall_time 5
+        let watermark = s.entries[&"a"].deleted.stamp();
+        // A later tombstone is above the frontier and must survive.
+        s.remove(&"b", 9);
+        assert_eq!(
+            s.gc(watermark),
+            1,
+            "only the at-or-below-watermark tombstone"
+        );
+        assert!(!s.entries.contains_key(&"a"));
+        assert!(
+            s.entries.contains_key(&"b"),
+            "above-watermark tombstone kept"
+        );
+    }
+
+    #[test]
+    fn gc_is_convergent_with_an_uncollected_replica() {
+        // The GC contract requires *every* replica to have observed the delete
+        // before it is stable, so model that: A removes "b", B merges the delete
+        // (now both are aware), THEN A may GC. B keeps its tombstone uncollected.
+        let mut a: SeqCrdt<&str, i32> = SeqCrdt::new(peer(1));
+        for (i, k) in ["a", "b", "c"].iter().enumerate() {
+            a.insert_back(k, i as i32, i as u64 + 1);
+        }
+        let mut b = a.clone_state_as(peer(2));
+        a.remove(&"b", 10);
+        b.merge(&a, 11); // B observes the delete -> stable on both replicas
+        a.gc_with(|_| true); // safe now: all replicas aware
+        assert!(!a.entries.contains_key(&"b"));
+
+        // Merging the un-GC'd replica re-adopts "b" as a tombstone, NOT as live.
+        a.merge(&b, 20);
+        assert!(!a.contains(&"b"), "re-adopted entry stays deleted");
+        assert_eq!(a.order(), vec!["a", "c"]);
     }
 
     // --- test helpers: cheap state clones for two-replica scenarios ---

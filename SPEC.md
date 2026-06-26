@@ -534,10 +534,18 @@ merges keystrokes; the structural tree is then a **projection** of the merged te
 - **Algorithm** — a Fugue/RGA-style tree CRDT. Each inserted character is an element with a
   unique `OpId` and a **left origin** (the element it was typed after). The sequence is the
   in-order traversal of the origin tree, same-origin siblings ordered by `OpId` descending.
-  Deletes are tombstones. `order` is therefore a pure function of the element set, so
-  `merge` (union of elements, tombstones sticky) MUST be commutative, associative, and
-  idempotent, and concurrent inserts at the same point MUST converge deterministically with
-  both preserved.
+  Deletes are tombstones carrying the **delete's own `OpId`** (not a bare flag) so GC can
+  test deletion stability; `order` is therefore a pure function of the element set, so
+  `merge` (union of elements, tombstones sticky — concurrent deletes converge to the smaller
+  delete `OpId`) MUST be commutative, associative, and idempotent, and concurrent inserts at
+  the same point MUST converge deterministically with both preserved.
+- **Tombstone GC** (`#lztombgc`) — `gc_with(is_stable)` reclaims tombstones the caller proves
+  causally stable ("every replica has observed the deletion"; the policy is supplied by the
+  distributed plane `#lzcrdtplane`, never derived from a single replica's clock). It is
+  deliberately conservative: an element is collected only when it is **not referenced as any
+  element's left origin**, so removal never orphans a survivor; interior tombstones are
+  reclaimed **bottom-up** as their descendants are collected. Contiguous-run compaction with
+  origin-rewrite is the heavier follow-up.
 - **Re-parse** — `parse_blocks` splits merged text into blocks; feed them through
   `assign_stable_keys` (`#lzstableid`) + `reconcile` (`#lzkeyrecon`) to project the merged
   text onto the keyed tree. An unchanged block keeps its key (identity) across the
@@ -2042,6 +2050,13 @@ reconciliation (`#lzkeyrecon`).
   local HLC past observed stamps so later local writes still win. This keeps the
   IPC `Snapshot`/`Delta` single-producer mirror as-is; the sequence CRDT lives
   only at the multi-writer boundary (pairs with `#lzcrdtplane`).
+- **Tombstone GC** (`#lztombgc`) — `gc_with(is_stable)` / `gc(watermark)` drop
+  tombstoned entries the caller proves causally stable (observed by every
+  replica; the version-vector frontier is `#lzcrdtplane`'s, not a single
+  replica's clock). Because `order`/`contains` already skip tombstones, dropping
+  a stable one is observationally inert and convergent: an un-collected replica
+  re-merges it as a tombstone (still skipped), and a genuine resurrection carries
+  a newer stamp and wins by LWW regardless.
 
 ## Internet-scale peer discovery: signaling server (`#yxjw`)
 

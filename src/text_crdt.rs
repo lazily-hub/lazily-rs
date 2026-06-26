@@ -51,7 +51,11 @@ struct Elem {
     ch: char,
     /// The element this character was inserted *after* (None = document start).
     origin: Option<OpId>,
-    deleted: bool,
+    /// `None` while live; `Some(delete_op)` once tombstoned. Carrying the
+    /// *delete's* own [`OpId`] (not a bare flag) is what lets GC test whether the
+    /// *deletion* — not merely the insertion — is causally stable (#lztombgc).
+    /// Tombstones are sticky; concurrent deletes converge to the smaller `OpId`.
+    deleted: Option<OpId>,
 }
 
 /// A character-granular, mergeable text buffer for concurrent free-text edits.
@@ -111,7 +115,7 @@ impl TextCrdt {
             Elem {
                 ch,
                 origin,
-                deleted: false,
+                deleted: None,
             },
         );
     }
@@ -126,10 +130,15 @@ impl TextCrdt {
     /// Tombstone the visible character at `index`. No-op if out of range.
     pub fn delete(&mut self, index: usize) {
         let visible = self.ordered_ids(false);
-        if let Some(id) = visible.get(index).copied()
-            && let Some(e) = self.elems.get_mut(&id)
-        {
-            e.deleted = true;
+        if let Some(id) = visible.get(index).copied() {
+            // Mint a distinct OpId for the deletion so GC can later test whether
+            // the *delete* is causally stable. No-op if already tombstoned.
+            let del = self.next_id();
+            if let Some(e) = self.elems.get_mut(&id)
+                && e.deleted.is_none()
+            {
+                e.deleted = Some(del);
+            }
         }
     }
 
@@ -143,7 +152,13 @@ impl TextCrdt {
 
     /// Number of visible characters.
     pub fn len(&self) -> usize {
-        self.elems.values().filter(|e| !e.deleted).count()
+        self.elems.values().filter(|e| e.deleted.is_none()).count()
+    }
+
+    /// Number of tombstoned-but-not-yet-collected characters — the GC-pressure
+    /// gauge behind the "memory bloat" critique.
+    pub fn tombstone_count(&self) -> usize {
+        self.elems.values().filter(|e| e.deleted.is_some()).count()
     }
 
     /// Whether there is any visible text.
@@ -176,7 +191,7 @@ impl TextCrdt {
             .collect();
         while let Some(id) = stack.pop() {
             let e = &self.elems[&id];
-            if include_deleted || !e.deleted {
+            if include_deleted || e.deleted.is_none() {
                 out.push(id);
             }
             if let Some(kids) = children.get(&Some(id)) {
@@ -197,11 +212,20 @@ impl TextCrdt {
         let before = self.text();
         for (id, oe) in &other.elems {
             self.counter = self.counter.max(id.counter);
+            // Delete OpIds advance the clock too, so a local insert after a
+            // merge can never collide with an observed deletion's id.
+            if let Some(d) = oe.deleted {
+                self.counter = self.counter.max(d.counter);
+            }
             match self.elems.get_mut(id) {
                 Some(e) => {
-                    if oe.deleted {
-                        e.deleted = true; // tombstone is sticky
-                    }
+                    // Tombstone is sticky and order-independent: keep whichever
+                    // delete id is smaller so concurrent deletes converge
+                    // (commutative/associative) instead of depending on merge order.
+                    e.deleted = match (e.deleted, oe.deleted) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
                 }
                 None => {
                     self.elems.insert(*id, oe.clone());
@@ -209,6 +233,39 @@ impl TextCrdt {
             }
         }
         self.text() != before
+    }
+
+    /// Garbage-collect causally-stable deletion tombstones (#lztombgc).
+    ///
+    /// `is_stable(delete_op_id)` is the caller-supplied "every replica has
+    /// observed this deletion" policy — the distributed plane (`#lzcrdtplane`)
+    /// derives it from its anti-entropy version vectors. Mechanism only, and
+    /// deliberately conservative: a tombstoned element is collected only when it
+    /// is **not referenced as any element's left origin**, so removing it can
+    /// never orphan a surviving character. Interior tombstones are reclaimed
+    /// bottom-up as their descendants are themselves collected (contiguous-run
+    /// compaction with origin-rewrite is the heavier follow-up). Returns the
+    /// number of elements collected.
+    pub fn gc_with(&mut self, is_stable: impl Fn(OpId) -> bool) -> usize {
+        let mut removed = 0;
+        loop {
+            let referenced: std::collections::HashSet<OpId> =
+                self.elems.values().filter_map(|e| e.origin).collect();
+            let collectable: Vec<OpId> = self
+                .elems
+                .iter()
+                .filter(|(id, e)| e.deleted.is_some_and(&is_stable) && !referenced.contains(id))
+                .map(|(id, _)| *id)
+                .collect();
+            if collectable.is_empty() {
+                break;
+            }
+            for id in collectable {
+                self.elems.remove(&id);
+                removed += 1;
+            }
+        }
+        removed
     }
 }
 
@@ -332,5 +389,74 @@ mod tests {
             keys.contains(&old_keys[1]),
             "unchanged paragraph keeps identity across the text-CRDT merge"
         );
+    }
+
+    #[test]
+    fn gc_collects_a_stable_deleted_leaf() {
+        let mut t = TextCrdt::from_str(1, "abc");
+        t.delete(2); // tombstone the trailing 'c' (a leaf: nothing follows it)
+        assert_eq!(t.text(), "ab");
+        assert_eq!(t.tombstone_count(), 1);
+        // Nothing stable -> nothing collected.
+        assert_eq!(t.gc_with(|_| false), 0);
+        assert_eq!(t.tombstone_count(), 1);
+        // Stable -> the leaf tombstone is reclaimed; visible text is unchanged.
+        assert_eq!(t.gc_with(|_| true), 1);
+        assert_eq!(t.tombstone_count(), 0);
+        assert_eq!(t.text(), "ab");
+    }
+
+    #[test]
+    fn gc_keeps_a_referenced_tombstone_then_collects_bottom_up() {
+        // Delete the MIDDLE char: 'b' is the left-origin of 'c', so collecting it
+        // would orphan 'c'. GC must keep it until 'c' is gone too.
+        let mut t = TextCrdt::from_str(1, "abc");
+        t.delete(1); // tombstone 'b'; 'c' still references it as origin
+        assert_eq!(t.text(), "ac");
+        assert_eq!(
+            t.gc_with(|_| true),
+            0,
+            "referenced tombstone is not collected"
+        );
+        assert_eq!(t.tombstone_count(), 1);
+        assert_eq!(
+            t.text(),
+            "ac",
+            "live text intact while tombstone is retained"
+        );
+
+        // Now delete 'c' too. One GC pass collects 'c' (leaf), which un-references
+        // 'b', so the same pass then collects 'b' bottom-up.
+        t.delete(1); // visible index of 'c' is now 1
+        assert_eq!(t.text(), "a");
+        assert_eq!(
+            t.gc_with(|_| true),
+            2,
+            "both tombstones collected bottom-up"
+        );
+        assert_eq!(t.tombstone_count(), 0);
+        assert_eq!(t.text(), "a");
+    }
+
+    #[test]
+    fn concurrent_deletes_of_same_char_converge() {
+        // Both replicas delete the same character; the sticky tombstone must
+        // converge regardless of merge order (commutative).
+        let mut a = TextCrdt::from_str(1, "abc");
+        let mut b = a.fork(2);
+        a.delete(1); // 'b' on replica 1
+        b.delete(1); // 'b' on replica 2 (concurrent, distinct delete OpIds)
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ba = b.clone();
+        ba.merge(&a);
+        assert_eq!(ab.text(), "ac");
+        assert_eq!(ba.text(), "ac");
+        assert_eq!(ab.tombstone_count(), ba.tombstone_count());
+        // The converged delete id is the same on both (min of the two) -> GC
+        // stability is order-independent.
+        ab.merge(&ba);
+        ba.merge(&ab);
+        assert_eq!(ab.text(), ba.text());
     }
 }
