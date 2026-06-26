@@ -33,6 +33,7 @@ use crate::Context;
 use crate::cell::CellHandle;
 use crate::distributed::PeerId;
 use crate::seq_crdt::SeqCrdt;
+use crate::text_crdt::{OpId, TextCrdt};
 
 /// The convergence mechanism a multi-write cell declares (`merge:`).
 ///
@@ -390,6 +391,104 @@ impl StampFrontier {
     }
 }
 
+/// The [`OpId`]-keyed twin of [`StampFrontier`], the causal-stability watermark
+/// for the *text* layer (`#lzcrdtplane4b`).
+///
+/// [`SeqCrdt`] keys deletes by [`HlcStamp`], so its GC is driven by the
+/// [`StampFrontier`]. [`TextCrdt`], though, keys deletes by a Lamport [`OpId`]
+/// (`counter + peer`) — a *distinct clock* from the `HlcStamp`. The Lamport
+/// counter is causally monotone in exactly the same way (it advances past
+/// everything observed on merge), so the same construction applies on the OpId
+/// clock: per peer, the highest [`OpId`] observed from that peer; the
+/// **causal-stability frontier** is the per-peer *minimum* over membership — the
+/// OpId every replica has durably observed, below which a text tombstone is
+/// collectable everywhere.
+///
+/// `observe`/`merge` are commutative, associative, and idempotent (per-peer
+/// `max` of a totally-ordered [`OpId`]), so two replicas that exchange frontiers
+/// in any order converge to the same map.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct OpIdFrontier(BTreeMap<u64, OpId>);
+
+impl OpIdFrontier {
+    /// An empty frontier — no peer observed yet.
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    /// Record that `op` was observed from peer [`OpId::peer`], keeping the higher
+    /// of the stored and new id (per-peer `max`). Returns `true` iff the stored
+    /// id advanced.
+    pub fn observe(&mut self, op: OpId) -> bool {
+        match self.0.get(&op.peer()) {
+            Some(&cur) if cur >= op => false,
+            _ => {
+                self.0.insert(op.peer(), op);
+                true
+            }
+        }
+    }
+
+    /// The highest id observed from `peer`, if any.
+    pub fn get(&self, peer: u64) -> Option<OpId> {
+        self.0.get(&peer).copied()
+    }
+
+    /// Merge another frontier into this one, taking the per-peer `max` id.
+    /// Commutative, associative, idempotent. Returns `true` iff any entry
+    /// advanced.
+    pub fn merge(&mut self, other: &OpIdFrontier) -> bool {
+        let mut changed = false;
+        for &op in other.0.values() {
+            changed |= self.observe(op);
+        }
+        changed
+    }
+
+    /// The causal-stability frontier across `membership`: the minimum observed
+    /// id over every expected peer.
+    ///
+    /// Returns `None` until **every** peer in `membership` has been observed at
+    /// least once — a member with no observed id may still hold a causally
+    /// earlier op, so nothing is yet stable. An empty `membership` likewise
+    /// yields `None`.
+    pub fn frontier<I>(&self, membership: I) -> Option<OpId>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut min: Option<OpId> = None;
+        for peer in membership {
+            let op = self.get(peer)?;
+            min = Some(match min {
+                Some(m) => m.min(op),
+                None => op,
+            });
+        }
+        min
+    }
+
+    /// `true` iff every entry in `other` is `<=` the corresponding entry in
+    /// `self` — i.e. `self` causally dominates or equals `other` on every peer
+    /// `other` knows about.
+    pub fn dominates(&self, other: &OpIdFrontier) -> bool {
+        other
+            .0
+            .iter()
+            .all(|(peer, op)| self.0.get(peer).is_some_and(|cur| cur >= op))
+    }
+
+    /// Number of peers with at least one observed id.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// `true` iff no peer has been observed yet.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Multi-value register: surfaces concurrent writes as a set rather than
 /// dropping a loser. Each write is tagged with a [`VersionVector`]; a merge
 /// keeps only values whose vector is not dominated by another.
@@ -662,6 +761,7 @@ pub struct CrdtPlane {
     clock: Hlc,
     membership: BTreeSet<PeerId>,
     frontier: StampFrontier,
+    op_frontier: OpIdFrontier,
 }
 
 impl CrdtPlane {
@@ -675,6 +775,7 @@ impl CrdtPlane {
             clock: Hlc::new(peer),
             membership,
             frontier: StampFrontier::new(),
+            op_frontier: OpIdFrontier::new(),
         }
     }
 
@@ -749,9 +850,9 @@ impl CrdtPlane {
     /// before every replica has provably seen it.
     ///
     /// [`SeqCrdt`] keys deletes by [`HlcStamp`], so the plane's frontier drives
-    /// its GC directly. [`crate::TextCrdt`] keys deletes by a Lamport `OpId`
-    /// (a distinct clock), so it needs an `OpId`-keyed frontier rather than this
-    /// `HlcStamp` one — wired separately.
+    /// its GC directly. [`TextCrdt`] keys deletes by a Lamport [`OpId`]
+    /// (a distinct clock), so it is driven by the parallel [`OpIdFrontier`] via
+    /// [`gc_text`](Self::gc_text) instead.
     pub fn gc_seq<Id, V>(&self, seq: &mut SeqCrdt<Id, V>) -> usize
     where
         Id: Eq + Hash + Clone,
@@ -759,6 +860,69 @@ impl CrdtPlane {
     {
         match self.stability_frontier() {
             Some(frontier) => seq.gc(frontier),
+            None => 0,
+        }
+    }
+
+    /// Fold a replica's [`OpId`] position into the text-layer
+    /// [`OpIdFrontier`](Self::op_frontier) (`#lzcrdtplane4b`).
+    ///
+    /// `op` is a peer's current Lamport position — locally,
+    /// [`TextCrdt::clock`](crate::TextCrdt::clock); remotely, the same value
+    /// learned over the exchange — attributed to its originating peer
+    /// ([`OpId::peer`]). The originating peer is added to membership, exactly as
+    /// [`observe_remote`](Self::observe_remote) does for the `HlcStamp` clock, so
+    /// observing a peer's text clock also expands the expected membership.
+    ///
+    /// This is the `OpId`-clock analog of [`tick`](Self::tick) /
+    /// [`observe_remote`](Self::observe_remote): a single entry point for both
+    /// the local replica's progress and an observed remote one.
+    pub fn observe_op(&mut self, op: OpId) {
+        self.membership.insert(PeerId(op.peer()));
+        self.op_frontier.observe(op);
+    }
+
+    /// Immutable access to the per-peer [`OpId`] frontier (the text-layer twin of
+    /// [`frontier`](Self::frontier)).
+    pub fn op_frontier(&self) -> &OpIdFrontier {
+        &self.op_frontier
+    }
+
+    /// The text-layer causal-stability frontier: the minimum [`OpId`] observed
+    /// across every expected member, or `None` until all members are seen.
+    ///
+    /// A text tombstone whose delete [`OpId`] is `<=` this value is collectable
+    /// on every replica; this is the watermark [`gc_text`](Self::gc_text) drives
+    /// [`TextCrdt::gc_with`](crate::TextCrdt::gc_with) from, mirroring
+    /// [`stability_frontier`](Self::stability_frontier) on the `HlcStamp` clock.
+    pub fn op_stability_frontier(&self) -> Option<OpId> {
+        self.op_frontier
+            .frontier(self.membership.iter().map(|p| p.0))
+    }
+
+    /// `true` iff `op` is at or below the text-layer causal-stability frontier —
+    /// every expected member has observed it, so a tombstone whose delete id is
+    /// `op` is collectable on every replica. `false` until the full membership
+    /// has been observed. The [`OpId`] analog of
+    /// [`is_collectable`](Self::is_collectable).
+    pub fn is_op_collectable(&self, op: OpId) -> bool {
+        self.op_stability_frontier()
+            .is_some_and(|frontier| op <= frontier)
+    }
+
+    /// Drive frontier-based tombstone GC on a [`TextCrdt`] (Phase 4b of
+    /// `#lzcrdtplane`, completing the GC layer started in Phase 4 for the text
+    /// layer): collect every tombstone whose delete [`OpId`] is `<=` the text
+    /// causal-stability frontier. Returns the number of elements collected, or
+    /// `0` (a no-op) until the full membership has been observed — so a delete is
+    /// never collected before every replica has provably seen it.
+    ///
+    /// The [`OpId`]-keyed counterpart to [`gc_seq`](Self::gc_seq): `TextCrdt`
+    /// keys deletes by a Lamport [`OpId`] rather than [`HlcStamp`], so its GC is
+    /// driven by the [`OpIdFrontier`] instead of the [`StampFrontier`].
+    pub fn gc_text(&self, text: &mut TextCrdt) -> usize {
+        match self.op_stability_frontier() {
+            Some(frontier) => text.gc_with(|op| op <= frontier),
             None => 0,
         }
     }
@@ -1580,5 +1744,126 @@ mod tests {
         // After a tick past the delete, the single-member frontier covers it.
         plane.tick(250);
         assert_eq!(plane.gc_seq(&mut seq), 1);
+    }
+
+    // --- #lzcrdtplane4b: OpId-frontier-driven TextCrdt tombstone GC ---
+
+    #[test]
+    fn op_id_frontier_takes_the_per_peer_max_and_membership_min() {
+        // A buffer authored by peer 1 (counter ends at 3), and one by peer 2.
+        let a = TextCrdt::from_str(1, "abc");
+        let mut b = TextCrdt::from_str(2, "z");
+
+        let mut f = OpIdFrontier::new();
+        assert!(f.is_empty());
+        assert!(f.observe(a.clock()), "first observe advances");
+        assert!(
+            !f.observe(a.clock()),
+            "re-observing the same id is idempotent"
+        );
+        f.observe(b.clock());
+        assert_eq!(f.len(), 2);
+
+        // Frontier over the full membership = the per-peer minimum id.
+        assert_eq!(f.frontier([1, 2]), Some(b.clock().min(a.clock())));
+        // An expected-but-unobserved member withholds the frontier.
+        assert_eq!(f.frontier([1, 2, 3]), None);
+        // A lower observation never lowers the stored max.
+        b.delete(0); // advances peer 2's counter past `a`
+        let high = b.clock();
+        f.observe(high);
+        assert_eq!(f.get(2), Some(high));
+        f.observe(TextCrdt::from_str(2, "y").clock()); // a *lower* peer-2 id
+        assert_eq!(f.get(2), Some(high), "max is sticky");
+    }
+
+    #[test]
+    fn is_op_collectable_tracks_the_op_stability_frontier() {
+        let mut plane = CrdtPlane::new(peer(1));
+        plane.add_peer(peer(2));
+
+        // Peer 1 tombstones a trailing leaf; the delete mints OpId (4, peer 1).
+        let mut a = TextCrdt::from_str(1, "abc");
+        a.delete(2); // tombstone 'c'
+        let del = a.clock();
+
+        plane.observe_op(a.clock()); // self past the delete
+        // Peer 2 is an expected member but unseen -> no stable frontier.
+        assert!(
+            !plane.is_op_collectable(del),
+            "unseen member withholds collectability"
+        );
+
+        // Peer 2 observed only BELOW the delete -> the min is below it.
+        let behind = TextCrdt::from_str(2, "z"); // peer-2 counter = 1
+        plane.observe_op(behind.clock());
+        assert!(
+            !plane.is_op_collectable(del),
+            "a member behind the delete still withholds GC"
+        );
+
+        // Peer 2 catches up past the delete -> the frontier now covers it.
+        let mut ahead = behind.clone();
+        ahead.merge(&a); // advances peer-2's counter past the delete id
+        plane.observe_op(ahead.clock());
+        assert!(plane.is_op_collectable(del));
+    }
+
+    #[test]
+    fn gc_text_collects_a_tombstone_only_once_every_replica_has_observed_it() {
+        let mut plane = CrdtPlane::new(peer(1));
+        plane.add_peer(peer(2));
+
+        let mut a = TextCrdt::from_str(1, "abc");
+        let mut behind = a.fork(2); // peer 2 forks BEFORE the delete (counter 3)
+        a.delete(2); // tombstone trailing 'c' (a leaf); delete OpId = (4, peer 1)
+        assert_eq!(a.text(), "ab");
+        assert_eq!(a.tombstone_count(), 1);
+
+        // A's own clock is past the delete, but peer 2 is unseen -> frontier None.
+        plane.observe_op(a.clock());
+        assert_eq!(
+            plane.gc_text(&mut a),
+            0,
+            "no GC until every member is observed"
+        );
+
+        // Peer 2 seen, but only below the delete -> still not collectable.
+        plane.observe_op(behind.clock());
+        assert_eq!(
+            plane.gc_text(&mut a),
+            0,
+            "a lagging member blocks collection"
+        );
+
+        // Peer 2 catches up past the delete -> the tombstone is now collectable.
+        behind.merge(&a);
+        plane.observe_op(behind.clock());
+        assert_eq!(
+            plane.gc_text(&mut a),
+            1,
+            "tombstone collected once every replica has observed it"
+        );
+        assert_eq!(a.tombstone_count(), 0);
+        assert_eq!(a.text(), "ab", "visible text is unchanged by GC");
+        // Idempotent: the entry is gone, a second pass collects nothing.
+        assert_eq!(plane.gc_text(&mut a), 0);
+    }
+
+    #[test]
+    fn gc_text_is_inert_for_a_single_writer_session() {
+        // A lone writer (membership = {self}) reaches a stable frontier as soon
+        // as it observes its own clock; with no peers GC is driven purely locally.
+        let mut plane = CrdtPlane::new(peer(1));
+        let mut a = TextCrdt::from_str(1, "abc");
+        a.delete(2); // tombstone trailing 'c'
+
+        // No observation yet -> frontier is None -> nothing collected.
+        assert_eq!(plane.gc_text(&mut a), 0);
+        // After observing the local clock past the delete, the single-member
+        // frontier covers it.
+        plane.observe_op(a.clock());
+        assert_eq!(plane.gc_text(&mut a), 1);
+        assert_eq!(a.text(), "ab");
     }
 }

@@ -41,9 +41,25 @@ use crate::stable_id::Block;
 /// everything observed on merge), so a causally-later insert sorts higher and a
 /// concurrent insert tiebreaks deterministically by peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpId {
     counter: u64,
     peer: u64,
+}
+
+impl OpId {
+    /// The Lamport counter component (advances past everything observed on
+    /// merge). The dominant ordering key.
+    pub fn counter(&self) -> u64 {
+        self.counter
+    }
+
+    /// The originating peer — the final tiebreak that keeps concurrent inserts
+    /// at the same counter totally ordered, and the per-peer key the distributed
+    /// plane's OpId frontier groups deletions by.
+    pub fn peer(&self) -> u64 {
+        self.peer
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +111,25 @@ impl TextCrdt {
 
     fn next_id(&mut self) -> OpId {
         self.counter += 1;
+        OpId {
+            counter: self.counter,
+            peer: self.peer,
+        }
+    }
+
+    /// This replica's current Lamport position, as an [`OpId`] attributed to the
+    /// local peer.
+    ///
+    /// The OpId analog of an HLC stamp: the counter advances on every local edit
+    /// and jumps past everything observed on [`merge`](Self::merge), so it is a
+    /// causally-monotone watermark of how far this replica has progressed. The
+    /// distributed plane (`#lzcrdtplane`) folds each replica's `clock` into its
+    /// OpId frontier; the per-peer minimum is the all-replicas-aware watermark
+    /// below which a tombstone is collectable everywhere — exactly as the
+    /// [`HlcStamp`](crate::HlcStamp) frontier drives [`SeqCrdt`](crate::SeqCrdt)
+    /// GC. Deletes key by `OpId`, not `HlcStamp`, which is why this parallel
+    /// clock exists.
+    pub fn clock(&self) -> OpId {
         OpId {
             counter: self.counter,
             peer: self.peer,
