@@ -140,8 +140,9 @@ pub use ipc::{DecodeError, EncodeError};
 #[cfg(feature = "ipc")]
 pub use ipc::{
     Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, IpcPayload, IpcSink, IpcSource,
-    IpcValue, NodeSnapshot, NodeState, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError,
-    ShmBlobRef, Snapshot,
+    IpcValue, KeyIndex, NODE_KEY_MAX_LEN, NODE_KEY_MAX_SEGMENTS, NodeKey, NodeKeyError,
+    NodeSnapshot, NodeState, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, ShmBlobRef,
+    Snapshot,
 };
 pub use reconcile::{DiffOp, apply_to_map, reconcile};
 pub use sem_tree::SemTree;

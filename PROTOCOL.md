@@ -33,6 +33,40 @@ language-internal allocation IDs.
 
 Wire format: `u64` wrapped in a `"node"` field.
 
+### NodeKey
+
+Optional wire-stable keyed address for a collection entry (a `CellMap` /
+`CellFamily` entry). Unlike `NodeId` — the volatile internal handle — a
+`NodeKey` is producer-defined and **stable across NodeId churn**: an entry that
+is removed and later re-added is re-minted under a *new* `NodeId` but keeps the
+same `NodeKey`, so a peer can subscribe to "entry `scores/alice`" without
+maintaining an out-of-band key→NodeId map.
+
+```json
+"scores/alice"
+"sheet/A1"
+"outer/k1/inner/k2"
+```
+
+Wire format: a `/`-joined path string. A multi-segment path addresses nested
+collections (an entry of a `CellMap` inside a `CellMap` entry) with no extra
+machinery — each `/` introduces a deeper segment.
+
+Bounds (reject on construction and on the wire):
+
+| Bound | Limit |
+|-------|-------|
+| Max path length | 1024 bytes |
+| Max segment count | 32 |
+| Empty path | rejected |
+| Empty segment (leading/trailing/double `/`) | rejected |
+
+`NodeKey` is **additive** addressing — it never changes `NodeId` semantics. It
+appears only as the optional `key` field on `NodeSnapshot` and the `NodeAdd`
+delta op; absent ⇒ today's opaque-NodeId-only behavior. Key uniqueness across
+multiple producers (the multi-writer distributed boundary) is owned by the
+distributed CRDT plane's last-writer rule, not this protocol.
+
 ### PeerId
 
 Identifies a remote peer.
@@ -127,9 +161,16 @@ Snapshot {
 NodeSnapshot {
   node: NodeId,
   type_tag: string,
-  state: NodeState
+  state: NodeState,
+  key: NodeKey?   // optional; absent in JSON/MessagePack when not set
 }
 ```
+
+The optional trailing `key` field carries a wire-stable `NodeKey` for
+collection entries (see [NodeKey](#nodekey)). In the self-describing codecs
+(JSON, MessagePack) it is omitted when absent, so pre-`key` encoders and
+decoders round-trip unchanged. In Postcard (positional) the field is always
+present as an optional discriminant for schema stability.
 
 ### EdgeSnapshot
 
@@ -230,7 +271,7 @@ reorders, or sender restarts by checking `base_epoch == last_epoch`.
 | `CellSet` | `node`, `payload` (IpcValue) | Source cell changed to new value |
 | `SlotValue` | `node`, `payload` (IpcValue) | Lazily recomputed slot published a value |
 | `Invalidate` | `node` | Node dirtied without a concrete value |
-| `NodeAdd` | `node`, `type_tag`, `state` (NodeState) | New node became visible |
+| `NodeAdd` | `node`, `type_tag`, `state` (NodeState), `key` (NodeKey, optional) | New node became visible |
 | `NodeRemove` | `node` | Node was removed |
 | `EdgeAdd` | `dependent`, `dependency` | Dependency edge added |
 | `EdgeRemove` | `dependent`, `dependency` | Dependency edge removed |

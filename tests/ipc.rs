@@ -1,9 +1,9 @@
 #![cfg(feature = "ipc")]
 
 use lazily::{
-    Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeSnapshot, NodeState,
-    OpKind, PeerId, PeerPermissions, RemoteOp, SHM_BLOB_HEADER_LEN, ShmBlobArena,
-    ShmBlobArenaError, Snapshot,
+    Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, KeyIndex, NODE_KEY_MAX_SEGMENTS,
+    NodeId, NodeKey, NodeKeyError, NodeSnapshot, NodeState, OpKind, PeerId, PeerPermissions,
+    RemoteOp, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, Snapshot,
 };
 
 const PEER_A: PeerId = PeerId(1);
@@ -39,6 +39,7 @@ fn delta_round_trips_through_serde() {
                 node: NodeId(4),
                 type_tag: "u64".into(),
                 state: NodeState::Payload(vec![64]),
+                key: None,
             },
             DeltaOp::NodeRemove { node: NodeId(5) },
             DeltaOp::EdgeAdd {
@@ -137,6 +138,7 @@ fn delta_filter_omits_non_readable_ops_without_redaction() {
                 node: NodeId(4),
                 type_tag: "u8".into(),
                 state: NodeState::Payload(vec![4]),
+                key: None,
             },
             DeltaOp::NodeRemove { node: NodeId(5) },
             DeltaOp::EdgeAdd {
@@ -267,10 +269,148 @@ fn ipc_message_bytes_are_channel_agnostic_payloads() {
     );
 }
 
+#[test]
+fn node_key_validates_path_bounds() {
+    assert!(NodeKey::new("scores/alice").is_ok());
+    assert_eq!(NodeKey::new("").unwrap_err(), NodeKeyError::Empty);
+    assert_eq!(
+        NodeKey::new("a//b").unwrap_err(),
+        NodeKeyError::EmptySegment
+    );
+    assert_eq!(
+        NodeKey::new("/leading").unwrap_err(),
+        NodeKeyError::EmptySegment
+    );
+    let too_many = vec!["s"; NODE_KEY_MAX_SEGMENTS + 1].join("/");
+    assert!(matches!(
+        NodeKey::new(too_many).unwrap_err(),
+        NodeKeyError::TooManySegments { .. }
+    ));
+    let too_long = "x".repeat(2000);
+    assert!(matches!(
+        NodeKey::new(too_long).unwrap_err(),
+        NodeKeyError::TooLong { .. }
+    ));
+}
+
+#[test]
+fn node_key_segments_round_trip() {
+    let key = NodeKey::from_segments(["outer", "k1", "inner", "k2"]).unwrap();
+    assert_eq!(key.as_str(), "outer/k1/inner/k2");
+    assert_eq!(
+        key.segments().collect::<Vec<_>>(),
+        vec!["outer", "k1", "inner", "k2"]
+    );
+}
+
+#[test]
+fn keyed_node_round_trips_through_json() {
+    let key = NodeKey::new("scores/alice").unwrap();
+    let snapshot = Snapshot::new(
+        1,
+        vec![NodeSnapshot::payload(NodeId(1), "i32", vec![1]).with_key(key.clone())],
+        vec![],
+        vec![NodeId(1)],
+    );
+    let message = IpcMessage::Snapshot(snapshot);
+    let json = serde_json::to_string(&message).unwrap();
+    assert!(json.contains("scores/alice"));
+    assert_eq!(
+        serde_json::from_str::<IpcMessage>(&json).unwrap(),
+        message,
+        "keyed snapshot must round-trip through JSON"
+    );
+}
+
+#[test]
+fn unkeyed_node_omits_key_in_json() {
+    // Cross-language guarantee: a `None` key is omitted from self-describing
+    // wire (JSON), so pre-`key` decoders and existing conformance fixtures
+    // round-trip unchanged.
+    let snapshot = Snapshot::new(
+        1,
+        vec![NodeSnapshot::payload(NodeId(1), "i32", vec![1])],
+        vec![],
+        vec![NodeId(1)],
+    );
+    let message = IpcMessage::Snapshot(snapshot);
+    let json = serde_json::to_string(&message).unwrap();
+    assert!(
+        !json.contains("\"key\""),
+        "unkeyed node must omit the key field in JSON: {json}"
+    );
+
+    // A keyed NodeAdd in a delta omits its key when None, too.
+    let delta = Delta::next(
+        1,
+        vec![DeltaOp::NodeAdd {
+            node: NodeId(2),
+            type_tag: "i32".into(),
+            state: NodeState::Payload(vec![2]),
+            key: None,
+        }],
+    );
+    let delta_json = serde_json::to_string(&IpcMessage::Delta(delta)).unwrap();
+    assert!(
+        !delta_json.contains("\"key\""),
+        "unkeyed NodeAdd must omit the key field in JSON: {delta_json}"
+    );
+}
+
+#[test]
+fn node_with_absent_key_decodes_to_none() {
+    // Backward-compat: a node serialized before `key` existed (no `key` field)
+    // still decodes, with `key` defaulting to `None`.
+    let wire = r#"{"Snapshot":{"epoch":1,"nodes":[{"node":1,"type_tag":"i32","state":{"Payload":[1]}}],"edges":[],"roots":[1]}}"#;
+    let IpcMessage::Snapshot(snapshot) = serde_json::from_str::<IpcMessage>(wire).unwrap() else {
+        panic!("expected snapshot");
+    };
+    assert_eq!(snapshot.nodes[0].key, None);
+}
+
+#[test]
+fn key_index_survives_nodeid_churn() {
+    let key = NodeKey::new("scores/alice").unwrap();
+    let mut index = KeyIndex::new();
+
+    // Initial snapshot binds the key to NodeId(1).
+    let snapshot = Snapshot::new(
+        1,
+        vec![NodeSnapshot::payload(NodeId(1), "i32", vec![1]).with_key(key.clone())],
+        vec![],
+        vec![NodeId(1)],
+    );
+    index.ingest_snapshot(&snapshot);
+    assert_eq!(index.node_for_key(&key), Some(NodeId(1)));
+    assert_eq!(index.key_for_node(NodeId(1)), Some(&key));
+
+    // Entry is removed and re-added under a fresh NodeId(2).
+    let delta = Delta::next(
+        1,
+        vec![
+            DeltaOp::NodeRemove { node: NodeId(1) },
+            DeltaOp::NodeAdd {
+                node: NodeId(2),
+                type_tag: "i32".into(),
+                state: NodeState::Payload(vec![2]),
+                key: Some(key.clone()),
+            },
+        ],
+    );
+    index.apply_delta(&delta);
+
+    // The key-expressed subscription stays valid; the old NodeId is gone.
+    assert_eq!(index.node_for_key(&key), Some(NodeId(2)));
+    assert_eq!(index.key_for_node(NodeId(1)), None);
+    assert_eq!(index.key_for_node(NodeId(2)), Some(&key));
+    assert_eq!(index.len(), 1);
+}
+
 #[cfg(feature = "ipc-binary")]
 mod binary {
     use lazily::{
-        DecodeError, Delta, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeSnapshot, Snapshot,
+        DecodeError, Delta, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeKey, NodeSnapshot,
+        Snapshot,
     };
 
     #[test]
@@ -303,6 +443,29 @@ mod binary {
             ],
         );
         let message = IpcMessage::Delta(delta.clone());
+
+        let encoded = message.encode_binary().unwrap();
+        let decoded = IpcMessage::decode_binary(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_binary_round_trips_keyed_and_unkeyed_nodes() {
+        // Postcard is positional/non-self-describing: the optional `key` must
+        // round-trip for both the `None` (unkeyed) and `Some` (keyed) node in
+        // the same message.
+        let key = NodeKey::new("scores/alice").unwrap();
+        let snapshot = Snapshot::new(
+            7,
+            vec![
+                NodeSnapshot::payload(NodeId(1), "i32", vec![1]).with_key(key),
+                NodeSnapshot::opaque(NodeId(2), "opaque-type"),
+            ],
+            vec![],
+            vec![NodeId(1), NodeId(2)],
+        );
+        let message = IpcMessage::Snapshot(snapshot);
 
         let encoded = message.encode_binary().unwrap();
         let decoded = IpcMessage::decode_binary(&encoded).unwrap();

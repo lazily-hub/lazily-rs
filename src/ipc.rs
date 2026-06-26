@@ -10,6 +10,7 @@
 //! closures, or typed handles to foreign runtimes.
 
 use crate::distributed::{NodeId, PeerId, PeerPermissions, RemoteOp};
+use std::collections::HashMap;
 use std::fmt;
 
 /// Bytes reserved before every shared-memory blob payload.
@@ -319,6 +320,155 @@ where
     }
 }
 
+/// Maximum encoded byte length of a [`NodeKey`] path.
+pub const NODE_KEY_MAX_LEN: usize = 1024;
+/// Maximum number of `/`-separated segments in a [`NodeKey`].
+pub const NODE_KEY_MAX_SEGMENTS: usize = 32;
+
+/// Why a [`NodeKey`] failed validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeKeyError {
+    /// The path was empty.
+    Empty,
+    /// The path exceeded [`NODE_KEY_MAX_LEN`] bytes.
+    TooLong {
+        /// Byte length of the offending path.
+        len: usize,
+    },
+    /// The path had more than [`NODE_KEY_MAX_SEGMENTS`] segments.
+    TooManySegments {
+        /// Segment count of the offending path.
+        segments: usize,
+    },
+    /// The path contained an empty segment (leading/trailing/double `/`).
+    EmptySegment,
+}
+
+impl fmt::Display for NodeKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "node key path is empty"),
+            Self::TooLong { len } => {
+                write!(
+                    f,
+                    "node key path is {len} bytes, exceeds {NODE_KEY_MAX_LEN}"
+                )
+            }
+            Self::TooManySegments { segments } => write!(
+                f,
+                "node key has {segments} segments, exceeds {NODE_KEY_MAX_SEGMENTS}"
+            ),
+            Self::EmptySegment => write!(f, "node key path has an empty segment"),
+        }
+    }
+}
+
+impl std::error::Error for NodeKeyError {}
+
+/// Wire-stable keyed address for a collection entry.
+///
+/// A `NodeKey` is a `/`-joined path (e.g. `scores/alice`, `sheet/A1`,
+/// `outer/k1/inner/k2`). Unlike [`NodeId`] — the volatile internal handle —
+/// a `NodeKey` is producer-defined and stable across NodeId churn: a
+/// removed-then-readded entry keeps the same key, so a peer can subscribe to
+/// "entry `scores/alice`" without maintaining an out-of-band key→NodeId map.
+/// A multi-segment path addresses nested collections (an entry of a `CellMap`
+/// inside a `CellMap` entry) with no extra machinery.
+///
+/// Length and segment count are bounded ([`NODE_KEY_MAX_LEN`],
+/// [`NODE_KEY_MAX_SEGMENTS`]) to cap attacker-controlled growth; oversized keys
+/// are rejected on construction and on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeKey(String);
+
+impl NodeKey {
+    /// Construct a validated key from a `/`-joined path.
+    pub fn new(path: impl Into<String>) -> Result<Self, NodeKeyError> {
+        let path = path.into();
+        Self::validate(&path)?;
+        Ok(Self(path))
+    }
+
+    /// Construct a key from already-validated segments.
+    ///
+    /// Segments are joined with `/`; the result is validated.
+    pub fn from_segments<I, S>(segments: I) -> Result<Self, NodeKeyError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let joined = segments
+            .into_iter()
+            .map(|s| s.as_ref().to_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        Self::new(joined)
+    }
+
+    fn validate(path: &str) -> Result<(), NodeKeyError> {
+        if path.is_empty() {
+            return Err(NodeKeyError::Empty);
+        }
+        if path.len() > NODE_KEY_MAX_LEN {
+            return Err(NodeKeyError::TooLong { len: path.len() });
+        }
+        let mut segments = 0usize;
+        for segment in path.split('/') {
+            if segment.is_empty() {
+                return Err(NodeKeyError::EmptySegment);
+            }
+            segments += 1;
+        }
+        if segments > NODE_KEY_MAX_SEGMENTS {
+            return Err(NodeKeyError::TooManySegments { segments });
+        }
+        Ok(())
+    }
+
+    /// The full `/`-joined path.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Iterate the path segments.
+    pub fn segments(&self) -> impl Iterator<Item = &str> {
+        self.0.split('/')
+    }
+}
+
+impl fmt::Display for NodeKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for NodeKey {
+    type Error = NodeKeyError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for NodeKey {
+    type Error = NodeKeyError;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl serde::Serialize for NodeKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NodeKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let path = String::deserialize(deserializer)?;
+        Self::new(path).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Serializable state for one allowlisted node in a [`Snapshot`] or `NodeAdd`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NodeState {
@@ -331,7 +481,12 @@ pub enum NodeState {
 }
 
 /// Full state for one node in a snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// `key` serialization is format-aware: self-describing codecs (JSON,
+/// MessagePack) omit it when `None` so pre-`key` encoders/decoders round-trip
+/// unchanged; positional Postcard always writes the optional discriminant so
+/// the binary schema stays stable. See [`NodeKey`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSnapshot {
     /// Wire-stable node identifier.
     pub node: NodeId,
@@ -340,6 +495,47 @@ pub struct NodeSnapshot {
     /// Serialized value bytes, or `Opaque` when the node is visible but
     /// type-erased serialization was not available.
     pub state: NodeState,
+    /// Optional wire-stable keyed address for this node (a `CellMap`/`CellFamily`
+    /// entry's path). `None` keeps today's opaque-NodeId-only addressing.
+    pub key: Option<NodeKey>,
+}
+
+impl serde::Serialize for NodeSnapshot {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // Omit a `None` key only in self-describing formats; positional codecs
+        // (Postcard) must always carry the field so the schema stays stable.
+        let emit_key = self.key.is_some() || !serializer.is_human_readable();
+        let mut st = serializer.serialize_struct("NodeSnapshot", 3 + emit_key as usize)?;
+        st.serialize_field("node", &self.node)?;
+        st.serialize_field("type_tag", &self.type_tag)?;
+        st.serialize_field("state", &self.state)?;
+        if emit_key {
+            st.serialize_field("key", &self.key)?;
+        }
+        st.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NodeSnapshot {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename = "NodeSnapshot")]
+        struct Raw {
+            node: NodeId,
+            type_tag: String,
+            state: NodeState,
+            #[serde(default)]
+            key: Option<NodeKey>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            node: raw.node,
+            type_tag: raw.type_tag,
+            state: raw.state,
+            key: raw.key,
+        })
+    }
 }
 
 impl NodeSnapshot {
@@ -349,6 +545,7 @@ impl NodeSnapshot {
             node,
             type_tag: type_tag.into(),
             state: NodeState::Payload(payload),
+            key: None,
         }
     }
 
@@ -358,6 +555,7 @@ impl NodeSnapshot {
             node,
             type_tag: type_tag.into(),
             state: NodeState::Opaque,
+            key: None,
         }
     }
 
@@ -367,7 +565,14 @@ impl NodeSnapshot {
             node,
             type_tag: type_tag.into(),
             state: NodeState::SharedBlob(blob),
+            key: None,
         }
+    }
+
+    /// Attach a wire-stable [`NodeKey`] to this node (builder style).
+    pub fn with_key(mut self, key: NodeKey) -> Self {
+        self.key = Some(key);
+        self
     }
 }
 
@@ -452,7 +657,10 @@ impl Snapshot {
 }
 
 /// One incremental graph mutation in a [`Delta`].
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// `NodeAdd`'s `key` serialization is format-aware (see [`NodeSnapshot`]):
+/// self-describing codecs omit a `None` key; positional Postcard keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeltaOp {
     /// A source cell was changed to `payload`.
     CellSet { node: NodeId, payload: IpcValue },
@@ -465,6 +673,9 @@ pub enum DeltaOp {
         node: NodeId,
         type_tag: String,
         state: NodeState,
+        /// Optional wire-stable keyed address for the new node (see
+        /// [`NodeKey`]). `None` keeps opaque-NodeId-only addressing.
+        key: Option<NodeKey>,
     },
     /// A node was removed.
     NodeRemove { node: NodeId },
@@ -530,6 +741,221 @@ impl DeltaOp {
                 && can_read(permissions, peer, *dependency))
             .then(|| self.clone()),
         }
+    }
+}
+
+fn delta_op_key_ref_is_none(key: &&Option<NodeKey>) -> bool {
+    key.is_none()
+}
+
+impl serde::Serialize for DeltaOp {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Two borrowed shadows differing only in `NodeAdd.key` omission. The
+        // human-readable shadow omits a `None` key; the binary shadow always
+        // writes it so positional Postcard keeps a stable schema.
+        #[derive(serde::Serialize)]
+        #[serde(rename = "DeltaOp")]
+        enum Hr<'a> {
+            CellSet {
+                node: &'a NodeId,
+                payload: &'a IpcValue,
+            },
+            SlotValue {
+                node: &'a NodeId,
+                payload: &'a IpcValue,
+            },
+            Invalidate {
+                node: &'a NodeId,
+            },
+            NodeAdd {
+                node: &'a NodeId,
+                type_tag: &'a String,
+                state: &'a NodeState,
+                #[serde(skip_serializing_if = "delta_op_key_ref_is_none")]
+                key: &'a Option<NodeKey>,
+            },
+            NodeRemove {
+                node: &'a NodeId,
+            },
+            EdgeAdd {
+                dependent: &'a NodeId,
+                dependency: &'a NodeId,
+            },
+            EdgeRemove {
+                dependent: &'a NodeId,
+                dependency: &'a NodeId,
+            },
+        }
+        #[derive(serde::Serialize)]
+        #[serde(rename = "DeltaOp")]
+        enum Bin<'a> {
+            CellSet {
+                node: &'a NodeId,
+                payload: &'a IpcValue,
+            },
+            SlotValue {
+                node: &'a NodeId,
+                payload: &'a IpcValue,
+            },
+            Invalidate {
+                node: &'a NodeId,
+            },
+            NodeAdd {
+                node: &'a NodeId,
+                type_tag: &'a String,
+                state: &'a NodeState,
+                key: &'a Option<NodeKey>,
+            },
+            NodeRemove {
+                node: &'a NodeId,
+            },
+            EdgeAdd {
+                dependent: &'a NodeId,
+                dependency: &'a NodeId,
+            },
+            EdgeRemove {
+                dependent: &'a NodeId,
+                dependency: &'a NodeId,
+            },
+        }
+
+        if serializer.is_human_readable() {
+            match self {
+                DeltaOp::CellSet { node, payload } => Hr::CellSet { node, payload },
+                DeltaOp::SlotValue { node, payload } => Hr::SlotValue { node, payload },
+                DeltaOp::Invalidate { node } => Hr::Invalidate { node },
+                DeltaOp::NodeAdd {
+                    node,
+                    type_tag,
+                    state,
+                    key,
+                } => Hr::NodeAdd {
+                    node,
+                    type_tag,
+                    state,
+                    key,
+                },
+                DeltaOp::NodeRemove { node } => Hr::NodeRemove { node },
+                DeltaOp::EdgeAdd {
+                    dependent,
+                    dependency,
+                } => Hr::EdgeAdd {
+                    dependent,
+                    dependency,
+                },
+                DeltaOp::EdgeRemove {
+                    dependent,
+                    dependency,
+                } => Hr::EdgeRemove {
+                    dependent,
+                    dependency,
+                },
+            }
+            .serialize(serializer)
+        } else {
+            match self {
+                DeltaOp::CellSet { node, payload } => Bin::CellSet { node, payload },
+                DeltaOp::SlotValue { node, payload } => Bin::SlotValue { node, payload },
+                DeltaOp::Invalidate { node } => Bin::Invalidate { node },
+                DeltaOp::NodeAdd {
+                    node,
+                    type_tag,
+                    state,
+                    key,
+                } => Bin::NodeAdd {
+                    node,
+                    type_tag,
+                    state,
+                    key,
+                },
+                DeltaOp::NodeRemove { node } => Bin::NodeRemove { node },
+                DeltaOp::EdgeAdd {
+                    dependent,
+                    dependency,
+                } => Bin::EdgeAdd {
+                    dependent,
+                    dependency,
+                },
+                DeltaOp::EdgeRemove {
+                    dependent,
+                    dependency,
+                } => Bin::EdgeRemove {
+                    dependent,
+                    dependency,
+                },
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DeltaOp {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename = "DeltaOp")]
+        enum Wire {
+            CellSet {
+                node: NodeId,
+                payload: IpcValue,
+            },
+            SlotValue {
+                node: NodeId,
+                payload: IpcValue,
+            },
+            Invalidate {
+                node: NodeId,
+            },
+            NodeAdd {
+                node: NodeId,
+                type_tag: String,
+                state: NodeState,
+                #[serde(default)]
+                key: Option<NodeKey>,
+            },
+            NodeRemove {
+                node: NodeId,
+            },
+            EdgeAdd {
+                dependent: NodeId,
+                dependency: NodeId,
+            },
+            EdgeRemove {
+                dependent: NodeId,
+                dependency: NodeId,
+            },
+        }
+
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::CellSet { node, payload } => DeltaOp::CellSet { node, payload },
+            Wire::SlotValue { node, payload } => DeltaOp::SlotValue { node, payload },
+            Wire::Invalidate { node } => DeltaOp::Invalidate { node },
+            Wire::NodeAdd {
+                node,
+                type_tag,
+                state,
+                key,
+            } => DeltaOp::NodeAdd {
+                node,
+                type_tag,
+                state,
+                key,
+            },
+            Wire::NodeRemove { node } => DeltaOp::NodeRemove { node },
+            Wire::EdgeAdd {
+                dependent,
+                dependency,
+            } => DeltaOp::EdgeAdd {
+                dependent,
+                dependency,
+            },
+            Wire::EdgeRemove {
+                dependent,
+                dependency,
+            } => DeltaOp::EdgeRemove {
+                dependent,
+                dependency,
+            },
+        })
     }
 }
 
@@ -621,6 +1047,96 @@ pub enum DeltaApplyStatus {
         /// Delta's advertised target epoch.
         epoch: u64,
     },
+}
+
+/// Consumer-side registry mapping wire-stable [`NodeKey`]s to current
+/// [`NodeId`]s.
+///
+/// A subscriber expresses interest as a key (`scores/alice`); the index keeps
+/// that key resolvable across NodeId churn. When an entry is removed and later
+/// re-added under a fresh NodeId, ingesting the `NodeRemove` + keyed `NodeAdd`
+/// (or a fresh `Snapshot`) repoints the key at the new NodeId, so the
+/// key-expressed subscription stays valid. The mapping is bijective: each
+/// NodeId resolves back to at most one key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyIndex {
+    forward: HashMap<NodeKey, NodeId>,
+    reverse: HashMap<NodeId, NodeKey>,
+}
+
+impl KeyIndex {
+    /// Create an empty index.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the index with the keyed nodes of a full snapshot.
+    pub fn ingest_snapshot(&mut self, snapshot: &Snapshot) {
+        self.forward.clear();
+        self.reverse.clear();
+        for node in &snapshot.nodes {
+            if let Some(key) = &node.key {
+                self.insert(key.clone(), node.node);
+            }
+        }
+    }
+
+    /// Apply one delta's keyed `NodeAdd` / `NodeRemove` ops to the index.
+    pub fn apply_delta(&mut self, delta: &Delta) {
+        for op in &delta.ops {
+            match op {
+                DeltaOp::NodeAdd {
+                    node,
+                    key: Some(key),
+                    ..
+                } => self.insert(key.clone(), *node),
+                DeltaOp::NodeRemove { node } => self.remove_node(*node),
+                _ => {}
+            }
+        }
+    }
+
+    /// Bind `key` to `node`, dropping any stale forward/reverse entries so the
+    /// mapping stays bijective across re-keying and NodeId churn.
+    pub fn insert(&mut self, key: NodeKey, node: NodeId) {
+        if let Some(old_key) = self.reverse.insert(node, key.clone())
+            && old_key != key
+        {
+            self.forward.remove(&old_key);
+        }
+        if let Some(old_node) = self.forward.insert(key, node)
+            && old_node != node
+        {
+            self.reverse.remove(&old_node);
+        }
+    }
+
+    /// Drop whatever key currently resolves to `node`.
+    pub fn remove_node(&mut self, node: NodeId) {
+        if let Some(key) = self.reverse.remove(&node) {
+            self.forward.remove(&key);
+        }
+    }
+
+    /// Resolve a wire-stable key to its current NodeId.
+    pub fn node_for_key(&self, key: &NodeKey) -> Option<NodeId> {
+        self.forward.get(key).copied()
+    }
+
+    /// Resolve a NodeId back to its wire-stable key.
+    pub fn key_for_node(&self, node: NodeId) -> Option<&NodeKey> {
+        self.reverse.get(&node)
+    }
+
+    /// Number of keyed entries.
+    pub fn len(&self) -> usize {
+        self.forward.len()
+    }
+
+    /// Whether the index has no keyed entries.
+    pub fn is_empty(&self) -> bool {
+        self.forward.is_empty()
+    }
 }
 
 /// Tagged IPC protocol message.

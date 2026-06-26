@@ -391,6 +391,7 @@ fn conformance_permission_delta_filter_omits_without_redaction() {
                 node: NodeId(4),
                 type_tag: "u8".into(),
                 state: NodeState::Payload(vec![4]),
+                key: None,
             },
             DeltaOp::NodeRemove { node: NodeId(5) },
             DeltaOp::EdgeAdd {

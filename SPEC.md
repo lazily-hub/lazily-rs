@@ -418,6 +418,36 @@ independently-tracked value cell per entry.
   `get(key)`, via a `Fn(&K) -> V` factory. Repeated `get`s of the same key return the
   same cell.
 
+### Wire-stable keyed addressing (`#lzwirekey`)
+
+A `CellMap`/`CellFamily` entry is addressable internally by its key, but on the
+wire (`PROTOCOL.md`) a peer historically could only refer to it by the opaque,
+volatile `NodeId` it happened to receive — which a producer may re-mint under a
+*new* value after a resync or a remove-then-readd. The wire protocol therefore
+carries an optional, wire-stable **`NodeKey`**: a `/`-joined path (`scores/alice`,
+`outer/k1/inner/k2`) attached to the `NodeSnapshot` and `NodeAdd` ops that
+introduce a node.
+
+- **Additive and backward compatible.** `NodeKey` never changes `NodeId`
+  semantics; it is an optional field. Self-describing codecs (JSON, MessagePack)
+  **omit** it when absent, so pre-`key` encoders/decoders and existing
+  conformance fixtures round-trip unchanged; positional Postcard always carries
+  the optional discriminant for binary schema stability.
+- **Path = nesting.** A multi-segment path addresses nested collections (an
+  entry of a `CellMap` inside a `CellMap` entry) with no extra machinery. Length
+  (≤ 1024 bytes) and segment count (≤ 32) are bounded and rejected on the wire.
+- **Consumer key index.** A subscriber maintains a bijective `NodeKey ↔ NodeId`
+  index (`KeyIndex`): ingesting a `Snapshot` or applying a keyed `NodeAdd` /
+  `NodeRemove` keeps a key resolvable across NodeId churn, so a key-expressed
+  subscription (`node_for_key("scores/alice")`) stays valid when the entry is
+  removed and re-added under a fresh NodeId.
+- **Producer wiring is staged.** The wire types, codecs, and consumer index land
+  with `#lzwirekey`; threading each entry's `NodeKey` through the runtime→IPC
+  projection waits on the graph→snapshot producer (today `NodeSnapshot`s are
+  constructed only at the transport seam, not minted from a live `CellMap`).
+  Multi-producer key-uniqueness is owned by the distributed plane's last-writer
+  rule (`#lzcrdtplane`), not this protocol.
+
 ### Atomic ordered move (`#lzcellmove`)
 
 `CellMap` exposes `move_to(key, index)`, `move_before(key, anchor)`, and
