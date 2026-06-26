@@ -51,6 +51,13 @@ GROUP_ORDER = {
     # #lzscalebench: >=1M-node scale group (feature-gated `scale-bench`).
     "scale": 24,
 }
+
+# #lzscalecompare: criterion groups that must NOT appear in the auto-generated
+# results table. `scale_compare` is the cross-library head-to-head (lazily vs
+# leptos_reactive) documented manually in BENCHMARKS.md prose; its estimates land
+# in `target/criterion` when the comparison bench runs, but they are not a tracked
+# lazily benchmark, so the generator skips them (keeps `benchmark-check` green).
+EXCLUDED_GROUPS = {"scale_compare"}
 SET_CELL_INVALIDATION_CASE_ORDER = {
     "high_fan_out": 0,
     "same_slot_contention": 1,
@@ -409,6 +416,14 @@ def discover_results(criterion_dir: Path) -> list[BenchmarkResult]:
         group = case_parts[0]
         case = " / ".join(case_parts[1:]) if len(case_parts) > 1 else group
         if group == "thread_safe_contention" and case.isdigit():
+            continue
+        # #lzscalecompare: the `scale_compare` group is the cross-library
+        # head-to-head (lazily vs leptos_reactive) documented manually in
+        # BENCHMARKS.md's "Cross-library comparison" prose, NOT a tracked lazily
+        # benchmark. Exclude it from the auto-generated results table so running
+        # `cargo bench --features scale-compare` never makes `benchmark-check`
+        # stale (its criterion estimates would otherwise leak into the table).
+        if group in EXCLUDED_GROUPS:
             continue
         mean_ns, lower_ns, upper_ns = read_estimate(estimates)
         results.append(

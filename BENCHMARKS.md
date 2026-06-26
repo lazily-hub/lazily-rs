@@ -577,13 +577,15 @@ so this size keeps its wall clock feasible — lazily's own 1M/10M numbers are a
 | `full_recalc_invalidate_all` (100k) | **6.26 ms** | 17.29 ms | lazily **2.8×** faster |
 | `viewport_recalc` (edit 1, read 1k) | 11.52 µs | **8.22 µs** | leptos **1.4×** faster |
 
-**Reading the result honestly:** lazily wins the bulk-graph operations — building
+**Honest read:** lazily wins the bulk-graph operations — building
 the sheet (1.5×), computing it cold (3.6×), and recomputing the whole sheet after a
 full invalidation (2.8×) — driven by its sparse arena + lean single-threaded
 `Context` versus leptos's runtime slotmap and subscriber bookkeeping. On the
 cached-read-dominated `viewport_recalc` case the two are close and leptos is
 actually a touch faster (its memo cache-hit read path is slightly leaner at this
-size; only ~2 of the 1,000 viewport cells actually recompute). The shared headline
+size; only ~2 of the 1,000 viewport cells actually recompute). That leptos *wins*
+a case — and that its 30 ms cold recalc proves its memos genuinely recompute — is
+the evidence this comparison is fair rather than cherry-picked. The shared headline
 is the lazy-pull property both exhibit: a one-input edit + bounded-viewport read is
 **microseconds**, ~1000× cheaper than a full recalc, *independent of total sheet
 size* — neither library recomputes off-viewport formulas. So the defensible claim
