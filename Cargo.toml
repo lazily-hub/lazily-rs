@@ -49,8 +49,15 @@ vec_edges = []
 # generated section is unaffected. Run explicitly:
 #   cargo bench --features scale-bench --bench scale
 scale-bench = []
+# #lzscalecompare: cross-library head-to-head against leptos_reactive (another
+# lazy pull-based memo system) on the identical spreadsheet graph shape. Gated so
+# the comparison dependency (`leptos_reactive`) is only pulled in for the explicit
+# benchmark run, never for normal builds / `make check`:
+#   cargo bench --features scale-compare --bench scale_compare
+scale-compare = ["dep:leptos_reactive"]
 
 [dependencies]
+leptos_reactive = { version = "0.6", optional = true }
 arc-swap = "1"
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
 parking_lot = "0.12"
@@ -95,6 +102,13 @@ harness = false
 name = "scale"
 harness = false
 required-features = ["scale-bench"]
+
+# #lzscalecompare: head-to-head vs leptos_reactive on the same graph shape.
+# `cargo bench --features scale-compare --bench scale_compare`
+[[bench]]
+name = "scale_compare"
+harness = false
+required-features = ["scale-compare"]
 
 [[bench]]
 name = "profile"

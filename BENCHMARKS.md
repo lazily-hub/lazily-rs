@@ -554,6 +554,51 @@ populated cells, far beyond any realistically-populated Excel sheet. The `scale`
 linear scaling (1M → 10M held ~constant per-cell cost) is the evidence that the model
 extrapolates rather than degrading at spreadsheet capacity.
 
+### Cross-library comparison — `#lzscalecompare`
+
+Head-to-head against [`leptos_reactive`](https://crates.io/crates/leptos_reactive)
+(Leptos 0.6's fine-grained reactivity) on the **identical** spreadsheet graph
+(`N` input signals + `N` formula memos, `formula[i] = input[i] + input[i-1]`), in
+the same criterion harness on the same host. `leptos_reactive` is the fair
+apples-to-apples pick: like lazily it is a **lazy, pull-based memo** system (a memo
+recomputes only when read while dirty), so this isolates per-node runtime overhead
+and the lazy-pull viewport property rather than comparing a pull model against an
+eager push one. (JS signal libraries — Solid, MobX, Preact Signals — are a
+different runtime and are excluded; the standard js-reactivity-benchmark / cellx
+harnesses also measure small/medium graphs, not a 100k-node sheet.)
+
+Measured at `N = 100_000` (200,000 nodes/library; leptos is far heavier per node,
+so this size keeps its wall clock feasible — lazily's own 1M/10M numbers are above):
+
+| case | lazily | leptos_reactive | ratio |
+|---|---:|---:|---|
+| `build` (200k nodes) | **8.58 ms** | 12.89 ms | lazily **1.5×** faster |
+| `cold_full_recalc` (100k formulas) | **8.45 ms** | 30.06 ms | lazily **3.6×** faster |
+| `full_recalc_invalidate_all` (100k) | **6.26 ms** | 17.29 ms | lazily **2.8×** faster |
+| `viewport_recalc` (edit 1, read 1k) | 11.52 µs | **8.22 µs** | leptos **1.4×** faster |
+
+**Reading the result honestly:** lazily wins the bulk-graph operations — building
+the sheet (1.5×), computing it cold (3.6×), and recomputing the whole sheet after a
+full invalidation (2.8×) — driven by its sparse arena + lean single-threaded
+`Context` versus leptos's runtime slotmap and subscriber bookkeeping. On the
+cached-read-dominated `viewport_recalc` case the two are close and leptos is
+actually a touch faster (its memo cache-hit read path is slightly leaner at this
+size; only ~2 of the 1,000 viewport cells actually recompute). The shared headline
+is the lazy-pull property both exhibit: a one-input edit + bounded-viewport read is
+**microseconds**, ~1000× cheaper than a full recalc, *independent of total sheet
+size* — neither library recomputes off-viewport formulas. So the defensible claim
+is "lazily has materially higher whole-graph throughput than a comparable
+native-Rust pull-based reactive system, and matches it on incremental viewport
+reads," **not** a blanket "fastest reactive library."
+
+Reproduce (gated behind the `scale-compare` feature so the comparison dependency is
+never pulled into normal builds / `make check`):
+
+```bash
+cargo bench --features scale-compare --bench scale_compare
+LAZILY_SCALE_N=250000 cargo bench --features scale-compare --bench scale_compare
+```
+
 ## Multi-Language
 
 lazily is implemented across three languages with shared semantics:
