@@ -123,6 +123,33 @@ impl HlcStamp {
     }
 }
 
+/// Lossless conversion to the feature-free wire mirror (`#lzcrdtplane5b`): the
+/// `ipc` layer carries causal-stability metadata as plain integers
+/// ([`WireStamp`](crate::ipc::WireStamp)) so it never depends on the
+/// `distributed` feature. The total order `(wall_time, logical, peer)` is
+/// identical on both sides, so this round-trips.
+#[cfg(feature = "ipc")]
+impl From<HlcStamp> for crate::ipc::WireStamp {
+    fn from(stamp: HlcStamp) -> Self {
+        Self {
+            wall_time: stamp.wall_time,
+            logical: stamp.logical,
+            peer: stamp.peer.0,
+        }
+    }
+}
+
+#[cfg(feature = "ipc")]
+impl From<crate::ipc::WireStamp> for HlcStamp {
+    fn from(wire: crate::ipc::WireStamp) -> Self {
+        Self {
+            wall_time: wire.wall_time,
+            logical: wire.logical,
+            peer: PeerId(wire.peer),
+        }
+    }
+}
+
 /// A hybrid logical clock for one peer.
 ///
 /// The caller supplies wall-clock time (`now_micros`) on each event so the
@@ -378,6 +405,13 @@ impl StampFrontier {
             .0
             .iter()
             .all(|(peer, stamp)| self.0.get(peer).is_some_and(|cur| cur >= stamp))
+    }
+
+    /// Iterate the observed `(peer, stamp)` entries in [`PeerId`] order — the
+    /// per-peer frontier a replica advertises over anti-entropy
+    /// (`#lzcrdtplane5b`).
+    pub fn iter(&self) -> impl Iterator<Item = (PeerId, HlcStamp)> + '_ {
+        self.0.iter().map(|(&peer, &stamp)| (peer, stamp))
     }
 
     /// Number of peers with at least one observed stamp.

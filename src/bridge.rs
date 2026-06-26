@@ -31,7 +31,7 @@
 //! peer simultaneously.
 
 use crate::distributed::{PeerId, PeerPermissions, RemoteOp};
-use crate::ipc::{Delta, DeltaOp, IpcMessage, IpcSink, IpcSource};
+use crate::ipc::{CrdtSync, Delta, DeltaOp, IpcMessage, IpcSink, IpcSource};
 
 /// Error from a [`BridgeHub`] operation: an erased transport failure.
 #[derive(Debug)]
@@ -140,11 +140,18 @@ impl BridgeHub {
     /// different attachments are never borrowed at once; routing a write back to
     /// its originating peer is always skipped.
     pub fn poll(&mut self) -> Result<usize, HubError> {
-        // Phase A: drain + write-authorize inbound from every source.
+        // Phase A: drain inbound from every source. Source-cell writes are
+        // write-authorized into bare `DeltaOp`s; CRDT-plane sync frames
+        // (`#lzcrdtplane5b`) are kept whole for read-filtered fan-out.
         let mut inbound: Vec<(usize, Vec<DeltaOp>)> = Vec::new();
+        let mut inbound_sync: Vec<(usize, CrdtSync)> = Vec::new();
         for i in 0..self.attachments.len() {
             while let Some(message) = self.attachments[i].source.recv_msg()? {
                 let att = &self.attachments[i];
+                if let IpcMessage::CrdtSync(sync) = &message {
+                    inbound_sync.push((i, sync.clone()));
+                    continue;
+                }
                 let ops = authorize_inbound(att.peer, &att.perms, &message);
                 if !ops.is_empty() {
                     inbound.push((i, ops));
@@ -173,6 +180,27 @@ impl BridgeHub {
                 routed += 1;
             }
         }
+
+        // Phase C: fan each CRDT sync frame out to the other attachments,
+        // re-filtered to each target's read allowlist. Ops a target cannot read
+        // are omitted; the frontier advertisement is retained so the receiver's
+        // causal-stability watermark stays sound. The frame's converged CvRDT
+        // ops are commutative/idempotent, so the hub forwards them rather than
+        // re-deriving a single authoritative write as it does for a Delta.
+        for (src_i, sync) in &inbound_sync {
+            for j in 0..self.attachments.len() {
+                if j == *src_i {
+                    continue;
+                }
+                let att = &mut self.attachments[j];
+                let filtered = sync.filter_readable(&att.perms, att.peer);
+                if filtered.ops.is_empty() {
+                    continue;
+                }
+                att.sink.send_msg(&IpcMessage::CrdtSync(filtered))?;
+                routed += 1;
+            }
+        }
         Ok(routed)
     }
 }
@@ -192,11 +220,9 @@ fn authorize_inbound(peer: PeerId, perms: &PeerPermissions, message: &IpcMessage
             .collect(),
         // A peer is not the snapshot authority; it cannot push full state.
         IpcMessage::Snapshot(_) => Vec::new(),
-        // CrdtSync carries multi-writer plane traffic. Its wire format and
-        // per-peer read-filtering land in #lzcrdtplane5a; BridgeHub fan-out of
-        // the CRDT plane (translating sync frames to/from replica state) is the
-        // runtime-integration slice #lzcrdtplane5b. Point-to-point CrdtSync over
-        // an IpcSink/IpcSource pair already works today.
+        // CrdtSync multi-writer plane traffic is fanned out whole (read-filtered)
+        // in `poll`'s Phase C (`#lzcrdtplane5b`); it never reaches this
+        // write-authorization path. The arm stays for exhaustiveness.
         IpcMessage::CrdtSync(_) => Vec::new(),
     }
 }
@@ -322,6 +348,52 @@ mod tests {
 
         assert_eq!(routed, 0, "a peer-pushed snapshot must be dropped");
         assert!(recv(&pb).is_none());
+    }
+
+    #[test]
+    fn crdt_sync_fans_out_to_readers_only() {
+        use crate::ipc::{CrdtOp, WireStamp};
+
+        // A may read+write N1; B may read N1; C may read only N2.
+        let (a, b, c) = (PeerId(1), PeerId(2), PeerId(3));
+        let mut hub = BridgeHub::new();
+        let pa = attach(&mut hub, a, perms(a, &[1], &[1]));
+        let pb = attach(&mut hub, b, perms(b, &[1], &[]));
+        let pc = attach(&mut hub, c, perms(c, &[2], &[]));
+
+        // A pushes a CRDT sync frame carrying converged state for N1.
+        let stamp = WireStamp {
+            wall_time: 7,
+            logical: 0,
+            peer: 1,
+        };
+        let sync = CrdtSync::new(
+            vec![(1, stamp)],
+            vec![CrdtOp::new(NodeId(1), stamp, IpcValue::from(vec![42u8]))],
+        );
+        send(&pa, &IpcMessage::CrdtSync(sync));
+        let routed = hub.poll().unwrap();
+
+        // B (reads N1) gets the op; C (cannot read N1) gets a frame with no ops,
+        // which is dropped; A never echoes.
+        match recv(&pb).expect("B should receive the N1 sync frame") {
+            IpcMessage::CrdtSync(s) => {
+                assert_eq!(s.ops.len(), 1);
+                assert_eq!(s.ops[0].node, NodeId(1));
+                assert_eq!(s.ops[0].state, IpcValue::from(vec![42u8]));
+                assert_eq!(s.frontier, vec![(1, stamp)], "frontier advert retained");
+            }
+            other => panic!("expected a CrdtSync frame, got {other:?}"),
+        }
+        assert!(
+            recv(&pc).is_none(),
+            "C may not read N1 — its filtered frame has no ops and is not sent"
+        );
+        assert!(
+            recv(&pa).is_none(),
+            "A must not receive its own echoed frame"
+        );
+        assert_eq!(routed, 1, "exactly one sync frame routed (to B)");
     }
 
     /// Phase 2: one hub bridging a *WebSocket* peer to an *in-process* peer —

@@ -31,7 +31,7 @@ LEAN_SPEC_DIR ?= ../lazily-spec/formal/lean
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-lean-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-lean-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -67,6 +67,13 @@ test-loom:
 
 test-distributed:
 >$(CARGO) test --locked --features "distributed serde"
+
+# Distributed CRDT plane runtime integration (#lzcrdtplane5b): the
+# CrdtPlaneRuntime glue + the end-to-end two-replica-over-transport convergence
+# test need BOTH the plane primitives (`distributed`) and the wire + in-memory
+# DataChannel transport (`webrtc`), a combo no other target exercises.
+test-crdt-plane:
+>$(CARGO) test --locked --features "distributed webrtc"
 
 test-ffi:
 >$(CARGO) test --locked --features ffi --test ffi

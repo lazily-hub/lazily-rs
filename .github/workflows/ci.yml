@@ -40,6 +40,9 @@ jobs:
       - name: Test distributed feature
         run: cargo +stable test --locked --features "distributed serde"
 
+      - name: Test distributed CRDT plane runtime integration (#lzcrdtplane5b)
+        run: cargo +stable test --locked --features "distributed webrtc"
+
       - name: Test signaling client feature
         run: cargo +stable test --locked --features signaling-client
 

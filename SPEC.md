@@ -2117,10 +2117,31 @@ are formally proven in `../lazily-spec/formal/lean/LazilyFormal/CRDT.lean` and d
 [`protocol.md`](../lazily-spec/protocol.md) §Distributed.
 
 The wire format, codec round-trips, permission filtering, and point-to-point
-`IpcSink`/`IpcSource` delivery land in `#lzcrdtplane5a`. Wiring the plane to live
-`merge: crdt` root cells (local edits → `CrdtOp`s; remote `CrdtOp`s → `ReplicatedCell`
-ingress merge driving the reactive graph + Seq/Text GC) plus `BridgeHub` fan-out of
-`CrdtSync` is the runtime-integration slice `#lzcrdtplane5b`.
+`IpcSink`/`IpcSource` delivery land in `#lzcrdtplane5a`.
+
+**Runtime integration (`#lzcrdtplane5b`, FINAL — completes Phase 5).** `CrdtPlaneRuntime`
+(behind `distributed` + `webrtc`) is the live glue between the plane primitives and a
+reactive graph's `merge: crdt` root cells:
+
+- **Registry.** It owns the session's `ReplicatedCell` root cells, addressed by `NodeId`
+  with an optional wire-stable `NodeKey` (producer projection, `#lzwirekey`) so a cell stays
+  addressable across `NodeId` churn.
+- **Local edit → op.** `local_update` ticks the plane `Hlc`, mutates the typed cell, records
+  the converged state in the `OpLog`, and returns the `CrdtOp` to broadcast (JSON-encoded
+  `IpcValue` state).
+- **Remote op → reactive graph.** `ingest` folds each not-yet-seen `CrdtOp` into its target
+  replica via `ReplicatedCell::merge_remote` — driving downstream derived slots — while
+  `CrdtPlane::observe_remote` advances the clock + stamp frontier so the causal-stability
+  watermark and Seq/Text tombstone GC stay sound. Re-delivery is idempotent (the `OpLog`
+  dedups by stamp).
+- **Anti-entropy frames.** `sync_frame` / `sync_frame_since` / `sync_reply` advertise the
+  local stamp frontier and ship only the ops a peer is missing.
+- **`BridgeHub` fan-out.** `BridgeHub::poll` now fans `CrdtSync` frames out to the other
+  peers, re-filtered to each target's read allowlist (ops a peer cannot read are omitted; the
+  frontier advertisement is retained), beside the existing single-writer `Delta` routing.
+
+An end-to-end two-replica convergence test drives a full edit → `CrdtSync` → ingest cycle
+over the real `webrtc` `IpcSink`/`IpcSource` transport (`tests/crdt_plane.rs`).
 
 ## Internet-scale peer discovery: signaling server (`#yxjw`)
 

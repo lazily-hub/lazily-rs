@@ -45,6 +45,8 @@ mod cell_tree;
 mod context;
 #[cfg(feature = "distributed")]
 mod crdt;
+#[cfg(all(feature = "distributed", feature = "webrtc"))]
+mod crdt_plane;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
 mod effect;
@@ -94,6 +96,8 @@ pub use crdt::{
     OpLog, PnCounter, RegisterCrdt, ReplicatedCell, StampFrontier, UnsupportedMechanism,
     VersionVector,
 };
+#[cfg(all(feature = "distributed", feature = "webrtc"))]
+pub use crdt_plane::CrdtPlaneRuntime;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
 pub use effect::{EffectCallbackResult, EffectHandle};
