@@ -731,6 +731,114 @@ impl CrdtPlane {
     }
 }
 
+/// A causal op log keyed by [`HlcStamp`] (which embeds the originating peer),
+/// the anti-entropy substrate of the distributed plane (Phase 3 of
+/// `#lzcrdtplane`).
+///
+/// Each op a replica originates or applies is stored under its stamp; because
+/// [`HlcStamp`] is a total order embedding the peer, every op has a unique key.
+/// Two replicas reconcile pairwise:
+///
+/// 1. The requester advertises its [`StampFrontier`] (the highest stamp it has
+///    seen per peer).
+/// 2. The responder calls [`missing_since`](Self::missing_since) with that
+///    frontier and ships every op the requester has not yet observed.
+/// 3. The requester calls [`apply_remote`](Self::apply_remote), which folds
+///    each op into its application CRDT exactly once (idempotent re-apply) in
+///    causal stamp order.
+///
+/// The op type `Op` is application-defined (a register write, a `SeqCrdt`
+/// insert/remove, a `TextCrdt` edit); the log is agnostic to it and only
+/// orders and deduplicates by stamp. Delivery may be out-of-order, duplicated,
+/// or batched — convergence holds because every application CRDT this drives is
+/// itself commutative/associative/idempotent.
+#[derive(Debug, Clone)]
+pub struct OpLog<Op> {
+    ops: BTreeMap<HlcStamp, Op>,
+    frontier: StampFrontier,
+}
+
+impl<Op> Default for OpLog<Op> {
+    fn default() -> Self {
+        Self {
+            ops: BTreeMap::new(),
+            frontier: StampFrontier::new(),
+        }
+    }
+}
+
+impl<Op: Clone> OpLog<Op> {
+    /// An empty op log.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a locally originated op stamped `stamp`. Returns `true` iff the
+    /// op was new (a duplicate stamp is ignored, keeping the log idempotent).
+    pub fn record(&mut self, stamp: HlcStamp, op: Op) -> bool {
+        if self.ops.contains_key(&stamp) {
+            return false;
+        }
+        self.frontier.observe(stamp.peer, stamp);
+        self.ops.insert(stamp, op);
+        true
+    }
+
+    /// The per-peer frontier of stamps this log has stored — what a replica
+    /// advertises to a peer to request the ops it is missing.
+    pub fn frontier(&self) -> &StampFrontier {
+        &self.frontier
+    }
+
+    /// Every op whose stamp the requester (described by `since`) has not yet
+    /// observed: an op from peer `p` stamped `s` is missing iff `since` has no
+    /// entry for `p`, or its entry is `< s`. Returned in causal stamp order.
+    pub fn missing_since(&self, since: &StampFrontier) -> Vec<(HlcStamp, Op)> {
+        self.ops
+            .iter()
+            .filter(|(stamp, _)| match since.get(stamp.peer) {
+                Some(seen) => **stamp > seen,
+                None => true,
+            })
+            .map(|(stamp, op)| (*stamp, op.clone()))
+            .collect()
+    }
+
+    /// Apply remote ops, folding each not-yet-seen op into the application CRDT
+    /// via `apply` exactly once, in causal stamp order. Already-stored stamps
+    /// (including duplicates within `ops`) are skipped, so re-delivery is a
+    /// no-op. Returns the number of ops newly applied.
+    pub fn apply_remote<I, F>(&mut self, ops: I, mut apply: F) -> usize
+    where
+        I: IntoIterator<Item = (HlcStamp, Op)>,
+        F: FnMut(&HlcStamp, &Op),
+    {
+        let mut incoming: Vec<(HlcStamp, Op)> = ops.into_iter().collect();
+        incoming.sort_by_key(|(stamp, _)| *stamp);
+        let mut applied = 0;
+        for (stamp, op) in incoming {
+            if self.ops.contains_key(&stamp) {
+                continue;
+            }
+            apply(&stamp, &op);
+            self.frontier.observe(stamp.peer, stamp);
+            self.ops.insert(stamp, op);
+            applied += 1;
+        }
+        applied
+    }
+
+    /// Number of ops currently stored.
+    pub fn len(&self) -> usize {
+        self.ops.len()
+    }
+
+    /// `true` iff the log holds no ops.
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1211,5 +1319,149 @@ mod tests {
 
             prop_assert!(!ab.clone().merge(&b), "idempotent: re-merge changes nothing");
         }
+    }
+
+    // --- #lzcrdtplane3: OpLog + anti-entropy delta exchange ---
+
+    /// A test op: a stamped LWW write of an i32, so a log can drive a register.
+    #[derive(Debug, Clone, PartialEq)]
+    struct LwwWrite(i32);
+
+    #[test]
+    fn op_log_record_is_idempotent_and_tracks_frontier() {
+        let mut log: OpLog<LwwWrite> = OpLog::new();
+        assert!(log.is_empty());
+
+        let s1 = HlcStamp::new(10, 0, peer(1));
+        assert!(log.record(s1, LwwWrite(1)));
+        // Re-recording the same stamp is a no-op.
+        assert!(!log.record(s1, LwwWrite(1)));
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.frontier().get(peer(1)), Some(s1));
+    }
+
+    #[test]
+    fn op_log_missing_since_returns_only_unseen_ops_in_order() {
+        let mut log: OpLog<LwwWrite> = OpLog::new();
+        let a1 = HlcStamp::new(10, 0, peer(1));
+        let a2 = HlcStamp::new(20, 0, peer(1));
+        let b1 = HlcStamp::new(15, 0, peer(2));
+        log.record(a2, LwwWrite(2));
+        log.record(a1, LwwWrite(1));
+        log.record(b1, LwwWrite(3));
+
+        // A requester that has seen peer 1 up to a1 and nothing from peer 2.
+        let mut since = StampFrontier::new();
+        since.observe(peer(1), a1);
+        let missing: Vec<HlcStamp> = log
+            .missing_since(&since)
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        // a1 already seen; a2 and b1 are missing, returned in causal order.
+        assert_eq!(missing, vec![b1, a2]);
+
+        // A requester that has seen everything gets nothing.
+        let full = log.frontier().clone();
+        assert!(log.missing_since(&full).is_empty());
+    }
+
+    #[test]
+    fn op_log_apply_remote_is_idempotent_and_causally_ordered() {
+        let mut log: OpLog<LwwWrite> = OpLog::new();
+        let s1 = HlcStamp::new(10, 0, peer(2));
+        let s2 = HlcStamp::new(20, 0, peer(2));
+
+        let mut order = Vec::new();
+        // Deliver out of order and duplicated.
+        let applied = log.apply_remote(
+            vec![(s2, LwwWrite(2)), (s1, LwwWrite(1)), (s2, LwwWrite(2))],
+            |stamp, op| order.push((*stamp, op.clone())),
+        );
+        assert_eq!(applied, 2, "the duplicate s2 is skipped");
+        assert_eq!(
+            order,
+            vec![(s1, LwwWrite(1)), (s2, LwwWrite(2))],
+            "applied in causal order"
+        );
+
+        // Re-delivering already-applied ops applies nothing.
+        let again = log.apply_remote(vec![(s1, LwwWrite(1)), (s2, LwwWrite(2))], |_, _| {
+            panic!("must not re-apply a stored op")
+        });
+        assert_eq!(again, 0);
+    }
+
+    #[test]
+    fn two_replicas_converge_through_anti_entropy_exchange() {
+        // Each replica owns an Hlc, an OpLog, and an LWW register; they exchange
+        // missing ops pairwise (the transport seam carries (stamp, op) tuples)
+        // and must converge to the same register value.
+        let mut hlc_a = Hlc::new(peer(1));
+        let mut hlc_b = Hlc::new(peer(2));
+        let mut log_a: OpLog<LwwWrite> = OpLog::new();
+        let mut log_b: OpLog<LwwWrite> = OpLog::new();
+        let mut reg_a = LwwRegister::new(0i32, HlcStamp::new(0, 0, peer(1)));
+        let mut reg_b = LwwRegister::new(0i32, HlcStamp::new(0, 0, peer(2)));
+
+        // Concurrent local writes: neither replica has seen the other.
+        let sa = hlc_a.send(100);
+        reg_a.set(7, sa);
+        log_a.record(sa, LwwWrite(7));
+
+        let sb = hlc_b.send(200);
+        reg_b.set(9, sb);
+        log_b.record(sb, LwwWrite(9));
+
+        // A pulls B's missing ops (advertising A's frontier), applies into reg_a.
+        let to_a = log_b.missing_since(log_a.frontier());
+        log_a.apply_remote(to_a, |stamp, op| {
+            reg_a.set(op.0, *stamp);
+        });
+
+        // B pulls A's missing ops symmetrically.
+        let to_b = log_a.missing_since(log_b.frontier());
+        log_b.apply_remote(to_b, |stamp, op| {
+            reg_b.set(op.0, *stamp);
+        });
+
+        assert_eq!(reg_a.value(), reg_b.value(), "replicas converge");
+        assert_eq!(
+            reg_a.value(),
+            9,
+            "highest HLC stamp (peer 2 @ wall 200) wins"
+        );
+
+        // Anti-entropy is idempotent: a second exchange round changes nothing
+        // and ships no ops (both frontiers now cover both peers).
+        assert!(log_b.missing_since(log_a.frontier()).is_empty());
+        assert!(log_a.missing_since(log_b.frontier()).is_empty());
+    }
+
+    #[test]
+    fn op_log_drives_a_pn_counter_to_convergence() {
+        // Two replicas each increment a shared PN counter; exchanging ops both
+        // ways converges to the summed value, and re-exchange is idempotent.
+        let mut log_a: OpLog<u64> = OpLog::new();
+        let mut log_b: OpLog<u64> = OpLog::new();
+        let mut ctr_a = PnCounter::new();
+        let mut ctr_b = PnCounter::new();
+
+        let sa = HlcStamp::new(100, 0, peer(1));
+        ctr_a.increment(peer(1), 5);
+        log_a.record(sa, 5);
+        let sb = HlcStamp::new(110, 0, peer(2));
+        ctr_b.increment(peer(2), 3);
+        log_b.record(sb, 3);
+
+        for (stamp, amt) in log_b.missing_since(log_a.frontier()) {
+            log_a.apply_remote([(stamp, amt)], |s, a| ctr_a.increment(s.peer, *a));
+        }
+        for (stamp, amt) in log_a.missing_since(log_b.frontier()) {
+            log_b.apply_remote([(stamp, amt)], |s, a| ctr_b.increment(s.peer, *a));
+        }
+
+        assert_eq!(ctr_a.value(), 8);
+        assert_eq!(ctr_b.value(), 8, "both replicas reach the summed value");
     }
 }

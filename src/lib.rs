@@ -90,7 +90,7 @@ pub use cell_tree::CellTree;
 pub use context::Context;
 #[cfg(feature = "distributed")]
 pub use crdt::{
-    CellCrdt, CrdtPlane, Hlc, HlcStamp, LwwRegister, MergeMechanism, MvRegister, PnCounter,
+    CellCrdt, CrdtPlane, Hlc, HlcStamp, LwwRegister, MergeMechanism, MvRegister, OpLog, PnCounter,
     RegisterCrdt, ReplicatedCell, StampFrontier, UnsupportedMechanism, VersionVector,
 };
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
