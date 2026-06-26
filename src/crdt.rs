@@ -27,10 +27,12 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::hash::Hash;
 
 use crate::Context;
 use crate::cell::CellHandle;
 use crate::distributed::PeerId;
+use crate::seq_crdt::SeqCrdt;
 
 /// The convergence mechanism a multi-write cell declares (`merge:`).
 ///
@@ -728,6 +730,37 @@ impl CrdtPlane {
     /// Immutable access to the per-peer stamp frontier.
     pub fn frontier(&self) -> &StampFrontier {
         &self.frontier
+    }
+
+    /// `true` iff `stamp` is at or below the causal-stability frontier — every
+    /// expected member has observed it, so a tombstone stamped `stamp` is
+    /// collectable on every replica. `false` until the full membership has been
+    /// observed (no member is allowed to still hold an un-seen earlier op).
+    pub fn is_collectable(&self, stamp: HlcStamp) -> bool {
+        self.stability_frontier()
+            .is_some_and(|frontier| stamp <= frontier)
+    }
+
+    /// Drive frontier-based tombstone GC on a [`SeqCrdt`] (Phase 4 of
+    /// `#lzcrdtplane`, closing `#r86a`/`#lztombgcwire` for the sequence layer):
+    /// collect every tombstone whose delete stamp is `<=` the causal-stability
+    /// frontier. Returns the number of entries collected, or `0` (a no-op) until
+    /// the full membership has been observed — so a delete is never collected
+    /// before every replica has provably seen it.
+    ///
+    /// [`SeqCrdt`] keys deletes by [`HlcStamp`], so the plane's frontier drives
+    /// its GC directly. [`crate::TextCrdt`] keys deletes by a Lamport `OpId`
+    /// (a distinct clock), so it needs an `OpId`-keyed frontier rather than this
+    /// `HlcStamp` one — wired separately.
+    pub fn gc_seq<Id, V>(&self, seq: &mut SeqCrdt<Id, V>) -> usize
+    where
+        Id: Eq + Hash + Clone,
+        V: Clone + PartialEq,
+    {
+        match self.stability_frontier() {
+            Some(frontier) => seq.gc(frontier),
+            None => 0,
+        }
     }
 }
 
@@ -1463,5 +1496,89 @@ mod tests {
 
         assert_eq!(ctr_a.value(), 8);
         assert_eq!(ctr_b.value(), 8, "both replicas reach the summed value");
+    }
+
+    // --- #lzcrdtplane4: frontier-driven tombstone GC ---
+
+    #[test]
+    fn is_collectable_tracks_the_stability_frontier() {
+        let mut plane = CrdtPlane::new(peer(1));
+        plane.add_peer(peer(2));
+        let del = HlcStamp::new(200, 0, peer(1));
+
+        plane.tick(250); // self frontier entry (250, 0, peer 1)
+        // Peer 2 is an expected member but unseen -> no stable frontier.
+        assert!(
+            !plane.is_collectable(del),
+            "unseen member withholds collectability"
+        );
+
+        // Peer 2 observed only BELOW the delete -> frontier = min is below it.
+        plane.observe_remote(HlcStamp::new(150, 0, peer(2)), 260);
+        assert!(
+            !plane.is_collectable(del),
+            "a member behind the delete still withholds GC"
+        );
+
+        // Peer 2 catches up past the delete -> the frontier now covers it.
+        plane.observe_remote(HlcStamp::new(300, 0, peer(2)), 310);
+        assert!(plane.is_collectable(del));
+    }
+
+    #[test]
+    fn gc_seq_collects_a_tombstone_only_once_every_replica_has_observed_it() {
+        let mut plane = CrdtPlane::new(peer(1));
+        plane.add_peer(peer(2));
+        let mut seq: SeqCrdt<u64, &str> = SeqCrdt::new(peer(1));
+
+        seq.insert_back(1, "x", 100);
+        seq.remove(&1, 200); // delete stamped (200, 0, peer 1)
+        assert!(
+            !seq.contains(&1),
+            "removed element is tombstoned (still stored)"
+        );
+
+        // A's own clock is past the delete, but peer 2 is unseen -> frontier None.
+        plane.tick(250);
+        assert_eq!(
+            plane.gc_seq(&mut seq),
+            0,
+            "no GC until every member is observed"
+        );
+
+        // Peer 2 seen, but only below the delete -> still not collectable.
+        plane.observe_remote(HlcStamp::new(150, 0, peer(2)), 260);
+        assert_eq!(
+            plane.gc_seq(&mut seq),
+            0,
+            "a lagging member blocks collection"
+        );
+
+        // Peer 2 catches up past the delete -> the tombstone is now collectable.
+        plane.observe_remote(HlcStamp::new(300, 0, peer(2)), 310);
+        assert_eq!(
+            plane.gc_seq(&mut seq),
+            1,
+            "tombstone collected once every replica has observed it"
+        );
+        // Idempotent: the entry is gone, a second pass collects nothing.
+        assert_eq!(plane.gc_seq(&mut seq), 0);
+    }
+
+    #[test]
+    fn gc_seq_is_inert_for_a_single_writer_session() {
+        // A lone writer (membership = {self}) reaches a stable frontier as soon
+        // as it ticks, so its own observed deletes are collectable — but with no
+        // peers there is no coordination cost and GC is driven purely locally.
+        let mut plane = CrdtPlane::new(peer(1));
+        let mut seq: SeqCrdt<u64, &str> = SeqCrdt::new(peer(1));
+        seq.insert_back(1, "x", 100);
+        seq.remove(&1, 200);
+
+        // No tick yet -> frontier is None -> nothing collected.
+        assert_eq!(plane.gc_seq(&mut seq), 0);
+        // After a tick past the delete, the single-member frontier covers it.
+        plane.tick(250);
+        assert_eq!(plane.gc_seq(&mut seq), 1);
     }
 }
