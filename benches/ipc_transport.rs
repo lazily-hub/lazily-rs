@@ -3,14 +3,9 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use lazily::{
-    EdgeSnapshot, IPC_DEFAULT_QUEUE_CAPACITY, InProcessIpcTransport, IpcControlFrame,
-    IpcFramePayload, IpcMessage, IpcTransport, IpcTransportError, NodeSnapshot, Snapshot,
-};
+use lazily::{EdgeSnapshot, IpcMessage, NodeSnapshot, Snapshot};
 
-const IPC_BACKPRESSURE_DEPTH: usize = 16;
 const IPC_TPUT_MESSAGE_SIZE_BYTES: [usize; 3] = [64, 1_024, 16_384];
-const IPC_TPUT_ITERS: usize = 256;
 const IPC_NODE_COUNT: usize = 128;
 
 fn make_snapshot(payload_size: usize) -> Snapshot {
@@ -40,96 +35,97 @@ fn make_delta_chain(count: usize) -> IpcMessage {
     IpcMessage::Delta(lazily::Delta::next(41, ops))
 }
 
-fn benchmark_round_trip_control(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ipc_transport_control_roundtrip");
-
-    group.bench_function("heartbeats", |b| {
-        b.iter(|| {
-            let (mut sender, mut receiver) =
-                InProcessIpcTransport::pair(1, 2, IPC_DEFAULT_QUEUE_CAPACITY);
-            for idx in 0..IPC_TPUT_ITERS {
-                let _ = sender.send_control(IpcControlFrame::Heartbeat);
-                let _ = receiver.recv_frame().unwrap().unwrap();
-                black_box(idx);
-            }
-        })
-    });
-
-    group.bench_function("control_with_retransmit", |b| {
-        b.iter(|| {
-            let (mut sender, mut receiver) =
-                InProcessIpcTransport::pair(1, 2, IPC_DEFAULT_QUEUE_CAPACITY);
-            let heartbeat = sender.send_control(IpcControlFrame::Heartbeat).unwrap();
-            let _ = receiver.recv_frame().unwrap().unwrap();
-            let retransmit = sender.send_frame(lazily::IpcFrame::control(
-                1,
-                2,
-                Some(heartbeat.sequence_id),
-                IpcControlFrame::Retransmit {
-                    correlation_id: heartbeat.sequence_id,
-                },
-            ));
-            assert!(
-                retransmit.is_ok(),
-                "transport must accept retransmit control frames"
-            );
-            let _ = receiver.recv_frame().unwrap().unwrap();
-        });
-    });
-
-    group.finish();
-}
-
-fn benchmark_round_trip_payload(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ipc_transport_payload_roundtrip");
-    group.throughput(Throughput::Bytes(1));
-
+fn benchmark_message_clone(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ipc_message_clone");
     for &size in &IPC_TPUT_MESSAGE_SIZE_BYTES {
+        group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(
-            BenchmarkId::new("snapshot_payload", size),
+            BenchmarkId::new("snapshot", size),
             &size,
             |b, payload_size| {
-                let payload = make_snapshot(*payload_size);
-                let delta = make_delta_chain(IPC_NODE_COUNT);
-                b.iter(|| {
-                    let (mut sender, mut receiver) =
-                        InProcessIpcTransport::pair(1, 2, IPC_DEFAULT_QUEUE_CAPACITY * 16);
-                    let _ = sender.send_message(payload.clone());
-                    let _ = sender.send_message(delta.clone());
-                    let _ = receiver.recv_frame().unwrap().unwrap();
-                    let _ = receiver.recv_frame().unwrap().unwrap();
-                });
+                let message = IpcMessage::Snapshot(make_snapshot(*payload_size));
+                b.iter(|| black_box(message.clone()));
             },
         );
     }
-
+    group.bench_function("delta_chain", |b| {
+        let message = make_delta_chain(IPC_NODE_COUNT);
+        b.iter(|| black_box(message.clone()));
+    });
     group.finish();
 }
 
-fn benchmark_backpressure(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ipc_transport_backpressure");
-
-    group.bench_function("bounded_queue", |b| {
-        b.iter(|| {
-            let (mut sender, _receiver) = InProcessIpcTransport::pair(1, 2, IPC_BACKPRESSURE_DEPTH);
-            for seq in 1..=IPC_BACKPRESSURE_DEPTH {
-                assert!(sender.send_control(IpcControlFrame::Heartbeat).is_ok());
-                black_box(seq);
-            }
-            assert_eq!(
-                sender.send_control(IpcControlFrame::HeartbeatAck),
-                Err(IpcTransportError::Backpressure)
+fn benchmark_json_round_trip(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ipc_message_json_roundtrip");
+    #[cfg(any(feature = "ffi", feature = "webrtc"))]
+    {
+        for &size in &IPC_TPUT_MESSAGE_SIZE_BYTES {
+            group.throughput(Throughput::Bytes(size as u64));
+            group.bench_with_input(
+                BenchmarkId::new("snapshot", size),
+                &size,
+                |b, payload_size| {
+                    let message = IpcMessage::Snapshot(make_snapshot(*payload_size));
+                    b.iter(|| {
+                        let encoded = message.encode_json().unwrap();
+                        black_box(IpcMessage::decode_json(&encoded).unwrap());
+                    });
+                },
             );
-        });
-    });
+        }
+    }
+    group.finish();
+}
 
+fn benchmark_binary_round_trip(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ipc_message_binary_roundtrip");
+    #[cfg(feature = "ipc-binary")]
+    {
+        for &size in &IPC_TPUT_MESSAGE_SIZE_BYTES {
+            group.throughput(Throughput::Bytes(size as u64));
+            group.bench_with_input(
+                BenchmarkId::new("snapshot", size),
+                &size,
+                |b, payload_size| {
+                    let message = IpcMessage::Snapshot(make_snapshot(*payload_size));
+                    b.iter(|| {
+                        let encoded = message.encode_binary().unwrap();
+                        black_box(IpcMessage::decode_binary(&encoded).unwrap());
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+fn benchmark_msgpack_round_trip(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ipc_message_msgpack_roundtrip");
+    #[cfg(feature = "ipc-msgpack")]
+    {
+        for &size in &IPC_TPUT_MESSAGE_SIZE_BYTES {
+            group.throughput(Throughput::Bytes(size as u64));
+            group.bench_with_input(
+                BenchmarkId::new("snapshot", size),
+                &size,
+                |b, payload_size| {
+                    let message = IpcMessage::Snapshot(make_snapshot(*payload_size));
+                    b.iter(|| {
+                        let encoded = message.encode_msgpack().unwrap();
+                        black_box(IpcMessage::decode_msgpack(&encoded).unwrap());
+                    });
+                },
+            );
+        }
+    }
     group.finish();
 }
 
 criterion_group!(
     benches,
-    benchmark_round_trip_control,
-    benchmark_round_trip_payload,
-    benchmark_backpressure
+    benchmark_message_clone,
+    benchmark_json_round_trip,
+    benchmark_binary_round_trip,
+    benchmark_msgpack_round_trip
 );
 criterion_main!(benches);
