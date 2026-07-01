@@ -28,6 +28,9 @@ ipc-binary = ["ipc", "dep:postcard"]
 ipc-msgpack = ["ipc", "dep:rmp-serde"]
 loom = []
 serde = ["dep:serde", "smallvec?/serde"]
+# State-chart JSON parsing (`ChartDef::from_json`) for conformance/tooling.
+# The reactive engine itself is dependency-free; this gates only serde_json.
+statechart = ["dep:serde_json"]
 # #jpf1: WebRTC DataChannel IPC transport — abstraction layer (sync IpcSink/Source
 # bridge + permission filtering + in-memory loopback). Dependency-light.
 webrtc = ["ipc", "dep:serde_json"]

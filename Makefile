@@ -23,6 +23,7 @@ LEAN_SPEC_DIR ?= ../lazily-spec/formal/lean
 	test-ipc \
 	test-ipc-binary \
 	test-ipc-conformance \
+	test-statechart-conformance \
 	test-lean-formal \
 	test-signaling-client \
 	test-webrtc \
@@ -31,7 +32,7 @@ LEAN_SPEC_DIR ?= ../lazily-spec/formal/lean
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-lean-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-statechart-conformance test-lean-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -89,6 +90,9 @@ test-ipc-binary:
 
 test-ipc-conformance:
 >$(CARGO) test --locked --features ipc --test conformance
+
+test-statechart-conformance:
+>$(CARGO) test --locked --features statechart --test statechart_conformance
 
 test-lean-formal:
 >test -d "$(LEAN_SPEC_DIR)" || { echo "missing $(LEAN_SPEC_DIR); clone lazily-spec as a sibling or set LEAN_SPEC_DIR"; exit 1; }

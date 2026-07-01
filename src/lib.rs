@@ -66,6 +66,7 @@ mod signaling_client;
 mod slot;
 mod stable_id;
 mod state_machine;
+pub mod statechart;
 #[cfg(feature = "webrtc-str0m")]
 mod str0m_backend;
 #[cfg(feature = "webrtc-str0m")]
@@ -163,6 +164,7 @@ pub use stable_id::{
 #[cfg(feature = "async")]
 pub use state_machine::AsyncStateMachine;
 pub use state_machine::{StateMachine, ThreadSafeStateMachine};
+pub use statechart::{ChartDef, StateChart};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]
