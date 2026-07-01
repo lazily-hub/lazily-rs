@@ -135,10 +135,11 @@ pub use instrumentation::{
 pub use ipc::IpcCodec;
 #[cfg(feature = "ipc")]
 pub use ipc::{
-    CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, IpcPayload,
-    IpcSink, IpcSource, IpcValue, KeyIndex, NODE_KEY_MAX_LEN, NODE_KEY_MAX_SEGMENTS, NodeKey,
-    NodeKeyError, NodeSnapshot, NodeState, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError,
-    ShmBlobRef, Snapshot, WireStamp,
+    CapabilityHandshake, CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot,
+    IpcMessage, IpcPayload, IpcSink, IpcSource, IpcValue, KeyIndex, NODE_KEY_MAX_LEN,
+    NODE_KEY_MAX_SEGMENTS, NodeKey, NodeKeyError, NodeSnapshot, NodeState, PROTOCOL_ID,
+    PROTOCOL_MAJOR_VERSION, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, ShmBlobRef,
+    Snapshot, WireStamp,
 };
 #[cfg(all(
     feature = "ipc",

@@ -1345,6 +1345,140 @@ impl IpcCodec {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Capability negotiation (protocol.md § Capability Negotiation)
+// ---------------------------------------------------------------------------
+
+/// The protocol identifier every `lazily-ipc` peer must advertise.
+pub const PROTOCOL_ID: &str = "lazily-ipc";
+
+/// The current protocol major version.
+pub const PROTOCOL_MAJOR_VERSION: u64 = 1;
+
+fn default_ordered_reliable() -> bool {
+    true
+}
+
+/// The compatibility handshake exchanged before any graph state flows
+/// (protocol.md § Capability Negotiation).
+///
+/// Each non-local session starts with this frame. If the peers disagree on
+/// `protocol_major_version`, `codec`, or `ordered_reliable`, they fail closed
+/// before applying any [`Snapshot`] or [`Delta`].
+///
+/// Serialized as a plain JSON object (externally tagged like the rest of the
+/// IPC layer is not applicable — this is a standalone frame, not an
+/// [`IpcMessage`] variant):
+///
+/// ```json
+/// {
+///   "protocol_id": "lazily-ipc",
+///   "protocol_major_version": 1,
+///   "codec": "json",
+///   "max_frame_size": 1048576,
+///   "fragmentation_supported": false,
+///   "ordered_reliable": true,
+///   "peer_id": 1,
+///   "session_id": "abc-123",
+///   "features": ["shared-blob", "signaling-relay"]
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CapabilityHandshake {
+    /// Must be [`PROTOCOL_ID`].
+    pub protocol_id: String,
+    /// Breaking-change indicator; must equal [`PROTOCOL_MAJOR_VERSION`].
+    pub protocol_major_version: u64,
+    /// Codec negotiation token (`"json"`, `"msgpack"`, `"postcard"`).
+    pub codec: String,
+    /// Maximum frame size in bytes.
+    pub max_frame_size: u64,
+    /// Whether frame fragmentation is supported.
+    #[serde(default)]
+    pub fragmentation_supported: bool,
+    /// Delivery guarantee requirement; both peers must require ordered reliable
+    /// delivery for the session to proceed.
+    #[serde(default = "default_ordered_reliable")]
+    pub ordered_reliable: bool,
+    /// The [`PeerId`] for this session endpoint.
+    pub peer_id: PeerId,
+    /// Session/graph identifier.
+    pub session_id: String,
+    /// Supported feature flags (e.g. `"shared-blob"`, `"signaling-relay"`).
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+impl CapabilityHandshake {
+    /// Create a handshake with protocol defaults (JSON codec, 1 MiB frame size,
+    /// ordered-reliable, no features).
+    pub fn new(peer_id: PeerId, session_id: impl Into<String>) -> Self {
+        Self {
+            protocol_id: PROTOCOL_ID.to_owned(),
+            protocol_major_version: PROTOCOL_MAJOR_VERSION,
+            codec: "json".to_owned(),
+            max_frame_size: 1_048_576,
+            fragmentation_supported: false,
+            ordered_reliable: true,
+            peer_id,
+            session_id: session_id.into(),
+            features: Vec::new(),
+        }
+    }
+
+    /// Builder: set the codec negotiation token.
+    #[must_use]
+    pub fn with_codec(mut self, codec: impl Into<String>) -> Self {
+        self.codec = codec.into();
+        self
+    }
+
+    /// Builder: set the max frame size.
+    #[must_use]
+    pub fn with_max_frame_size(mut self, max_frame_size: u64) -> Self {
+        self.max_frame_size = max_frame_size;
+        self
+    }
+
+    /// Builder: set the features list.
+    #[must_use]
+    pub fn with_features(mut self, features: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.features = features.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Builder: set fragmentation support.
+    #[must_use]
+    pub fn with_fragmentation(mut self, supported: bool) -> Self {
+        self.fragmentation_supported = supported;
+        self
+    }
+
+    /// Whether this handshake is mutually compatible with `other`.
+    ///
+    /// Peers are compatible when both advertise [`PROTOCOL_ID`], both advertise
+    /// [`PROTOCOL_MAJOR_VERSION`], their major versions and codecs agree, and
+    /// both require ordered reliable delivery. Feature negotiation is
+    /// caller-driven via [`features`](Self::features) / [`has_feature`](Self::has_feature).
+    #[must_use]
+    pub fn is_compatible_with(&self, other: &Self) -> bool {
+        self.protocol_id == PROTOCOL_ID
+            && other.protocol_id == PROTOCOL_ID
+            && self.protocol_major_version == PROTOCOL_MAJOR_VERSION
+            && other.protocol_major_version == PROTOCOL_MAJOR_VERSION
+            && self.protocol_major_version == other.protocol_major_version
+            && self.codec == other.codec
+            && self.ordered_reliable
+            && other.ordered_reliable
+    }
+
+    /// Whether this peer advertises `feature`.
+    #[must_use]
+    pub fn has_feature(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+}
+
 impl IpcMessage {
     #[cfg(any(feature = "ffi", feature = "webrtc"))]
     pub fn encode_json(&self) -> Result<Vec<u8>, EncodeError> {

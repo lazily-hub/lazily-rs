@@ -1,10 +1,10 @@
 #![cfg(feature = "ipc")]
 
 use lazily::{
-    CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot, IpcMessage, KeyIndex,
-    NODE_KEY_MAX_SEGMENTS, NodeId, NodeKey, NodeKeyError, NodeSnapshot, NodeState, OpKind, PeerId,
-    PeerPermissions, RemoteOp, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, Snapshot,
-    WireStamp,
+    CapabilityHandshake, CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot,
+    IpcMessage, KeyIndex, NODE_KEY_MAX_SEGMENTS, NodeId, NodeKey, NodeKeyError, NodeSnapshot,
+    NodeState, OpKind, PeerId, PeerPermissions, RemoteOp, SHM_BLOB_HEADER_LEN, ShmBlobArena,
+    ShmBlobArenaError, Snapshot, WireStamp,
 };
 
 const PEER_A: PeerId = PeerId(1);
@@ -758,5 +758,143 @@ mod json_codec {
 
         let encode_err = EncodeError::Json(serde_json::from_str::<()>("bad").unwrap_err());
         let _ = std::format!("{}", encode_err);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capability negotiation (protocol.md § Capability Negotiation)
+// ---------------------------------------------------------------------------
+
+mod capability_handshake {
+    use super::*;
+
+    #[test]
+    fn new_sets_protocol_defaults() {
+        let hs = CapabilityHandshake::new(PEER_A, "session-1");
+        assert_eq!(hs.protocol_id, "lazily-ipc");
+        assert_eq!(hs.protocol_major_version, 1);
+        assert_eq!(hs.codec, "json");
+        assert_eq!(hs.max_frame_size, 1_048_576);
+        assert!(!hs.fragmentation_supported);
+        assert!(hs.ordered_reliable);
+        assert_eq!(hs.peer_id, PEER_A);
+        assert_eq!(hs.session_id, "session-1");
+        assert!(hs.features.is_empty());
+    }
+
+    #[test]
+    fn builders_configure_fields() {
+        let hs = CapabilityHandshake::new(PEER_A, "s")
+            .with_codec("msgpack")
+            .with_max_frame_size(2_097_152)
+            .with_fragmentation(true)
+            .with_features(["shared-blob", "signaling-relay"]);
+        assert_eq!(hs.codec, "msgpack");
+        assert_eq!(hs.max_frame_size, 2_097_152);
+        assert!(hs.fragmentation_supported);
+        assert_eq!(hs.features, ["shared-blob", "signaling-relay"]);
+        assert!(hs.has_feature("shared-blob"));
+        assert!(!hs.has_feature("crdt-cell-plane"));
+    }
+
+    #[test]
+    fn round_trips_through_serde_json() {
+        let hs = CapabilityHandshake::new(PEER_B, "abc-123")
+            .with_features(["shared-blob", "signaling-relay"]);
+
+        let json = serde_json::to_string(&hs).unwrap();
+        let back: CapabilityHandshake = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, hs);
+    }
+
+    #[test]
+    fn serde_matches_protocol_wire_shape() {
+        let hs = CapabilityHandshake::new(PeerId(1), "abc-123")
+            .with_max_frame_size(1_048_576)
+            .with_features(["shared-blob", "signaling-relay"]);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&hs).unwrap()).unwrap();
+        assert_eq!(value["protocol_id"], "lazily-ipc");
+        assert_eq!(value["protocol_major_version"], 1);
+        assert_eq!(value["codec"], "json");
+        assert_eq!(value["max_frame_size"], 1_048_576);
+        assert_eq!(value["fragmentation_supported"], false);
+        assert_eq!(value["ordered_reliable"], true);
+        assert_eq!(value["peer_id"], 1);
+        assert_eq!(value["session_id"], "abc-123");
+        assert_eq!(value["features"][0], "shared-blob");
+    }
+
+    #[test]
+    fn ordered_reliable_defaults_to_true_on_decode() {
+        // A peer that omits `ordered_reliable` should default to true (the
+        // protocol-mandated requirement).
+        let json = r#"{
+            "protocol_id": "lazily-ipc",
+            "protocol_major_version": 1,
+            "codec": "json",
+            "max_frame_size": 1024,
+            "peer_id": 5,
+            "session_id": "s"
+        }"#;
+        let hs: CapabilityHandshake = serde_json::from_str(json).unwrap();
+        assert!(hs.ordered_reliable);
+        assert!(!hs.fragmentation_supported);
+        assert!(hs.features.is_empty());
+    }
+
+    #[test]
+    fn compatible_handshakes_pass() {
+        let a = CapabilityHandshake::new(PEER_A, "s");
+        let b = CapabilityHandshake::new(PEER_B, "s");
+        assert!(a.is_compatible_with(&b));
+    }
+
+    #[test]
+    fn wrong_protocol_id_fails_closed() {
+        let mut a = CapabilityHandshake::new(PEER_A, "s");
+        a.protocol_id = "other".to_owned();
+        let b = CapabilityHandshake::new(PEER_B, "s");
+        assert!(!a.is_compatible_with(&b));
+    }
+
+    #[test]
+    fn major_version_mismatch_fails_closed() {
+        let mut a = CapabilityHandshake::new(PEER_A, "s");
+        a.protocol_major_version = 2;
+        let b = CapabilityHandshake::new(PEER_B, "s");
+        assert!(!a.is_compatible_with(&b));
+        assert!(!b.is_compatible_with(&a));
+    }
+
+    #[test]
+    fn codec_mismatch_fails_closed() {
+        let a = CapabilityHandshake::new(PEER_A, "s").with_codec("json");
+        let b = CapabilityHandshake::new(PEER_B, "s").with_codec("postcard");
+        assert!(!a.is_compatible_with(&b));
+    }
+
+    #[test]
+    fn unordered_reliable_fails_closed() {
+        let mut a = CapabilityHandshake::new(PEER_A, "s");
+        a.ordered_reliable = false;
+        let b = CapabilityHandshake::new(PEER_B, "s");
+        assert!(!a.is_compatible_with(&b));
+        // Symmetric: either side relaxing ordering fails the session.
+        assert!(!b.is_compatible_with(&a));
+    }
+
+    #[test]
+    fn fragmentation_and_features_do_not_block_compatibility() {
+        // Fragmentation support and feature lists are informational for the
+        // core compatibility check; callers use `has_feature` for specific gates.
+        let a = CapabilityHandshake::new(PEER_A, "s")
+            .with_fragmentation(true)
+            .with_features(["shared-blob"]);
+        let b = CapabilityHandshake::new(PEER_B, "s")
+            .with_fragmentation(false)
+            .with_features(["signaling-relay"]);
+        assert!(a.is_compatible_with(&b));
     }
 }
