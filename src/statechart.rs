@@ -19,6 +19,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::{CellHandle, Context};
 
+// Variants are constructed only by the feature-gated `parse_state`/`from_json`
+// path; the reactive engine matches them but never constructs them without it.
+#[cfg_attr(not(feature = "statechart"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Atomic,
@@ -28,6 +31,7 @@ enum Kind {
     Final,
 }
 
+#[cfg_attr(not(feature = "statechart"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryKind {
     Shallow,
@@ -288,6 +292,7 @@ fn parse_transition(raw: &serde_json::Value) -> Result<Transition, String> {
     }
 }
 
+#[cfg(feature = "statechart")]
 fn compute_depth(
     states: &HashMap<String, StateDef>,
     id: &str,
