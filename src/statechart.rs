@@ -17,6 +17,10 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
+#[cfg(feature = "thread-safe")]
+use crate::ThreadSafeContext;
+#[cfg(feature = "async")]
+use crate::{AsyncCellHandle, AsyncContext};
 use crate::{CellHandle, Context};
 
 // Variants are constructed only by the feature-gated `parse_state`/`from_json`
@@ -113,6 +117,19 @@ impl ChartDef {
             states.insert(id.clone(), parse_state(id, raw)?);
         }
 
+        Self::from_states(states, order)
+    }
+
+    /// Assemble a validated [`ChartDef`] from parsed states plus their document
+    /// order. Shared by [`ChartDef::from_json`] and the Rust [`ChartBuilder`], so
+    /// both definition paths derive parent→children, the single parent-less root,
+    /// and per-node depth identically. `order` maps each state id to the position
+    /// that fixes deterministic parallel-region descent.
+    #[cfg(feature = "statechart")]
+    fn from_states(
+        states: HashMap<String, StateDef>,
+        order: HashMap<String, usize>,
+    ) -> Result<ChartDef, String> {
         // Derived structure: children, depth, root.
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
         let mut root: Option<String> = None;
@@ -310,6 +327,190 @@ fn compute_depth(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Typed Rust builder — define a `ChartDef` in Rust instead of (or alongside) the
+// JSON form. Both paths funnel through `ChartDef::from_states`, so a chart built
+// in Rust is byte-for-byte equivalent to the same chart parsed from JSON.
+// ---------------------------------------------------------------------------
+
+/// A single transition, built in Rust. Equivalent to a JSON transition object.
+#[cfg(feature = "statechart")]
+pub struct TransitionBuilder {
+    inner: Transition,
+}
+
+#[cfg(feature = "statechart")]
+impl TransitionBuilder {
+    /// An external transition to `target` with no guard or actions.
+    pub fn to(target: impl Into<String>) -> Self {
+        Self {
+            inner: Transition {
+                target: target.into(),
+                guard: None,
+                action: Vec::new(),
+                internal: false,
+            },
+        }
+    }
+
+    /// Attach a named boolean guard (resolved at `send` time; absent → false).
+    pub fn guard(mut self, name: impl Into<String>) -> Self {
+        self.inner.guard = Some(name.into());
+        self
+    }
+
+    /// Append a transition action name.
+    pub fn action(mut self, name: impl Into<String>) -> Self {
+        self.inner.action.push(name.into());
+        self
+    }
+
+    /// Mark this transition internal (no exit/re-entry of the source subtree
+    /// when the target is the source or a proper descendant).
+    pub fn internal(mut self) -> Self {
+        self.inner.internal = true;
+        self
+    }
+}
+
+/// A single chart state, built in Rust. Mirrors the JSON state object.
+#[cfg(feature = "statechart")]
+pub struct StateBuilder {
+    id: String,
+    def: StateDef,
+}
+
+#[cfg(feature = "statechart")]
+impl StateBuilder {
+    fn with_kind(id: impl Into<String>, kind: Kind, initial: Option<String>) -> Self {
+        Self {
+            id: id.into(),
+            def: StateDef {
+                parent: None,
+                kind,
+                initial,
+                default: None,
+                transitions: HashMap::new(),
+                entry: Vec::new(),
+                exit: Vec::new(),
+            },
+        }
+    }
+
+    /// An atomic leaf state.
+    pub fn atomic(id: impl Into<String>) -> Self {
+        Self::with_kind(id, Kind::Atomic, None)
+    }
+
+    /// A compound state with the given initial child.
+    pub fn compound(id: impl Into<String>, initial: impl Into<String>) -> Self {
+        Self::with_kind(id, Kind::Compound, Some(initial.into()))
+    }
+
+    /// A parallel (orthogonal) state; all its child regions are entered together.
+    pub fn parallel(id: impl Into<String>) -> Self {
+        Self::with_kind(id, Kind::Parallel, None)
+    }
+
+    /// A final leaf state (accepted as a leaf; raises no completion event).
+    pub fn final_state(id: impl Into<String>) -> Self {
+        Self::with_kind(id, Kind::Final, None)
+    }
+
+    /// A shallow-history pseudostate for its parent region.
+    pub fn history_shallow(id: impl Into<String>) -> Self {
+        Self::with_kind(id, Kind::History(HistoryKind::Shallow), None)
+    }
+
+    /// A deep-history pseudostate for its parent region.
+    pub fn history_deep(id: impl Into<String>) -> Self {
+        Self::with_kind(id, Kind::History(HistoryKind::Deep), None)
+    }
+
+    /// Set the parent state id. Omit only for the single chart root.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.def.parent = Some(parent.into());
+        self
+    }
+
+    /// Set the default target used on a history pseudostate's first entry.
+    pub fn default_child(mut self, target: impl Into<String>) -> Self {
+        self.def.default = Some(target.into());
+        self
+    }
+
+    /// Append an entry action name.
+    pub fn entry(mut self, action: impl Into<String>) -> Self {
+        self.def.entry.push(action.into());
+        self
+    }
+
+    /// Append an exit action name.
+    pub fn exit(mut self, action: impl Into<String>) -> Self {
+        self.def.exit.push(action.into());
+        self
+    }
+
+    /// Add an unguarded external transition on `event` to `target`.
+    pub fn on(self, event: impl Into<String>, target: impl Into<String>) -> Self {
+        self.on_transition(event, TransitionBuilder::to(target))
+    }
+
+    /// Add a guarded external transition on `event` to `target`.
+    pub fn on_guarded(
+        self,
+        event: impl Into<String>,
+        target: impl Into<String>,
+        guard: impl Into<String>,
+    ) -> Self {
+        self.on_transition(event, TransitionBuilder::to(target).guard(guard))
+    }
+
+    /// Add a fully-specified transition on `event`.
+    pub fn on_transition(mut self, event: impl Into<String>, t: TransitionBuilder) -> Self {
+        self.def.transitions.insert(event.into(), t.inner);
+        self
+    }
+}
+
+/// Fluent builder assembling a [`ChartDef`] from typed Rust states, the
+/// definition path parallel to [`ChartDef::from_json`]. State insertion order
+/// fixes deterministic parallel-region descent, exactly as JSON key order does.
+#[cfg(feature = "statechart")]
+#[derive(Default)]
+pub struct ChartBuilder {
+    states: Vec<StateBuilder>,
+}
+
+#[cfg(feature = "statechart")]
+impl ChartBuilder {
+    /// A new, empty builder.
+    pub fn new() -> Self {
+        Self { states: Vec::new() }
+    }
+
+    /// Add a state. The first parent-less state added becomes the root.
+    pub fn state(mut self, state: StateBuilder) -> Self {
+        self.states.push(state);
+        self
+    }
+
+    /// Validate and assemble the [`ChartDef`]. Fails on a duplicate state id, on
+    /// zero or more than one parent-less root, matching the JSON path.
+    pub fn build(self) -> Result<ChartDef, String> {
+        let mut states: HashMap<String, StateDef> = HashMap::new();
+        let mut order: HashMap<String, usize> = HashMap::new();
+        for (idx, sb) in self.states.into_iter().enumerate() {
+            if states.contains_key(&sb.id) {
+                return Err(format!("duplicate state id `{}`", sb.id));
+            }
+            order.insert(sb.id.clone(), idx);
+            states.insert(sb.id, sb.def);
+        }
+        ChartDef::from_states(states, order)
+    }
+}
+
 impl StateChart {
     /// Create a chart over `ctx`, entering the initial configuration by
     /// descending from the root via each compound's `initial` (and every region
@@ -362,188 +563,384 @@ impl StateChart {
     /// named guards for this send (absent/unknown name → fail-closed `false`).
     pub fn send(&self, ctx: &Context, event: &str, guards: &HashMap<String, bool>) -> bool {
         let config = self.configuration(ctx);
-
-        // 1. Enabled transitions: per active leaf, innermost passing match.
-        struct Cand<'a> {
-            source: String,
-            transition: &'a Transition,
-            leaf: String,
+        let mut history = self.history.borrow_mut();
+        match engine_send(&self.def, &mut history, &config, event, guards) {
+            Some((new_config, actions)) => {
+                drop(history);
+                *self.last_actions.borrow_mut() = actions;
+                if new_config != config {
+                    ctx.set_cell(&self.config, new_config);
+                }
+                true
+            }
+            None => {
+                drop(history);
+                *self.last_actions.borrow_mut() = Vec::new();
+                false
+            }
         }
-        let mut candidates: Vec<Cand> = Vec::new();
-        let leaves: Vec<String> = config
+    }
+}
+
+/// A reactive full-Harel state chart backed by a [`ThreadSafeContext`]. Same
+/// chart semantics as [`StateChart`]; the configuration cell is shared safely
+/// across threads and history/last-actions use a `parking_lot::Mutex`, so the
+/// whole chart is `Send + Sync`. A status observer on one thread can read
+/// [`ThreadSafeStateChart::configuration`] while another drives
+/// [`ThreadSafeStateChart::send`].
+#[cfg(all(feature = "statechart", feature = "thread-safe"))]
+pub struct ThreadSafeStateChart {
+    def: ChartDef,
+    config: CellHandle<BTreeSet<String>>,
+    history: parking_lot::Mutex<HashMap<String, Recording>>,
+    last_actions: parking_lot::Mutex<Vec<String>>,
+}
+
+#[cfg(all(feature = "statechart", feature = "thread-safe"))]
+impl ThreadSafeStateChart {
+    /// Create a chart over `ctx`, entering the initial configuration.
+    pub fn new(ctx: &ThreadSafeContext, def: ChartDef) -> Self {
+        let mut enter = BTreeSet::new();
+        let mut actions = Vec::new();
+        enter_subtree(&def, &def.root, &mut enter, &mut actions);
+        let config = ctx.cell(enter);
+        Self {
+            def,
+            config,
+            history: parking_lot::Mutex::new(HashMap::new()),
+            last_actions: parking_lot::Mutex::new(actions),
+        }
+    }
+
+    /// Ordered action names fired by the initial entry or the most recent `send`.
+    pub fn last_actions(&self) -> Vec<String> {
+        self.last_actions.lock().clone()
+    }
+
+    /// The full active configuration (active leaves plus all active ancestors).
+    pub fn configuration(&self, ctx: &ThreadSafeContext) -> BTreeSet<String> {
+        ctx.get_cell(&self.config)
+    }
+
+    /// Active atomic leaves, sorted (one per parallel region).
+    pub fn active_leaves(&self, ctx: &ThreadSafeContext) -> Vec<String> {
+        let config = self.configuration(ctx);
+        let mut leaves: Vec<String> = config
             .iter()
             .filter(|id| matches!(self.def.kind(id), Kind::Atomic | Kind::Final))
             .cloned()
             .collect();
-        for leaf in &leaves {
-            for anc in self.def.ancestors_inclusive(leaf) {
-                if let Some(def) = self.def.states.get(&anc)
-                    && let Some(t) = def.transitions.get(event)
-                    && guard_passes(t, guards)
-                {
-                    candidates.push(Cand {
-                        source: anc.clone(),
-                        transition: t,
-                        leaf: leaf.clone(),
-                    });
-                    break; // innermost wins for this leaf's chain
-                }
-            }
-        }
-
-        if candidates.is_empty() {
-            *self.last_actions.borrow_mut() = Vec::new();
-            return false;
-        }
-
-        // 2. Conflict resolution: order by source depth desc, then document order;
-        //    take greedily, skipping any whose exit set intersects the taken union.
-        candidates.sort_by(|a, b| {
-            self.def
-                .depth(&b.source)
-                .cmp(&self.def.depth(&a.source))
-                .then_with(|| {
-                    self.def
-                        .order
-                        .get(&a.source)
-                        .cmp(&self.def.order.get(&b.source))
-                })
-        });
-
-        let mut exit_union: BTreeSet<String> = BTreeSet::new();
-        let mut enter_union: BTreeSet<String> = BTreeSet::new();
-        let mut taken_transitions: Vec<&Transition> = Vec::new();
-        for cand in &candidates {
-            let (exit_set, enter_set) =
-                self.compute_exit_enter(&cand.source, cand.transition, &cand.leaf, &config);
-            if exit_set.intersection(&exit_union).next().is_some() {
-                continue; // conflicts with an already-taken transition
-            }
-            exit_union.extend(exit_set);
-            enter_union.extend(enter_set);
-            taken_transitions.push(cand.transition);
-        }
-
-        if taken_transitions.is_empty() {
-            *self.last_actions.borrow_mut() = Vec::new();
-            return false;
-        }
-
-        // 3. Record history for regions being exited that own a history child.
-        let mut history = self.history.borrow_mut();
-        for s in &exit_union {
-            if let Some(h_child) = history_child_of(&self.def, s) {
-                record_region(&self.def, s, h_child, &config, &mut history);
-            }
-        }
-        drop(history);
-
-        // 4. Action trace: exit (innermost-first) → transition → entry (outermost-first).
-        let mut actions = Vec::new();
-        let mut exit_sorted: Vec<&String> = exit_union.iter().collect();
-        exit_sorted.sort_by_key(|s| std::cmp::Reverse(self.def.depth(s)));
-        for s in &exit_sorted {
-            actions.extend(self.def.states[*s].exit.iter().cloned());
-        }
-        for t in &taken_transitions {
-            actions.extend(t.action.iter().cloned());
-        }
-        let mut enter_sorted: Vec<&String> = enter_union.iter().collect();
-        enter_sorted.sort_by_key(|s| self.def.depth(s));
-        for s in &enter_sorted {
-            actions.extend(self.def.states[*s].entry.iter().cloned());
-        }
-
-        // 5. Apply new configuration.
-        let mut new_config = config.clone();
-        for s in &exit_union {
-            new_config.remove(s);
-        }
-        for s in &enter_union {
-            new_config.insert(s.clone());
-        }
-
-        *self.last_actions.borrow_mut() = actions;
-        if new_config != config {
-            ctx.set_cell(&self.config, new_config);
-        }
-        true
+        leaves.sort();
+        leaves
     }
 
-    fn compute_exit_enter(
+    /// Hierarchical "state-in" predicate.
+    pub fn matches(&self, ctx: &ThreadSafeContext, id: &str) -> bool {
+        self.configuration(ctx).contains(id)
+    }
+
+    /// Send an event. Returns `true` if any transition was taken, `false` if
+    /// rejected (configuration unchanged, no actions fired).
+    pub fn send(
         &self,
-        source: &str,
-        transition: &Transition,
-        leaf: &str,
-        config: &BTreeSet<String>,
-    ) -> (BTreeSet<String>, BTreeSet<String>) {
-        let target = &transition.target;
-        let internal = transition.internal
-            && (target == source || self.def.is_proper_descendant(target, source));
-        let lca = if internal {
-            source.to_string()
-        } else {
-            self.def.lca(leaf, target)
-        };
-
-        // Exit set: active proper-descendants of the lca.
-        let exit_set: BTreeSet<String> = config
-            .iter()
-            .filter(|s| self.def.is_proper_descendant(s, &lca))
-            .cloned()
-            .collect();
-
-        // Enter set.
-        let mut enter: BTreeSet<String> = BTreeSet::new();
-        if matches!(self.def.kind(target), Kind::History(_)) {
-            let region = self.def.states[target]
-                .parent
-                .clone()
-                .unwrap_or_else(|| self.def.root.clone());
-            for s in path_below(&self.def, &lca, &region) {
-                enter.insert(s);
-            }
-            self.restore_via_history(target, &region, &mut enter);
-        } else {
-            for s in path_below(&self.def, &lca, target) {
-                enter.insert(s);
-            }
-            let mut entry_actions = Vec::new();
-            enter_subtree(&self.def, target, &mut enter, &mut entry_actions);
-        }
-
-        (exit_set, enter)
-    }
-
-    fn restore_via_history(&self, hist: &str, region: &str, enter: &mut BTreeSet<String>) {
-        let history = self.history.borrow();
-        match history.get(hist) {
-            Some(Recording::Shallow(child)) => {
-                let child = child.clone();
+        ctx: &ThreadSafeContext,
+        event: &str,
+        guards: &HashMap<String, bool>,
+    ) -> bool {
+        let config = self.configuration(ctx);
+        let mut history = self.history.lock();
+        match engine_send(&self.def, &mut history, &config, event, guards) {
+            Some((new_config, actions)) => {
                 drop(history);
-                enter.insert(child.clone());
-                let mut tmp = Vec::new();
-                enter_subtree(&self.def, &child, enter, &mut tmp);
-            }
-            Some(Recording::Deep(set)) => {
-                for s in set {
-                    enter.insert(s.clone());
+                *self.last_actions.lock() = actions;
+                if new_config != config {
+                    ctx.set_cell(&self.config, new_config);
                 }
+                true
             }
             None => {
                 drop(history);
-                // First entry: descend via `default`, else the region's `initial`.
-                let start = self.def.states[hist]
-                    .default
-                    .clone()
-                    .or_else(|| self.def.states[region].initial.clone());
-                if let Some(start) = start {
-                    for s in path_below(&self.def, region, &start) {
-                        enter.insert(s);
-                    }
-                    let mut tmp = Vec::new();
-                    enter_subtree(&self.def, &start, enter, &mut tmp);
+                *self.last_actions.lock() = Vec::new();
+                false
+            }
+        }
+    }
+}
+
+/// A reactive full-Harel state chart backed by an [`AsyncContext`]. Because
+/// cells are the synchronous input layer of `AsyncContext`, `send`/`state`
+/// remain synchronous; reactive observers (`ctx.effect`/`ctx.signal` reading the
+/// configuration) drive async recomputation. Same chart semantics as
+/// [`StateChart`].
+#[cfg(all(feature = "statechart", feature = "async"))]
+pub struct AsyncStateChart {
+    def: ChartDef,
+    config: AsyncCellHandle<BTreeSet<String>>,
+    history: parking_lot::Mutex<HashMap<String, Recording>>,
+    last_actions: parking_lot::Mutex<Vec<String>>,
+}
+
+#[cfg(all(feature = "statechart", feature = "async"))]
+impl AsyncStateChart {
+    /// Create a chart over `ctx`, entering the initial configuration.
+    pub fn new(ctx: &AsyncContext, def: ChartDef) -> Self {
+        let mut enter = BTreeSet::new();
+        let mut actions = Vec::new();
+        enter_subtree(&def, &def.root, &mut enter, &mut actions);
+        let config = ctx.cell(enter);
+        Self {
+            def,
+            config,
+            history: parking_lot::Mutex::new(HashMap::new()),
+            last_actions: parking_lot::Mutex::new(actions),
+        }
+    }
+
+    /// Ordered action names fired by the initial entry or the most recent `send`.
+    pub fn last_actions(&self) -> Vec<String> {
+        self.last_actions.lock().clone()
+    }
+
+    /// The full active configuration (active leaves plus all active ancestors).
+    pub fn configuration(&self, ctx: &AsyncContext) -> BTreeSet<String> {
+        ctx.get_cell(&self.config)
+    }
+
+    /// Active atomic leaves, sorted (one per parallel region).
+    pub fn active_leaves(&self, ctx: &AsyncContext) -> Vec<String> {
+        let config = self.configuration(ctx);
+        let mut leaves: Vec<String> = config
+            .iter()
+            .filter(|id| matches!(self.def.kind(id), Kind::Atomic | Kind::Final))
+            .cloned()
+            .collect();
+        leaves.sort();
+        leaves
+    }
+
+    /// Hierarchical "state-in" predicate.
+    pub fn matches(&self, ctx: &AsyncContext, id: &str) -> bool {
+        self.configuration(ctx).contains(id)
+    }
+
+    /// Send an event (synchronous). Returns `true` if any transition was taken.
+    pub fn send(&self, ctx: &AsyncContext, event: &str, guards: &HashMap<String, bool>) -> bool {
+        let config = self.configuration(ctx);
+        let mut history = self.history.lock();
+        match engine_send(&self.def, &mut history, &config, event, guards) {
+            Some((new_config, actions)) => {
+                drop(history);
+                *self.last_actions.lock() = actions;
+                if new_config != config {
+                    ctx.set_cell(&self.config, new_config);
                 }
+                true
+            }
+            None => {
+                drop(history);
+                *self.last_actions.lock() = Vec::new();
+                false
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context-free transition engine. Every `StateChart` variant (single-threaded,
+// thread-safe, async) delegates here; only the cell storage and interior-
+// mutability wrapper differ per variant, never the Harel semantics. This is the
+// algorithm the spec conformance fixtures and the Lean formal model pin down —
+// keep it byte-for-byte behaviourally identical across refactors.
+// ---------------------------------------------------------------------------
+
+/// Compute one Harel macrostep. Returns `Some((new_config, actions))` when a
+/// transition is taken (the new configuration may equal the old for an internal
+/// self-transition) and `None` when the event is rejected (no enabled
+/// transition; configuration and history unchanged). `history` is mutated only
+/// when a transition is actually taken.
+fn engine_send(
+    def: &ChartDef,
+    history: &mut HashMap<String, Recording>,
+    config: &BTreeSet<String>,
+    event: &str,
+    guards: &HashMap<String, bool>,
+) -> Option<(BTreeSet<String>, Vec<String>)> {
+    // 1. Enabled transitions: per active leaf, innermost passing match.
+    struct Cand<'a> {
+        source: String,
+        transition: &'a Transition,
+        leaf: String,
+    }
+    let mut candidates: Vec<Cand> = Vec::new();
+    let leaves: Vec<String> = config
+        .iter()
+        .filter(|id| matches!(def.kind(id), Kind::Atomic | Kind::Final))
+        .cloned()
+        .collect();
+    for leaf in &leaves {
+        for anc in def.ancestors_inclusive(leaf) {
+            if let Some(sd) = def.states.get(&anc)
+                && let Some(t) = sd.transitions.get(event)
+                && guard_passes(t, guards)
+            {
+                candidates.push(Cand {
+                    source: anc.clone(),
+                    transition: t,
+                    leaf: leaf.clone(),
+                });
+                break; // innermost wins for this leaf's chain
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // 2. Conflict resolution: order by source depth desc, then document order;
+    //    take greedily, skipping any whose exit set intersects the taken union.
+    candidates.sort_by(|a, b| {
+        def.depth(&b.source)
+            .cmp(&def.depth(&a.source))
+            .then_with(|| def.order.get(&a.source).cmp(&def.order.get(&b.source)))
+    });
+
+    let mut exit_union: BTreeSet<String> = BTreeSet::new();
+    let mut enter_union: BTreeSet<String> = BTreeSet::new();
+    let mut taken_transitions: Vec<&Transition> = Vec::new();
+    for cand in &candidates {
+        let (exit_set, enter_set) = engine_compute_exit_enter(
+            def,
+            history,
+            &cand.source,
+            cand.transition,
+            &cand.leaf,
+            config,
+        );
+        if exit_set.intersection(&exit_union).next().is_some() {
+            continue; // conflicts with an already-taken transition
+        }
+        exit_union.extend(exit_set);
+        enter_union.extend(enter_set);
+        taken_transitions.push(cand.transition);
+    }
+
+    if taken_transitions.is_empty() {
+        return None;
+    }
+
+    // 3. Record history for regions being exited that own a history child.
+    for s in &exit_union {
+        if let Some(h_child) = history_child_of(def, s) {
+            record_region(def, s, h_child, config, history);
+        }
+    }
+
+    // 4. Action trace: exit (innermost-first) → transition → entry (outermost-first).
+    let mut actions = Vec::new();
+    let mut exit_sorted: Vec<&String> = exit_union.iter().collect();
+    exit_sorted.sort_by_key(|s| std::cmp::Reverse(def.depth(s)));
+    for s in &exit_sorted {
+        actions.extend(def.states[*s].exit.iter().cloned());
+    }
+    for t in &taken_transitions {
+        actions.extend(t.action.iter().cloned());
+    }
+    let mut enter_sorted: Vec<&String> = enter_union.iter().collect();
+    enter_sorted.sort_by_key(|s| def.depth(s));
+    for s in &enter_sorted {
+        actions.extend(def.states[*s].entry.iter().cloned());
+    }
+
+    // 5. Compute new configuration.
+    let mut new_config = config.clone();
+    for s in &exit_union {
+        new_config.remove(s);
+    }
+    for s in &enter_union {
+        new_config.insert(s.clone());
+    }
+
+    Some((new_config, actions))
+}
+
+fn engine_compute_exit_enter(
+    def: &ChartDef,
+    history: &HashMap<String, Recording>,
+    source: &str,
+    transition: &Transition,
+    leaf: &str,
+    config: &BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let target = &transition.target;
+    let internal =
+        transition.internal && (target == source || def.is_proper_descendant(target, source));
+    let lca = if internal {
+        source.to_string()
+    } else {
+        def.lca(leaf, target)
+    };
+
+    // Exit set: active proper-descendants of the lca.
+    let exit_set: BTreeSet<String> = config
+        .iter()
+        .filter(|s| def.is_proper_descendant(s, &lca))
+        .cloned()
+        .collect();
+
+    // Enter set.
+    let mut enter: BTreeSet<String> = BTreeSet::new();
+    if matches!(def.kind(target), Kind::History(_)) {
+        let region = def.states[target]
+            .parent
+            .clone()
+            .unwrap_or_else(|| def.root.clone());
+        for s in path_below(def, &lca, &region) {
+            enter.insert(s);
+        }
+        engine_restore_via_history(def, history, target, &region, &mut enter);
+    } else {
+        for s in path_below(def, &lca, target) {
+            enter.insert(s);
+        }
+        let mut entry_actions = Vec::new();
+        enter_subtree(def, target, &mut enter, &mut entry_actions);
+    }
+
+    (exit_set, enter)
+}
+
+fn engine_restore_via_history(
+    def: &ChartDef,
+    history: &HashMap<String, Recording>,
+    hist: &str,
+    region: &str,
+    enter: &mut BTreeSet<String>,
+) {
+    match history.get(hist) {
+        Some(Recording::Shallow(child)) => {
+            let child = child.clone();
+            enter.insert(child.clone());
+            let mut tmp = Vec::new();
+            enter_subtree(def, &child, enter, &mut tmp);
+        }
+        Some(Recording::Deep(set)) => {
+            for s in set {
+                enter.insert(s.clone());
+            }
+        }
+        None => {
+            // First entry: descend via `default`, else the region's `initial`.
+            let start = def.states[hist]
+                .default
+                .clone()
+                .or_else(|| def.states[region].initial.clone());
+            if let Some(start) = start {
+                for s in path_below(def, region, &start) {
+                    enter.insert(s);
+                }
+                let mut tmp = Vec::new();
+                enter_subtree(def, &start, enter, &mut tmp);
             }
         }
     }
@@ -635,5 +1032,112 @@ fn record_region(
                 .collect();
             history.insert(hist_child, Recording::Deep(set));
         }
+    }
+}
+
+#[cfg(all(test, feature = "statechart"))]
+mod builder_variant_tests {
+    use super::*;
+
+    /// A small chart used by both the JSON and Rust-builder equivalence check:
+    /// a parallel root over two regions, one guarded transition, one final.
+    fn json_chart() -> ChartDef {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{
+              "initial": "root",
+              "states": {
+                "root": { "parallel": true },
+                "flow": { "parent": "root", "initial": "idle" },
+                "idle": { "parent": "flow", "on": { "go": { "target": "done", "guard": "ready" } } },
+                "done": { "parent": "flow", "kind": "final" },
+                "net": { "parent": "root", "initial": "up" },
+                "up": { "parent": "net", "on": { "drop": { "target": "down" } } },
+                "down": { "parent": "net", "on": { "restore": { "target": "up" } } }
+              }
+            }"#,
+        )
+        .unwrap();
+        ChartDef::from_json(&v).unwrap()
+    }
+
+    fn built_chart() -> ChartDef {
+        ChartBuilder::new()
+            .state(StateBuilder::parallel("root"))
+            .state(StateBuilder::compound("flow", "idle").parent("root"))
+            .state(
+                StateBuilder::atomic("idle")
+                    .parent("flow")
+                    .on_guarded("go", "done", "ready"),
+            )
+            .state(StateBuilder::final_state("done").parent("flow"))
+            .state(StateBuilder::compound("net", "up").parent("root"))
+            .state(StateBuilder::atomic("up").parent("net").on("drop", "down"))
+            .state(
+                StateBuilder::atomic("down")
+                    .parent("net")
+                    .on("restore", "up"),
+            )
+            .build()
+            .unwrap()
+    }
+
+    /// The Rust builder and JSON paths produce charts that behave identically:
+    /// same initial configuration and same response to the same event stream.
+    #[test]
+    fn builder_matches_json_behaviour() {
+        use crate::Context;
+        let ctx_j = Context::new();
+        let ctx_b = Context::new();
+        let cj = StateChart::new(&ctx_j, json_chart());
+        let cb = StateChart::new(&ctx_b, built_chart());
+        assert_eq!(cj.configuration(&ctx_j), cb.configuration(&ctx_b));
+
+        let mut ready = HashMap::new();
+        ready.insert("ready".to_string(), false);
+        // Guard false: rejected on both.
+        assert_eq!(cj.send(&ctx_j, "go", &ready), cb.send(&ctx_b, "go", &ready));
+        assert_eq!(cj.configuration(&ctx_j), cb.configuration(&ctx_b));
+        // Orthogonal region transition on both.
+        let empty = HashMap::new();
+        assert!(cj.send(&ctx_j, "drop", &empty));
+        assert!(cb.send(&ctx_b, "drop", &empty));
+        // Guard true: accepted on both.
+        ready.insert("ready".to_string(), true);
+        assert!(cj.send(&ctx_j, "go", &ready));
+        assert!(cb.send(&ctx_b, "go", &ready));
+        assert_eq!(cj.configuration(&ctx_j), cb.configuration(&ctx_b));
+        assert!(cj.matches(&ctx_j, "done") && cj.matches(&ctx_j, "down"));
+    }
+
+    #[cfg(feature = "thread-safe")]
+    #[test]
+    fn thread_safe_chart_is_send_sync_and_transitions() {
+        use crate::ThreadSafeContext;
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ThreadSafeStateChart>();
+
+        let ctx = ThreadSafeContext::new();
+        let chart = ThreadSafeStateChart::new(&ctx, built_chart());
+        assert!(chart.matches(&ctx, "idle") && chart.matches(&ctx, "up"));
+        let empty = HashMap::new();
+        // Guard absent -> fail-closed rejection.
+        assert!(!chart.send(&ctx, "go", &empty));
+        assert!(chart.matches(&ctx, "idle"));
+        let mut ready = HashMap::new();
+        ready.insert("ready".to_string(), true);
+        assert!(chart.send(&ctx, "go", &ready));
+        assert!(chart.matches(&ctx, "done"));
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn async_chart_transitions() {
+        use crate::AsyncContext;
+        let ctx = AsyncContext::new();
+        let chart = AsyncStateChart::new(&ctx, built_chart());
+        assert!(chart.matches(&ctx, "idle"));
+        let empty = HashMap::new();
+        assert!(chart.send(&ctx, "drop", &empty));
+        assert!(chart.matches(&ctx, "down"));
     }
 }

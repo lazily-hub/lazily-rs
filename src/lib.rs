@@ -168,6 +168,12 @@ pub use state_machine::AsyncStateMachine;
 pub use state_machine::StateMachine;
 #[cfg(feature = "thread-safe")]
 pub use state_machine::ThreadSafeStateMachine;
+#[cfg(all(feature = "statechart", feature = "async"))]
+pub use statechart::AsyncStateChart;
+#[cfg(all(feature = "statechart", feature = "thread-safe"))]
+pub use statechart::ThreadSafeStateChart;
+#[cfg(feature = "statechart")]
+pub use statechart::{ChartBuilder, StateBuilder, TransitionBuilder};
 pub use statechart::{ChartDef, StateChart};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
