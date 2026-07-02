@@ -77,8 +77,13 @@ jobs:
 
       - name: Test keyed cell collections conformance against canonical spec fixtures (#lzcellfamily)
         run: |
-          test -d ../lazily-spec/conformance/collections || { echo "::error::../lazily-spec/conformance/collections missing"; exit 1; }
+          test -d ../lazily-spec/conformance/collections || { echo "::error::../lazily-spec/conformance/collections missing — collections_conformance.rs would silently fall back to local fixtures"; exit 1; }
           cargo +stable test --locked --test collections_conformance
+
+      - name: Test SeqCrdt conformance against canonical spec fixtures (#lzseqcrdt)
+        run: |
+          test -f ../lazily-spec/conformance/collections/seqcrdt_convergence.json || { echo "::error::seqcrdt_convergence.json missing — seqcrdt_conformance.rs cannot run"; exit 1; }
+          cargo +stable test --locked --features distributed --test seqcrdt_conformance
 
       - name: Test loom model
         run: cargo +stable test --locked --features loom --test thread_safe_loom
@@ -105,7 +110,7 @@ jobs:
         run: npm run check
 
   lean:
-    name: Lean formal model (#lzleanformal)
+    name: Lean formal models (#lzleanmodel, #lzformal)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout canonical lazily-spec
@@ -114,10 +119,25 @@ jobs:
           repository: lazily-hub/lazily-spec
           path: lazily-spec
 
-      - name: Build Lean formal model
+      - name: Build lazily-spec Lean formal model (#lzleanmodel)
         uses: leanprover/lean-action@v1
         with:
           lake-package-directory: lazily-spec/formal/lean
+          auto-config: false
+          build: true
+          test: false
+          lint: false
+
+      - name: Checkout canonical lazily-formal
+        uses: actions/checkout@v4
+        with:
+          repository: lazily-hub/lazily-formal
+          path: lazily-formal
+
+      - name: Build lazily-formal Lean model (#lzformal)
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lazily-formal
           auto-config: false
           build: true
           test: false

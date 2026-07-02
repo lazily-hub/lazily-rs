@@ -64,6 +64,7 @@ impl<V: Clone> Clone for Entry<V> {
 ///
 /// The clock is caller-driven: every mutator takes `now_micros` so behaviour is
 /// deterministic and testable (the embedded [`Hlc`] never reads the system clock).
+#[derive(Clone)]
 pub struct SeqCrdt<Id, V> {
     entries: HashMap<Id, Entry<V>>,
     hlc: Hlc,
@@ -79,6 +80,23 @@ where
     pub fn new(peer: PeerId) -> Self {
         Self {
             entries: HashMap::new(),
+            hlc: Hlc::new(peer),
+            peer,
+        }
+    }
+
+    /// The owning peer id of this replica.
+    pub fn peer(&self) -> PeerId {
+        self.peer
+    }
+
+    /// Fork this replica's state under a new owning `peer` (deep copy of
+    /// entries with their original stamps/positions, new HLC identity). The
+    /// fork continues from the source's causal state under a new peer id, so
+    /// concurrent ops on different forks tiebreak deterministically.
+    pub fn fork(&self, peer: PeerId) -> Self {
+        Self {
+            entries: self.entries.clone(),
             hlc: Hlc::new(peer),
             peer,
         }

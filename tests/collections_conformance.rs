@@ -11,10 +11,15 @@
 //! declarative: diff `prior` → `target` and assert the emitted minimal op set
 //! plus that stable entries are not invalidated by a sibling reorder.
 
+use std::cell::Cell as StdCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::rc::Rc;
 
-use lazily::{CellHandle, CellMap, Context, DiffOp, apply_to_map, reconcile};
+use lazily::{
+    Block, CellHandle, CellMap, CellTree, Context, DiffOp, Match, SemTree, TextCrdt, align,
+    apply_to_map, assign_stable_keys, block_key, reconcile,
+};
 use serde_json::Value;
 
 const SPEC_DIR: &str = "../lazily-spec/conformance/collections";
@@ -450,4 +455,543 @@ fn conformance_cellmap_atomic_move() {
 #[test]
 fn conformance_keyed_reconciliation_lis() {
     run_reconcile_fixture("keyed_reconciliation_lis.json");
+}
+
+// === SemTree (memoized semantic tree) ======================================
+// Replay `semtree_incremental.json`: one memo slot per node folds
+// (node value, child derived values). Editing one node recomputes only its
+// ANCESTOR CHAIN (sibling subtrees stay cached); a node edit that doesn't
+// change the folded result MUST NOT re-run a downstream consumer (memo guard).
+
+fn build_sem_tree(ctx: &Context, node: &Value) -> CellTree<String, i64> {
+    let id = node.get("id").and_then(|v| v.as_str()).unwrap().to_string();
+    let value = node.get("value").and_then(|v| v.as_i64()).unwrap();
+    let root = CellTree::leaf(ctx, id, value);
+    if let Some(children) = node.get("children") {
+        let order = children.get("order").and_then(|v| v.as_array()).unwrap();
+        let values = children.get("values").and_then(|v| v.as_object()).unwrap();
+        for kid in order {
+            let kid_id = kid.as_str().unwrap();
+            let kid_node = values.get(kid_id).unwrap();
+            let subtree = build_sem_tree(ctx, kid_node);
+            root.attach_child(ctx, subtree);
+        }
+    }
+    root
+}
+
+/// Recursively search for a node by id (CellTree::child only sees one level).
+fn find_in_tree<V: PartialEq + Clone + 'static>(
+    ctx: &Context,
+    node: &CellTree<String, V>,
+    id: &str,
+) -> Option<CellTree<String, V>> {
+    if node.id() == id {
+        return Some(node.clone());
+    }
+    for child in node.children(ctx) {
+        if let Some(found) = find_in_tree(ctx, &child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn run_semtree_fixture(name: &str) {
+    let fixture = load_fixture(name);
+    let scenarios = fixture
+        .get("scenarios")
+        .and_then(|v| v.as_array())
+        .expect("semtree scenarios");
+
+    for (i, scenario) in scenarios.iter().enumerate() {
+        let fold = scenario
+            .get("fold")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("scenario {i}: missing fold"));
+        let tree_json = scenario.get("tree").unwrap();
+        let ctx = Context::new();
+        let root = build_sem_tree(&ctx, tree_json);
+
+        match fold {
+            "sum" => {
+                let sums = SemTree::build(&ctx, &root, |v: &i64, kids: &[i64]| {
+                    v + kids.iter().sum::<i64>()
+                });
+                let expect_initial = scenario.get("expect_initial").unwrap();
+                assert_eq!(
+                    sums.value(&ctx),
+                    expect_field_i64(expect_initial, "root"),
+                    "scenario {i} initial root"
+                );
+                if let Some(a) = expect_initial.get("a").and_then(|v| v.as_i64()) {
+                    assert_eq!(
+                        sums.node_value(&ctx, &"a".to_string()),
+                        Some(a),
+                        "scenario {i} initial a"
+                    );
+                }
+
+                // Prime sibling slot cache before edit so we can verify isolation.
+                let a_slot = sums.node(&"a".to_string());
+                let b_slot = sums.node(&"b".to_string());
+
+                if let Some(edit) = scenario.get("edit") {
+                    let id = edit.get("id").and_then(|v| v.as_str()).unwrap().to_string();
+                    let value = edit.get("value").and_then(|v| v.as_i64()).unwrap();
+                    let node = find_in_tree(&ctx, &root, &id)
+                        .unwrap_or_else(|| panic!("scenario {i}: edit target {id} not in tree"));
+                    node.set(&ctx, value);
+                } else if let Some(rm) = scenario.get("remove_child") {
+                    let parent_id = rm
+                        .get("parent")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string();
+                    let child_id = rm
+                        .get("child")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string();
+                    let parent = find_in_tree(&ctx, &root, &parent_id).unwrap_or_else(|| {
+                        panic!("scenario {i}: remove parent {parent_id} missing")
+                    });
+                    assert!(
+                        parent.remove_child(&ctx, &child_id),
+                        "scenario {i}: remove_child {child_id} not found under {parent_id}"
+                    );
+                }
+
+                let expect_after = scenario.get("expect_after").unwrap();
+                assert_eq!(
+                    sums.value(&ctx),
+                    expect_field_i64(expect_after, "root"),
+                    "scenario {i}: root after edit"
+                );
+
+                if let Some(sibling_cached) = expect_after
+                    .get("sibling_a_cached")
+                    .and_then(|v| v.as_bool())
+                {
+                    let a_slot =
+                        a_slot.expect("scenario checks sibling_a_cached but no `a` node slot");
+                    assert_eq!(
+                        ctx.is_set(&a_slot),
+                        sibling_cached,
+                        "scenario {i}: sibling_a_cached contract ({}cached expected)",
+                        if sibling_cached { "" } else { "un" }
+                    );
+                }
+                if let Some(b) = expect_after.get("b").and_then(|v| v.as_i64()) {
+                    let b_slot = b_slot.expect("expect_after.b present but no `b` slot");
+                    assert_eq!(ctx.get(&b_slot), b, "scenario {i}: b after edit");
+                }
+                if let Some(a) = expect_after.get("a").and_then(|v| v.as_i64()) {
+                    let a_slot = a_slot.expect("expect_after.a present but no `a` slot");
+                    assert_eq!(ctx.get(&a_slot), a, "scenario {i}: a unchanged after edit");
+                }
+            }
+            "count_positive" => {
+                let count = SemTree::build(&ctx, &root, |v: &i64, kids: &[usize]| {
+                    (if *v > 0 { 1usize } else { 0 }) + kids.iter().sum::<usize>()
+                });
+                let expect_initial = scenario.get("expect_initial").unwrap();
+                assert_eq!(
+                    count.value(&ctx),
+                    expect_field_i64(expect_initial, "root") as usize,
+                    "scenario {i}: initial positive count"
+                );
+
+                // Downstream consumer of the derived root; count how often it re-runs.
+                let calls = Rc::new(StdCell::new(0usize));
+                let root_slot = count.root();
+                let observer = {
+                    let calls = Rc::clone(&calls);
+                    ctx.computed(move |ctx| {
+                        calls.set(calls.get() + 1);
+                        ctx.get(&root_slot)
+                    })
+                };
+                assert_eq!(ctx.get(&observer), count.value(&ctx));
+                let calls_before = calls.get();
+
+                if let Some(edit) = scenario.get("edit") {
+                    let id = edit.get("id").and_then(|v| v.as_str()).unwrap().to_string();
+                    let value = edit.get("value").and_then(|v| v.as_i64()).unwrap();
+                    let node = find_in_tree(&ctx, &root, &id)
+                        .unwrap_or_else(|| panic!("scenario {i}: edit target {id} not in tree"));
+                    node.set(&ctx, value);
+                }
+
+                let expect_after = scenario.get("expect_after").unwrap();
+                assert_eq!(
+                    count.value(&ctx),
+                    expect_field_i64(expect_after, "root") as usize,
+                    "scenario {i}: positive count after edit"
+                );
+                let _ = ctx.get(&observer); // pull observer
+                if let Some(reran) = expect_after
+                    .get("downstream_consumer_reran")
+                    .and_then(|v| v.as_bool())
+                {
+                    let did_rerun = calls.get() > calls_before;
+                    assert_eq!(
+                        did_rerun, reran,
+                        "scenario {i}: downstream_consumer_reran contract ({reran} expected)"
+                    );
+                }
+            }
+            other => panic!("scenario {i}: unknown fold {other}"),
+        }
+    }
+}
+
+fn expect_field_i64(v: &Value, field: &str) -> i64 {
+    v.get(field)
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| panic!("missing {field}: {v}"))
+}
+
+#[test]
+fn conformance_semtree_incremental() {
+    run_semtree_fixture("semtree_incremental.json");
+}
+
+// === StableId (manufactured text identity) =================================
+// Replay `stableid_alignment.json`: anchor/content/similarity layers.
+
+fn build_blocks(v: &Value, field: &str) -> Vec<Block> {
+    let arr = v
+        .get(field)
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("missing {field}"));
+    arr.iter().map(block_from_json).collect()
+}
+
+fn block_from_json(v: &Value) -> Block {
+    let text = v.get("text").and_then(|v| v.as_str()).unwrap().to_string();
+    if let Some(anchor) = v.get("anchor").and_then(|v| v.as_str()) {
+        Block::anchored(anchor.to_string(), text)
+    } else {
+        Block::text(text)
+    }
+}
+
+fn run_stableid_fixture(name: &str) {
+    let fixture = load_fixture(name);
+    let scenarios = fixture
+        .get("scenarios")
+        .and_then(|v| v.as_array())
+        .expect("stableid scenarios");
+
+    for (i, scenario) in scenarios.iter().enumerate() {
+        // --- key-equality scenarios (blocks, no old/new) ---
+        if let Some(blocks_json) = scenario.get("blocks") {
+            let blocks: Vec<Block> = blocks_json
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(block_from_json)
+                .collect();
+            if let Some(pairs) = scenario
+                .get("expect")
+                .and_then(|v| v.get("key_equal"))
+                .and_then(|v| v.as_array())
+            {
+                for pair in pairs {
+                    let a = pair.get(0).and_then(|v| v.as_u64()).unwrap() as usize;
+                    let b = pair.get(1).and_then(|v| v.as_u64()).unwrap() as usize;
+                    assert_eq!(
+                        block_key(&blocks[a]),
+                        block_key(&blocks[b]),
+                        "scenario {i}: blocks {a}/{b} keys should be equal"
+                    );
+                }
+            }
+            if let Some(pairs) = scenario
+                .get("expect")
+                .and_then(|v| v.get("key_not_equal"))
+                .and_then(|v| v.as_array())
+            {
+                for pair in pairs {
+                    let a = pair.get(0).and_then(|v| v.as_u64()).unwrap() as usize;
+                    let b = pair.get(1).and_then(|v| v.as_u64()).unwrap() as usize;
+                    assert_ne!(
+                        block_key(&blocks[a]),
+                        block_key(&blocks[b]),
+                        "scenario {i}: blocks {a}/{b} keys should differ"
+                    );
+                }
+            }
+            continue;
+        }
+
+        // --- alignment scenarios (old + new) ---
+        let old = build_blocks(scenario, "old");
+        let new = build_blocks(scenario, "new");
+        let expect = scenario.get("expect").unwrap();
+
+        if let Some(matches) = expect.get("matches").and_then(|v| v.as_array()) {
+            let al = align(&old, &new);
+            assert_eq!(
+                al.new_matches.len(),
+                matches.len(),
+                "scenario {i}: matches length mismatch"
+            );
+            for (j, m) in matches.iter().enumerate() {
+                let s = m.as_str().unwrap();
+                let got = &al.new_matches[j];
+                if let Some(rest) = s.strip_prefix("Same:") {
+                    let idx: usize = rest.parse().unwrap();
+                    assert!(
+                        matches!(got, Match::Same { old } if *old == idx),
+                        "scenario {i}.{j}: expected Same:{idx}, got {got:?}"
+                    );
+                } else if s == "Inserted" {
+                    assert!(
+                        matches!(got, Match::Inserted),
+                        "scenario {i}.{j}: expected Inserted, got {got:?}"
+                    );
+                } else if let Some(rest) = s.strip_prefix("Edited:") {
+                    let idx: usize = rest.parse().unwrap();
+                    assert!(
+                        matches!(got, Match::Edited { old, .. } if *old == idx),
+                        "scenario {i}.{j}: expected Edited:{idx}, got {got:?}"
+                    );
+                    if let Some(min) = expect.get("similarity_min").and_then(|v| v.as_f64())
+                        && let Match::Edited { similarity, .. } = got
+                    {
+                        assert!(
+                            *similarity as f64 >= min,
+                            "scenario {i}.{j}: similarity {similarity} < min {min}"
+                        );
+                    }
+                } else {
+                    panic!("scenario {i}.{j}: unknown match spec {s}");
+                }
+            }
+            if let Some(removed) = expect.get("removed").and_then(|v| v.as_array()) {
+                let want: Vec<usize> = removed
+                    .iter()
+                    .map(|v| v.as_u64().unwrap() as usize)
+                    .collect();
+                assert_eq!(al.removed, want, "scenario {i}: removed mismatch");
+            }
+        }
+
+        if let Some(pairs) = expect
+            .get("new_key_equals_old_key")
+            .and_then(|v| v.as_array())
+        {
+            let old_keys: Vec<String> = old.iter().map(|b| block_key(b).as_string()).collect();
+            let new_keys = assign_stable_keys(&old, &new);
+            for pair in pairs {
+                let new_idx = pair.get(0).and_then(|v| v.as_u64()).unwrap() as usize;
+                let old_idx = pair.get(1).and_then(|v| v.as_u64()).unwrap() as usize;
+                assert_eq!(
+                    new_keys[new_idx], old_keys[old_idx],
+                    "scenario {i}: new[{new_idx}] key should equal old[{old_idx}]"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn conformance_stableid_alignment() {
+    run_stableid_fixture("stableid_alignment.json");
+}
+
+// === TextCrdt (Fugue/RGA character CRDT) ===================================
+// Replay `textcrdt_convergence.json`: commutative/idempotent merge, concurrent
+// same-point inserts, sticky tombstones, GC.
+
+fn run_textcrdt_fixture(name: &str) {
+    let fixture = load_fixture(name);
+    let scenarios = fixture
+        .get("scenarios")
+        .and_then(|v| v.as_array())
+        .expect("textcrdt scenarios");
+
+    for (i, scenario) in scenarios.iter().enumerate() {
+        let mut replicas: HashMap<String, TextCrdt> = HashMap::new();
+
+        // Seed: either a peer-only replica (empty) or a seeded text replica.
+        if let Some(seed_text) = scenario.get("seed").and_then(|v| v.as_str()) {
+            // seed is a raw string -> single-peer replica named "a".
+            let peer = scenario
+                .get("replica")
+                .and_then(|v| v.get("peer"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
+            replicas.insert("a".to_string(), TextCrdt::from_str(peer, seed_text));
+        } else if let Some(seed_obj) = scenario.get("seed").and_then(|v| v.as_object()) {
+            let peer = seed_obj.get("peer").and_then(|v| v.as_u64()).unwrap();
+            let text = seed_obj.get("text").and_then(|v| v.as_str()).unwrap();
+            replicas.insert("a".to_string(), TextCrdt::from_str(peer, text));
+        } else if let Some(rep) = scenario.get("replica") {
+            let peer = rep.get("peer").and_then(|v| v.as_u64()).unwrap();
+            replicas.insert("a".to_string(), TextCrdt::new(peer));
+        } else {
+            panic!("scenario {i}: missing seed or replica");
+        }
+
+        for step in scenario
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .expect("textcrdt steps")
+        {
+            if let Some(fork_name) = step.get("fork").and_then(|v| v.as_str()) {
+                let peer = step.get("peer").and_then(|v| v.as_u64()).unwrap();
+                let src = replicas
+                    .get("a")
+                    .unwrap_or_else(|| panic!("scenario {i}: fork from missing `a`"));
+                replicas.insert(fork_name.to_string(), src.fork(peer));
+            } else if let Some(new_name) = step.get("clone").and_then(|v| v.as_str()) {
+                // `{ "clone": "ab", "from": "a" }` -> clone `a` as `ab`.
+                let from = step
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("scenario {i}: clone missing `from`"));
+                let cloned = replicas
+                    .get(from)
+                    .unwrap_or_else(|| panic!("scenario {i}: clone from missing `{from}`"))
+                    .clone();
+                replicas.insert(new_name.to_string(), cloned);
+            } else if let Some(merge) = step.get("merge").and_then(|v| v.as_object()) {
+                let into = merge
+                    .get("into")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("scenario {i}: merge missing `into`"));
+                let from = merge
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("scenario {i}: merge missing `from`"));
+                // Clone-out to satisfy the borrow checker (mutable + shared borrow).
+                let from_state = replicas
+                    .get(from)
+                    .unwrap_or_else(|| panic!("scenario {i}: merge from missing `{from}`"))
+                    .clone();
+                replicas
+                    .get_mut(into)
+                    .unwrap_or_else(|| panic!("scenario {i}: merge into missing `{into}`"))
+                    .merge(&from_state);
+            } else if let Some(on) = step.get("on").and_then(|v| v.as_str()) {
+                apply_textcrdt_op(
+                    replicas
+                        .get_mut(on)
+                        .unwrap_or_else(|| panic!("scenario {i}: `on` target `{on}` missing")),
+                    step,
+                );
+            } else if step.get("op").is_some() {
+                // No `on`: apply to default replica "a".
+                apply_textcrdt_op(
+                    replicas
+                        .get_mut("a")
+                        .expect("scenario {i}: default target `a` missing"),
+                    step,
+                );
+            } else {
+                panic!("scenario {i}: unrecognized step {step}");
+            }
+        }
+
+        // Assertions.
+        let expect = scenario.get("expect").unwrap();
+        if let Some(text) = expect.get("text").and_then(|v| v.as_str()) {
+            assert_eq!(replicas["a"].text(), text, "scenario {i}: text mismatch");
+        }
+        if let Some(len) = expect.get("len").and_then(|v| v.as_u64()) {
+            // `len` applies to the converged replica named `a`, or to all
+            // replicas referenced by `texts_equal`/`orders_equal`.
+            let target = expect
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(|_| "a".to_string())
+                .or_else(|| {
+                    expect
+                        .get("texts_equal")
+                        .or_else(|| expect.get("orders_equal"))
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| "a".to_string());
+            assert_eq!(
+                replicas[&target].len() as u64,
+                len,
+                "scenario {i}: len mismatch on `{target}`"
+            );
+        }
+        if let Some(pairs) = expect.get("texts_equal").and_then(|v| v.as_array()) {
+            for pair in pairs {
+                let a = pair.get(0).and_then(|v| v.as_str()).unwrap();
+                let b = pair.get(1).and_then(|v| v.as_str()).unwrap();
+                assert_eq!(
+                    replicas[a].text(),
+                    replicas[b].text(),
+                    "scenario {i}: `{a}`/`{b}` texts should converge"
+                );
+            }
+        }
+        if let Some(prefix) = expect.get("a_starts_with").and_then(|v| v.as_str()) {
+            assert!(
+                replicas["a"].text().starts_with(prefix),
+                "scenario {i}: `a` should start with `{prefix}`"
+            );
+        }
+        if let Some(suffix) = expect.get("a_ends_with").and_then(|v| v.as_str()) {
+            assert!(
+                replicas["a"].text().ends_with(suffix),
+                "scenario {i}: `a` should end with `{suffix}`"
+            );
+        }
+        if let Some(tc) = expect.get("tombstone_count").and_then(|v| v.as_u64()) {
+            assert_eq!(
+                replicas["a"].tombstone_count() as u64,
+                tc,
+                "scenario {i}: tombstone_count mismatch"
+            );
+        }
+    }
+}
+
+fn apply_textcrdt_op(t: &mut TextCrdt, op: &Value) {
+    let kind = op
+        .get("op")
+        .and_then(|v| v.as_str())
+        .expect("textcrdt op.op");
+    match kind {
+        "insert" => {
+            let index = op.get("index").and_then(|v| v.as_u64()).unwrap() as usize;
+            let ch = op
+                .get("ch")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .chars()
+                .next()
+                .unwrap();
+            t.insert(index, ch);
+        }
+        "delete" => {
+            let index = op.get("index").and_then(|v| v.as_u64()).unwrap() as usize;
+            t.delete(index);
+        }
+        "gc" => {
+            let stable = op.get("stable").and_then(|v| v.as_bool()).unwrap();
+            let collected = t.gc_with(|_| stable);
+            if let Some(expect) = op.get("expect_collected").and_then(|v| v.as_u64()) {
+                assert_eq!(collected as u64, expect, "gc expect_collected mismatch");
+            }
+        }
+        other => panic!("unknown textcrdt op: {other}"),
+    }
+}
+
+#[test]
+fn conformance_textcrdt_convergence() {
+    run_textcrdt_fixture("textcrdt_convergence.json");
 }

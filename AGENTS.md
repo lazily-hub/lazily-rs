@@ -13,7 +13,8 @@ Lazy reactive primitives library for Rust.
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)
-- `tests/collections_conformance.rs` — keyed cell collections compute fixtures (lazily-spec/conformance/collections); value/membership/order independence, atomic move, LIS reconciliation
+- `tests/collections_conformance.rs` — keyed cell collections compute fixtures (lazily-spec/conformance/collections); value/membership/order independence, atomic move, LIS reconciliation, memoized semantic tree, manufactured text identity, character CRDT convergence
+- `tests/seqcrdt_conformance.rs` — move-aware sequence CRDT compute fixture (lazily-spec/conformance/collections/seqcrdt_convergence.json); concurrent-insert/move/value-edit convergence, tombstone commutativity (feature-gated, needs `distributed`)
 - `tests/schema_compliance.rs` — lazily-rs serde output validates against lazily-spec JSON Schemas (#lzspecschema)
 - `tests/signal.rs` — 19 eager-Signal integration tests (single-threaded + thread-safe)
 - `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests
@@ -31,11 +32,13 @@ Lazy reactive primitives library for Rust.
 ## Commands
 
 ```bash
-make check           # Run fmt, clippy, build, Rust feature tests, the sibling lazily-spec Lean model, and benchmark result checks
+make check           # Run fmt, clippy, build, every Rust feature test, both Lean formal models (lazily-spec + lazily-formal), and benchmark result checks
 make test-tokio      # Include Tokio sync integration tests
 make test-async      # AsyncContext integration tests
 make test-loom       # Run thread-safe Loom model tests
-make test-lean-formal # Build ../lazily-spec/formal/lean with lake
+make test-lean-formal    # Build ../lazily-spec/formal/lean with lake
+make test-lazily-formal  # Build ../lazily-formal with lake (full Harel chart + reactive graph + collections/tree/reconciliation/async proofs)
+make test-seqcrdt-conformance  # Replay ../lazily-spec/conformance/collections/seqcrdt_convergence.json (needs --features distributed)
 make benchmark-check # Verify generated benchmark results and instrumentation budgets
 make benchmark-update # Run python3 scripts/update-benchmark-results.py to regenerate BENCHMARKS.md
 make instrumentation-profile # Run examples/instrumentation_profile.rs with --features instrumentation

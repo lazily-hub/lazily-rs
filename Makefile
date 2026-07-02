@@ -25,6 +25,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	test-ipc-binary \
 	test-ipc-conformance \
 	test-collections-conformance \
+	test-seqcrdt-conformance \
 	test-schema-compliance \
 	test-statechart-conformance \
 	test-lean-formal \
@@ -36,7 +37,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-seqcrdt-conformance test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -103,6 +104,15 @@ test-ipc-conformance:
 # this target needs no feature flags.
 test-collections-conformance:
 >$(CARGO) test --locked --test collections_conformance
+
+# Move-aware sequence CRDT conformance (#lzseqcrdt): lazily-rs replays the
+# canonical compute fixture in lazily-spec/conformance/collections/
+# `seqcrdt_convergence.json` — concurrent-insert convergence, single-LWW move
+# (no duplication), concurrent move + value-edit independence, tombstone
+# convergence + commutative merge. SeqCrdt is feature-gated behind `distributed`
+# (the CRDT plane), so this target needs that feature.
+test-seqcrdt-conformance:
+>$(CARGO) test --locked --features distributed --test seqcrdt_conformance
 
 # JSON Schema compliance: lazily-rs's own serde output (Snapshot/Delta/CrdtSync,
 # incl. NodeKey) validates against the sibling lazily-spec/schemas, and every IPC

@@ -293,7 +293,7 @@ share the same state plane as other channels.
 ## Related
 
 - [lazily-spec](https://github.com/lazily-hub/lazily-spec) — language-agnostic wire protocol + conformance fixtures shared by every binding
-- [lazily-formal](https://github.com/lazily-hub/lazily-formal) — Lean 4 formal model (flat FSM kernel + full Harel state chart)
+- [lazily-formal](https://github.com/lazily-hub/lazily-formal) — Lean 4 formal model (flat FSM kernel, full Harel state chart, reactive graph kernel, keyed collections, ordered tree, LIS reconciliation, async slot state) with universal proofs every binding inherits
 - [lazily-zig](https://github.com/btakita/lazily-zig) — Zig implementation with FFI support
 - [lazily-py](https://github.com/btakita/lazily-py) — Python implementation with context-as-dict
 - [Blog post: Lazily — Reactive Primitives Done Right](https://briantakita.me/posts/lazily-reactive-signals)
