@@ -7,6 +7,12 @@ use crate::context::SlotId;
 ///
 /// Like [`SlotHandle`], this is a lightweight id. The actual value lives
 /// inside the Context.
+///
+/// Two handles are equal when they address the same underlying node — the
+/// observable cell-identity contract behind atomic moves (`#lzcellmove`) and
+/// keyed reconciliation, where a stable entry keeps its handle across a
+/// sibling reorder.
+#[derive(Debug, PartialEq, Eq)]
 pub struct CellHandle<T> {
     pub(crate) id: SlotId,
     pub(crate) _marker: PhantomData<T>,

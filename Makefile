@@ -24,6 +24,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	test-ipc \
 	test-ipc-binary \
 	test-ipc-conformance \
+	test-collections-conformance \
 	test-schema-compliance \
 	test-statechart-conformance \
 	test-lean-formal \
@@ -35,7 +36,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -93,6 +94,15 @@ test-ipc-binary:
 
 test-ipc-conformance:
 >$(CARGO) test --locked --features ipc --test conformance
+
+# Keyed cell collections conformance (#lzcellfamily / #lzkeyrecon): lazily-rs
+# replays the canonical compute fixtures in lazily-spec/conformance/collections/
+# — value / set-membership / order reactivity independence, atomic ordered move
+# (handle_stable), and LIS move-minimized reconciliation. Required of every
+# binding (see the Binding Conformance Matrix). Collections are unconditional, so
+# this target needs no feature flags.
+test-collections-conformance:
+>$(CARGO) test --locked --test collections_conformance
 
 # JSON Schema compliance: lazily-rs's own serde output (Snapshot/Delta/CrdtSync,
 # incl. NodeKey) validates against the sibling lazily-spec/schemas, and every IPC

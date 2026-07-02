@@ -13,6 +13,7 @@ Lazy reactive primitives library for Rust.
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)
+- `tests/collections_conformance.rs` — keyed cell collections compute fixtures (lazily-spec/conformance/collections); value/membership/order independence, atomic move, LIS reconciliation
 - `tests/schema_compliance.rs` — lazily-rs serde output validates against lazily-spec JSON Schemas (#lzspecschema)
 - `tests/signal.rs` — 19 eager-Signal integration tests (single-threaded + thread-safe)
 - `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests
