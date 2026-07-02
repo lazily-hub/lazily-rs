@@ -129,7 +129,7 @@ test-schema-compliance:
 >$(CARGO) test --locked --features ipc --test schema_compliance
 
 test-statechart-conformance:
->$(CARGO) test --locked --features statechart --test statechart_conformance
+>$(CARGO) test --locked --features statechart-json --test statechart_conformance
 
 test-lean-formal:
 >test -d "$(LEAN_SPEC_DIR)" || { echo "missing $(LEAN_SPEC_DIR); clone lazily-spec as a sibling or set LEAN_SPEC_DIR"; exit 1; }

@@ -4,7 +4,7 @@
 //! replays the `steps`, and asserts `accepted`, `active`, `matches`, and
 //! `actions` after each step — the same fixtures every binding replays.
 
-#![cfg(feature = "statechart")]
+#![cfg(feature = "statechart-json")]
 
 use std::collections::HashMap;
 use std::fs;

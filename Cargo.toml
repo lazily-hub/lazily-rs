@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -40,9 +40,17 @@ ipc-msgpack = ["ipc", "dep:rmp-serde"]
 # model has something to test.
 loom = ["thread-safe"]
 serde = ["dep:serde", "smallvec?/serde"]
-# State-chart JSON parsing (`ChartDef::from_json`) for conformance/tooling.
-# The reactive engine itself is dependency-free; this gates only serde_json.
-statechart = ["dep:serde_json"]
+# DEPRECATED no-op: the typed Harel state-chart engine (`ChartBuilder`,
+# `StateChart`, reactive transition engine) is now part of core — pure Rust, no
+# extra dependencies, always available, alongside the other core reactive
+# constructs (`CellTree`, `CellMap`, `reconcile`). This alias is retained so
+# existing `features = ["statechart"]` consumers keep building; it will be removed
+# in a future release.
+statechart = []
+# `ChartDef::from_json` — load charts from a `serde_json::Value` (conformance,
+# tooling, cross-language fixtures). This is the only chart surface that needs a
+# dependency (serde_json), so it stays gated; the typed builder needs nothing.
+statechart-json = ["dep:serde_json"]
 # Switch ThreadSafeContext's inner state mutex from parking_lot::Mutex to
 # std::sync::Mutex — a fully std-only thread-safe build. No-op without
 # `thread-safe`. ReadStrategy::Cached still uses parking_lot::RwLock.

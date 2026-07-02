@@ -23,9 +23,6 @@ use crate::ThreadSafeContext;
 use crate::{AsyncCellHandle, AsyncContext};
 use crate::{CellHandle, Context};
 
-// Variants are constructed only by the feature-gated `parse_state`/`from_json`
-// path; the reactive engine matches them but never constructs them without it.
-#[cfg_attr(not(feature = "statechart"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Atomic,
@@ -35,7 +32,6 @@ enum Kind {
     Final,
 }
 
-#[cfg_attr(not(feature = "statechart"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryKind {
     Shallow,
@@ -92,7 +88,7 @@ impl ChartDef {
     /// Parse a chart definition from a `serde_json::Value` of the declarative
     /// form. Returns an error string for malformed charts or unsupported
     /// features (`run` actions, `{"expr": …}` guards).
-    #[cfg(feature = "statechart")]
+    #[cfg(feature = "statechart-json")]
     pub fn from_json(value: &serde_json::Value) -> Result<ChartDef, String> {
         let obj = value
             .as_object()
@@ -125,7 +121,6 @@ impl ChartDef {
     /// both definition paths derive parent→children, the single parent-less root,
     /// and per-node depth identically. `order` maps each state id to the position
     /// that fixes deterministic parallel-region descent.
-    #[cfg(feature = "statechart")]
     fn from_states(
         states: HashMap<String, StateDef>,
         order: HashMap<String, usize>,
@@ -196,7 +191,7 @@ impl ChartDef {
     }
 }
 
-#[cfg(feature = "statechart")]
+#[cfg(feature = "statechart-json")]
 fn parse_state(id: &str, raw: &serde_json::Value) -> Result<StateDef, String> {
     let obj = raw
         .as_object()
@@ -254,7 +249,7 @@ fn parse_state(id: &str, raw: &serde_json::Value) -> Result<StateDef, String> {
     })
 }
 
-#[cfg(feature = "statechart")]
+#[cfg(feature = "statechart-json")]
 fn parse_action_list(raw: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
     match raw {
         None => Ok(Vec::new()),
@@ -270,7 +265,7 @@ fn parse_action_list(raw: Option<&serde_json::Value>) -> Result<Vec<String>, Str
     }
 }
 
-#[cfg(feature = "statechart")]
+#[cfg(feature = "statechart-json")]
 fn parse_transition(raw: &serde_json::Value) -> Result<Transition, String> {
     match raw {
         serde_json::Value::String(target) => Ok(Transition {
@@ -309,7 +304,6 @@ fn parse_transition(raw: &serde_json::Value) -> Result<Transition, String> {
     }
 }
 
-#[cfg(feature = "statechart")]
 fn compute_depth(
     states: &HashMap<String, StateDef>,
     id: &str,
@@ -334,12 +328,10 @@ fn compute_depth(
 // ---------------------------------------------------------------------------
 
 /// A single transition, built in Rust. Equivalent to a JSON transition object.
-#[cfg(feature = "statechart")]
 pub struct TransitionBuilder {
     inner: Transition,
 }
 
-#[cfg(feature = "statechart")]
 impl TransitionBuilder {
     /// An external transition to `target` with no guard or actions.
     pub fn to(target: impl Into<String>) -> Self {
@@ -374,13 +366,11 @@ impl TransitionBuilder {
 }
 
 /// A single chart state, built in Rust. Mirrors the JSON state object.
-#[cfg(feature = "statechart")]
 pub struct StateBuilder {
     id: String,
     def: StateDef,
 }
 
-#[cfg(feature = "statechart")]
 impl StateBuilder {
     fn with_kind(id: impl Into<String>, kind: Kind, initial: Option<String>) -> Self {
         Self {
@@ -476,13 +466,11 @@ impl StateBuilder {
 /// Fluent builder assembling a [`ChartDef`] from typed Rust states, the
 /// definition path parallel to [`ChartDef::from_json`]. State insertion order
 /// fixes deterministic parallel-region descent, exactly as JSON key order does.
-#[cfg(feature = "statechart")]
 #[derive(Default)]
 pub struct ChartBuilder {
     states: Vec<StateBuilder>,
 }
 
-#[cfg(feature = "statechart")]
 impl ChartBuilder {
     /// A new, empty builder.
     pub fn new() -> Self {
@@ -588,7 +576,7 @@ impl StateChart {
 /// whole chart is `Send + Sync`. A status observer on one thread can read
 /// [`ThreadSafeStateChart::configuration`] while another drives
 /// [`ThreadSafeStateChart::send`].
-#[cfg(all(feature = "statechart", feature = "thread-safe"))]
+#[cfg(feature = "thread-safe")]
 pub struct ThreadSafeStateChart {
     def: ChartDef,
     config: CellHandle<BTreeSet<String>>,
@@ -596,7 +584,7 @@ pub struct ThreadSafeStateChart {
     last_actions: parking_lot::Mutex<Vec<String>>,
 }
 
-#[cfg(all(feature = "statechart", feature = "thread-safe"))]
+#[cfg(feature = "thread-safe")]
 impl ThreadSafeStateChart {
     /// Create a chart over `ctx`, entering the initial configuration.
     pub fn new(ctx: &ThreadSafeContext, def: ChartDef) -> Self {
@@ -672,7 +660,7 @@ impl ThreadSafeStateChart {
 /// remain synchronous; reactive observers (`ctx.effect`/`ctx.signal` reading the
 /// configuration) drive async recomputation. Same chart semantics as
 /// [`StateChart`].
-#[cfg(all(feature = "statechart", feature = "async"))]
+#[cfg(feature = "async")]
 pub struct AsyncStateChart {
     def: ChartDef,
     config: AsyncCellHandle<BTreeSet<String>>,
@@ -680,7 +668,7 @@ pub struct AsyncStateChart {
     last_actions: parking_lot::Mutex<Vec<String>>,
 }
 
-#[cfg(all(feature = "statechart", feature = "async"))]
+#[cfg(feature = "async")]
 impl AsyncStateChart {
     /// Create a chart over `ctx`, entering the initial configuration.
     pub fn new(ctx: &AsyncContext, def: ChartDef) -> Self {
@@ -1035,12 +1023,13 @@ fn record_region(
     }
 }
 
-#[cfg(all(test, feature = "statechart"))]
+#[cfg(test)]
 mod builder_variant_tests {
     use super::*;
 
     /// A small chart used by both the JSON and Rust-builder equivalence check:
     /// a parallel root over two regions, one guarded transition, one final.
+    #[cfg(feature = "statechart-json")]
     fn json_chart() -> ChartDef {
         let v: serde_json::Value = serde_json::from_str(
             r#"{
@@ -1081,8 +1070,28 @@ mod builder_variant_tests {
             .unwrap()
     }
 
+    /// The typed builder + engine are core (no feature): a built chart enters the
+    /// initial configuration of every parallel region and drives a guarded edge.
+    #[test]
+    fn builder_engine_is_core() {
+        use crate::Context;
+        let ctx = Context::new();
+        let chart = StateChart::new(&ctx, built_chart());
+        // Both parallel regions enter their initial leaves.
+        assert!(chart.matches(&ctx, "idle") && chart.matches(&ctx, "up"));
+        // Guarded edge rejected when the guard is false, taken when true.
+        let mut guards = HashMap::new();
+        guards.insert("ready".to_string(), false);
+        assert!(!chart.send(&ctx, "go", &guards));
+        assert!(chart.matches(&ctx, "idle"));
+        guards.insert("ready".to_string(), true);
+        assert!(chart.send(&ctx, "go", &guards));
+        assert!(chart.matches(&ctx, "done"));
+    }
+
     /// The Rust builder and JSON paths produce charts that behave identically:
     /// same initial configuration and same response to the same event stream.
+    #[cfg(feature = "statechart-json")]
     #[test]
     fn builder_matches_json_behaviour() {
         use crate::Context;
