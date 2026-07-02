@@ -12,6 +12,8 @@ Lazy reactive primitives library for Rust.
 - `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
+- `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)
+- `tests/schema_compliance.rs` — lazily-rs serde output validates against lazily-spec JSON Schemas (#lzspecschema)
 - `tests/signal.rs` — 19 eager-Signal integration tests (single-threaded + thread-safe)
 - `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests
 - `tests/async_integration.rs` — AsyncContext feature-gated integration tests (incl. eager `signal_async`)

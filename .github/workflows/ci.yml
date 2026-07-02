@@ -70,6 +70,11 @@ jobs:
           test -d ../lazily-spec/conformance || { echo "::error::../lazily-spec/conformance missing — conformance.rs would silently fall back to local fixtures"; exit 1; }
           cargo +stable test --locked --features ipc --test conformance
 
+      - name: Test JSON Schema compliance against canonical spec schemas (#lzspecschema)
+        run: |
+          test -d ../lazily-spec/schemas || { echo "::error::../lazily-spec/schemas missing"; exit 1; }
+          cargo +stable test --locked --features ipc --test schema_compliance
+
       - name: Test loom model
         run: cargo +stable test --locked --features loom --test thread_safe_loom
 

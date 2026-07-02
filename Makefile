@@ -24,6 +24,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	test-ipc \
 	test-ipc-binary \
 	test-ipc-conformance \
+	test-schema-compliance \
 	test-statechart-conformance \
 	test-lean-formal \
 	test-lazily-formal \
@@ -34,7 +35,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -92,6 +93,12 @@ test-ipc-binary:
 
 test-ipc-conformance:
 >$(CARGO) test --locked --features ipc --test conformance
+
+# JSON Schema compliance: lazily-rs's own serde output (Snapshot/Delta/CrdtSync,
+# incl. NodeKey) validates against the sibling lazily-spec/schemas, and every IPC
+# conformance fixture's `wire` is schema-valid. Closes the binding<->schema loop.
+test-schema-compliance:
+>$(CARGO) test --locked --features ipc --test schema_compliance
 
 test-statechart-conformance:
 >$(CARGO) test --locked --features statechart --test statechart_conformance

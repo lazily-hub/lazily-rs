@@ -75,6 +75,7 @@ tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls
 
 [dev-dependencies]
 criterion = "0.8"
+jsonschema = { version = "0.46.8", default-features = false }
 loom = "0.7"
 proptest = "1"
 rmp-serde = "1"
