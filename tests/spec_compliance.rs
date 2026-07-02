@@ -11,13 +11,19 @@
 //! 8. Edge cases — no deps, shared deps, deep chains, dynamic deps
 //! 9. Threading contract — local contexts today, portable handles for future shared contexts
 
-use lazily::{CellHandle, Context, EffectHandle, SlotHandle, ThreadSafeContext};
+#[cfg(feature = "thread-safe")]
+use lazily::ThreadSafeContext;
+use lazily::{CellHandle, Context, EffectHandle, SlotHandle};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+#[cfg(feature = "thread-safe")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "thread-safe")]
 use std::sync::mpsc;
+#[cfg(feature = "thread-safe")]
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
+#[cfg(feature = "thread-safe")]
 use std::time::Duration;
 
 // ============================================================================
@@ -233,6 +239,7 @@ mod threading_contract {
 
     /// SPEC: `ThreadSafeContext` shares a single graph across OS threads while
     /// keeping handles id-only and copyable.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_context_shares_slot_across_threads() {
         let ctx = ThreadSafeContext::new();
@@ -273,6 +280,7 @@ mod threading_contract {
 
     /// SPEC: changed values in one thread invalidate dependent slots read from
     /// another thread.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_context_invalidates_across_threads() {
         let ctx = ThreadSafeContext::new();
@@ -293,6 +301,7 @@ mod threading_contract {
 
     /// SPEC: frontier invalidation coalesces duplicate slot paths but still
     /// upgrades a duplicated direct cell dependency to force recomputation.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_frontier_invalidation_preserves_direct_force_recompute() {
         let ctx = ThreadSafeContext::new();
@@ -331,6 +340,7 @@ mod threading_contract {
 
     /// SPEC: the graph lock is not held while user compute callbacks run, so
     /// callbacks may re-enter the same context through nested `get` calls.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_context_allows_reentrant_computation() {
         let ctx = ThreadSafeContext::new();
@@ -345,6 +355,7 @@ mod threading_contract {
 
     /// SPEC: thread-safe effects track dependencies and rerun when a different
     /// thread mutates a dependency.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_effect_reruns_from_other_thread() {
         let ctx = ThreadSafeContext::new();
@@ -375,6 +386,7 @@ mod threading_contract {
 
     /// SPEC: concurrent first access to one thread-safe slot returns the same
     /// value to all callers and leaves the slot cached.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_concurrent_first_get_contention() {
         let ctx = ThreadSafeContext::new();
@@ -413,6 +425,7 @@ mod threading_contract {
 
     /// SPEC: high-frequency concurrent cell writes do not corrupt graph state;
     /// the final slot read matches the final cell value.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_concurrent_set_cell_contention() {
         let ctx = ThreadSafeContext::new();
@@ -447,6 +460,7 @@ mod threading_contract {
     /// SPEC: if an upstream cell changes while a thread-safe slot callback is
     /// running, the stale callback result is discarded and recomputed before
     /// the getter returns.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_retries_slot_compute_invalidated_midflight() {
         let ctx = ThreadSafeContext::new();
@@ -486,6 +500,7 @@ mod threading_contract {
 
     /// SPEC: a batch opened on another thread defers thread-safe effect reruns
     /// until the outermost batch exits.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_batch_flushes_after_cross_thread_exit() {
         let ctx = ThreadSafeContext::new();
@@ -522,6 +537,7 @@ mod threading_contract {
 
     /// SPEC: diamond invalidation from another thread schedules one effect
     /// rerun even when multiple dirty paths reach the same effect.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_effect_coalesces_diamond_invalidation_across_thread() {
         let ctx = ThreadSafeContext::new();
@@ -552,6 +568,7 @@ mod threading_contract {
 
     /// SPEC: thread-safe effect callbacks may re-enter the same context and
     /// schedule more work without deadlocking the active flush.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_effect_reentrant_write_does_not_deadlock() {
         let (tx, rx) = mpsc::channel();
@@ -587,6 +604,7 @@ mod threading_contract {
 
     /// SPEC: clearing slots, clearing cell dependents, disposing effects, and
     /// setting cells from different threads do not leave graph state corrupted.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_clear_and_dispose_races_remain_consistent() {
         let ctx = ThreadSafeContext::new();
@@ -660,6 +678,7 @@ mod threading_contract {
     /// SPEC: dynamic thread-safe effect dependencies unsubscribe stale edges
     /// before later lazy invalidations can rerun the effect, and disposal clears
     /// pending cleanup/subscription state before racing writes continue.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_dynamic_effect_dependency_cleanup_survives_disposal() {
         let ctx = ThreadSafeContext::new();
@@ -1092,6 +1111,7 @@ mod benchmark_instrumentation {
 
     /// SPEC: `ThreadSafeContext` instrumentation tracks graph work plus
     /// in-flight first-get deduplication and lock timing.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_instrumentation_tracks_dedup_and_locks() {
         let ctx = ThreadSafeContext::new();
@@ -1209,6 +1229,7 @@ mod benchmark_instrumentation {
 
     /// SPEC: a fresh cached thread-safe get uses the per-slot fast path instead
     /// of taking the graph lock or recursively refreshing unchanged dependencies.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_cached_get_bypasses_get_refresh_graph_lock() {
         let ctx = ThreadSafeContext::new();
@@ -1234,6 +1255,7 @@ mod benchmark_instrumentation {
 
     /// SPEC: thread-safe effect reruns preserve unchanged dependency edges and
     /// skip redundant edge-registration locks.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_effect_rerun_preserves_unchanged_dependency_edges() {
         let ctx = ThreadSafeContext::new();
@@ -1291,6 +1313,7 @@ mod benchmark_instrumentation {
     /// SPEC: fresh cached thread-safe gets use a per-slot read guard, so
     /// independent readers can clone the cached value concurrently without
     /// entering write-side graph mutation.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_cached_get_allows_concurrent_fresh_readers() {
         #[derive(Debug)]
@@ -1368,6 +1391,7 @@ mod benchmark_instrumentation {
     /// SPEC: the cached get fast path must still observe invalidation from
     /// another thread before returning, while cell-only dirty slots can bypass
     /// the graph-locked refresh decision.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_cached_get_revalidates_after_cross_thread_invalidation() {
         let ctx = ThreadSafeContext::new();
@@ -1404,6 +1428,7 @@ mod benchmark_instrumentation {
 
     /// SPEC: in-flight thread-safe recompute waiters park instead of repeatedly
     /// reacquiring the graph lock while another thread owns the computation.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_in_flight_wait_parks_until_recompute_finishes() {
         let ctx = ThreadSafeContext::new();
@@ -1462,6 +1487,7 @@ mod benchmark_instrumentation {
     /// SPEC: dirty same-slot readers first check per-slot recompute state, so
     /// waiters park behind the in-flight owner without taking the graph
     /// `get_refresh` or `publish` locks.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_dirty_same_slot_waiters_bypass_graph_locks() {
         let ctx = ThreadSafeContext::new();
@@ -1547,6 +1573,7 @@ mod benchmark_instrumentation {
     /// SPEC: independent changed-cell invalidations may use per-node SlotId
     /// sidecar frontiers instead of the context graph mutex when no callback is
     /// discovering dependencies and the frontier contains only slots.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_independent_cell_invalidations_use_sharded_sidecars() {
         let ctx = ThreadSafeContext::new();
@@ -1628,6 +1655,7 @@ mod benchmark_instrumentation {
     /// SPEC: independent cell-only dirty slots use their per-slot dependency
     /// summaries to bypass the graph-locked refresh decision, then publish each
     /// recompute through one final graph mutation.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_independent_cell_only_refreshes_skip_get_refresh_locks() {
         let ctx = ThreadSafeContext::new();
@@ -1670,6 +1698,7 @@ mod benchmark_instrumentation {
 
     /// SPEC: same-thread `ThreadSafeContext` batches keep changed cells in a
     /// local batch frame and take one graph invalidation lock at batch exit.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_batch_queues_same_thread_writes_before_graph_flush() {
         let ctx = ThreadSafeContext::new();
@@ -1718,6 +1747,7 @@ mod benchmark_instrumentation {
 
     /// SPEC: in-flight recompute notifications are scoped to the slot that
     /// finished, so unrelated in-flight slot waiters stay parked.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_in_flight_waiters_are_scoped_to_finished_slot() {
         let ctx = ThreadSafeContext::new();
@@ -1808,6 +1838,7 @@ mod benchmark_instrumentation {
 
     /// SPEC: Thread-safe recompute preserves unchanged dependency edges and skips
     /// redundant edge-registration locks for dependencies already subscribed.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_recompute_preserves_unchanged_dependency_edges() {
         let ctx = ThreadSafeContext::new();
@@ -1856,6 +1887,7 @@ mod benchmark_instrumentation {
 
     /// SPEC: Thread-safe recompute diffs old and new dependency sets at publish
     /// so dynamic dependency changes add and remove only changed edges.
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_recompute_diffs_dynamic_dependency_edges() {
         let ctx = ThreadSafeContext::new();
@@ -3513,6 +3545,7 @@ mod handle_get_methods {
         assert_eq!(s.get(&ctx), 15);
     }
 
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_cell_get_cell_still_works() {
         let ctx = ThreadSafeContext::new();
@@ -3520,6 +3553,7 @@ mod handle_get_methods {
         assert_eq!(ctx.get_cell(&c), 42);
     }
 
+    #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_slot_get_still_works() {
         let ctx = ThreadSafeContext::new();

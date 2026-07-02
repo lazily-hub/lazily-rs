@@ -171,6 +171,12 @@ effect.dispose(&ctx);
 
 ### ThreadSafeContext
 
+Enable the `thread-safe` feature (v0.18.0+, was default before):
+
+```bash
+cargo test --features thread-safe
+```
+
 `ThreadSafeContext` is the mutex-backed counterpart for sharing one reactive
 graph across OS threads. It mirrors the core `Context` methods while requiring
 `Send + Sync + 'static` values and compute/effect callbacks. The graph lock is
@@ -208,11 +214,12 @@ cargo test --features loom --test thread_safe_loom
 ```
 
 Enable the optional `tokio` feature for sync-on-Tokio integration tests and the
-`tokio_sync` example:
+`tokio_sync` example (requires `thread-safe` since v0.18.0 — the integration
+exercises `ThreadSafeContext` through `tokio::spawn`):
 
 ```bash
-cargo test --features tokio
-cargo run --example tokio_sync --features tokio
+cargo test --features "tokio thread-safe"
+cargo run --example tokio_sync --features "tokio thread-safe"
 ```
 
 The feature proves `ThreadSafeContext` can be shared through `tokio::spawn` and

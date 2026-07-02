@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -18,7 +18,17 @@ exclude = ["signaling/"]
 crate-type = ["lib", "cdylib"]
 
 [features]
-async = ["dep:tokio"]
+# Thread-safe reactive context (lock-backed, Send + Sync). Required of any
+# binding whose platform exposes preemptive threading (lazily-spec §
+# "Concurrency layers are required"). Opt-in so single-threaded users don't
+# pay for parking_lot; the `std_sync_mutex` toggle further swaps in
+# std::sync::Mutex for a fully std-only build.
+thread-safe = ["dep:parking_lot"]
+# Async reactive context (future-returning, Empty/Computing/Resolved/Error slot
+# lifecycle). Required of any binding whose platform exposes a suspendable
+# runtime (lazily-spec § "Concurrency layers are required"). Pulls tokio +
+# parking_lot (async_context uses parking_lot::Mutex internally).
+async = ["dep:tokio", "dep:parking_lot"]
 default = ["smallvec"]
 distributed = []
 ffi = ["ipc", "dep:serde_json"]
@@ -26,11 +36,17 @@ instrumentation = []
 ipc = ["serde"]
 ipc-binary = ["ipc", "dep:postcard"]
 ipc-msgpack = ["ipc", "dep:rmp-serde"]
-loom = []
+# Loom model tests for the thread-safe context. Implies `thread-safe` so the
+# model has something to test.
+loom = ["thread-safe"]
 serde = ["dep:serde", "smallvec?/serde"]
 # State-chart JSON parsing (`ChartDef::from_json`) for conformance/tooling.
 # The reactive engine itself is dependency-free; this gates only serde_json.
 statechart = ["dep:serde_json"]
+# Switch ThreadSafeContext's inner state mutex from parking_lot::Mutex to
+# std::sync::Mutex — a fully std-only thread-safe build. No-op without
+# `thread-safe`. ReadStrategy::Cached still uses parking_lot::RwLock.
+std_sync_mutex = ["thread-safe"]
 # #jpf1: WebRTC DataChannel IPC transport — abstraction layer (sync IpcSink/Source
 # bridge + permission filtering + in-memory loopback). Dependency-light.
 webrtc = ["ipc", "dep:serde_json"]
@@ -44,7 +60,6 @@ websocket = ["webrtc", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 # Async client for the #yxjw Cloudflare signaling endpoint, so a Rust project
 # (e.g. agent-doc) can depend on lazily-rs for distributed peer discovery (#s0fc).
 signaling-client = ["distributed", "serde", "dep:serde_json", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
-std_sync_mutex = []
 tokio = ["dep:tokio"]
 vec_edges = []
 # #lzscalebench: gates the heavy >=1M-node scale benchmark so the default
@@ -63,7 +78,7 @@ scale-compare = ["dep:leptos_reactive"]
 leptos_reactive = { version = "0.6", optional = true }
 arc-swap = "1"
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
-parking_lot = "0.12"
+parking_lot = { version = "0.12", optional = true }
 postcard = { version = "1", optional = true, features = ["alloc"] }
 rmp-serde = { version = "1", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }

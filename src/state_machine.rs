@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+#[cfg(any(feature = "thread-safe", feature = "async"))]
 use std::sync::Arc;
 
+#[cfg(any(feature = "thread-safe", feature = "async"))]
 use parking_lot::Mutex;
 
 use crate::Context;
@@ -12,9 +14,11 @@ use crate::async_context::{
 use crate::cell::CellHandle;
 use crate::effect::EffectHandle;
 use crate::signal::SignalHandle;
+#[cfg(feature = "thread-safe")]
 use crate::thread_safe::{ThreadSafeContext, ThreadSafeSignalHandle};
 
 type TransitionFn<S, E> = dyn Fn(&S, &E) -> Option<S>;
+#[cfg(any(feature = "thread-safe", feature = "async"))]
 type ThreadSafeTransitionFn<S, E> = dyn Fn(&S, &E) -> Option<S> + Send + Sync;
 
 /// A finite state machine backed by a reactive [`Context`].
@@ -192,6 +196,7 @@ where
 /// m.send(&ctx, Tick::Advance);
 /// assert_eq!(m.state(&ctx), Light::Green);
 /// ```
+#[cfg(feature = "thread-safe")]
 pub struct ThreadSafeStateMachine<S, E>
 where
     S: PartialEq + Clone + Send + Sync + 'static,
@@ -201,6 +206,7 @@ where
     transition: Arc<ThreadSafeTransitionFn<S, E>>,
 }
 
+#[cfg(feature = "thread-safe")]
 impl<S, E> Clone for ThreadSafeStateMachine<S, E>
 where
     S: PartialEq + Clone + Send + Sync + 'static,
@@ -214,6 +220,7 @@ where
     }
 }
 
+#[cfg(feature = "thread-safe")]
 impl<S, E> ThreadSafeStateMachine<S, E>
 where
     S: PartialEq + Clone + Send + Sync + 'static,

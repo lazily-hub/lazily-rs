@@ -1,3 +1,5 @@
+#![cfg(feature = "thread-safe")]
+
 //! Integration tests for the `ThreadSafeStateMachine` primitive.
 //!
 //! Mirrors `tests/state_machine.rs` over the lock-backed `ThreadSafeContext`.

@@ -34,8 +34,11 @@ jobs:
       - name: Test default features
         run: cargo +stable test --locked
 
+      - name: Test thread-safe feature (#lzthreadsafe)
+        run: cargo +stable test --locked --features thread-safe
+
       - name: Test Tokio feature
-        run: cargo +stable test --locked --features tokio
+        run: cargo +stable test --locked --features "tokio thread-safe"
 
       - name: Test distributed feature
         run: cargo +stable test --locked --features "distributed serde"

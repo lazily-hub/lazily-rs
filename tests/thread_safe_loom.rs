@@ -1,4 +1,4 @@
-#![cfg(feature = "loom")]
+#![cfg(all(feature = "loom", feature = "thread-safe"))]
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;

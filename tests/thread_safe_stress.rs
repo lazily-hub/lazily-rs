@@ -1,3 +1,5 @@
+#![cfg(feature = "thread-safe")]
+
 use lazily::{ReadStrategy, ThreadSafeContext};
 use std::sync::{
     Arc, Barrier, Mutex,

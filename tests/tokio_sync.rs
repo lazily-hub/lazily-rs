@@ -1,4 +1,4 @@
-#![cfg(feature = "tokio")]
+#![cfg(all(feature = "tokio", feature = "thread-safe"))]
 
 use lazily::ThreadSafeContext;
 use std::sync::{Arc, Mutex};

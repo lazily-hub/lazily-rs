@@ -1,3 +1,5 @@
+#![cfg(feature = "thread-safe")]
+
 use lazily::ThreadSafeContext;
 
 #[tokio::main(flavor = "multi_thread")]

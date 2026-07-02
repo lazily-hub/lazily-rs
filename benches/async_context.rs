@@ -1,4 +1,4 @@
-#![cfg(feature = "async")]
+#![cfg(all(feature = "async", feature = "thread-safe"))]
 
 use std::hint::black_box;
 use std::sync::{

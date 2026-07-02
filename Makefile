@@ -14,6 +14,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	build-ffi \
 	ffi-headers \
 	test \
+	test-thread-safe \
 	test-tokio \
 	test-async \
 	test-async-resolve \
@@ -37,7 +38,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-seqcrdt-conformance test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-seqcrdt-conformance test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -57,8 +58,15 @@ ffi-headers: build-ffi
 test:
 >$(CARGO) test --locked
 
+# ThreadSafeContext + ThreadSafeStateMachine (feature-gated behind `thread-safe`
+# since v0.18.0; lazily-spec requires this layer conditionally — see
+# protocol.md § "Concurrency layers are required").
+test-thread-safe:
+>$(CARGO) test --locked --features thread-safe
+
+# tokio_sync.rs + benches/tokio_sync.rs require BOTH tokio and thread-safe.
 test-tokio:
->$(CARGO) test --locked --features tokio
+>$(CARGO) test --locked --features "tokio thread-safe"
 
 test-async:
 >$(CARGO) test --locked --features async
@@ -162,4 +170,4 @@ benchmark-update:
 >$(PYTHON) scripts/update-benchmark-results.py
 
 instrumentation-profile:
->$(CARGO) run --example instrumentation_profile --features instrumentation --quiet
+>$(CARGO) run --example instrumentation_profile --features "instrumentation thread-safe" --quiet

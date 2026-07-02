@@ -72,6 +72,7 @@ mod str0m_backend;
 #[cfg(feature = "webrtc-str0m")]
 mod str0m_net;
 mod text_crdt;
+#[cfg(feature = "thread-safe")]
 mod thread_safe;
 #[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
 mod webrtc_signaling;
@@ -164,13 +165,16 @@ pub use stable_id::{
 };
 #[cfg(feature = "async")]
 pub use state_machine::AsyncStateMachine;
-pub use state_machine::{StateMachine, ThreadSafeStateMachine};
+pub use state_machine::StateMachine;
+#[cfg(feature = "thread-safe")]
+pub use state_machine::ThreadSafeStateMachine;
 pub use statechart::{ChartDef, StateChart};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_net::{Str0mNet, Str0mNetChannel, Str0mNetError};
 pub use text_crdt::{OpId, TextCrdt, parse_blocks};
+#[cfg(feature = "thread-safe")]
 pub use thread_safe::{
     ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,
 };

@@ -308,14 +308,14 @@ WATCH_ITEM_AB_CHECKS: tuple[tuple[str, str, str, str, str], ...] = (
     (
         "cached ThreadSafeContext read latency",
         "a8b6fc3 vs c917401",
-        "cargo bench --features instrumentation --bench context -- cached_reads/thread_safe_context",
+        "cargo bench --features instrumentation,thread-safe --bench context -- cached_reads/thread_safe_context",
         "73.48 ns baseline vs 73.20 ns current on warm-cache repeat",
         "no tuning; the archived 56.5 ns row did not reproduce under controlled A/B",
     ),
     (
         "effect cleanup contention at 16 workers",
         "a8b6fc3 vs c917401",
-        "cargo bench --features instrumentation --bench context -- thread_safe_effect_contention/cleanup_execution/16",
+        "cargo bench --features instrumentation,thread-safe --bench context -- thread_safe_effect_contention/cleanup_execution/16",
         "2.31 ms baseline vs 2.43 ms current on warm-cache repeat with overlapping CIs",
         "keep watching; Criterion reported no statistically significant change",
     ),
@@ -713,9 +713,9 @@ def build_section(
         "Regression workflow:",
         "",
         "```bash",
-        "cargo bench --features instrumentation -- --save-baseline before",
+        "cargo bench --features instrumentation,thread-safe -- --save-baseline before",
         "# apply the performance patch",
-        "cargo bench --features instrumentation -- --baseline before",
+        "cargo bench --features instrumentation,thread-safe -- --baseline before",
         "python3 scripts/update-benchmark-results.py --no-run",
         "```",
         "",
@@ -962,7 +962,7 @@ def main() -> int:
         pass
     elif not args.no_run:
         # `scale-bench` enables the gated >=1M-node `scale` group (#lzscalebench).
-        run(["cargo", "bench", "--features", "instrumentation,async,tokio,scale-bench"])
+        run(["cargo", "bench", "--features", "instrumentation,async,tokio,thread-safe,scale-bench"])
         run_instrumentation_profile(args.profile_output)
     else:
         run_instrumentation_profile(args.profile_output)

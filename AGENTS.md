@@ -9,7 +9,7 @@ Lazy reactive primitives library for Rust.
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
 - `src/signal.rs` — eager `Signal` primitive (`ctx.signal`); a memoized Slot plus a puller Effect, exposed on `Context`, `ThreadSafeContext`, and `AsyncContext`
 - `src/async_context.rs` — `AsyncContext` async reactive graph (feature-gated behind `async`)
-- `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph
+- `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph (feature-gated behind `thread-safe` since v0.18.0)
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)
@@ -17,7 +17,7 @@ Lazy reactive primitives library for Rust.
 - `tests/seqcrdt_conformance.rs` — move-aware sequence CRDT compute fixture (lazily-spec/conformance/collections/seqcrdt_convergence.json); concurrent-insert/move/value-edit convergence, tombstone commutativity (feature-gated, needs `distributed`)
 - `tests/schema_compliance.rs` — lazily-rs serde output validates against lazily-spec JSON Schemas (#lzspecschema)
 - `tests/signal.rs` — 19 eager-Signal integration tests (single-threaded + thread-safe)
-- `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests
+- `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests (requires `tokio` + `thread-safe`)
 - `tests/async_integration.rs` — AsyncContext feature-gated integration tests (incl. eager `signal_async`)
 
 ## Key Design Decisions
@@ -33,7 +33,8 @@ Lazy reactive primitives library for Rust.
 
 ```bash
 make check           # Run fmt, clippy, build, every Rust feature test, both Lean formal models (lazily-spec + lazily-formal), and benchmark result checks
-make test-tokio      # Include Tokio sync integration tests
+make test-thread-safe  # ThreadSafeContext + ThreadSafeStateMachine (feature-gated since v0.18.0)
+make test-tokio      # Tokio sync integration tests (requires tokio + thread-safe)
 make test-async      # AsyncContext integration tests
 make test-loom       # Run thread-safe Loom model tests
 make test-lean-formal    # Build ../lazily-spec/formal/lean with lake

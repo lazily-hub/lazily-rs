@@ -1,4 +1,4 @@
-#![cfg(feature = "tokio")]
+#![cfg(all(feature = "tokio", feature = "thread-safe"))]
 
 use std::hint::black_box;
 use std::sync::Arc;

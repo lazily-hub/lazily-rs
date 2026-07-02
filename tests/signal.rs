@@ -202,6 +202,7 @@ fn equal_value_set_is_a_noop_for_signals() {
 /// The same eager-Signal semantics, exercised over the shared-graph
 /// [`ThreadSafeContext`]. Mirrors the single-threaded suite above so the two
 /// `signal` surfaces stay behaviorally identical (#lzsignalparity).
+#[cfg(feature = "thread-safe")]
 mod thread_safe {
     use std::sync::Arc;
     use std::sync::Mutex;

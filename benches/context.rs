@@ -1,3 +1,5 @@
+#![cfg(feature = "thread-safe")]
+
 use std::cell::Cell as LocalCell;
 use std::hint::black_box;
 use std::rc::Rc;
