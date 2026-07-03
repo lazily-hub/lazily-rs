@@ -20,26 +20,34 @@ Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect
 
 ## Feature Set
 
-The full `lazily` capability set and its cross-language coverage (`lazily-rs`,
-`lazily-kt`, `lazily-js`). `✅` shipped, `~` partial, `—` not applicable/absent.
+The full `lazily` capability set and its cross-language coverage across every
+binding. Legend: ✅ shipped · `~` partial · `—` absent or not applicable. The
+canonical matrix with per-cell notes and platform carve-outs lives in
+[`lazily-spec` § Cross-Language Coverage](../lazily-spec/docs/coverage.md).
 
-| Feature | Rust | Kotlin | JS |
-|---------|:----:|:------:|:--:|
-| Reactive graph — `Context`, `Slot`, `Cell`, `memo`, `Signal` (eager), `Effect`, `batch` | ✅ | ✅ | ✅ |
-| Thread-safe `Context` (`Send + Sync`, lock-backed) | ✅ | ✅ | — |
-| Async reactive `Context` | ✅ | ✅ | — |
-| Statechart (Harel) + state machine | ✅ | ✅ | ✅ |
-| Keyed cell collections + `reconcile` + `SemTree` (keyed tree) | ✅ | ✅ | ✅ |
-| Stable-id alignment (manufactured identity) | ✅ | ✅ | ✅ |
-| Free-text character CRDT (`TextCrdt`) | ✅ | ✅ | ✅ |
-| **`TextCrdt` delta sync — `version_vector` / `delta_since` / `apply_delta` (`#lztextsync`)** | ✅ | ✅ | ✅ |
-| Move-aware sequence CRDT (`SeqCrdt`) | ✅ | ✅ | ✅ |
-| Registers (LWW / MV), `PnCounter`, `CellCrdt` | ✅ | ✅ | ✅ |
-| IPC wire — `Snapshot` + `Delta` + `CrdtSync` + shared-memory blobs | ✅ | ✅ | ~ |
-| State projection / mirror | ✅ | ✅ | ✅ |
-| FFI boundary | ✅ | ✅ | n/a |
-| Distributed plane (WebRTC transport + signaling) | ✅ | — | — |
-| Instrumentation / benchmarks | ✅ | — | — |
+| Feature | Rust | Python | Kotlin | JS | Dart | Zig |
+|---------|:----:|:------:|:------:|:--:|:----:|:---:|
+| Reactive graph — `Cell` / `Slot` / `Signal` / `Effect` / memo / batch | ✅ | ~ | ✅ | ✅ | ~ | ~ |
+| Thread-safe context (lock-backed) | ✅ | ✅ | ✅ | — | — | ✅ |
+| Async reactive context | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Flat state machine | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Harel state charts | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Keyed cell collections (`CellMap` / `CellTree`) + reconcile | ✅ | ✅ | ✅ | ✅ | ✅ | ~ |
+| Memoized semantic tree (`SemTree`) | ✅ | — | ✅ | ✅ | — | — |
+| Stable-id alignment (manufactured identity) | ✅ | — | ✅ | ✅ | — | — |
+| Free-text character CRDT (`TextCrdt`) | ✅ | — | ✅ | ✅ | — | — |
+| `TextCrdt` delta sync (`version_vector` / `delta_since` / `apply_delta`) | ✅ | — | ✅ | ✅ | — | — |
+| Move-aware sequence CRDT (`SeqCrdt`) | ✅ | — | ✅ | ✅ | — | — |
+| Registers (LWW / MV) + `PnCounter` + `CellCrdt` | ✅ | — | ✅ | ✅ | — | — |
+| IPC wire — `Snapshot` + `Delta` + `CrdtSync` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Shared-memory blob path (`ShmBlobArena`) | ✅ | ✅ | ✅ | ~ | ~ | ✅ |
+| Distributed CRDT plane (`CrdtPlaneRuntime` / anti-entropy) | ✅ | — | ✅ | ✅ | ~ | — |
+| Distributed plane — WebRTC transport + signaling | ✅ | — | ✅ | ✅ | — | — |
+| State projection / mirror | ✅ | — | ✅ | ✅ | — | — |
+| C-ABI FFI boundary | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| Permission boundary (`PeerPermissions` / `RemoteOp`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Capability negotiation (`SessionHandshake`) | ✅ | — | ✅ | ✅ | ✅ | ✅ |
+| Instrumentation / benchmarks | ✅ | — | — | — | — | — |
 
 CRDT convergence and the wire protocol are pinned by the shared conformance fixtures
 and JSON Schemas in [`lazily-spec`](../lazily-spec) and the Lean models in
