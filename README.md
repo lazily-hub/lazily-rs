@@ -18,6 +18,33 @@ Values are **lazy by default**: dependents are marked dirty on invalidation but 
 `ctx.memo()` Slots use a memo guard: if recomputation produces the same value, downstream dirty caches and effects are left alone.
 Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect reruns happen once after the outermost batch exits.
 
+## Feature Set
+
+The full `lazily` capability set and its cross-language coverage (`lazily-rs`,
+`lazily-kt`, `lazily-js`). `✅` shipped, `~` partial, `—` not applicable/absent.
+
+| Feature | Rust | Kotlin | JS |
+|---------|:----:|:------:|:--:|
+| Reactive graph — `Context`, `Slot`, `Cell`, `memo`, `Signal` (eager), `Effect`, `batch` | ✅ | ✅ | ✅ |
+| Thread-safe `Context` (`Send + Sync`, lock-backed) | ✅ | ✅ | — |
+| Async reactive `Context` | ✅ | ✅ | — |
+| Statechart (Harel) + state machine | ✅ | ✅ | ✅ |
+| Keyed cell collections + `reconcile` + `SemTree` (keyed tree) | ✅ | ✅ | ✅ |
+| Stable-id alignment (manufactured identity) | ✅ | ✅ | ✅ |
+| Free-text character CRDT (`TextCrdt`) | ✅ | ✅ | ✅ |
+| **`TextCrdt` delta sync — `version_vector` / `delta_since` / `apply_delta` (`#lztextsync`)** | ✅ | ✅ | ✅ |
+| Move-aware sequence CRDT (`SeqCrdt`) | ✅ | ✅ | ✅ |
+| Registers (LWW / MV), `PnCounter`, `CellCrdt` | ✅ | ✅ | ✅ |
+| IPC wire — `Snapshot` + `Delta` + `CrdtSync` + shared-memory blobs | ✅ | ✅ | ~ |
+| State projection / mirror | ✅ | ✅ | ✅ |
+| FFI boundary | ✅ | ✅ | n/a |
+| Distributed plane (WebRTC transport + signaling) | ✅ | — | — |
+| Instrumentation / benchmarks | ✅ | — | — |
+
+CRDT convergence and the wire protocol are pinned by the shared conformance fixtures
+and JSON Schemas in [`lazily-spec`](../lazily-spec) and the Lean models in
+[`lazily-formal`](../lazily-formal).
+
 ## Development
 
 **Minimum supported Rust version (MSRV): 1.88** — declared via `rust-version` in `Cargo.toml`. The crate uses `let_chains` (stabilized in 1.88) pervasively.
