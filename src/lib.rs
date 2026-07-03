@@ -178,7 +178,7 @@ pub use statechart::{ChartDef, StateChart};
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_net::{Str0mNet, Str0mNetChannel, Str0mNetError};
-pub use text_crdt::{OpId, TextCrdt, TextOp, VersionVector, parse_blocks};
+pub use text_crdt::{OpId, TextCrdt, TextOp, TextVersionVector, parse_blocks};
 #[cfg(feature = "thread-safe")]
 pub use thread_safe::{
     ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,

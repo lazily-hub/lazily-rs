@@ -65,7 +65,7 @@ impl OpId {
 /// One text-CRDT element in a serializable, transport-ready form (#lztextsync).
 ///
 /// The wire unit for [`TextCrdt::delta_since`] / [`TextCrdt::apply_delta`]: a full
-/// snapshot is `delta_since(&VersionVector::new())`, and a replica is rebuilt by
+/// snapshot is `delta_since(&TextVersionVector::new())`, and a replica is rebuilt by
 /// `apply_delta`-ing that op list onto a fresh [`TextCrdt`], which preserves each
 /// character's [`OpId`] identity so later deltas still merge conflict-free (unlike
 /// re-parsing the text, which would mint fresh ids and duplicate on merge).
@@ -86,7 +86,7 @@ pub struct TextOp {
 /// the compact frontier a replica sends so a partner can compute exactly the ops it
 /// lacks (#lztextsync). Serde-friendly (integer keys), unlike the raw element map
 /// keyed by [`OpId`].
-pub type VersionVector = BTreeMap<u64, u64>;
+pub type TextVersionVector = BTreeMap<u64, u64>;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -332,11 +332,11 @@ impl TextCrdt {
 }
 
 impl TextCrdt {
-    /// This replica's [`VersionVector`]: for each peer that authored an insert or a
+    /// This replica's [`TextVersionVector`]: for each peer that authored an insert or a
     /// deletion this replica holds, the greatest counter seen from that peer. An op
     /// `(c, p)` is unknown to a partner iff `c > their_vv[p]` (0 when absent).
-    pub fn version_vector(&self) -> VersionVector {
-        let mut vv = VersionVector::new();
+    pub fn version_vector(&self) -> TextVersionVector {
+        let mut vv = TextVersionVector::new();
         let mut bump = |id: OpId| {
             let slot = vv.entry(id.peer()).or_insert(0);
             *slot = (*slot).max(id.counter());
@@ -353,8 +353,8 @@ impl TextCrdt {
     /// The ops this replica holds that `their_vv` has not observed — new inserts and
     /// newly-observed deletions of older elements. [`apply_delta`](Self::apply_delta)-ing
     /// this list into the partner converges the two replicas. A whole-state snapshot
-    /// is `delta_since(&VersionVector::new())`.
-    pub fn delta_since(&self, their_vv: &VersionVector) -> Vec<TextOp> {
+    /// is `delta_since(&TextVersionVector::new())`.
+    pub fn delta_since(&self, their_vv: &TextVersionVector) -> Vec<TextOp> {
         let seen = |id: OpId| id.counter() <= their_vv.get(&id.peer()).copied().unwrap_or(0);
         self.elems
             .iter()
@@ -448,7 +448,7 @@ mod tests {
         // replica preserves element identity, so a later concurrent edit still
         // merges conflict-free (no duplication).
         let mut canonical = TextCrdt::from_str(1, "base\n");
-        let snapshot = canonical.delta_since(&VersionVector::new());
+        let snapshot = canonical.delta_since(&TextVersionVector::new());
         let mut member = TextCrdt::new(2);
         member.apply_delta(&snapshot);
         assert_eq!(member.text(), "base\n");
@@ -466,7 +466,7 @@ mod tests {
     fn delta_apply_is_idempotent() {
         let a = TextCrdt::from_str(1, "abc\n");
         let mut b = TextCrdt::new(2);
-        let delta = a.delta_since(&VersionVector::new());
+        let delta = a.delta_since(&TextVersionVector::new());
         assert!(b.apply_delta(&delta));
         assert!(!b.apply_delta(&delta), "re-applying a delta is a no-op");
         assert_eq!(b.text(), a.text());
