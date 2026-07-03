@@ -31,7 +31,7 @@
 //! assert_eq!(a.text(), b.text()); // converged, both edits preserved
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::stable_id::Block;
 
@@ -62,7 +62,34 @@ impl OpId {
     }
 }
 
+/// One text-CRDT element in a serializable, transport-ready form (#lztextsync).
+///
+/// The wire unit for [`TextCrdt::delta_since`] / [`TextCrdt::apply_delta`]: a full
+/// snapshot is `delta_since(&VersionVector::new())`, and a replica is rebuilt by
+/// `apply_delta`-ing that op list onto a fresh [`TextCrdt`], which preserves each
+/// character's [`OpId`] identity so later deltas still merge conflict-free (unlike
+/// re-parsing the text, which would mint fresh ids and duplicate on merge).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TextOp {
+    /// The character's globally-unique id.
+    pub id: OpId,
+    /// The inserted character.
+    pub ch: char,
+    /// The element this was inserted after (`None` = document start).
+    pub origin: Option<OpId>,
+    /// `Some(delete_op)` once tombstoned, else `None`.
+    pub deleted: Option<OpId>,
+}
+
+/// A version vector: the greatest [`OpId`] counter observed per originating peer —
+/// the compact frontier a replica sends so a partner can compute exactly the ops it
+/// lacks (#lztextsync). Serde-friendly (integer keys), unlike the raw element map
+/// keyed by [`OpId`].
+pub type VersionVector = BTreeMap<u64, u64>;
+
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Elem {
     ch: char,
     /// The element this character was inserted *after* (None = document start).
@@ -304,6 +331,82 @@ impl TextCrdt {
     }
 }
 
+impl TextCrdt {
+    /// This replica's [`VersionVector`]: for each peer that authored an insert or a
+    /// deletion this replica holds, the greatest counter seen from that peer. An op
+    /// `(c, p)` is unknown to a partner iff `c > their_vv[p]` (0 when absent).
+    pub fn version_vector(&self) -> VersionVector {
+        let mut vv = VersionVector::new();
+        let mut bump = |id: OpId| {
+            let slot = vv.entry(id.peer()).or_insert(0);
+            *slot = (*slot).max(id.counter());
+        };
+        for (id, elem) in &self.elems {
+            bump(*id);
+            if let Some(d) = elem.deleted {
+                bump(d);
+            }
+        }
+        vv
+    }
+
+    /// The ops this replica holds that `their_vv` has not observed — new inserts and
+    /// newly-observed deletions of older elements. [`apply_delta`](Self::apply_delta)-ing
+    /// this list into the partner converges the two replicas. A whole-state snapshot
+    /// is `delta_since(&VersionVector::new())`.
+    pub fn delta_since(&self, their_vv: &VersionVector) -> Vec<TextOp> {
+        let seen = |id: OpId| id.counter() <= their_vv.get(&id.peer()).copied().unwrap_or(0);
+        self.elems
+            .iter()
+            .filter_map(|(id, elem)| {
+                let insert_new = !seen(*id);
+                let delete_new = elem.deleted.is_some_and(|d| !seen(d));
+                (insert_new || delete_new).then_some(TextOp {
+                    id: *id,
+                    ch: elem.ch,
+                    origin: elem.origin,
+                    deleted: elem.deleted,
+                })
+            })
+            .collect()
+    }
+
+    /// Apply a delta op list (from [`delta_since`](Self::delta_since)) into this
+    /// replica. Commutative, associative, and idempotent — the same convergence
+    /// contract as [`merge`](Self::merge), just from the transport form: a fresh
+    /// insert adds its element (preserving its [`OpId`]); an incoming tombstone is
+    /// merged sticky-minimally so concurrent deletes converge. Returns whether the
+    /// visible text changed.
+    pub fn apply_delta(&mut self, ops: &[TextOp]) -> bool {
+        let before = self.text();
+        for op in ops {
+            self.counter = self.counter.max(op.id.counter());
+            if let Some(d) = op.deleted {
+                self.counter = self.counter.max(d.counter());
+            }
+            match self.elems.get_mut(&op.id) {
+                Some(e) => {
+                    e.deleted = match (e.deleted, op.deleted) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                }
+                None => {
+                    self.elems.insert(
+                        op.id,
+                        Elem {
+                            ch: op.ch,
+                            origin: op.origin,
+                            deleted: op.deleted,
+                        },
+                    );
+                }
+            }
+        }
+        self.text() != before
+    }
+}
+
 /// Re-parse merged text into paragraph [`Block`]s (split on blank lines). This is
 /// the "re-derive the tree from CRDT-merged text" step: feed the result through
 /// [`assign_stable_keys`](crate::stable_id::assign_stable_keys) +
@@ -319,6 +422,55 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delta_sync_converges_two_replicas() {
+        // Two replicas fork a shared base, edit concurrently (insert + delete),
+        // then exchange deltas keyed off each other's version vector.
+        let base = TextCrdt::from_str(0, "hello\n");
+        let mut a = base.fork(1);
+        a.insert_str(a.len(), "world\n"); // agent appends
+        let mut b = base.fork(2);
+        b.delete(0); // human deletes 'h'
+
+        let a_delta = a.delta_since(&b.version_vector());
+        let b_delta = b.delta_since(&a.version_vector());
+        assert!(a.apply_delta(&b_delta));
+        b.apply_delta(&a_delta);
+
+        assert_eq!(a.text(), b.text(), "replicas converge after delta exchange");
+        assert_eq!(a.text(), "ello\nworld\n");
+    }
+
+    #[test]
+    fn full_snapshot_delta_reconstructs_a_mergeable_replica() {
+        // delta_since(empty) is a whole-state snapshot; apply_delta onto a fresh
+        // replica preserves element identity, so a later concurrent edit still
+        // merges conflict-free (no duplication).
+        let mut canonical = TextCrdt::from_str(1, "base\n");
+        let snapshot = canonical.delta_since(&VersionVector::new());
+        let mut member = TextCrdt::new(2);
+        member.apply_delta(&snapshot);
+        assert_eq!(member.text(), "base\n");
+
+        canonical.insert_str(canonical.len(), "A\n");
+        member.insert_str(member.len(), "B\n");
+        let to_member = canonical.delta_since(&member.version_vector());
+        let to_canonical = member.delta_since(&canonical.version_vector());
+        canonical.apply_delta(&to_canonical);
+        member.apply_delta(&to_member);
+        assert_eq!(canonical.text(), member.text(), "shared-identity convergence");
+    }
+
+    #[test]
+    fn delta_apply_is_idempotent() {
+        let a = TextCrdt::from_str(1, "abc\n");
+        let mut b = TextCrdt::new(2);
+        let delta = a.delta_since(&VersionVector::new());
+        assert!(b.apply_delta(&delta));
+        assert!(!b.apply_delta(&delta), "re-applying a delta is a no-op");
+        assert_eq!(b.text(), a.text());
+    }
 
     #[test]
     fn local_insert_and_delete() {
