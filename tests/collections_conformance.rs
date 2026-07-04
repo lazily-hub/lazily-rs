@@ -17,8 +17,8 @@ use std::fs;
 use std::rc::Rc;
 
 use lazily::{
-    Block, CellHandle, CellMap, CellTree, Context, DiffOp, Match, SemTree, TextCrdt, align,
-    apply_to_map, assign_stable_keys, block_key, reconcile,
+    Block, CellHandle, CellMap, CellTree, Context, DiffOp, Match, SemTree, TextCrdt,
+    TextVersionVector, align, apply_to_map, assign_stable_keys, block_key, reconcile,
 };
 use serde_json::Value;
 
@@ -876,6 +876,93 @@ fn run_textcrdt_fixture(name: &str) {
                     .get_mut(into)
                     .unwrap_or_else(|| panic!("scenario {i}: merge into missing `{into}`"))
                     .merge(&from_state);
+            } else if let Some(name) = step.get("new").and_then(|v| v.as_str()) {
+                // `{ "new": "b", "peer": 2 }` -> fresh empty replica.
+                let peer = step.get("peer").and_then(|v| v.as_u64()).unwrap();
+                replicas.insert(name.to_string(), TextCrdt::new(peer));
+            } else if let Some(d) = step.get("delta").and_then(|v| v.as_object()) {
+                // `{ "delta": { "into": "b", "from": "a" } }` -> b.apply_delta(a.delta_since(b.vv)).
+                let into = d
+                    .get("into")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("scenario {i}: delta missing `into`"));
+                let from = d
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("scenario {i}: delta missing `from`"));
+                let their_vv = replicas
+                    .get(into)
+                    .unwrap_or_else(|| panic!("scenario {i}: delta into missing `{into}`"))
+                    .version_vector();
+                let ops = replicas
+                    .get(from)
+                    .unwrap_or_else(|| panic!("scenario {i}: delta from missing `{from}`"))
+                    .delta_since(&their_vv);
+                let changed = replicas
+                    .get_mut(into)
+                    .unwrap_or_else(|| panic!("scenario {i}: delta into missing `{into}`"))
+                    .apply_delta(&ops);
+                if let Some(expect) = step.get("expect_changed").and_then(|v| v.as_bool()) {
+                    assert_eq!(
+                        changed, expect,
+                        "scenario {i}: delta {from}->{into} expect_changed={expect} got={changed}"
+                    );
+                }
+            } else if let Some(s) = step.get("snapshot").and_then(|v| v.as_object()) {
+                // `{ "snapshot": { "from": "a", "into": "b", "peer": 2 } }` -> a
+                // whole-state snapshot is delta_since({}); apply_delta onto a fresh
+                // replica preserves OpId identity (#lztextsync).
+                let from = s
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("scenario {i}: snapshot missing `from`"));
+                let into = s
+                    .get("into")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("scenario {i}: snapshot missing `into`"));
+                let peer = s
+                    .get("peer")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| panic!("scenario {i}: snapshot missing `peer`"));
+                let empty = TextVersionVector::new();
+                let ops = replicas
+                    .get(from)
+                    .unwrap_or_else(|| panic!("scenario {i}: snapshot from missing `{from}`"))
+                    .delta_since(&empty);
+                let mut replica = TextCrdt::new(peer);
+                let changed = replica.apply_delta(&ops);
+                replicas.insert(into.to_string(), replica);
+                if let Some(expect) = step.get("expect_changed").and_then(|v| v.as_bool()) {
+                    assert_eq!(
+                        changed, expect,
+                        "scenario {i}: snapshot {from}->{into} expect_changed={expect} got={changed}"
+                    );
+                }
+            } else if let Some(pair) = step.get("exchange").and_then(|v| v.as_array()) {
+                // `{ "exchange": ["x", "y"] }` -> bidirectional delta sync: each
+                // replica apply_delta's the partner's delta_since(its own vv).
+                assert!(
+                    pair.len() == 2,
+                    "scenario {i}: exchange must name two replicas"
+                );
+                let x = pair[0].as_str().unwrap();
+                let y = pair[1].as_str().unwrap();
+                let to_x = {
+                    let xv = replicas
+                        .get(x)
+                        .unwrap_or_else(|| panic!("scenario {i}: exchange missing `{x}`"))
+                        .version_vector();
+                    replicas
+                        .get(y)
+                        .unwrap_or_else(|| panic!("scenario {i}: exchange missing `{y}`"))
+                        .delta_since(&xv)
+                };
+                let to_y = {
+                    let yv = replicas.get(y).unwrap().version_vector();
+                    replicas.get(x).unwrap().delta_since(&yv)
+                };
+                replicas.get_mut(x).unwrap().apply_delta(&to_x);
+                replicas.get_mut(y).unwrap().apply_delta(&to_y);
             } else if let Some(on) = step.get("on").and_then(|v| v.as_str()) {
                 apply_textcrdt_op(
                     replicas
@@ -937,6 +1024,40 @@ fn run_textcrdt_fixture(name: &str) {
                 );
             }
         }
+        if let Some(text_on) = expect.get("text_on").and_then(|v| v.as_object()) {
+            for (name, val) in text_on {
+                let want = val.as_str().unwrap_or_else(|| {
+                    panic!("scenario {i}: text_on `{name}` value must be a string")
+                });
+                let got = replicas
+                    .get(name)
+                    .unwrap_or_else(|| panic!("scenario {i}: text_on names missing `{name}`"))
+                    .text();
+                assert_eq!(got, want, "scenario {i}: text_on `{name}` mismatch");
+            }
+        }
+        if let Some(vv_on) = expect.get("version_vector_on").and_then(|v| v.as_object()) {
+            for (name, val) in vv_on {
+                let want = val.as_object().unwrap_or_else(|| {
+                    panic!("scenario {i}: version_vector_on `{name}` must be an object")
+                });
+                let got = serde_json::to_value(
+                    replicas
+                        .get(name)
+                        .unwrap_or_else(|| {
+                            panic!("scenario {i}: version_vector_on names missing `{name}`")
+                        })
+                        .version_vector(),
+                )
+                .unwrap_or_else(|e| panic!("scenario {i}: vv serialize `{name}`: {e}"));
+                let got_obj = got.as_object().unwrap();
+                // BTreeMap<u64,u64> serializes to {"<peer>": <counter>}; compare as JSON.
+                assert_eq!(
+                    got_obj, want,
+                    "scenario {i}: version_vector_on `{name}` mismatch"
+                );
+            }
+        }
         if let Some(prefix) = expect.get("a_starts_with").and_then(|v| v.as_str()) {
             assert!(
                 replicas["a"].text().starts_with(prefix),
@@ -976,6 +1097,11 @@ fn apply_textcrdt_op(t: &mut TextCrdt, op: &Value) {
                 .unwrap();
             t.insert(index, ch);
         }
+        "insert_str" => {
+            let index = op.get("index").and_then(|v| v.as_u64()).unwrap() as usize;
+            let s = op.get("str").and_then(|v| v.as_str()).unwrap();
+            t.insert_str(index, s);
+        }
         "delete" => {
             let index = op.get("index").and_then(|v| v.as_u64()).unwrap() as usize;
             t.delete(index);
@@ -994,4 +1120,9 @@ fn apply_textcrdt_op(t: &mut TextCrdt, op: &Value) {
 #[test]
 fn conformance_textcrdt_convergence() {
     run_textcrdt_fixture("textcrdt_convergence.json");
+}
+
+#[test]
+fn conformance_textcrdt_delta_sync() {
+    run_textcrdt_fixture("textcrdt_delta_sync.json");
 }
