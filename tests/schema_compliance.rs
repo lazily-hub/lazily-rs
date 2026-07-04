@@ -19,13 +19,13 @@
 use std::collections::HashSet;
 
 use lazily::{
-    CrdtOp, CrdtSync, Delta, DeltaOp, EdgeSnapshot, IpcMessage, NodeId, NodeKey, NodeSnapshot,
-    NodeState, ShmBlobRef, Snapshot, WireStamp,
+    CausalReceipt, CausalReceipts, CrdtOp, CrdtSync, Delta, DeltaOp, EdgeSnapshot, IpcMessage,
+    NodeId, NodeKey, NodeSnapshot, NodeState, ReceiptMessage, ShmBlobRef, Snapshot, WireStamp,
 };
 use serde_json::{Map, Value};
 
 const SPEC_SCHEMAS_DIR: &str = "../lazily-spec/schemas";
-const SCHEMA_FILES: &[&str] = &["defs", "snapshot", "delta", "distributed"];
+const SCHEMA_FILES: &[&str] = &["defs", "snapshot", "delta", "distributed", "receipts"];
 
 fn sibling_schemas_present() -> bool {
     SCHEMA_FILES
@@ -230,6 +230,27 @@ fn crdt_sync_wire_validates_schema() {
         ],
     );
     assert_valid_message(&IpcMessage::CrdtSync(sync), "distributed", &defs);
+}
+
+// ---------------------------------------------------------------------------
+// CausalReceipts — generic receipt/outcome projection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn causal_receipts_wire_validates_schema() {
+    if !sibling_schemas_present() {
+        eprintln!("skipping: ../lazily-spec/schemas not present (run from the monorepo)");
+        return;
+    }
+    let defs = load_json("defs");
+    let schema = composed_schema("receipts", &defs);
+    let message = ReceiptMessage::CausalReceipts(CausalReceipts::new([
+        CausalReceipt::observed("receipt-observed", "patch-123", "editor", 7),
+        CausalReceipt::applied("receipt-applied", "patch-123", "editor", 7)
+            .with_payload_hash("sha256:abc"),
+    ]));
+    let instance = serde_json::to_value(message).expect("receipt message serializes");
+    assert_valid(&schema, &instance, "receipts");
 }
 
 // ---------------------------------------------------------------------------

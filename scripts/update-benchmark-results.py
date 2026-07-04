@@ -490,7 +490,7 @@ def run_instrumentation_profile(output: Path) -> None:
         "--example",
         "instrumentation_profile",
         "--features",
-        "instrumentation",
+        "instrumentation,thread-safe",
         "--quiet",
     ]
     print("$ " + " ".join(command), flush=True)

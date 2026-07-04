@@ -56,6 +56,7 @@ pub mod ffi;
 mod instrumentation;
 #[cfg(feature = "ipc")]
 mod ipc;
+mod receipt;
 mod reconcile;
 mod sem_tree;
 #[cfg(feature = "distributed")]
@@ -152,6 +153,10 @@ pub use ipc::{
     )
 ))]
 pub use ipc::{DecodeError, EncodeError};
+pub use receipt::{
+    CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,
+    ReceiptProjection,
+};
 pub use reconcile::{DiffOp, apply_to_map, apply_to_tree, reconcile};
 pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]

@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.21.2"
+version = "0.21.3"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -57,7 +57,7 @@ statechart-json = ["dep:serde_json"]
 std_sync_mutex = ["thread-safe"]
 # #jpf1: WebRTC DataChannel IPC transport — abstraction layer (sync IpcSink/Source
 # bridge + permission filtering + in-memory loopback). Dependency-light.
-webrtc = ["ipc", "dep:serde_json"]
+webrtc = ["ipc", "dep:serde_json", "dep:parking_lot"]
 # #webrtcbackend: concrete sans-IO str0m DataChannel backend over the `webrtc`
 # abstraction. Additive + opt-in so the str0m dep tree stays out of default builds.
 webrtc-str0m = ["webrtc", "dep:str0m"]
@@ -110,7 +110,7 @@ required-features = ["tokio"]
 
 [[example]]
 name = "instrumentation_profile"
-required-features = ["instrumentation"]
+required-features = ["instrumentation", "thread-safe"]
 
 # #lzwebrtcrunbook: operator driver for the live two-host WebRTC e2e run (#h6qb).
 # See tasks/software/runbook-lazily-webrtc-live-e2e.md.

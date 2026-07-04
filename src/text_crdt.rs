@@ -459,7 +459,11 @@ mod tests {
         let to_canonical = member.delta_since(&canonical.version_vector());
         canonical.apply_delta(&to_canonical);
         member.apply_delta(&to_member);
-        assert_eq!(canonical.text(), member.text(), "shared-identity convergence");
+        assert_eq!(
+            canonical.text(),
+            member.text(),
+            "shared-identity convergence"
+        );
     }
 
     #[test]
