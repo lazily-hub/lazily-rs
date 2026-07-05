@@ -75,6 +75,7 @@ mod str0m_net;
 mod text_crdt;
 #[cfg(feature = "thread-safe")]
 mod thread_safe;
+mod typed_context;
 #[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
 mod webrtc_signaling;
 #[cfg(feature = "webrtc")]
@@ -187,6 +188,12 @@ pub use text_crdt::{OpId, TextCrdt, TextOp, TextVersionVector, parse_blocks};
 #[cfg(feature = "thread-safe")]
 pub use thread_safe::{
     ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,
+};
+pub use typed_context::{TypedCellHandle, TypedContext, TypedContextRef, TypedSlotHandle};
+#[cfg(feature = "thread-safe")]
+pub use typed_context::{
+    TypedThreadSafeCellHandle, TypedThreadSafeContext, TypedThreadSafeContextRef,
+    TypedThreadSafeSlotHandle,
 };
 #[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
 pub use webrtc_signaling::{WebrtcSignalingError, answer_next_offer, offer_to_peer};
