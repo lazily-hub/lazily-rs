@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    FnArg, ItemFn, Pat, ReturnType, Token, parse_macro_input, punctuated::Punctuated,
+    FnArg, ItemFn, Pat, ReturnType, Token, Type, parse_macro_input, punctuated::Punctuated,
     spanned::Spanned,
 };
 
@@ -78,22 +78,37 @@ fn expand_factory_item(kind: &str, item: ItemFn) -> syn::Result<proc_macro2::Tok
         ));
     }
 
-    let ctx_ident = match sig.inputs.first().expect("checked len") {
-        FnArg::Typed(arg) => match arg.pat.as_ref() {
-            Pat::Ident(ident) => ident.ident.clone(),
-            other => {
+    let (ctx_ident, ctx_family_ty) = match sig.inputs.first().expect("checked len") {
+        FnArg::Typed(arg) => {
+            let ident = match arg.pat.as_ref() {
+                Pat::Ident(ident) => ident.ident.clone(),
+                other => {
+                    return Err(syn::Error::new(
+                        other.span(),
+                        "lazily factory context argument must be a plain identifier",
+                    ));
+                }
+            };
+            let Type::Reference(reference) = arg.ty.as_ref() else {
                 return Err(syn::Error::new(
-                    other.span(),
-                    "lazily factory context argument must be a plain identifier",
+                    arg.ty.span(),
+                    "lazily factory context argument must be a shared reference",
+                ));
+            };
+            if reference.mutability.is_some() {
+                return Err(syn::Error::new(
+                    reference.mutability.span(),
+                    "lazily factory context argument must be a shared reference",
                 ));
             }
+            (ident, reference.elem.clone())
         },
         FnArg::Receiver(receiver) => {
             return Err(syn::Error::new(
                 receiver.span(),
                 "lazily factory decorators do not support methods",
             ));
-        }
+        },
     };
 
     let value_ty = match sig.output {
@@ -103,11 +118,14 @@ fn expand_factory_item(kind: &str, item: ItemFn) -> syn::Result<proc_macro2::Tok
                 name.span(),
                 "lazily factory decorators require an explicit return type",
             ));
-        }
+        },
     };
 
     let key_ident = format_ident!("__lazily_{kind}_factory_for_{name}");
-    let schema_ty = quote! { <C as ::lazily::TypedFactoryContext>::Schema };
+    let handle_method_ident = format_ident!("__lazily_{kind}_handle");
+    let handle_fn_ident = format_ident!("__lazily_{kind}_factory_for_{name}_handle");
+    let handle_fn_ptr_ident = format_ident!("__LAZILY_{kind}_FACTORY_FOR_{name}_HANDLE");
+    let schema_ty = quote! { <#ctx_family_ty as ::lazily::TypedContextFamily>::Schema };
 
     let memoized_call = match kind {
         "slot" => quote! {
@@ -131,15 +149,118 @@ fn expand_factory_item(kind: &str, item: ItemFn) -> syn::Result<proc_macro2::Tok
         _ => unreachable!("unknown lazily factory kind"),
     };
 
+    let get_impl = match kind {
+        "slot" => quote! {
+            impl ::lazily::TypedGet<#schema_ty, ::lazily::TypedSlotFactorySource> for #name
+            where
+                #ctx_family_ty: ::lazily::TypedContextFamily,
+            {
+                type Output = #value_ty;
+
+                fn get_typed(self, ctx: &::lazily::TypedContext<#schema_ty>) -> Self::Output {
+                    self.#handle_method_ident(ctx).get(ctx)
+                }
+            }
+
+            impl ::lazily::TypedGetRef<#schema_ty, ::lazily::TypedSlotFactorySource> for #name
+            where
+                #ctx_family_ty: ::lazily::TypedContextFamily,
+            {
+                type Output = #value_ty;
+
+                fn get_typed_ref(
+                    self,
+                    ctx: &::lazily::TypedContextRef<'_, #schema_ty>,
+                ) -> Self::Output {
+                    self.#handle_method_ident(ctx).get_ref(ctx)
+                }
+            }
+        },
+        "cell" => quote! {
+            impl ::lazily::TypedGet<#schema_ty, ::lazily::TypedCellFactorySource> for #name
+            where
+                #ctx_family_ty: ::lazily::TypedContextFamily,
+            {
+                type Output = #value_ty;
+
+                fn get_typed(self, ctx: &::lazily::TypedContext<#schema_ty>) -> Self::Output {
+                    self.#handle_method_ident(ctx).get(ctx)
+                }
+            }
+
+            impl ::lazily::TypedGetRef<#schema_ty, ::lazily::TypedCellFactorySource> for #name
+            where
+                #ctx_family_ty: ::lazily::TypedContextFamily,
+            {
+                type Output = #value_ty;
+
+                fn get_typed_ref(
+                    self,
+                    ctx: &::lazily::TypedContextRef<'_, #schema_ty>,
+                ) -> Self::Output {
+                    self.#handle_method_ident(ctx).get_ref(ctx)
+                }
+            }
+        },
+        _ => unreachable!("unknown lazily factory kind"),
+    };
+
+    let set_impl = match kind {
+        "cell" => quote! {
+            impl ::lazily::TypedSet<#schema_ty, #value_ty, ::lazily::TypedCellFactorySource>
+                for #name
+            where
+                #ctx_family_ty: ::lazily::TypedContextFamily,
+            {
+                fn set_typed(self, ctx: &::lazily::TypedContext<#schema_ty>, value: #value_ty) {
+                    self.#handle_method_ident(ctx).set(ctx, value);
+                }
+            }
+        },
+        "slot" => quote! {},
+        _ => unreachable!("unknown lazily factory kind"),
+    };
+
     Ok(quote! {
         #(#attrs)*
-        #vis fn #name<C>(#ctx_ident: &C) -> #handle_ty
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, Copy, Debug, Default)]
+        #vis struct #name;
+
+        impl #name {
+            fn #handle_method_ident<C>(&self, #ctx_ident: &C) -> #handle_ty
+            where
+                #ctx_family_ty: ::lazily::TypedContextFamily,
+                C: ::lazily::TypedFactoryContext<Schema = #schema_ty> + ?Sized,
+            {
+                #[allow(non_camel_case_types)]
+                struct #key_ident;
+                #memoized_call
+            }
+        }
+
+        #get_impl
+        #set_impl
+
+        fn #handle_fn_ident(#ctx_ident: &#ctx_family_ty) -> #handle_ty
         where
-            C: ::lazily::TypedFactoryContext + ?Sized,
+            #ctx_family_ty: ::lazily::TypedContextFamily,
         {
-            #[allow(non_camel_case_types)]
-            struct #key_ident;
-            #memoized_call
+            #name.#handle_method_ident(#ctx_ident)
+        }
+
+        #[allow(non_upper_case_globals)]
+        static #handle_fn_ptr_ident: fn(&#ctx_family_ty) -> #handle_ty = #handle_fn_ident;
+
+        impl ::std::ops::Deref for #name
+        where
+            #ctx_family_ty: ::lazily::TypedContextFamily,
+        {
+            type Target = fn(&#ctx_family_ty) -> #handle_ty;
+
+            fn deref(&self) -> &Self::Target {
+                &#handle_fn_ptr_ident
+            }
         }
     })
 }

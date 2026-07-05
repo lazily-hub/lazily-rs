@@ -112,8 +112,8 @@ ctx.batch(|ctx| {
 
 `#[lazily::cell]` and `#[lazily::slot]` provide the same factory style as
 `lazily-py`: the factory takes only a typed context and Lazily memoizes the
-Cell/Slot handle on that context. Callers mutate the returned cell handle
-directly.
+Cell/Slot handle on that context. `ctx.get(factory)` reads a memoized cell or
+slot factory, and `ctx.set(cell_factory, value)` mutates a memoized cell.
 
 This example is covered by `tests/decorator_factories.rs`.
 
@@ -130,15 +130,15 @@ fn counter(_ctx: &CounterContext) -> i32 {
 
 #[lazily::slot]
 fn doubled(ctx: &CounterContext) -> i32 {
-    counter(ctx).get_ref(ctx) * 2
+    ctx.get(counter) * 2
 }
 
 let ctx = CounterContext::new();
 
-assert_eq!(doubled(&ctx).get(&ctx), 0);
+assert_eq!(ctx.get(doubled), 0);
 
-counter(&ctx).set(&ctx, 5);
-assert_eq!(doubled(&ctx).get(&ctx), 10);
+ctx.set(counter, 5);
+assert_eq!(ctx.get(doubled), 10);
 ```
 
 `define_schema!` intentionally creates a concrete, uninhabited marker type for

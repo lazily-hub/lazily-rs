@@ -10,20 +10,22 @@ fn counter(_ctx: &CounterContext) -> i32 {
 
 #[lazily::slot]
 fn doubled(ctx: &CounterContext) -> i32 {
-    counter(ctx).get_ref(ctx) * 2
+    ctx.get(counter) * 2
 }
 
 #[test]
 fn readme_decorator_counter_example() {
     let ctx = CounterContext::new();
 
-    assert_eq!(doubled(&ctx).get(&ctx), 0);
+    assert_eq!(ctx.get(doubled), 0);
 
-    counter(&ctx).set(&ctx, 5);
-    assert_eq!(doubled(&ctx).get(&ctx), 10);
+    ctx.set(counter, 5);
+    assert_eq!(ctx.get(doubled), 10);
 
     let same_counter_cell = counter(&ctx);
-    assert_eq!(same_counter_cell.get(&ctx), 5);
+    assert_eq!(ctx.get(same_counter_cell), 5);
+    ctx.set(same_counter_cell, 6);
+    assert_eq!(ctx.get(counter), 6);
 }
 
 #[test]
@@ -32,9 +34,9 @@ fn decorated_factories_compose_inside_slot_callbacks() {
     let first = doubled(&ctx);
     let second = doubled(&ctx);
 
-    assert_eq!(first.get(&ctx), 0);
-    counter(&ctx).set(&ctx, 7);
+    assert_eq!(ctx.get(first), 0);
+    ctx.set(counter, 7);
 
-    assert_eq!(first.get(&ctx), 14);
-    assert_eq!(second.get(&ctx), 14);
+    assert_eq!(ctx.get(first), 14);
+    assert_eq!(ctx.get(second), 14);
 }

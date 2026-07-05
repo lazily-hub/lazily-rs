@@ -208,7 +208,9 @@ pub use thread_safe::{
     ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,
 };
 pub use typed_context::{
-    TypedCellHandle, TypedContext, TypedContextRef, TypedFactoryContext, TypedSlotHandle,
+    TypedCellFactorySource, TypedCellHandle, TypedCellHandleSource, TypedContext,
+    TypedContextFamily, TypedContextRef, TypedFactoryContext, TypedGet, TypedGetRef, TypedSet,
+    TypedSlotFactorySource, TypedSlotHandle, TypedSlotHandleSource,
 };
 #[cfg(feature = "thread-safe")]
 pub use typed_context::{
