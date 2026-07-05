@@ -108,6 +108,47 @@ ctx.batch(|ctx| {
 });
 ```
 
+### Decorator-style typed factories
+
+`#[lazily::cell]` and `#[lazily::slot]` provide the same factory style as
+`lazily-py`: the factory takes only a typed context and Lazily memoizes the
+Cell/Slot handle on that context. Callers mutate the returned cell handle
+directly.
+
+This example is covered by `tests/decorator_factories.rs`.
+
+```rust
+use lazily::TypedContext;
+
+lazily::define_schema!(CounterSchema);
+type CounterContext = TypedContext<CounterSchema>;
+
+#[lazily::cell]
+fn counter(_ctx: &CounterContext) -> i32 {
+    0
+}
+
+#[lazily::slot]
+fn doubled(ctx: &CounterContext) -> i32 {
+    counter(ctx).get_ref(ctx) * 2
+}
+
+let ctx = CounterContext::new();
+
+assert_eq!(doubled(&ctx).get(&ctx), 0);
+
+counter(&ctx).set(&ctx, 5);
+assert_eq!(doubled(&ctx).get(&ctx), 10);
+```
+
+`define_schema!` intentionally creates a concrete, uninhabited marker type for
+stable Rust 2024. It is "opaque" in the everyday sense that user code should not
+construct or inspect values of it; Lazily uses only the type identity to prevent
+mixing handles from different context families. Rust nightly's
+`#[define_opaque]` for `type Alias = impl Trait` is a separate unstable compiler
+feature for hidden concrete return types, and is not needed for Lazily context
+schemas.
+
 ## Why Lazy?
 
 | | Lazy (Slots) | Eager (Signals) |
@@ -185,16 +226,21 @@ effect.dispose(&ctx);
 | Method | Purpose |
 |--------|---------|
 | `Context::new()` | Create a new context |
+| `lazily::define_schema!(Name)` | Define an uninhabited schema marker for `TypedContext<Name>` |
 | `ctx.computed(\|ctx\| T)` | Create a derived lazily-computed value |
 | `ctx.slot(\|ctx\| T)` | Create a lazily-computed slot; synonym of `ctx.computed()` |
 | `ctx.memo(\|ctx\| T)` | Create a lazily-computed slot with a `PartialEq` memoization guard |
+| `ctx.memoized_slot::<Key, T, _>(\|ctx\| T)` | Return a context-local factory slot handle, creating it on first use |
 | `slot.get(&ctx)` | Get value (computes if unset) |
 | `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
 | `ctx.cell(value)` | Create a mutable cell |
+| `ctx.memoized_cell::<Key, T, _>(\|ctx\| T)` | Return a context-local factory cell handle, creating it on first use |
 | `cell.get(&ctx)` | Get cell value |
 | `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
 | `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
+| `#[lazily::slot] fn name(ctx: &TypedContext<_>) -> T` | Decorator-style typed slot factory over `TypedContext` |
+| `#[lazily::cell] fn name(ctx: &TypedContext<_>) -> T` | Decorator-style typed cell factory over `TypedContext` |
 | `ctx.signal(\|ctx\| T)` | Create an eager derived value (recomputes on invalidation, no unset window); `T: PartialEq + 'static` |
 | `signal.get(&ctx)` | Get the signal's value (`T: Clone`); also `ctx.get_signal(&signal)` |
 | `signal.dispose(&ctx)` | Remove the eager puller; value reverts to lazy recompute-on-read |

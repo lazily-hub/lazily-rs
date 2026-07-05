@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.21.3"
+version = "0.21.4"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -13,6 +13,10 @@ categories = ["data-structures"]
 # The signaling/ subtree is a standalone TypeScript Cloudflare Worker + client,
 # not part of the Rust crate; keep it out of the published package.
 exclude = ["signaling/"]
+
+[workspace]
+members = ["macros"]
+resolver = "3"
 
 [lib]
 crate-type = ["lib", "cdylib"]
@@ -83,6 +87,7 @@ scale-bench = []
 scale-compare = ["dep:leptos_reactive"]
 
 [dependencies]
+lazily-macros = { version = "=0.21.4", path = "macros" }
 leptos_reactive = { version = "0.6", optional = true }
 arc-swap = "1"
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }

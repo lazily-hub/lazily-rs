@@ -1,6 +1,6 @@
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 #[cfg(not(feature = "vec_edges"))]
@@ -115,6 +115,23 @@ pub(crate) enum Node {
     Effect(EffectNode),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum FactoryKind {
+    Slot,
+    Cell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FactoryKey {
+    kind: FactoryKind,
+    factory_type: TypeId,
+}
+
+struct FactoryEntry {
+    value_type: TypeId,
+    handle: Rc<dyn Any>,
+}
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -130,6 +147,7 @@ struct ContextInner {
     batched_cells: HashSet<SlotId>,
     batched_cell_clears: HashSet<SlotId>,
     batched_slots: HashSet<SlotId>,
+    factory_handles: HashMap<FactoryKey, FactoryEntry>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
@@ -180,6 +198,7 @@ impl Context {
                 batched_cells: HashSet::new(),
                 batched_cell_clears: HashSet::new(),
                 batched_slots: HashSet::new(),
+                factory_handles: HashMap::new(),
                 #[cfg(feature = "instrumentation")]
                 instrumentation: crate::instrumentation::InstrumentationCounters::default(),
             }),
@@ -354,6 +373,32 @@ impl Context {
                 old == new
             })),
         )
+    }
+
+    /// Return the context-local slot handle for factory `K`, creating it on
+    /// first use.
+    ///
+    /// This supports decorator-style factory functions: callers do not store
+    /// handles in wrapper structs; the context memoizes one handle per factory
+    /// key. Later calls with the same key return the same slot handle and ignore
+    /// the supplied compute callback.
+    pub fn memoized_slot<K, T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        K: 'static,
+        T: 'static,
+        F: Fn(&Context) -> T + 'static,
+    {
+        let key = FactoryKey {
+            kind: FactoryKind::Slot,
+            factory_type: TypeId::of::<K>(),
+        };
+        if let Some(handle) = self.factory_handle::<SlotHandle<T>>(key, TypeId::of::<T>()) {
+            return handle;
+        }
+
+        let handle = self.slot(compute);
+        self.insert_factory_handle(key, TypeId::of::<T>(), handle);
+        handle
     }
 
     fn slot_with_equals<T, F>(&self, compute: F, equals: Option<Box<EqualsFn>>) -> SlotHandle<T>
@@ -611,6 +656,32 @@ impl Context {
         };
         self.insert_node(id, Node::Cell(node));
         CellHandle::new(id)
+    }
+
+    /// Return the context-local cell handle for factory `K`, creating it on
+    /// first use.
+    ///
+    /// The initializer belongs to the factory. It runs only when this context
+    /// has not seen `K` before; callers should mutate the returned cell handle
+    /// with [`CellHandle::set`] / [`Context::set_cell`].
+    pub fn memoized_cell<K, T, F>(&self, init: F) -> CellHandle<T>
+    where
+        K: 'static,
+        T: PartialEq + 'static,
+        F: FnOnce(&Context) -> T,
+    {
+        let key = FactoryKey {
+            kind: FactoryKind::Cell,
+            factory_type: TypeId::of::<K>(),
+        };
+        if let Some(handle) = self.factory_handle::<CellHandle<T>>(key, TypeId::of::<T>()) {
+            return handle;
+        }
+
+        let value = init(self);
+        let handle = self.cell(value);
+        self.insert_factory_handle(key, TypeId::of::<T>(), handle);
+        handle
     }
 
     /// Set the value of a cell. If the value differs (via PartialEq),
@@ -1089,6 +1160,38 @@ impl Context {
         } else {
             false
         }
+    }
+
+    fn factory_handle<H>(&self, key: FactoryKey, value_type: TypeId) -> Option<H>
+    where
+        H: Copy + 'static,
+    {
+        let inner = self.inner.borrow();
+        let entry = inner.factory_handles.get(&key)?;
+        assert!(
+            entry.value_type == value_type,
+            "lazily: factory key {:?} was reused with an incompatible value type",
+            key.factory_type
+        );
+        Some(
+            *entry
+                .handle
+                .downcast_ref::<H>()
+                .expect("lazily: factory handle type mismatch"),
+        )
+    }
+
+    fn insert_factory_handle<H>(&self, key: FactoryKey, value_type: TypeId, handle: H)
+    where
+        H: Copy + 'static,
+    {
+        self.inner.borrow_mut().factory_handles.insert(
+            key,
+            FactoryEntry {
+                value_type,
+                handle: Rc::new(handle),
+            },
+        );
     }
 
     /// Return the current benchmark instrumentation counters.

@@ -33,6 +33,28 @@ pub struct TypedCellHandle<Schema, T> {
     _schema: PhantomData<fn() -> Schema>,
 }
 
+/// Context-like typed views that can memoize decorator-style slot/cell
+/// factories.
+///
+/// Implemented for both [`TypedContext`] and [`TypedContextRef`], so a factory
+/// can be called from ordinary code and from inside another slot callback while
+/// returning the same context-local handle.
+pub trait TypedFactoryContext {
+    type Schema: 'static;
+
+    fn memoized_slot<K, T, F>(&self, compute: F) -> TypedSlotHandle<Self::Schema, T>
+    where
+        K: 'static,
+        T: 'static,
+        F: for<'a> Fn(&TypedContextRef<'a, Self::Schema>) -> T + 'static;
+
+    fn memoized_cell<K, T, F>(&self, init: F) -> TypedCellHandle<Self::Schema, T>
+    where
+        K: 'static,
+        T: PartialEq + 'static,
+        F: for<'a> FnOnce(&TypedContextRef<'a, Self::Schema>) -> T;
+}
+
 #[cfg(feature = "thread-safe")]
 /// A thread-safe lazily context tagged with a schema/context-family type.
 pub struct TypedThreadSafeContext<Schema> {
@@ -116,6 +138,26 @@ impl<Schema> TypedContext<Schema> {
         TypedSlotHandle::new(raw)
     }
 
+    pub fn memoized_slot<K, T, F>(&self, compute: F) -> TypedSlotHandle<Schema, T>
+    where
+        K: 'static,
+        T: 'static,
+        F: for<'a> Fn(&TypedContextRef<'a, Schema>) -> T + 'static,
+        Schema: 'static,
+    {
+        <Self as TypedFactoryContext>::memoized_slot::<K, T, F>(self, compute)
+    }
+
+    pub fn memoized_cell<K, T, F>(&self, init: F) -> TypedCellHandle<Schema, T>
+    where
+        K: 'static,
+        T: PartialEq + 'static,
+        F: for<'a> FnOnce(&TypedContextRef<'a, Schema>) -> T,
+        Schema: 'static,
+    {
+        <Self as TypedFactoryContext>::memoized_cell::<K, T, F>(self, init)
+    }
+
     pub fn get<T>(&self, handle: &TypedSlotHandle<Schema, T>) -> T
     where
         T: Clone + 'static,
@@ -165,6 +207,36 @@ impl<Schema> Default for TypedContext<Schema> {
     }
 }
 
+impl<Schema: 'static> TypedFactoryContext for TypedContext<Schema> {
+    type Schema = Schema;
+
+    fn memoized_slot<K, T, F>(&self, compute: F) -> TypedSlotHandle<Self::Schema, T>
+    where
+        K: 'static,
+        T: 'static,
+        F: for<'a> Fn(&TypedContextRef<'a, Self::Schema>) -> T + 'static,
+    {
+        let raw = self.inner.memoized_slot::<K, T, _>(move |ctx| {
+            let typed = TypedContextRef::new(ctx);
+            compute(&typed)
+        });
+        TypedSlotHandle::new(raw)
+    }
+
+    fn memoized_cell<K, T, F>(&self, init: F) -> TypedCellHandle<Self::Schema, T>
+    where
+        K: 'static,
+        T: PartialEq + 'static,
+        F: for<'a> FnOnce(&TypedContextRef<'a, Self::Schema>) -> T,
+    {
+        let raw = self.inner.memoized_cell::<K, T, _>(move |ctx| {
+            let typed = TypedContextRef::new(ctx);
+            init(&typed)
+        });
+        TypedCellHandle::new(raw)
+    }
+}
+
 impl<'a, Schema> TypedContextRef<'a, Schema> {
     fn new(inner: &'a Context) -> Self {
         Self {
@@ -203,6 +275,56 @@ impl<'a, Schema> TypedContextRef<'a, Schema> {
         T: 'static,
     {
         self.inner.get_cell_rc(&handle.raw)
+    }
+
+    pub fn memoized_slot<K, T, F>(&self, compute: F) -> TypedSlotHandle<Schema, T>
+    where
+        K: 'static,
+        T: 'static,
+        F: for<'b> Fn(&TypedContextRef<'b, Schema>) -> T + 'static,
+        Schema: 'static,
+    {
+        <Self as TypedFactoryContext>::memoized_slot::<K, T, F>(self, compute)
+    }
+
+    pub fn memoized_cell<K, T, F>(&self, init: F) -> TypedCellHandle<Schema, T>
+    where
+        K: 'static,
+        T: PartialEq + 'static,
+        F: for<'b> FnOnce(&TypedContextRef<'b, Schema>) -> T,
+        Schema: 'static,
+    {
+        <Self as TypedFactoryContext>::memoized_cell::<K, T, F>(self, init)
+    }
+}
+
+impl<Schema: 'static> TypedFactoryContext for TypedContextRef<'_, Schema> {
+    type Schema = Schema;
+
+    fn memoized_slot<K, T, F>(&self, compute: F) -> TypedSlotHandle<Self::Schema, T>
+    where
+        K: 'static,
+        T: 'static,
+        F: for<'a> Fn(&TypedContextRef<'a, Self::Schema>) -> T + 'static,
+    {
+        let raw = self.inner.memoized_slot::<K, T, _>(move |ctx| {
+            let typed = TypedContextRef::new(ctx);
+            compute(&typed)
+        });
+        TypedSlotHandle::new(raw)
+    }
+
+    fn memoized_cell<K, T, F>(&self, init: F) -> TypedCellHandle<Self::Schema, T>
+    where
+        K: 'static,
+        T: PartialEq + 'static,
+        F: for<'a> FnOnce(&TypedContextRef<'a, Self::Schema>) -> T,
+    {
+        let raw = self.inner.memoized_cell::<K, T, _>(move |ctx| {
+            let typed = TypedContextRef::new(ctx);
+            init(&typed)
+        });
+        TypedCellHandle::new(raw)
     }
 }
 

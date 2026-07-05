@@ -34,6 +34,23 @@
 //! let _ = ctx.get(&pending);
 //! ```
 
+/// Define a schema marker type for typed lazily contexts.
+///
+/// The generated type is an uninhabited enum, so it cannot accidentally carry
+/// runtime state. Use it as the schema parameter for [`TypedContext`].
+///
+/// ```
+/// lazily::define_schema!(CounterSchema);
+/// type CounterContext = lazily::TypedContext<CounterSchema>;
+/// ```
+#[macro_export]
+macro_rules! define_schema {
+    ($(#[$attr:meta])* $vis:vis $name:ident) => {
+        $(#[$attr])*
+        $vis enum $name {}
+    };
+}
+
 #[cfg(feature = "async")]
 #[allow(dead_code)]
 mod async_context;
@@ -154,6 +171,7 @@ pub use ipc::{
     )
 ))]
 pub use ipc::{DecodeError, EncodeError};
+pub use lazily_macros::{cell, slot};
 pub use receipt::{
     CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,
     ReceiptProjection,
@@ -189,7 +207,9 @@ pub use text_crdt::{OpId, TextCrdt, TextOp, TextVersionVector, parse_blocks};
 pub use thread_safe::{
     ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,
 };
-pub use typed_context::{TypedCellHandle, TypedContext, TypedContextRef, TypedSlotHandle};
+pub use typed_context::{
+    TypedCellHandle, TypedContext, TypedContextRef, TypedFactoryContext, TypedSlotHandle,
+};
 #[cfg(feature = "thread-safe")]
 pub use typed_context::{
     TypedThreadSafeCellHandle, TypedThreadSafeContext, TypedThreadSafeContextRef,
