@@ -28,7 +28,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 <!-- coverage-table:start -->
 | Feature | Rust | Python | Kotlin | JS | Dart | Zig |
 | --------- | :----: | :------: | :------: | :--: | :----: | :---: |
-| Reactive graph — `Cell` / `Slot` / `Signal` / `Effect` / memo / batch | ✅ | ~ | ✅ | ✅ | ✅ | ✅ |
+| Reactive graph — `Cell` / `Slot` / `Signal` / `Effect` / memo / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Thread-safe context (lock-backed) | ✅ | ✅ | ✅ | — | — | ✅ |
 | Async reactive context | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Flat state machine | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
