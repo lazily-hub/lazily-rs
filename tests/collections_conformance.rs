@@ -34,6 +34,10 @@ fn load_fixture(name: &str) -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
 }
 
+fn spec_fixtures_present() -> bool {
+    std::path::Path::new(SPEC_DIR).exists()
+}
+
 fn build_initial(ctx: &Context, initial: &Value) -> CellMap<String, V> {
     let map: CellMap<String, V> = CellMap::new(ctx);
     let order = initial
@@ -250,6 +254,10 @@ fn assert_handle_stable(
 
 /// Replay a step-based collection fixture (`initial` + `steps`).
 fn run_steps_fixture(name: &str) {
+    if !spec_fixtures_present() {
+        eprintln!("skipping: {SPEC_DIR} absent - run with the lazily-spec sibling");
+        return;
+    }
     let fixture = load_fixture(name);
     let ctx = Context::new();
     let map = build_initial(&ctx, fixture.get("initial").expect("initial"));
@@ -315,6 +323,10 @@ fn run_steps_fixture(name: &str) {
 
 /// Replay the declarative LIS reconciliation fixture (`reconcile` block).
 fn run_reconcile_fixture(name: &str) {
+    if !spec_fixtures_present() {
+        eprintln!("skipping: {SPEC_DIR} absent - run with the lazily-spec sibling");
+        return;
+    }
     let fixture = load_fixture(name);
     let reconcile_block = fixture.get("reconcile").expect("reconcile");
     let prior = keyed_pairs(reconcile_block, "prior");
@@ -498,6 +510,10 @@ fn find_in_tree<V: PartialEq + Clone + 'static>(
 }
 
 fn run_semtree_fixture(name: &str) {
+    if !spec_fixtures_present() {
+        eprintln!("skipping: {SPEC_DIR} absent - run with the lazily-spec sibling");
+        return;
+    }
     let fixture = load_fixture(name);
     let scenarios = fixture
         .get("scenarios")
@@ -678,6 +694,10 @@ fn block_from_json(v: &Value) -> Block {
 }
 
 fn run_stableid_fixture(name: &str) {
+    if !spec_fixtures_present() {
+        eprintln!("skipping: {SPEC_DIR} absent - run with the lazily-spec sibling");
+        return;
+    }
     let fixture = load_fixture(name);
     let scenarios = fixture
         .get("scenarios")
@@ -807,6 +827,10 @@ fn conformance_stableid_alignment() {
 // same-point inserts, sticky tombstones, GC.
 
 fn run_textcrdt_fixture(name: &str) {
+    if !spec_fixtures_present() {
+        eprintln!("skipping: {SPEC_DIR} absent - run with the lazily-spec sibling");
+        return;
+    }
     let fixture = load_fixture(name);
     let scenarios = fixture
         .get("scenarios")

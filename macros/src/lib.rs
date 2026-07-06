@@ -102,13 +102,13 @@ fn expand_factory_item(kind: &str, item: ItemFn) -> syn::Result<proc_macro2::Tok
                 ));
             }
             (ident, reference.elem.clone())
-        },
+        }
         FnArg::Receiver(receiver) => {
             return Err(syn::Error::new(
                 receiver.span(),
                 "lazily factory decorators do not support methods",
             ));
-        },
+        }
     };
 
     let value_ty = match sig.output {
@@ -118,7 +118,7 @@ fn expand_factory_item(kind: &str, item: ItemFn) -> syn::Result<proc_macro2::Tok
                 name.span(),
                 "lazily factory decorators require an explicit return type",
             ));
-        },
+        }
     };
 
     let key_ident = format_ident!("__lazily_{kind}_factory_for_{name}");
