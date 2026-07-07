@@ -122,7 +122,7 @@ impl TextCrdt {
     /// A buffer owned by `peer` seeded with `s` (a linear chain of characters).
     pub fn from_str(peer: u64, s: &str) -> Self {
         let mut t = Self::new(peer);
-        t.insert_str(0, s);
+        t.append_root_chain(s);
         t
     }
 
@@ -187,6 +187,45 @@ impl TextCrdt {
         for (i, ch) in s.chars().enumerate() {
             self.insert(index + i, ch);
         }
+    }
+
+    fn append_root_chain(&mut self, s: &str) {
+        let mut origin = None;
+        for ch in s.chars() {
+            let id = self.next_id();
+            self.elems.insert(
+                id,
+                Elem {
+                    ch,
+                    origin,
+                    deleted: None,
+                },
+            );
+            origin = Some(id);
+        }
+    }
+
+    /// Replace the whole visible buffer in one linear pass.
+    ///
+    /// The ordinary edit path is intentionally character granular, but rebuilding a
+    /// document by calling `delete` / `insert` for every character recomputes the
+    /// full origin order on each step. Whole-document seed and patchback paths use
+    /// this method so large markdown buffers stay linear instead of quadratic.
+    pub fn replace_all(&mut self, s: &str) {
+        let visible_ids: Vec<OpId> = self
+            .elems
+            .iter()
+            .filter_map(|(id, elem)| elem.deleted.is_none().then_some(*id))
+            .collect();
+        for id in visible_ids {
+            let deleted = self.next_id();
+            if let Some(elem) = self.elems.get_mut(&id)
+                && elem.deleted.is_none()
+            {
+                elem.deleted = Some(deleted);
+            }
+        }
+        self.append_root_chain(s);
     }
 
     /// Tombstone the visible character at `index`. No-op if out of range.
@@ -464,6 +503,34 @@ mod tests {
             member.text(),
             "shared-identity convergence"
         );
+    }
+
+    #[test]
+    fn from_str_seeds_a_large_buffer_as_one_linear_chain() {
+        let text = "0123456789abcdef\n".repeat(512);
+        let t = TextCrdt::from_str(7, &text);
+
+        assert_eq!(t.text(), text);
+        assert_eq!(t.elems.len(), text.chars().count());
+        assert_eq!(
+            t.version_vector().get(&7).copied(),
+            Some(t.elems.len() as u64)
+        );
+    }
+
+    #[test]
+    fn whole_document_replace_deltas_converge_without_duplication() {
+        let base = TextCrdt::from_str(1, "old heading\nold body\n");
+        let mut canonical = base.clone();
+        let mut member = TextCrdt::new(2);
+        member.apply_delta(&base.delta_since(&TextVersionVector::new()));
+
+        canonical.replace_all("new heading\nnew body\n");
+        let delta = canonical.delta_since(&member.version_vector());
+        assert!(member.apply_delta(&delta));
+
+        assert_eq!(canonical.text(), "new heading\nnew body\n");
+        assert_eq!(member.text(), canonical.text());
     }
 
     #[test]
