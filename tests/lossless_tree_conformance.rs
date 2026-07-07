@@ -308,3 +308,18 @@ fn conformance_concurrent_reorder_and_leaf_edit() {
 fn conformance_non_contiguous_anti_entropy() {
     run_fixture("non_contiguous_anti_entropy.json");
 }
+
+#[test]
+fn conformance_token_trivia_preservation() {
+    run_fixture("token_trivia_preservation.json");
+}
+
+#[test]
+fn conformance_invalid_source_roundtrip() {
+    run_fixture("invalid_source_roundtrip.json");
+}
+
+#[test]
+fn conformance_concurrent_conflict_preserves_text() {
+    run_fixture("concurrent_conflict_preserves_text.json");
+}

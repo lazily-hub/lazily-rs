@@ -59,6 +59,7 @@ use crate::text_crdt::{TextCrdt, TextOp};
 /// [`LosslessTreeCrdt::apply_update`], so a causally-later op sorts higher (LWW)
 /// and concurrent ops at the same counter tiebreak deterministically by peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeOpId {
     /// Lamport counter (dominant ordering key).
     pub counter: u64,
@@ -72,6 +73,7 @@ pub struct TreeOpId {
 /// nodes without ambiguity. The document root is the sentinel `{counter: 0,
 /// peer: 0}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeNodeId(pub TreeOpId);
 
 impl TreeNodeId {
@@ -86,6 +88,7 @@ impl TreeNodeId {
 /// unknown/invalid spans are [`Raw`](LeafKind::Raw)/[`Error`](LeafKind::Error) so
 /// nothing is ever discarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LeafKind {
     /// A syntax delimiter or marker token.
     Token,
@@ -110,6 +113,7 @@ enum NodeBody {
 /// concurrent inserts into the same gap get a deterministic total order. Compared
 /// lexicographically by `frac`, then `peer`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct SortKey {
     frac: Vec<u8>,
     peer: u64,
@@ -139,6 +143,7 @@ struct NodeRecord {
 /// What a `CreateNode` op materializes: an element shell or a text leaf seeded
 /// from an exact string (both replicas rebuild the leaf deterministically).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NodeSeed {
     /// An internal element with the given kind.
     Element {
@@ -158,6 +163,7 @@ pub enum NodeSeed {
 /// remote replica needs to converge deterministically (positions and seed text
 /// travel inside the op, never re-derived from local clocks).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 enum TreeOpKind {
     CreateNode {
         id: TreeNodeId,
@@ -194,6 +200,7 @@ enum TreeOpKind {
 
 /// A transport-ready tree operation: its dotted id plus the change it encodes.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeOp {
     /// The op's dotted id (also the created node's id for `CreateNode`).
     pub id: TreeOpId,
@@ -203,6 +210,7 @@ pub struct TreeOp {
 /// A batch of ops to ship — the output of [`LosslessTreeCrdt::diff`] and the input
 /// to [`LosslessTreeCrdt::apply_update`].
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeUpdate {
     /// Ops ordered by dotted id (dependencies buffered on apply if still missing).
     pub ops: Vec<TreeOp>,
@@ -215,6 +223,7 @@ pub struct TreeUpdate {
 /// missing would then make the partner believe it holds 2. Tracking the actual dot
 /// set keeps a hole (2) representable so it is re-requested rather than skipped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct DotRange {
     /// Every dot `1..=contiguous` is present.
     contiguous: u64,
@@ -245,6 +254,7 @@ impl DotRange {
 /// non-contiguous delivery, so [`LosslessTreeCrdt::diff`] never omits a missing
 /// interior op.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeVersionFrontier {
     dots: BTreeMap<u64, DotRange>,
 }

@@ -126,11 +126,13 @@ test-seqcrdt-conformance:
 # Lossless full-document tree CRDT (#lzlosstree): M1 syntax-agnostic core. Replays
 # the shared compute fixtures in lazily-spec/conformance/lossless-tree/ (exact
 # round-trip, one-leaf edit delta, split/merge, concurrent insert, concurrent
-# reorder + edit, non-contiguous anti-entropy) plus randomized convergence
-# property tests. Feature-gated behind `lossless-tree` (which implies
-# `distributed`).
+# reorder + edit, non-contiguous anti-entropy, token/trivia preservation, invalid
+# source round-trip, structural-conflict text preservation) plus randomized
+# convergence property tests, plus schema compliance of the `TreeUpdate` /
+# frontier serde output against lazily-spec's lossless-tree schemas (needs
+# `serde`). Feature-gated behind `lossless-tree` (which implies `distributed`).
 test-lossless-tree:
->$(CARGO) test --locked --features lossless-tree --test lossless_tree_conformance --test lossless_tree_proptest
+>$(CARGO) test --locked --features "lossless-tree serde" --test lossless_tree_conformance --test lossless_tree_proptest --test lossless_tree_schema
 
 # JSON Schema compliance: lazily-rs's own serde output (Snapshot/Delta/CrdtSync,
 # incl. NodeKey) validates against the sibling lazily-spec/schemas, and every IPC
