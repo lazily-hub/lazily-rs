@@ -27,6 +27,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	test-ipc-conformance \
 	test-collections-conformance \
 	test-seqcrdt-conformance \
+	test-lossless-tree \
 	test-schema-compliance \
 	test-statechart-conformance \
 	test-lean-formal \
@@ -38,7 +39,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-seqcrdt-conformance test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -121,6 +122,15 @@ test-collections-conformance:
 # (the CRDT plane), so this target needs that feature.
 test-seqcrdt-conformance:
 >$(CARGO) test --locked --features distributed --test seqcrdt_conformance
+
+# Lossless full-document tree CRDT (#lzlosstree): M1 syntax-agnostic core. Replays
+# the shared compute fixtures in lazily-spec/conformance/lossless-tree/ (exact
+# round-trip, one-leaf edit delta, split/merge, concurrent insert, concurrent
+# reorder + edit, non-contiguous anti-entropy) plus randomized convergence
+# property tests. Feature-gated behind `lossless-tree` (which implies
+# `distributed`).
+test-lossless-tree:
+>$(CARGO) test --locked --features lossless-tree --test lossless_tree_conformance --test lossless_tree_proptest
 
 # JSON Schema compliance: lazily-rs's own serde output (Snapshot/Delta/CrdtSync,
 # incl. NodeKey) validates against the sibling lazily-spec/schemas, and every IPC

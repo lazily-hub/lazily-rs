@@ -73,6 +73,8 @@ pub mod ffi;
 mod instrumentation;
 #[cfg(feature = "ipc")]
 mod ipc;
+#[cfg(feature = "lossless-tree")]
+mod lossless_tree_crdt;
 mod receipt;
 mod reconcile;
 mod sem_tree;
@@ -172,6 +174,11 @@ pub use ipc::{
 ))]
 pub use ipc::{DecodeError, EncodeError};
 pub use lazily_macros::{cell, slot};
+#[cfg(feature = "lossless-tree")]
+pub use lossless_tree_crdt::{
+    LeafKind, LosslessTreeCrdt, NodeSeed, TreeError, TreeNodeId, TreeOp, TreeOpId, TreeUpdate,
+    TreeVersionFrontier,
+};
 pub use receipt::{
     CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,
     ReceiptProjection,

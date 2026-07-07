@@ -35,6 +35,10 @@ thread-safe = ["dep:parking_lot"]
 async = ["dep:tokio", "dep:parking_lot"]
 default = ["smallvec"]
 distributed = []
+# #lzlosstree: lossless full-document tree CRDT (M1 syntax-agnostic core). Builds
+# on the flat text CRDT and the distributed clock primitives, so it implies
+# `distributed`. Off by default until the protocol stabilizes across bindings.
+lossless-tree = ["distributed"]
 ffi = ["ipc", "dep:serde_json"]
 instrumentation = []
 ipc = ["serde"]
