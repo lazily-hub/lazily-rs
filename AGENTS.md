@@ -16,6 +16,7 @@ Lazy reactive primitives library for Rust.
 - `tests/collections_conformance.rs` — keyed cell collections compute fixtures (lazily-spec/conformance/collections); value/membership/order independence, atomic move, LIS reconciliation, memoized semantic tree, manufactured text identity, character CRDT convergence
 - `tests/seqcrdt_conformance.rs` — move-aware sequence CRDT compute fixture (lazily-spec/conformance/collections/seqcrdt_convergence.json); concurrent-insert/move/value-edit convergence, tombstone commutativity (feature-gated, needs `distributed`)
 - `tests/schema_compliance.rs` — lazily-rs serde output validates against lazily-spec JSON Schemas (#lzspecschema)
+- `tests/command_conformance.rs` — command/RPC message plane (`command-plane-v1`) fixture replay (lazily-spec/conformance/message-passing); projection reducer + RPC facade terminal-only rule (feature-gated `ipc`)
 - `tests/signal.rs` — 19 eager-Signal integration tests (single-threaded + thread-safe)
 - `tests/tokio_sync.rs` — 2 Tokio feature-gated sync integration tests (requires `tokio` + `thread-safe`)
 - `tests/async_integration.rs` — AsyncContext feature-gated integration tests (incl. eager `signal_async`)

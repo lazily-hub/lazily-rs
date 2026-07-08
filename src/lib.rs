@@ -59,6 +59,8 @@ mod bridge;
 mod cell;
 mod cell_family;
 mod cell_tree;
+#[cfg(feature = "ipc")]
+mod command;
 mod context;
 #[cfg(feature = "distributed")]
 mod crdt;
@@ -112,6 +114,13 @@ pub use bridge::{BridgeHub, HubError};
 pub use cell::CellHandle;
 pub use cell_family::{CellFamily, CellMap};
 pub use cell_tree::CellTree;
+#[cfg(feature = "ipc")]
+pub use command::{
+    CallState, CommandApplyStatus, CommandCancel, CommandEvent, CommandEventKind, CommandEvents,
+    CommandMessage, CommandPolicy, CommandProjection, CommandProjectionEntry,
+    CommandProjectionImage, CommandRpcClient, CommandStatus, CommandSubmit, CommandTransport,
+    DedupePolicy, applied_receipt, rejected_receipt,
+};
 pub use context::Context;
 #[cfg(feature = "distributed")]
 pub use crdt::{

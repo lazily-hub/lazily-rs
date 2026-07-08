@@ -25,7 +25,14 @@ use lazily::{
 use serde_json::{Map, Value};
 
 const SPEC_SCHEMAS_DIR: &str = "../lazily-spec/schemas";
-const SCHEMA_FILES: &[&str] = &["defs", "snapshot", "delta", "distributed", "receipts"];
+const SCHEMA_FILES: &[&str] = &[
+    "defs",
+    "snapshot",
+    "delta",
+    "distributed",
+    "receipts",
+    "message-passing",
+];
 
 fn sibling_schemas_present() -> bool {
     SCHEMA_FILES
@@ -304,5 +311,97 @@ fn every_ipc_conformance_fixture_wire_is_schema_valid() {
     assert!(
         !checked.is_empty(),
         "no IPC conformance fixtures found in {local_dir} or {spec_dir}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Command / RPC message plane — every CommandMessage variant validates
+// ---------------------------------------------------------------------------
+
+#[test]
+fn command_plane_wire_validates_schema() {
+    if !sibling_schemas_present() {
+        eprintln!("skipping: ../lazily-spec/schemas not present (run from the monorepo)");
+        return;
+    }
+    use lazily::{
+        CommandCancel, CommandEvent, CommandEventKind, CommandEvents, CommandMessage,
+        CommandPolicy, CommandProjectionEntry, CommandProjectionImage, CommandStatus,
+        CommandSubmit, DedupePolicy, IpcValue,
+    };
+
+    let defs = load_json("defs");
+    let schema = composed_schema("message-passing", &defs);
+
+    let submit = CommandMessage::CommandSubmit(Box::new(CommandSubmit {
+        command_id: "cmd-run-1".into(),
+        causation_id: "cmd-run-1".into(),
+        source: "vscode-plugin".into(),
+        target: "project-controller".into(),
+        namespace: "agent-doc".into(),
+        name: "editor_route".into(),
+        authority_generation: 42,
+        idempotency_key: "project-root:plan.md:run".into(),
+        deadline_ms: 120_000,
+        policy: CommandPolicy {
+            dedupe: DedupePolicy::SameIdempotencyKey,
+            supersede: false,
+            cancel_on_preempt: true,
+        },
+        payload_type: "agent-doc.editor_route.v1".into(),
+        payload_hash: "sha256:abc".into(),
+        payload: IpcValue::Inline(vec![123, 125]),
+        required_features: vec!["causal-receipts".into()],
+    }));
+    assert_valid(
+        &schema,
+        &serde_json::to_value(&submit).unwrap(),
+        "message-passing",
+    );
+
+    let cancel = CommandMessage::CommandCancel(CommandCancel {
+        command_id: "cmd-run-1".into(),
+        causation_id: "cancel-1".into(),
+        source: "vscode-plugin".into(),
+        authority_generation: 42,
+        reason: Some("operator cleared run".into()),
+    });
+    assert_valid(
+        &schema,
+        &serde_json::to_value(&cancel).unwrap(),
+        "message-passing",
+    );
+
+    let events = CommandMessage::CommandEvents(CommandEvents {
+        events: vec![CommandEvent {
+            event_id: "ev-1".into(),
+            command_id: "cmd-run-1".into(),
+            kind: CommandEventKind::Accepted,
+            generation: 42,
+            detail: Some("queued".into()),
+        }],
+    });
+    assert_valid(
+        &schema,
+        &serde_json::to_value(&events).unwrap(),
+        "message-passing",
+    );
+
+    let projection = CommandMessage::CommandProjection(CommandProjectionImage {
+        generation: 43,
+        commands: vec![CommandProjectionEntry {
+            command_id: "cmd-run-1".into(),
+            status: CommandStatus::Applied,
+            terminal: true,
+            generation: 43,
+            reason: None,
+            terminal_receipt_id: Some("rcpt-1".into()),
+            last_event_id: Some("ev-3".into()),
+        }],
+    });
+    assert_valid(
+        &schema,
+        &serde_json::to_value(&projection).unwrap(),
+        "message-passing",
     );
 }
