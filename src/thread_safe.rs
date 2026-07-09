@@ -2387,7 +2387,18 @@ impl ThreadSafeContext {
         }
 
         let mut slots_to_mark = HashMap::<SlotId, bool>::new();
-        let mut slot_order = Vec::new();
+        // Cache the fast-path `Arc` alongside the frontier order so the marking
+        // pass reuses the exact object observed during the BFS instead of
+        // re-acquiring the `slot_fast_paths` `RwLock` read lock per visited slot.
+        // SAFETY invariant: a `slot_fast_paths` entry is write-once for a given
+        // slot id — it is set at slot creation (`register_slot_fast_path`) and
+        // never cleared or replaced, because `ThreadSafeContext` never frees a
+        // slot id (only `dispose_effect` pushes to `free_ids`, and effects do
+        // not index `slot_fast_paths`). The `Arc` fetched at BFS time is
+        // therefore identical to the one a re-fetch at marking time would
+        // return; caching it is observational-equivalent to the prior re-fetch
+        // and removes one `RwLock` read acquisition per frontier slot.
+        let mut slot_order: Vec<(SlotId, Arc<ThreadSafeSlotFastPath>)> = Vec::new();
 
         while let Some(root) = queue.pop_front() {
             let Some(force_recompute) = requested_force.get(&root.id).copied() else {
@@ -2405,7 +2416,7 @@ impl ThreadSafeContext {
                 Some(force) => *force |= force_recompute,
                 None => {
                     slots_to_mark.insert(root.id, force_recompute);
-                    slot_order.push(root.id);
+                    slot_order.push((root.id, Arc::clone(&fast_path)));
                 }
             }
 
@@ -2428,12 +2439,9 @@ impl ThreadSafeContext {
 
         #[cfg(feature = "instrumentation")]
         let dirty_marks = slot_order.len();
-        for id in slot_order {
+        for (id, fast_path) in slot_order {
             let force_recompute = slots_to_mark.get(&id).copied().unwrap_or(false);
-            if !self
-                .slot_fast_path(id)?
-                .try_mark_dirty_without_inflight(force_recompute)
-            {
+            if !fast_path.try_mark_dirty_without_inflight(force_recompute) {
                 return None;
             }
         }

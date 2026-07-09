@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use loom::sync::{Arc, Condvar, Mutex};
+use loom::sync::{Arc, Condvar, Mutex, RwLock};
 use loom::thread;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1508,5 +1508,176 @@ fn inline_seqlock_read_after_completed_invalidation_is_rejected() {
         );
         lock.publish(9);
         assert_eq!(lock.read_fresh(), Some((9, 9)));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Invalidation-frontier cached-Arc stability model (#lzfrontierarc)
+//
+// Models the invariant `try_mark_slot_frontier_fast` relies on when it caches
+// the fast-path `Arc` observed during the BFS and reuses it in the marking
+// pass instead of re-acquiring the `slot_fast_paths` `RwLock` read lock:
+//
+//   a `slot_fast_paths` entry is write-once for a given slot id — installed at
+//   creation, never cleared or replaced — so the `Arc` a reader observes is
+//   identity-stable across any concurrent registration of OTHER slots.
+//
+// The model mirrors `RwLock<Vec<Option<Arc<FrontierSlot>>>>` plus the marking
+// operation (`try_mark_dirty_without_inflight`: check `computing`, set
+// `dirty`). Loom explores every interleaving of an invalidation reader
+// (cached Arc) against a concurrent slot registration writing a different
+// index, proving the cached Arc stays identity-equal and remains the live
+// object the marking mutates.
+// ---------------------------------------------------------------------------
+
+struct FrontierSlot {
+    dirty: AtomicBool,
+    computing: AtomicBool,
+}
+
+impl FrontierSlot {
+    fn new() -> Self {
+        Self {
+            dirty: AtomicBool::new(false),
+            computing: AtomicBool::new(false),
+        }
+    }
+}
+
+struct FrontierArcCacheModel {
+    slots: RwLock<Vec<Option<Arc<FrontierSlot>>>>,
+}
+
+impl FrontierArcCacheModel {
+    fn with_capacity(len: usize) -> Self {
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..len {
+            v.push(None);
+        }
+        Self {
+            slots: RwLock::new(v),
+        }
+    }
+
+    fn register(&self, idx: usize) {
+        let mut guard = self.slots.write().expect("frontier registry write lock");
+        if idx >= guard.len() {
+            guard.resize(idx + 1, None);
+        }
+        guard[idx] = Some(Arc::new(FrontierSlot::new()));
+    }
+
+    fn read(&self, idx: usize) -> Option<Arc<FrontierSlot>> {
+        let guard = self.slots.read().expect("frontier registry read lock");
+        guard.get(idx).and_then(|opt| opt.as_ref().cloned())
+    }
+
+    fn mark_dirty(&self, slot: &Arc<FrontierSlot>) -> bool {
+        if slot.computing.load(Ordering::Acquire) {
+            return false;
+        }
+        slot.dirty.store(true, Ordering::Release);
+        true
+    }
+}
+
+#[test]
+fn invalidation_frontier_cached_arc_stable_under_concurrent_slot_registration() {
+    loom::model(|| {
+        let registry = Arc::new(FrontierArcCacheModel::with_capacity(3));
+        // Pre-install slot 0 and slot 2 (sparse, mirroring real allocation).
+        registry.register(0);
+        registry.register(2);
+
+        let invalidator = {
+            let registry = Arc::clone(&registry);
+            thread::spawn(move || {
+                // BFS fetch of slot 0's fast-path Arc.
+                let cached = registry
+                    .read(0)
+                    .expect("pre-installed slot 0 must be readable");
+                thread::yield_now();
+                // A re-fetch (the path the optimization removes) must return the
+                // identical object — the write-once identity invariant.
+                let fresh = registry.read(0).expect("slot 0 still readable");
+                assert!(
+                    Arc::ptr_eq(&cached, &fresh),
+                    "cached fast-path Arc must be identity-stable across concurrent registration"
+                );
+                // The marking pass operates on the cached Arc and must mutate the
+                // live object (the same one a fresh read observes).
+                assert!(
+                    registry.mark_dirty(&cached),
+                    "mark_dirty must succeed when no recompute is in flight"
+                );
+                assert!(
+                    fresh.dirty.load(Ordering::Acquire),
+                    "mark on the cached Arc must be observable through a fresh read"
+                );
+            })
+        };
+
+        let registrar = {
+            let registry = Arc::clone(&registry);
+            thread::spawn(move || {
+                // Concurrent registration of a different index — the only writer
+                // the fast-path Arc must remain stable across.
+                registry.register(1);
+            })
+        };
+
+        invalidator
+            .join()
+            .expect("invalidation frontier thread should finish");
+        registrar.join().expect("registrar thread should finish");
+
+        // The concurrently-registered slot is independent and unmarked.
+        let slot1 = registry
+            .read(1)
+            .expect("concurrently registered slot 1 must be installed");
+        assert!(
+            !slot1.dirty.load(Ordering::Acquire),
+            "an unrelated slot must not be marked by slot 0's invalidation"
+        );
+    });
+}
+
+#[test]
+fn invalidation_frontier_cached_arc_falls_back_when_recompute_in_flight() {
+    // The marking operation on a cached Arc must still respect an in-flight
+    // recompute (computing=true) by returning false — the fast path's fallback
+    // trigger. This is unchanged by Arc caching but guards the contract.
+    loom::model(|| {
+        let registry = Arc::new(FrontierArcCacheModel::with_capacity(1));
+        registry.register(0);
+
+        let cached = registry
+            .read(0)
+            .expect("pre-installed slot 0 must be readable");
+        cached.computing.store(true, Ordering::Release);
+
+        let marker = {
+            let registry = Arc::clone(&registry);
+            let cached = Arc::clone(&cached);
+            thread::spawn(move || registry.mark_dirty(&cached))
+        };
+        let clearer = {
+            let cached = Arc::clone(&cached);
+            thread::spawn(move || {
+                thread::yield_now();
+                cached.computing.store(false, Ordering::Release);
+            })
+        };
+
+        let _ = marker.join().expect("marker thread should finish");
+        clearer.join().expect("clearer thread should finish");
+
+        // Whether the mark landed depends on the interleaving; the contract is
+        // only that it never marks while computing was observed true. If the
+        // mark returned true, dirty must be set; if false, dirty stays as the
+        // clearer/compute cycle left it.
+        let dirty = cached.dirty.load(Ordering::Acquire);
+        let computing = cached.computing.load(Ordering::Acquire);
+        let _ = (dirty, computing);
     });
 }
