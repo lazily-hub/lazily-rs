@@ -614,6 +614,121 @@ impl CachedReadStorage {
     }
 }
 
+/// Read-mostly cached-value sidecar storage for cells. Mirrors the slot
+/// [`CachedReadStorage`] read-scaling design but adapted for cell semantics: the
+/// value is always present (a cell is never unset), and `set_if_changed` needs
+/// an atomic compare-and-set against the prior value (#lzcellread).
+///
+/// - `Locked`: `RwLock` shared reads (the read-scaling win over the prior plain
+///   `Mutex` — concurrent readers no longer serialize); exclusive writes for
+///   `set_if_changed`. Used for non-`Copy` values in both [`ReadStrategy`] modes
+///   (`RwLock` shared reads already scale well; `arc-swap`'s compare-and-swap
+///   for `set_if_changed` adds complexity with marginal gain).
+/// - `Inline`: wait-free seqlock reads for small `Copy` values. Writers are
+///   serialized by a lightweight `Mutex<()>` (readers never touch it); the
+///   [`InlineSeqlock`] is the inner torn-read safety envelope, identical to the
+///   slot inline path.
+enum CellCachedReadStorage {
+    Locked(RwLock<Arc<ThreadSafeAny>>),
+    Inline {
+        seqlock: InlineSeqlock,
+        writer: Mutex<()>,
+    },
+}
+
+impl CellCachedReadStorage {
+    fn new(
+        strategy: ReadStrategy,
+        inline: Option<InlineSpec>,
+        initial: Arc<ThreadSafeAny>,
+    ) -> Self {
+        if let Some(spec) = inline {
+            let seqlock = InlineSeqlock::new(spec);
+            let erased: &ThreadSafeAny = &*initial;
+            let src = erased as *const ThreadSafeAny as *const u8;
+            // SAFETY: `initial` is alive across the call; `spec.size` bytes from
+            // its data pointer are valid reads. Single-writer: the cell was just
+            // created, so no other writer can race. The seqlock copies the bytes
+            // into its buffer before `write` returns, so `initial` may drop
+            // after this call.
+            unsafe { seqlock.write(Some(src)) };
+            // Rebind the writer Mutex; `initial`'s bytes now live in the seqlock
+            // buffer, so the source `Arc` is no longer needed.
+            drop(initial);
+            Self::Inline {
+                seqlock,
+                writer: Mutex::new(()),
+            }
+        } else {
+            // RwLock shared reads are the right choice for both read strategies:
+            // the win over the former Mutex is shared reads, and arc-swap's
+            // compare-and-swap for set_if_changed is not warranted.
+            let _ = strategy;
+            Self::Locked(RwLock::new(initial))
+        }
+    }
+
+    fn get<T>(&self) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        match self {
+            Self::Locked(lock) => {
+                let value = lock.read();
+                // SAFETY: the caller checked `type_id == TypeId::of::<T>()`, so
+                // the stored value is a `T`.
+                unsafe { &*(&**value as *const ThreadSafeAny as *const T) }.clone()
+            }
+            Self::Inline { seqlock, .. } => {
+                // SAFETY: `Inline` is only created for the `Copy` type captured
+                // at cell creation; the caller's `type_id` assert proves `T`
+                // matches, so `size_of::<T>() == seqlock.size` and the bitwise
+                // read is sound. A cell value is always present (never unset),
+                // so the `Option` is always `Some`.
+                unsafe { seqlock.read::<T>() }.expect("cell inline value never unset")
+            }
+        }
+    }
+
+    fn set_if_changed<T>(&self, new_value: T) -> bool
+    where
+        T: PartialEq + Send + Sync + 'static,
+    {
+        match self {
+            Self::Locked(lock) => {
+                let mut value = lock.write();
+                // SAFETY: the caller checked `type_id == TypeId::of::<T>()`.
+                let old = unsafe { &*(&**value as *const ThreadSafeAny as *const T) };
+                if *old == new_value {
+                    return false;
+                }
+                *value = Arc::new(new_value);
+                true
+            }
+            Self::Inline { seqlock, writer } => {
+                // Serialize compare+write so two concurrent `set_if_changed`
+                // calls cannot both pass the PartialEq check against the same
+                // stale old value. Readers stay lock-free via the seqlock and
+                // never contend on this Mutex.
+                let _guard = writer.lock();
+                // SAFETY: `Inline` is only created for the matching `Copy` `T`.
+                // Holding the writer Mutex guarantees no concurrent seqlock
+                // write, so this read observes a stable even `seq`.
+                let old = unsafe { seqlock.read::<T>() }.expect("cell inline value never unset");
+                if old == new_value {
+                    return false;
+                }
+                let src = &new_value as *const T as *const u8;
+                // SAFETY: `new_value` is alive across the call; single-writer
+                // (writer Mutex held). The seqlock copies the bytes before
+                // `write` returns, so `new_value` may drop after.
+                unsafe { seqlock.write(Some(src)) };
+                true
+            }
+        }
+    }
+}
+
 /// Inline-eligibility decision for a value type. Returns `Some` only for `Copy`
 /// `T` that fits the inline buffer (size + alignment), so the unchecked bitwise
 /// store/read is sound (a torn read of a `Copy` value has no `Drop`/ownership
@@ -924,18 +1039,18 @@ struct ThreadSafeCellNode {
 }
 
 struct ThreadSafeCellFastPath {
-    value: Mutex<Box<ThreadSafeAny>>,
+    value: CellCachedReadStorage,
     type_id: TypeId,
     dependents: Mutex<DependentEdgeVec>,
 }
 
 impl ThreadSafeCellFastPath {
-    fn new<T>(value: T) -> Self
+    fn new<T>(value: T, strategy: ReadStrategy, inline: Option<InlineSpec>) -> Self
     where
         T: Send + Sync + 'static,
     {
         Self {
-            value: Mutex::new(Box::new(value)),
+            value: CellCachedReadStorage::new(strategy, inline, Arc::new(value)),
             type_id: TypeId::of::<T>(),
             dependents: Mutex::new(DependentEdgeVec::new()),
         }
@@ -945,26 +1060,19 @@ impl ThreadSafeCellFastPath {
     where
         T: Clone + Send + Sync + 'static,
     {
-        let value = self.value.lock();
         assert!(self.type_id == TypeId::of::<T>(), "type mismatch in cell");
-        unsafe { &*(&**value as *const ThreadSafeAny as *const T) }.clone()
+        self.value.get()
     }
 
     fn set_if_changed<T>(&self, new_value: T) -> bool
     where
         T: PartialEq + Send + Sync + 'static,
     {
-        let mut value = self.value.lock();
         assert!(
             self.type_id == TypeId::of::<T>(),
             "type mismatch in cell set"
         );
-        let old = unsafe { &*(&**value as *const ThreadSafeAny as *const T) };
-        if *old == new_value {
-            return false;
-        }
-        *value = Box::new(new_value);
-        true
+        self.value.set_if_changed(new_value)
     }
 
     fn insert_dependent(&self, dependent_id: SlotId, kind: ThreadSafeDependentKind) {
@@ -2255,12 +2363,58 @@ impl ThreadSafeContext {
     }
 
     /// Create a mutable thread-safe cell.
+    ///
+    /// The cell's cached value is stored behind a read-scaling sidecar
+    /// (#lzcellread): concurrent `get_cell` reads take a *shared* `RwLock` read
+    /// (or a wait-free seqlock path for `cell_copy`), so readers no longer
+    /// serialize through an exclusive lock as they did before v0.23.0.
     pub fn cell<T>(&self, value: T) -> CellHandle<T>
     where
         T: PartialEq + Send + Sync + 'static,
     {
         let id = self.alloc_id();
-        let fast_path = Arc::new(ThreadSafeCellFastPath::new(value));
+        let fast_path = Arc::new(ThreadSafeCellFastPath::new(
+            value,
+            self.inner.read_strategy,
+            None,
+        ));
+        let node = ThreadSafeCellNode {
+            dependents: EdgeVec::new(),
+            fast_path: Arc::clone(&fast_path),
+        };
+        let mut cell_fast_paths = self.inner.cell_fast_paths.write();
+        let idx = node_index(id).expect("SlotId does not fit usize");
+        if idx >= cell_fast_paths.len() {
+            cell_fast_paths.resize_with(idx + 1, || None);
+        }
+        cell_fast_paths[idx] = Some(fast_path);
+        self.lock_state()
+            .insert_node(id, ThreadSafeNode::Cell(node));
+        CellHandle::new(id)
+    }
+
+    /// Like [`cell`](Self::cell), but opts the cached-value sidecar into the
+    /// inline small-`Copy` seqlock fast path (#lzcellread / #rdstrat2): when `T`
+    /// is `Copy` and fits the inline buffer (`size_of::<T>() <= 24`,
+    /// `align <= 16`), the value is stored inline behind a wait-free seqlock —
+    /// no heap `Arc`, no refcount traffic on read or publish, optimal under both
+    /// [`ReadStrategy`] modes. `T` that exceeds the bound transparently falls
+    /// back to the `RwLock` path. Writers are serialized by a lightweight
+    /// `Mutex<()>`; readers never contend on it.
+    ///
+    /// This is a separate constructor (rather than automatic) because stable
+    /// Rust cannot detect `T: Copy` inside the unbounded generic [`cell`]; see
+    /// [`inline_spec_for`].
+    pub fn cell_copy<T>(&self, value: T) -> CellHandle<T>
+    where
+        T: Copy + PartialEq + Send + Sync + 'static,
+    {
+        let id = self.alloc_id();
+        let fast_path = Arc::new(ThreadSafeCellFastPath::new(
+            value,
+            self.inner.read_strategy,
+            inline_spec_for::<T>(),
+        ));
         let node = ThreadSafeCellNode {
             dependents: EdgeVec::new(),
             fast_path: Arc::clone(&fast_path),
@@ -3154,6 +3308,145 @@ mod tests {
         let p = ctx.get(&pair);
         assert_eq!(p.a, 4242);
         assert_eq!(p.b, 4242);
+    }
+
+    fn cell_storage_kind<T>(ctx: &ThreadSafeContext, handle: &CellHandle<T>) -> &'static str
+    where
+        T: Send + Sync + 'static,
+    {
+        let state = ctx.lock_state();
+        match state.get_node(handle.id) {
+            Some(ThreadSafeNode::Cell(cell)) => match &cell.fast_path.value {
+                CellCachedReadStorage::Locked(_) => "locked",
+                CellCachedReadStorage::Inline { .. } => "inline",
+            },
+            _ => panic!("cell_storage_kind called on non-cell id"),
+        }
+    }
+
+    #[test]
+    fn cell_uses_locked_storage_in_both_strategies(/* #lzcellread */) {
+        for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
+            let ctx = ThreadSafeContext::with_read_strategy(strategy);
+            let cell = ctx.cell(42_i32);
+            assert_eq!(cell_storage_kind(&ctx, &cell), "locked", "{strategy:?}");
+            assert_eq!(ctx.get_cell(&cell), 42, "{strategy:?}");
+            ctx.set_cell(&cell, 7);
+            assert_eq!(ctx.get_cell(&cell), 7, "{strategy:?} after set");
+        }
+    }
+
+    #[test]
+    fn cell_copy_uses_inline_storage_for_small_copy_value(/* #lzcellread */) {
+        for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
+            let ctx = ThreadSafeContext::with_read_strategy(strategy);
+            let cell = ctx.cell_copy(42_i32);
+            // The inline seqlock subsumes the read-strategy tradeoff for small
+            // `Copy` values, so it is selected regardless of `strategy`.
+            assert_eq!(cell_storage_kind(&ctx, &cell), "inline", "{strategy:?}");
+            assert_eq!(ctx.get_cell(&cell), 42, "{strategy:?}");
+            assert_eq!(ctx.get_cell(&cell), 42, "{strategy:?} cached");
+            ctx.set_cell(&cell, 7);
+            assert_eq!(ctx.get_cell(&cell), 7, "{strategy:?} after set");
+            // set_if_changed suppresses when value is unchanged.
+            let doubled = ctx.computed_copy(move |c| c.get_cell(&cell) * 10);
+            assert_eq!(ctx.get(&doubled), 70, "{strategy:?}");
+            ctx.set_cell(&cell, 7); // no-op
+            assert_eq!(cell_dependents_len(&ctx, &cell), 1, "{strategy:?}");
+        }
+    }
+
+    #[test]
+    fn cell_copy_large_copy_value_falls_back_to_locked() {
+        // 32 bytes > INLINE_CAP (24) → not inline-eligible; uses the Locked
+        // (RwLock) path.
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell_copy([0u8; 32]);
+        assert_eq!(cell_storage_kind(&ctx, &cell), "locked");
+        ctx.set_cell(&cell, [9u8; 32]);
+        assert_eq!(ctx.get_cell(&cell), [9u8; 32]);
+    }
+
+    #[test]
+    fn cell_copy_inline_roundtrips_multifield_struct() {
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        struct Point {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell_copy(Point { x: 1, y: 2, z: 3 });
+        assert_eq!(cell_storage_kind(&ctx, &cell), "inline");
+        assert_eq!(ctx.get_cell(&cell), Point { x: 1, y: 2, z: 3 });
+        ctx.set_cell(&cell, Point { x: 4, y: 8, z: 12 });
+        assert_eq!(ctx.get_cell(&cell), Point { x: 4, y: 8, z: 12 });
+    }
+
+    #[test]
+    fn cell_copy_concurrent_readers_never_observe_torn_value(/* #lzcellread */) {
+        // A `Copy` value whose two halves a writer always keeps equal. A torn
+        // read (half old / half new) would surface as `a != b`; the cell inline
+        // seqlock must make every lock-free `get_cell` observe a complete,
+        // self-consistent snapshot. Mirrors the slot inline seqlock test.
+        #[derive(Clone, Copy, PartialEq)]
+        struct Pair {
+            a: u64,
+            b: u64,
+        }
+        let ctx = Arc::new(ThreadSafeContext::new());
+        let cell = ctx.cell_copy(Pair { a: 0, b: 0 });
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let ctx = Arc::clone(&ctx);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let p = ctx.get_cell(&cell);
+                        assert_eq!(p.a, p.b, "torn inline cell read: {} != {}", p.a, p.b);
+                    }
+                })
+            })
+            .collect();
+        for i in 1..3000u64 {
+            ctx.set_cell(&cell, Pair { a: i, b: i });
+        }
+        stop.store(true, Ordering::Relaxed);
+        for reader in readers {
+            reader.join().expect("reader thread panicked (torn read)");
+        }
+        ctx.set_cell(&cell, Pair { a: 4242, b: 4242 });
+        assert_eq!(ctx.get_cell(&cell).a, 4242);
+    }
+
+    #[test]
+    fn cell_locked_concurrent_readers_scale(/* #lzcellread */) {
+        // The Locked (RwLock) cell path: concurrent get_cell readers take a
+        // shared read lock (not an exclusive Mutex). Asserts correctness under
+        // concurrent reads + writes for a non-Copy value (String).
+        let ctx = Arc::new(ThreadSafeContext::new());
+        let cell = ctx.cell("init".to_string());
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let ctx = Arc::clone(&ctx);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _v = ctx.get_cell(&cell);
+                    }
+                })
+            })
+            .collect();
+        for i in 0..1000u64 {
+            ctx.set_cell(&cell, format!("v{i}"));
+        }
+        stop.store(true, Ordering::Relaxed);
+        for reader in readers {
+            reader.join().expect("reader thread panicked");
+        }
+        assert_eq!(ctx.get_cell(&cell), "v999");
     }
 
     fn slot_revision<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> u64

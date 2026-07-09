@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "lazily"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "arc-swap",
  "criterion",

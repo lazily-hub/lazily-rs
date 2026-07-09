@@ -144,9 +144,9 @@ struct ContextInner {
     scheduled_effects: HashSet<SlotId>,
     flushing_effects: bool,
     batch_depth: usize,
-    batched_cells: HashSet<SlotId>,
-    batched_cell_clears: HashSet<SlotId>,
-    batched_slots: HashSet<SlotId>,
+    batched_cells: EdgeVec,
+    batched_cell_clears: EdgeVec,
+    batched_slots: EdgeVec,
     factory_handles: HashMap<FactoryKey, FactoryEntry>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
@@ -195,9 +195,9 @@ impl Context {
                 scheduled_effects: HashSet::new(),
                 flushing_effects: false,
                 batch_depth: 0,
-                batched_cells: HashSet::new(),
-                batched_cell_clears: HashSet::new(),
-                batched_slots: HashSet::new(),
+                batched_cells: EdgeVec::new(),
+                batched_cell_clears: EdgeVec::new(),
+                batched_slots: EdgeVec::new(),
                 factory_handles: HashMap::new(),
                 #[cfg(feature = "instrumentation")]
                 instrumentation: crate::instrumentation::InstrumentationCounters::default(),
@@ -730,7 +730,7 @@ impl Context {
                 }
             }
             if self.is_batching() {
-                self.inner.borrow_mut().batched_cells.insert(handle.id);
+                self.inner.borrow_mut().batched_cells.push(handle.id);
             } else {
                 self.invalidate_cell_dependents_now(handle.id);
                 self.flush_effects();
@@ -776,14 +776,26 @@ impl Context {
     }
 
     fn flush_batched_invalidations(&self) {
-        let cells: Vec<SlotId> = self.inner.borrow_mut().batched_cells.drain().collect();
-        let cell_clears: Vec<SlotId> = self
-            .inner
-            .borrow_mut()
-            .batched_cell_clears
-            .drain()
-            .collect();
-        let slots: Vec<SlotId> = self.inner.borrow_mut().batched_slots.drain().collect();
+        // Collect + dedup the batched work BEFORE invalidating: the downstream
+        // `invalidate_*`/`clear_*` calls borrow `inner`, so the batched sets
+        // must be extracted first. Sort+dedup replaces the former `HashSet`'s
+        // per-insert dedup with a single O(N log N) pass on flush — the same
+        // pattern `ThreadSafeContext` uses, eliminating per-insert hashing and
+        // per-batch HashSet allocation (#lzbatchalloc).
+        let (cells, cell_clears, slots) = {
+            let mut inner = self.inner.borrow_mut();
+            inner.batched_cells.sort_unstable();
+            inner.batched_cells.dedup();
+            inner.batched_cell_clears.sort_unstable();
+            inner.batched_cell_clears.dedup();
+            inner.batched_slots.sort_unstable();
+            inner.batched_slots.dedup();
+            (
+                std::mem::take(&mut inner.batched_cells),
+                std::mem::take(&mut inner.batched_cell_clears),
+                std::mem::take(&mut inner.batched_slots),
+            )
+        };
 
         for cell_id in cells {
             self.invalidate_cell_dependents_now(cell_id);
@@ -1035,7 +1047,7 @@ impl Context {
     /// Hard-clear a slot's cached value and recursively clear all dependents.
     pub(crate) fn clear_slot(&self, id: SlotId) {
         if self.is_batching() {
-            self.inner.borrow_mut().batched_slots.insert(id);
+            self.inner.borrow_mut().batched_slots.push(id);
             return;
         }
         self.clear_slot_now(id);
@@ -1070,7 +1082,7 @@ impl Context {
 
     pub(crate) fn clear_cell_dependents(&self, id: SlotId) {
         if self.is_batching() {
-            self.inner.borrow_mut().batched_cell_clears.insert(id);
+            self.inner.borrow_mut().batched_cell_clears.push(id);
             return;
         }
         self.clear_cell_dependents_now(id);
@@ -1394,5 +1406,27 @@ mod tests {
         assert_eq!(ctx.get(&d), (1 + 1) + (1 + 2));
         a.set(&ctx, 10);
         assert_eq!(ctx.get(&d), (10 + 1) + (10 + 2));
+    }
+
+    #[test]
+    fn batch_dedup_invalidates_shared_dependent_once(/* #lzbatchalloc */) {
+        // Multiple writes to the same cell inside one batch, plus writes to
+        // several cells sharing one dependent, must coalesce: the shared
+        // dependent is invalidated exactly once on flush. Guards the sort+dedup
+        // replacement for the former HashSet-backed batch sets.
+        let ctx = Context::new();
+        let a = ctx.cell(0i32);
+        let b = ctx.cell(0i32);
+        let total = ctx.computed(move |ctx| ctx.get_cell(&a) + ctx.get_cell(&b));
+        assert_eq!(ctx.get(&total), 0);
+
+        ctx.batch(|ctx| {
+            a.set(ctx, 1);
+            a.set(ctx, 2); // duplicate cell `a` in the batch set
+            a.set(ctx, 3); // triplicate
+            b.set(ctx, 10);
+        });
+        // After the batch flush, the dependent sees the latest coalesced values.
+        assert_eq!(ctx.get(&total), 13);
     }
 }

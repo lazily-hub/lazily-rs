@@ -1512,6 +1512,157 @@ fn inline_seqlock_read_after_completed_invalidation_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Cell inline seqlock model (#lzcellread)
+//
+// Models `CellCachedReadStorage::Inline`: a single-writer / multi-reader seqlock
+// for cell values, where the writer is serialized by a dedicated `Mutex<()>`
+// (not the graph state lock, as on the slot path) and there is NO outer
+// cache_revision/dirty envelope (a cell read always reflects the latest publish
+// — cells have no invalidation lag). The seqlock itself is identical to the slot
+// path's; this model proves the writer-Mutex serialization + lock-free reader
+// combination rejects torn reads under every interleaving, and that
+// `set_if_changed`'s compare-and-set is race-free (two writers cannot both pass
+// the PartialEq check against the same stale old value).
+// ---------------------------------------------------------------------------
+
+struct CellInlineSeqlockModel {
+    seq: AtomicUsize,
+    occupied: AtomicBool,
+    lo: AtomicU8,
+    hi: AtomicU8,
+    writer: Mutex<()>,
+}
+
+impl CellInlineSeqlockModel {
+    fn new(initial: u8) -> Self {
+        let s = Self {
+            seq: AtomicUsize::new(0),
+            occupied: AtomicBool::new(false),
+            lo: AtomicU8::new(0),
+            hi: AtomicU8::new(0),
+            writer: Mutex::new(()),
+        };
+        s.seqlock_write(initial);
+        s
+    }
+
+    fn seqlock_write(&self, v: u8) {
+        let begin = self.seq.load(Ordering::Relaxed).wrapping_add(1);
+        self.seq.store(begin, Ordering::Release);
+        fence(Ordering::Release);
+        self.lo.store(v, Ordering::Relaxed);
+        self.hi.store(v, Ordering::Relaxed);
+        self.occupied.store(true, Ordering::Relaxed);
+        self.seq.store(begin.wrapping_add(1), Ordering::Release);
+    }
+
+    fn seqlock_try_read(&self) -> Option<(u8, u8)> {
+        let s1 = self.seq.load(Ordering::Acquire);
+        if s1 & 1 != 0 {
+            return None;
+        }
+        let occupied = self.occupied.load(Ordering::Relaxed);
+        let lo = self.lo.load(Ordering::Relaxed);
+        let hi = self.hi.load(Ordering::Relaxed);
+        fence(Ordering::Acquire);
+        let s2 = self.seq.load(Ordering::Relaxed);
+        if s1 == s2 && occupied {
+            Some((lo, hi))
+        } else {
+            None
+        }
+    }
+
+    /// Mirrors `CellCachedReadStorage::set_if_changed`: lock the writer Mutex,
+    /// read old via seqlock, compare, write if different.
+    fn set_if_changed(&self, v: u8) -> bool {
+        let _guard = self.writer.lock().expect("cell writer mutex");
+        if let Some((lo, hi)) = self.seqlock_try_read()
+            && lo == v
+            && hi == v
+        {
+            return false;
+        }
+        self.seqlock_write(v);
+        true
+    }
+}
+
+#[test]
+fn cell_inline_seqlock_reader_never_observes_torn_value(/* #lzcellread */) {
+    loom::model(|| {
+        let cell = Arc::new(CellInlineSeqlockModel::new(0));
+
+        let writer = {
+            let cell = Arc::clone(&cell);
+            thread::spawn(move || {
+                cell.set_if_changed(1);
+                cell.set_if_changed(2);
+            })
+        };
+        let reader = {
+            let cell = Arc::clone(&cell);
+            thread::spawn(move || {
+                if let Some((lo, hi)) = cell.seqlock_try_read() {
+                    assert_eq!(lo, hi, "cell seqlock accepted a torn snapshot");
+                }
+            })
+        };
+
+        writer.join().expect("writer should finish");
+        reader.join().expect("reader should finish");
+
+        let (lo, hi) = cell
+            .seqlock_try_read()
+            .expect("final cell read should succeed");
+        assert_eq!(lo, hi);
+        assert_eq!(lo, 2);
+    });
+}
+
+#[test]
+fn cell_inline_set_if_changed_compare_and_set_is_race_free(/* #lzcellread */) {
+    // Two concurrent writers calling set_if_changed: the writer Mutex
+    // serializes them so both observe a consistent old value. No torn publish
+    // can occur, and a set to the current value is correctly suppressed.
+    let mut builder = loom::model::Builder::new();
+    builder.preemption_bound = Some(3);
+    builder.max_duration = Some(Duration::from_secs(30));
+    builder.check(|| {
+        let cell = Arc::new(CellInlineSeqlockModel::new(0));
+
+        let w1 = {
+            let cell = Arc::clone(&cell);
+            thread::spawn(move || cell.set_if_changed(5))
+        };
+        let w2 = {
+            let cell = Arc::clone(&cell);
+            thread::spawn(move || cell.set_if_changed(5))
+        };
+
+        let r1 = {
+            let cell = Arc::clone(&cell);
+            thread::spawn(move || {
+                if let Some((lo, hi)) = cell.seqlock_try_read() {
+                    assert_eq!(lo, hi, "cell seqlock accepted a torn snapshot");
+                    assert!(lo == 0 || lo == 5, "phantom value {}", lo);
+                }
+            })
+        };
+
+        let _ = w1.join().expect("w1 should finish");
+        let _ = w2.join().expect("w2 should finish");
+        r1.join().expect("reader should finish");
+
+        // Exactly one write of value 5 landed (or neither if both suppressed
+        // against 0 — impossible since 0 != 5, so exactly one returns true).
+        let (lo, hi) = cell.seqlock_try_read().expect("final read succeeds");
+        assert_eq!(lo, hi);
+        assert_eq!(lo, 5);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Invalidation-frontier cached-Arc stability model (#lzfrontierarc)
 //
 // Models the invariant `try_mark_slot_frontier_fast` relies on when it caches

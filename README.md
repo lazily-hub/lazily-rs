@@ -274,6 +274,11 @@ run, so callbacks can re-enter the same context without deadlocking. If a slot
 is invalidated while its callback is running, the stale result is discarded and
 the getter retries before returning a fresh value.
 
+Cell values use a read-scaling sidecar (v0.23.0+): `ctx.cell()` reads take a
+shared `RwLock` read (concurrent readers don't serialize), and `ctx.cell_copy()`
+opts small `Copy` values into a wait-free inline seqlock — no heap allocation,
+no refcount traffic on read. Both mirror the slot fast-path design.
+
 ## Design
 
 - **Lazy by default, eager on demand:** Slots mark dirty on invalidation and validate/recompute on access; `ctx.signal()` opts a value into eager recomputation (a memo-slot + puller-effect composition) with no intermediate unset state
