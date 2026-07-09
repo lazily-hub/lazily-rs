@@ -14,27 +14,45 @@ use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
 use std::sync::Arc;
 
 #[cfg(feature = "std_sync_mutex")]
-type StateMutex<T> = std::sync::Mutex<T>;
+type StateRwLock<T> = std::sync::RwLock<T>;
 #[cfg(not(feature = "std_sync_mutex"))]
-type StateMutex<T> = parking_lot::Mutex<T>;
+type StateRwLock<T> = parking_lot::RwLock<T>;
+
+#[cfg(feature = "std_sync_mutex")]
+fn read_state_inner(
+    m: &std::sync::RwLock<ThreadSafeState>,
+) -> std::sync::RwLockReadGuard<'_, ThreadSafeState> {
+    m.read().expect("state rwlock poisoned")
+}
+#[cfg(not(feature = "std_sync_mutex"))]
+fn read_state_inner(
+    m: &parking_lot::RwLock<ThreadSafeState>,
+) -> parking_lot::RwLockReadGuard<'_, ThreadSafeState> {
+    m.read()
+}
 
 #[cfg(feature = "std_sync_mutex")]
 fn lock_state_inner(
-    m: &std::sync::Mutex<ThreadSafeState>,
-) -> std::sync::MutexGuard<'_, ThreadSafeState> {
-    m.lock().expect("state mutex poisoned")
+    m: &std::sync::RwLock<ThreadSafeState>,
+) -> std::sync::RwLockWriteGuard<'_, ThreadSafeState> {
+    m.write().expect("state rwlock poisoned")
 }
 #[cfg(not(feature = "std_sync_mutex"))]
 fn lock_state_inner(
-    m: &parking_lot::Mutex<ThreadSafeState>,
-) -> parking_lot::MutexGuard<'_, ThreadSafeState> {
-    m.lock()
+    m: &parking_lot::RwLock<ThreadSafeState>,
+) -> parking_lot::RwLockWriteGuard<'_, ThreadSafeState> {
+    m.write()
 }
 
 #[cfg(feature = "std_sync_mutex")]
-type StateMutexGuard<'a> = std::sync::MutexGuard<'a, ThreadSafeState>;
+type StateReadGuard<'a> = std::sync::RwLockReadGuard<'a, ThreadSafeState>;
 #[cfg(not(feature = "std_sync_mutex"))]
-type StateMutexGuard<'a> = parking_lot::MutexGuard<'a, ThreadSafeState>;
+type StateReadGuard<'a> = parking_lot::RwLockReadGuard<'a, ThreadSafeState>;
+
+#[cfg(feature = "std_sync_mutex")]
+type StateWriteGuard<'a> = std::sync::RwLockWriteGuard<'a, ThreadSafeState>;
+#[cfg(not(feature = "std_sync_mutex"))]
+type StateWriteGuard<'a> = parking_lot::RwLockWriteGuard<'a, ThreadSafeState>;
 #[cfg(feature = "instrumentation")]
 use std::time::Instant;
 
@@ -48,7 +66,7 @@ use crate::slot::SlotHandle;
 type ThreadSafeAny = dyn Any + Send + Sync;
 type ThreadSafeComputeFn = dyn Fn(&ThreadSafeContext) -> Box<ThreadSafeAny> + Send + Sync;
 type ThreadSafeEqualsFn = dyn Fn(&ThreadSafeAny, &ThreadSafeAny) -> bool + Send + Sync;
-type ThreadSafeCleanup = dyn FnOnce() + Send;
+type ThreadSafeCleanup = dyn FnOnce() + Send + Sync;
 type ThreadSafeEffectFn =
     dyn Fn(&ThreadSafeContext) -> Option<Box<ThreadSafeCleanup>> + Send + Sync;
 
@@ -764,6 +782,11 @@ struct ThreadSafeSlotFastPath {
     cache_revision: AtomicU64,
     dirty: AtomicBool,
     force_recompute: AtomicBool,
+    /// Bumped by `mark_dirty` / `clear` to detect concurrent invalidation during
+    /// recompute. Captured by `begin_recompute` and checked after compute
+    /// (#lzstateinvalidation — moved from the recompute Mutex to an atomic so
+    /// `mark_dirty` is Mutex-free).
+    invalidation_revision: AtomicU64,
     compute: Arc<ThreadSafeComputeFn>,
     dependencies: Mutex<EdgeVec>,
     slot_dependency_count: AtomicUsize,
@@ -787,6 +810,7 @@ impl ThreadSafeSlotFastPath {
             cache_revision: AtomicU64::default(),
             dirty: AtomicBool::default(),
             force_recompute: AtomicBool::default(),
+            invalidation_revision: AtomicU64::default(),
             compute,
             dependencies: Mutex::new(initial_dependencies),
             slot_dependency_count: AtomicUsize::new(slot_dependency_count),
@@ -853,70 +877,42 @@ impl ThreadSafeSlotFastPath {
         self.needs_refresh() && self.slot_dependency_count.load(Ordering::Acquire) == 0
     }
 
-    fn dirty_force(&self) -> (bool, bool) {
-        let recompute = self.lock_recompute_state();
-        (recompute.dirty, recompute.force_recompute)
-    }
-
     fn store_value(&self, value: Option<Arc<ThreadSafeAny>>) {
         self.value.store(value);
         self.cache_revision.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Mark dirty using atomics only — no per-node Mutex (#lzstateinvalidation).
+    /// Called from `apply_locked` under the state write lock; the recompute
+    /// Mutex is NOT touched, eliminating N per-node Mutex acquisitions during a
+    /// fan-out N invalidation pass.
     fn mark_dirty(&self, force_recompute: bool) {
-        {
-            let mut recompute = self.lock_recompute_state();
-            recompute.revision = recompute.revision.wrapping_add(1);
-            recompute.dirty = true;
-            recompute.force_recompute |= force_recompute;
-            if force_recompute {
-                self.force_recompute.store(true, Ordering::Release);
-            }
-            self.dirty.store(true, Ordering::Release);
+        self.invalidation_revision.fetch_add(1, Ordering::AcqRel);
+        if force_recompute {
+            self.force_recompute.store(true, Ordering::Release);
         }
+        self.dirty.store(true, Ordering::Release);
         self.cache_revision.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn try_mark_dirty_without_inflight(&self, force_recompute: bool) -> bool {
-        {
-            let mut recompute = self.lock_recompute_state();
-            if recompute.computing {
-                return false;
-            }
-            recompute.revision = recompute.revision.wrapping_add(1);
-            recompute.dirty = true;
-            recompute.force_recompute |= force_recompute;
-            if force_recompute {
-                self.force_recompute.store(true, Ordering::Release);
-            }
-            self.dirty.store(true, Ordering::Release);
-        }
-        self.cache_revision.fetch_add(1, Ordering::AcqRel);
-        true
     }
 
     fn mark_fresh(&self, has_value: bool) {
         {
             let mut recompute = self.lock_recompute_state();
             recompute.has_value = has_value;
-            recompute.dirty = false;
-            recompute.force_recompute = false;
-            self.force_recompute.store(false, Ordering::Release);
-            self.dirty.store(false, Ordering::Release);
         }
+        self.force_recompute.store(false, Ordering::Release);
+        self.dirty.store(false, Ordering::Release);
     }
 
     fn clear(&self) {
         self.store_value(None);
+        self.invalidation_revision.fetch_add(1, Ordering::AcqRel);
         {
             let mut recompute = self.lock_recompute_state();
-            recompute.revision = recompute.revision.wrapping_add(1);
             recompute.has_value = false;
-            recompute.dirty = false;
-            recompute.force_recompute = false;
-            self.force_recompute.store(false, Ordering::Release);
-            self.dirty.store(false, Ordering::Release);
         }
+        self.force_recompute.store(false, Ordering::Release);
+        self.dirty.store(false, Ordering::Release);
     }
 
     fn lock_recompute_state(&self) -> MutexGuard<'_, ThreadSafeSlotRecomputeState> {
@@ -930,7 +926,7 @@ impl ThreadSafeSlotFastPath {
         }
         recompute.computing = true;
         Some(ThreadSafeRecomputeStart {
-            revision: recompute.revision,
+            revision: self.invalidation_revision.load(Ordering::Acquire),
             was_unset: !recompute.has_value,
         })
     }
@@ -940,7 +936,7 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn current_recompute_revision(&self) -> u64 {
-        self.lock_recompute_state().revision
+        self.invalidation_revision.load(Ordering::Acquire)
     }
 
     fn finish_recompute(&self) {
@@ -972,7 +968,10 @@ impl ThreadSafeSlotFastPath {
         } else {
             false
         };
-        if recompute.has_value && !recompute.dirty && !recompute.force_recompute {
+        if recompute.has_value
+            && !self.dirty.load(Ordering::Acquire)
+            && !self.force_recompute.load(Ordering::Acquire)
+        {
             drop(recompute);
             if notify_next_waiter {
                 self.recompute_condvar.notify_one();
@@ -1012,20 +1011,13 @@ impl ThreadSafeSlotFastPath {
     fn remove_dependent(&self, dependent_id: SlotId) {
         dependent_edge_remove(&mut self.dependents.lock(), dependent_id);
     }
-
-    fn dependents_snapshot(&self) -> Vec<(SlotId, ThreadSafeDependentKind)> {
-        self.dependents.lock().to_vec()
-    }
 }
 
 #[derive(Default)]
 struct ThreadSafeSlotRecomputeState {
     has_value: bool,
-    dirty: bool,
-    force_recompute: bool,
     computing: bool,
     waiters: usize,
-    revision: u64,
 }
 
 struct ThreadSafeRecomputeStart {
@@ -1081,10 +1073,6 @@ impl ThreadSafeCellFastPath {
 
     fn remove_dependent(&self, dependent_id: SlotId) {
         dependent_edge_remove(&mut self.dependents.lock(), dependent_id);
-    }
-
-    fn dependents_snapshot(&self) -> Vec<(SlotId, ThreadSafeDependentKind)> {
-        self.dependents.lock().to_vec()
     }
 }
 
@@ -1389,7 +1377,7 @@ impl ThreadSafeState {
 }
 
 struct ThreadSafeInner {
-    state: StateMutex<ThreadSafeState>,
+    state: StateRwLock<ThreadSafeState>,
     slot_fast_paths: RwLock<Vec<Option<Arc<ThreadSafeSlotFastPath>>>>,
     cell_fast_paths: RwLock<Vec<Option<Arc<ThreadSafeCellFastPath>>>>,
     read_strategy: ReadStrategy,
@@ -1404,7 +1392,7 @@ struct ThreadSafeInner {
 impl Default for ThreadSafeInner {
     fn default() -> Self {
         Self {
-            state: StateMutex::new(ThreadSafeState::default()),
+            state: StateRwLock::new(ThreadSafeState::default()),
             slot_fast_paths: RwLock::new(Vec::new()),
             cell_fast_paths: RwLock::new(Vec::new()),
             read_strategy: ReadStrategy::default(),
@@ -1421,7 +1409,7 @@ impl Default for ThreadSafeInner {
 
 #[cfg(feature = "instrumentation")]
 struct ProfiledReadGuard<'a> {
-    guard: Option<StateMutexGuard<'a>>,
+    guard: Option<StateReadGuard<'a>>,
     lock_instrumentation: &'a crate::instrumentation::ThreadSafeLockInstrumentation,
     site: ThreadSafeLockSite,
     acquired_at: Instant,
@@ -1429,7 +1417,7 @@ struct ProfiledReadGuard<'a> {
 
 #[cfg(feature = "instrumentation")]
 struct ProfiledWriteGuard<'a> {
-    guard: Option<StateMutexGuard<'a>>,
+    guard: Option<StateWriteGuard<'a>>,
     lock_instrumentation: &'a crate::instrumentation::ThreadSafeLockInstrumentation,
     site: ThreadSafeLockSite,
     acquired_at: Instant,
@@ -1502,7 +1490,7 @@ impl ThreadSafeEffectCallbackResult for () {
 
 impl<F> ThreadSafeEffectCallbackResult for F
 where
-    F: FnOnce() + Send + 'static,
+    F: FnOnce() + Send + Sync + 'static,
 {
     fn into_thread_safe_cleanup(self) -> Option<Box<ThreadSafeCleanup>> {
         Some(Box::new(self))
@@ -1651,12 +1639,12 @@ impl ThreadSafeContext {
     }
 
     #[cfg(not(feature = "instrumentation"))]
-    fn read_state(&self) -> StateMutexGuard<'_> {
-        lock_state_inner(&self.inner.state)
+    fn read_state(&self) -> StateReadGuard<'_> {
+        read_state_inner(&self.inner.state)
     }
 
     #[cfg(not(feature = "instrumentation"))]
-    fn lock_state(&self) -> StateMutexGuard<'_> {
+    fn lock_state(&self) -> StateWriteGuard<'_> {
         lock_state_inner(&self.inner.state)
     }
 
@@ -1664,7 +1652,7 @@ impl ThreadSafeContext {
     fn read_state(&self) -> ProfiledReadGuard<'_> {
         let site = current_thread_safe_lock_site();
         let wait_started = Instant::now();
-        let guard = lock_state_inner(&self.inner.state);
+        let guard = read_state_inner(&self.inner.state);
         self.inner
             .lock_instrumentation
             .record_lock_wait(site, wait_started.elapsed());
@@ -1753,10 +1741,6 @@ impl ThreadSafeContext {
         self.slot_fast_path(id)
             .map(|fast_path| fast_path.needs_refresh_without_slot_dependencies())
             .unwrap_or(false)
-    }
-
-    fn callbacks_active(&self) -> bool {
-        self.inner.active_callbacks.load(Ordering::Acquire) > 0
     }
 
     fn callback_activity(&self) -> CallbackActivityGuard {
@@ -2445,6 +2429,12 @@ impl ThreadSafeContext {
     }
 
     /// Set a cell value. Changed values invalidate dependents.
+    ///
+    /// All invalidation goes through the state-locked path (v0.24.0+,
+    /// #lzstateinvalidation): the former `try_invalidate_cell_dependents_fast`
+    /// sidecar path acquired 3 per-node Mutexes + 1 RwLock per BFS node. The
+    /// state-locked path reads node fields directly under one lock — the same
+    /// model lazily-cpp uses (one recursive_mutex, raw-pointer inner loop).
     pub fn set_cell<T>(&self, handle: &CellHandle<T>, new_value: T)
     where
         T: PartialEq + Send + Sync + 'static,
@@ -2460,17 +2450,7 @@ impl ThreadSafeContext {
             return;
         }
 
-        let should_flush = if let Some(should_flush) =
-            self.try_invalidate_cell_dependents_fast(handle.id, &fast_path)
-        {
-            should_flush
-        } else {
-            #[cfg(feature = "instrumentation")]
-            self.inner
-                .invalidation_instrumentation
-                .record_sidecar_fallback();
-            self.invalidate_changed_cell_locked(handle.id)
-        };
+        let should_flush = self.invalidate_changed_cell_locked(handle.id);
 
         if should_flush {
             self.flush_effects();
@@ -2492,119 +2472,6 @@ impl ThreadSafeContext {
             Self::invalidate_cell_dependents_locked(&mut state, id);
         }
         !batching
-    }
-
-    fn try_invalidate_cell_dependents_fast(
-        &self,
-        id: SlotId,
-        fast_path: &ThreadSafeCellFastPath,
-    ) -> Option<bool> {
-        if self.callbacks_active() {
-            return None;
-        }
-
-        if self.inner.batch_depth.load(Ordering::Acquire) > 0 {
-            let mut state = self.lock_state();
-            if state.batch_depth > 0 {
-                state.batched_cells.push(id);
-                return Some(false);
-            }
-            return None;
-        }
-
-        let dependents = fast_path.dependents_snapshot();
-        if dependents.is_empty() {
-            return None;
-        }
-        let roots = dependents.into_iter().map(|(id, kind)| (id, kind, true));
-        self.try_mark_slot_frontier_fast(roots)
-    }
-
-    fn try_mark_slot_frontier_fast<I>(&self, roots: I) -> Option<bool>
-    where
-        I: IntoIterator<Item = (SlotId, ThreadSafeDependentKind, bool)>,
-    {
-        let mut queue = VecDeque::new();
-        let mut requested_force = HashMap::new();
-        for (id, kind, force_recompute) in roots {
-            match kind {
-                ThreadSafeDependentKind::Slot => Self::enqueue_invalidation_root(
-                    &mut queue,
-                    &mut requested_force,
-                    ThreadSafeInvalidationRoot {
-                        id,
-                        force_recompute,
-                    },
-                ),
-                ThreadSafeDependentKind::Effect => return None,
-            }
-        }
-
-        let mut slots_to_mark = HashMap::<SlotId, bool>::new();
-        // Cache the fast-path `Arc` alongside the frontier order so the marking
-        // pass reuses the exact object observed during the BFS instead of
-        // re-acquiring the `slot_fast_paths` `RwLock` read lock per visited slot.
-        // SAFETY invariant: a `slot_fast_paths` entry is write-once for a given
-        // slot id — it is set at slot creation (`register_slot_fast_path`) and
-        // never cleared or replaced, because `ThreadSafeContext` never frees a
-        // slot id (only `dispose_effect` pushes to `free_ids`, and effects do
-        // not index `slot_fast_paths`). The `Arc` fetched at BFS time is
-        // therefore identical to the one a re-fetch at marking time would
-        // return; caching it is observational-equivalent to the prior re-fetch
-        // and removes one `RwLock` read acquisition per frontier slot.
-        let mut slot_order: Vec<(SlotId, Arc<ThreadSafeSlotFastPath>)> = Vec::new();
-
-        while let Some(root) = queue.pop_front() {
-            let Some(force_recompute) = requested_force.get(&root.id).copied() else {
-                continue;
-            };
-            if root.force_recompute != force_recompute {
-                continue;
-            }
-
-            let fast_path = self.slot_fast_path(root.id)?;
-            let (dirty, force_state) = fast_path.dirty_force();
-            let should_propagate = !dirty || (force_recompute && !force_state);
-
-            match slots_to_mark.get_mut(&root.id) {
-                Some(force) => *force |= force_recompute,
-                None => {
-                    slots_to_mark.insert(root.id, force_recompute);
-                    slot_order.push((root.id, Arc::clone(&fast_path)));
-                }
-            }
-
-            if should_propagate {
-                for (dependent_id, dependent_kind) in fast_path.dependents_snapshot() {
-                    match dependent_kind {
-                        ThreadSafeDependentKind::Slot => Self::enqueue_invalidation_root(
-                            &mut queue,
-                            &mut requested_force,
-                            ThreadSafeInvalidationRoot {
-                                id: dependent_id,
-                                force_recompute: false,
-                            },
-                        ),
-                        ThreadSafeDependentKind::Effect => return None,
-                    }
-                }
-            }
-        }
-
-        #[cfg(feature = "instrumentation")]
-        let dirty_marks = slot_order.len();
-        for (id, fast_path) in slot_order {
-            let force_recompute = slots_to_mark.get(&id).copied().unwrap_or(false);
-            if !fast_path.try_mark_dirty_without_inflight(force_recompute) {
-                return None;
-            }
-        }
-        #[cfg(feature = "instrumentation")]
-        self.inner
-            .invalidation_instrumentation
-            .record_sidecar_frontier(dirty_marks);
-
-        Some(false)
     }
 
     /// Run several updates as one invalidation pass.
@@ -3065,24 +2932,6 @@ impl ThreadSafeContext {
             Some(ThreadSafeNode::Slot(slot)) => slot.dependents.clone(),
             Some(ThreadSafeNode::Cell(cell)) => cell.dependents.clone(),
             Some(ThreadSafeNode::Effect(_)) | None => EdgeVec::new(),
-        }
-    }
-
-    fn enqueue_invalidation_root(
-        queue: &mut VecDeque<ThreadSafeInvalidationRoot>,
-        requested_force: &mut HashMap<SlotId, bool>,
-        root: ThreadSafeInvalidationRoot,
-    ) {
-        match requested_force.get_mut(&root.id) {
-            Some(force_recompute) if root.force_recompute && !*force_recompute => {
-                *force_recompute = true;
-                queue.push_back(root);
-            }
-            Some(_) => {}
-            None => {
-                requested_force.insert(root.id, root.force_recompute);
-                queue.push_back(root);
-            }
         }
     }
 

@@ -157,18 +157,6 @@ pub(crate) struct ThreadSafeInvalidationInstrumentation {
 }
 
 impl ThreadSafeInvalidationInstrumentation {
-    pub(crate) fn record_sidecar_frontier(&self, dirty_marks: usize) {
-        self.sidecar_invalidation_frontiers
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.sidecar_dirty_marks
-            .fetch_add(dirty_marks as u64, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(crate) fn record_sidecar_fallback(&self) {
-        self.sidecar_invalidation_fallbacks
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
     pub(crate) fn apply_to_snapshot(&self, snapshot: &mut InstrumentationSnapshot) {
         let sidecar_frontiers = self
             .sidecar_invalidation_frontiers

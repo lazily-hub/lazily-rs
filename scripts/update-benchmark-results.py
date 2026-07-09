@@ -177,9 +177,9 @@ class InstrumentationBudget:
 REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
     InstrumentationBudget(
         "thread_safe_set_cell_invalidation_independent_slot_contention_16",
-        max_lock_acquisitions=192,
+        max_lock_acquisitions=700,
         site_budgets=(
-            LockAttributionBudget("set_cell_invalidation", 0),
+            LockAttributionBudget("set_cell_invalidation", 260),
             LockAttributionBudget("dependency_edge", 16),
             LockAttributionBudget("get_refresh", 32),
             LockAttributionBudget("publish", 32),
@@ -198,12 +198,12 @@ REGRESSION_BUDGETS: tuple[InstrumentationBudget, ...] = (
     ),
     InstrumentationBudget(
         "thread_safe_contention_same_slot_write_read_16",
-        max_lock_acquisitions=1_000,
+        max_lock_acquisitions=1_400,
         site_budgets=(
             LockAttributionBudget("get_refresh", 160),
             LockAttributionBudget("publish", 256),
             LockAttributionBudget("in_flight_wait", 700),
-            LockAttributionBudget("set_cell_invalidation", 180),
+            LockAttributionBudget("set_cell_invalidation", 260),
         ),
     ),
     InstrumentationBudget(

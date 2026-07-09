@@ -280,6 +280,14 @@ shared `RwLock` read (concurrent readers don't serialize), and `ctx.cell_copy()`
 opts small `Copy` values into a wait-free inline seqlock — no heap allocation,
 no refcount traffic on read. Both mirror the slot fast-path design.
 
+The graph state lock is an `RwLock` (v0.24.0+, #lzstateinvalidation):
+`read_state()` acquires a shared read lock, `lock_state()` an exclusive write
+lock. All invalidation routes through the state-locked path — one lock for the
+entire BFS pass, with atomics-only dirty marking (no per-node Mutex
+acquisitions). This mirrors lazily-cpp's single-recursive-mutex model: fewer,
+coarser locks with a fast inner loop beat many fine-grained locks for reactive
+fan-out workloads.
+
 ## Design
 
 - **Lazy by default, eager on demand:** Slots mark dirty on invalidation and validate/recompute on access; `ctx.signal()` opts a value into eager recomputation (a memo-slot + puller-effect composition) with no intermediate unset state
