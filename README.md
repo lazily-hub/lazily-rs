@@ -343,7 +343,7 @@ erased-value storage.
 
 ## Benchmarks
 
-See [BENCHMARKS.md](BENCHMARKS.md) for full benchmark results, regression budgets, lock attribution, and instrumentation profiles.
+See [BENCHMARKS.md](BENCHMARKS.md) for full benchmark results, regression budgets, lock attribution, instrumentation profiles, and a cross-language comparison with lazily-cpp and lazily-zig.
 
 For large-graph evidence, see the [Scale (≥1M cells)](BENCHMARKS.md#scale-1m-cells--lzscalebench) section (a criterion-tracked `scale` group): a spreadsheet-shaped graph of ~2M nodes builds in ~0.13 s and fully recomputes from cold in ~0.10 s, while a single-cell edit + bounded viewport read recomputes only the viewport (~11.5 µs / 1,000 cells, ~5,000× cheaper than a full recalc).
 
