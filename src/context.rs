@@ -505,6 +505,30 @@ impl Context {
     }
 
     fn refresh_slot(&self, id: SlotId) -> bool {
+        // Fast path: clean cache hit. When the slot holds a value and is
+        // neither dirty nor force-recompute, no upstream value can have
+        // changed since the last compute — invalidation always sets
+        // `dirty=true` on dependents via `mark_slot_dirty` (called from
+        // `invalidate_dependent_from_changed_value` with `force_recompute=true`
+        // for both cell- and slot-driven changes). The dependency-refresh walk,
+        // the cycle guard, and the dirty-flag clear are therefore all
+        // unnecessary on this path. This is the hot path for cached slot
+        // reads: it collapses the borrowMut (enter_refresh) + guard-drop
+        // borrowMut + dependencies Vec clone + per-dep `is_slot_node` borrows
+        // + needs_recompute borrow + clear_slot_dirty_flags borrowMut down to a
+        // single shared borrow.
+        {
+            let inner = self.inner.borrow();
+            match Self::get_node(&inner.nodes, id) {
+                Some(Node::Slot(slot)) => {
+                    if slot.value.is_some() && !slot.dirty && !slot.force_recompute {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+
         // Cycle guard: mark this slot in-progress for the duration of the
         // refresh. If the pull-based walk re-enters the same slot (a slot that
         // depends on itself directly or transitively), `enter_refresh` panics
