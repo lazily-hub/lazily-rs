@@ -77,6 +77,7 @@ mod instrumentation;
 mod ipc;
 #[cfg(feature = "lossless-tree")]
 mod lossless_tree_crdt;
+mod queue;
 mod receipt;
 mod reconcile;
 mod sem_tree;
@@ -187,6 +188,9 @@ pub use lazily_macros::{cell, slot};
 pub use lossless_tree_crdt::{
     LeafKind, LosslessTreeCrdt, NodeSeed, TreeError, TreeNodeId, TreeOp, TreeOpId, TreeUpdate,
     TreeVersionFrontier,
+};
+pub use queue::{
+    QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, VecDequeStorage,
 };
 pub use receipt::{
     CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,

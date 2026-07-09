@@ -21,10 +21,12 @@ this repo.
 - `src/signal.rs` — eager `Signal` primitive (`ctx.signal`); a memoized Slot plus a puller Effect, exposed on `Context`, `ThreadSafeContext`, and `AsyncContext`
 - `src/async_context.rs` — `AsyncContext` async reactive graph (feature-gated behind `async`)
 - `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph (feature-gated behind `thread-safe` since v0.18.0)
+- `src/queue.rs` — `QueueCell` (SPSC reactive FIFO + MPSC-via-`batch()` usage rule) + `QueueStorage` adapter trait + `VecDequeStorage` default backend (`#lzqueue`). Reader-kind invalidation (head/len/is_empty/is_full/closed); bounded reactive backpressure via `is_full`; closure lifecycle (drain / Closed-distinct-from-Empty / idempotent+terminal).
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)
 - `tests/collections_conformance.rs` — keyed cell collections compute fixtures (lazily-spec/conformance/collections); value/membership/order independence, atomic move, LIS reconciliation, memoized semantic tree, manufactured text identity, character CRDT convergence
+- `tests/queue_conformance.rs` — reactive queue (`QueueCell`) compute fixtures (lazily-spec/conformance/collections/`queuecell_*.json`); SPSC total FIFO, popped-head reader-kind independence, MPSC multi-writer inside `batch()`, bounded reactive backpressure (`is_full`), closure lifecycle
 - `tests/seqcrdt_conformance.rs` — move-aware sequence CRDT compute fixture (lazily-spec/conformance/collections/seqcrdt_convergence.json); concurrent-insert/move/value-edit convergence, tombstone commutativity (feature-gated, needs `distributed`)
 - `tests/schema_compliance.rs` — lazily-rs serde output validates against lazily-spec JSON Schemas (#lzspecschema)
 - `tests/command_conformance.rs` — command/RPC message plane (`command-plane-v1`) fixture replay (lazily-spec/conformance/message-passing); projection reducer + RPC facade terminal-only rule (feature-gated `ipc`)
@@ -52,6 +54,7 @@ make test-loom       # Run thread-safe Loom model tests
 make test-lean-formal    # Build ../lazily-spec/formal/lean with lake
 make test-lazily-formal  # Build ../lazily-formal with lake (full Harel chart + reactive graph + collections/tree/reconciliation/async proofs)
 make test-seqcrdt-conformance  # Replay ../lazily-spec/conformance/collections/seqcrdt_convergence.json (needs --features distributed)
+make test-queue-conformance   # Replay ../lazily-spec/conformance/collections/queuecell_*.json (needs --features serde)
 make benchmark-check # Verify generated benchmark results and instrumentation budgets
 make benchmark-update # Run python3 scripts/update-benchmark-results.py to regenerate BENCHMARKS.md
 make instrumentation-profile # Run examples/instrumentation_profile.rs with --features instrumentation

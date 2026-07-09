@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.21.6"
+version = "0.22.0"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -91,7 +91,7 @@ scale-bench = []
 scale-compare = ["dep:leptos_reactive"]
 
 [dependencies]
-lazily-macros = { version = "=0.21.6", path = "macros" }
+lazily-macros = { version = "=0.22.0", path = "macros" }
 leptos_reactive = { version = "0.6", optional = true }
 arc-swap = "1"
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }

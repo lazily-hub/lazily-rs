@@ -26,6 +26,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	test-ipc-binary \
 	test-ipc-conformance \
 	test-collections-conformance \
+	test-queue-conformance \
 	test-seqcrdt-conformance \
 	test-lossless-tree \
 	test-schema-compliance \
@@ -39,7 +40,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-queue-conformance test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -113,6 +114,15 @@ test-ipc-conformance:
 # this target needs no feature flags.
 test-collections-conformance:
 >$(CARGO) test --locked --test collections_conformance
+
+# Reactive queue conformance (#lzqueue): lazily-rs replays the canonical compute
+# fixtures in lazily-spec/conformance/collections/ `queuecell_*.json` — SPSC
+# total FIFO, popped-head observation (reader-kind independence), MPSC
+# multi-writer inside batch(), bounded reactive backpressure (is_full), and the
+# closure lifecycle. Required of every binding (see the Binding Conformance
+# Matrix). The `serde` feature is enabled for the VecDequeStorage wire-shape test.
+test-queue-conformance:
+>$(CARGO) test --locked --features serde --test queue_conformance
 
 # Move-aware sequence CRDT conformance (#lzseqcrdt): lazily-rs replays the
 # canonical compute fixture in lazily-spec/conformance/collections/

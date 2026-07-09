@@ -1,6 +1,6 @@
 [package]
 name = "lazily-macros"
-version = "0.21.6"
+version = "0.22.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Attribute macros for lazily reactive slot and cell factories"

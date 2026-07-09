@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "lazily"
-version = "0.21.6"
+version = "0.22.0"
 dependencies = [
  "arc-swap",
  "criterion",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "lazily-macros"
-version = "0.21.6"
+version = "0.22.0"
 dependencies = [
  "proc-macro2",
  "quote",
