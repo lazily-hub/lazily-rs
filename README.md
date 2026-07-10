@@ -155,6 +155,65 @@ mixing handles from different context families. Rust nightly's
 feature for hidden concrete return types, and is not needed for Lazily context
 schemas.
 
+### Actor recipe (mailbox + RPC)
+
+An **actor** — private state that talks only through messages — falls out of two
+primitives: a `QueueCell` mailbox the actor drains, and correlation-by-id for
+request/response RPC. No thread, no polling loop, no async runtime.
+
+- **Mailbox**: `QueueCell<Request>`. A push flips the `is_empty` reader
+  empty → non-empty, which reruns the actor's drain effect; the single-threaded
+  scheduler flushes effects synchronously, so the message is handled by the time
+  `send` returns.
+- **RPC (request → response)**: each request carries a correlation `id`; the
+  actor answers on a shared **outbox** `QueueCell<Reply>` and the caller pops the
+  reply whose id matches. Correlating by id (rather than embedding a reply queue
+  in each message) keeps every payload `PartialEq + Clone` — `QueueCell<T>`'s
+  bound on its element.
+- **Fire-and-forget**: a request with no reply is pure message passing — the
+  actor mutates its private state and returns nothing.
+- The actor's own state lives in a plain `Cell`, deliberately outside the
+  reactive graph, so the drain effect subscribes to the mailbox alone.
+
+```rust
+use std::cell::Cell as StdCell;
+use std::rc::Rc;
+use lazily::{Context, QueueCell};
+
+let ctx = Context::new();
+let mailbox: QueueCell<(u64, i64)> = QueueCell::new(&ctx); // (id, delta); id 0 == "report"
+let outbox: QueueCell<(u64, i64)> = QueueCell::new(&ctx);  // (id, total)
+let total = Rc::new(StdCell::new(0i64));                    // private actor state
+
+// Drain effect: wakes on every push, drains to empty, answers reports on the outbox.
+let _drain = {
+    let (mailbox, outbox, total) = (mailbox.clone(), outbox.clone(), Rc::clone(&total));
+    ctx.effect(move |ctx| {
+        while !mailbox.is_empty(ctx) {
+            let Ok((id, delta)) = mailbox.try_pop(ctx) else { break };
+            if id == 0 {
+                total.set(total.get() + delta);            // fire-and-forget
+            } else {
+                let _ = outbox.try_push(ctx, (id, total.get())); // RPC reply
+            }
+        }
+    })
+};
+
+mailbox.try_push(&ctx, (0, 5)).unwrap(); // handled synchronously on push
+mailbox.try_push(&ctx, (0, 3)).unwrap();
+mailbox.try_push(&ctx, (7, 0)).unwrap(); // request a report, id 7
+assert_eq!(outbox.try_pop(&ctx).unwrap(), (7, 8));
+```
+
+The full runnable version — a typed `CounterActor` with a `send`/`get` API and
+id-matched reply dispatch — is in
+[`examples/actor_rpc.rs`](examples/actor_rpc.rs) (`cargo run --example
+actor_rpc`). For a distributed actor whose messages cross a process boundary
+with causal-receipt delivery guarantees, project this same shape onto the
+command/RPC plane (`CommandRpcClient` / `CommandTransport` in `src/command.rs`,
+feature `ipc`).
+
 ## Why Lazy?
 
 | | Lazy (Slots) | Eager (Signals) |
