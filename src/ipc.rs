@@ -28,7 +28,98 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// the node value.
 pub type IpcPayload = Vec<u8>;
 
-/// Descriptor for a payload stored in a shared-memory blob arena.
+/// Which pluggable blob backend holds a descriptor's bytes (zero-copy
+/// transport, `#lzzcpy`).
+///
+/// Spec: `lazily-spec/docs/zero-copy-transport.md`. The descriptor
+/// ([`ShmBlobRef`]) carries this discriminator so a receiver routes resolution
+/// to the right backend. Defaults to [`BlobBackendKind::Shm`] for backward
+/// compatibility — legacy descriptors absent the field resolve as POSIX shared
+/// memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum BlobBackendKind {
+    /// POSIX shared-memory region (`shm_open` + `mmap`) — the default
+    /// cross-process backend (same host).
+    #[default]
+    Shm,
+    /// Apache Arrow IPC stream / Flight-resolved buffer — columnar zero-copy.
+    /// The descriptor's bytes are an Arrow IPC stream the receiver imports
+    /// zero-copy.
+    Arrow,
+    /// An in-process arena (single address space — the FFI host / an editor
+    /// plugin loaded in the same process).
+    InProcess,
+}
+
+impl BlobBackendKind {
+    /// Returns the lowercase wire string for this backend (`"shm"`, `"arrow"`,
+    /// `"in_process"`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shm => "shm",
+            Self::Arrow => "arrow",
+            Self::InProcess => "in_process",
+        }
+    }
+
+    /// Parses a backend discriminator from its wire string. Unknown strings
+    /// fall back to [`BlobBackendKind::Shm`] (the default) so a legacy or
+    /// forward-compatible descriptor never hard-fails resolution.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "arrow" => Self::Arrow,
+            "in_process" => Self::InProcess,
+            _ => Self::Shm,
+        }
+    }
+
+    /// Whether this is the default backend ([`Shm`]). Used by
+    /// `skip_serializing_if` so legacy descriptors omit the field.
+    ///
+    /// [`Shm`]: BlobBackendKind::Shm
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Shm)
+    }
+}
+
+impl fmt::Display for BlobBackendKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for BlobBackendKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BlobBackendKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = BlobBackendKind;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a blob backend string (\"shm\" | \"arrow\" | \"in_process\")")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(BlobBackendKind::from_str(v))
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+/// Descriptor for a payload stored in a blob backend (shared-memory arena,
+/// Arrow buffer, or in-process arena).
+///
+/// The `backend` field is optional and defaults to [`BlobBackendKind::Shm`]:
+/// it is omitted on the wire (self-describing codecs) when `Shm` so legacy
+/// descriptors validate unchanged. The arena header itself is backend-agnostic
+/// and does not store `backend` — the discriminator is wire-level routing
+/// metadata only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ShmBlobRef {
     /// Offset of the blob header from the beginning of the shared arena.
@@ -41,6 +132,11 @@ pub struct ShmBlobRef {
     pub epoch: u64,
     /// Non-cryptographic payload checksum for torn-write/stale-region checks.
     pub checksum: u64,
+    /// Which pluggable backend resolves this descriptor. Optional; defaults to
+    /// [`BlobBackendKind::Shm`] and is omitted on the wire when `Shm` for
+    /// backward compatibility.
+    #[serde(default, skip_serializing_if = "BlobBackendKind::is_default")]
+    pub backend: BlobBackendKind,
 }
 
 /// IPC value stored inline or by shared-memory blob reference.
@@ -104,6 +200,12 @@ pub enum ShmBlobArenaError {
     },
     /// The arena generation counter overflowed.
     GenerationOverflow,
+    /// A blob backend setup or I/O failure (e.g. a POSIX `shm` `shm_open` /
+    /// `mmap` failure in [`ShmBackend`](crate::ShmBackend)).
+    BackendIo {
+        /// Human-readable backend/OS error detail.
+        detail: String,
+    },
 }
 
 impl fmt::Display for ShmBlobArenaError {
@@ -135,6 +237,7 @@ impl fmt::Display for ShmBlobArenaError {
                 "SHM blob checksum mismatch: expected {expected:#x}, got {actual:#x}"
             ),
             Self::GenerationOverflow => write!(f, "SHM blob generation counter overflowed"),
+            Self::BackendIo { detail } => write!(f, "blob backend I/O error: {detail}"),
         }
     }
 }
@@ -251,6 +354,9 @@ where
             generation,
             epoch,
             checksum,
+            // The arena is backend-agnostic; the default `Shm` lets an
+            // `InProcessBackend` overwrite this after minting.
+            backend: BlobBackendKind::Shm,
         };
 
         let payload_offset = offset + SHM_BLOB_HEADER_LEN;
@@ -301,7 +407,10 @@ where
             });
         }
 
-        let header = read_header(self.bytes.as_ref(), offset)?;
+        let mut header = read_header(self.bytes.as_ref(), offset)?;
+        // The arena header does not store `backend`; align it to the descriptor
+        // so a non-Shm descriptor validates against the backend-agnostic header.
+        header.backend = descriptor.backend;
         if header != descriptor {
             return Err(mismatch_field(header, descriptor));
         }
@@ -1735,6 +1844,10 @@ fn read_header(bytes: &[u8], offset: usize) -> Result<ShmBlobRef, ShmBlobArenaEr
         epoch: read_u64(header, 16),
         len: read_u64(header, 24),
         checksum: read_u64(header, 32),
+        // The arena header does not store `backend` — it is wire-level routing
+        // metadata only. Default to `Shm`; `read_blob` normalizes it before
+        // the equality check so a non-Shm descriptor still validates.
+        backend: BlobBackendKind::Shm,
     })
 }
 

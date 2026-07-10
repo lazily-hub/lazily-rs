@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.24.0"
+version = "0.25.0"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -48,6 +48,11 @@ ipc-msgpack = ["ipc", "dep:rmp-serde"]
 # model has something to test.
 loom = ["thread-safe"]
 serde = ["dep:serde", "smallvec?/serde"]
+# #lzzcpy: POSIX shared-memory backend (`ShmBackend`) for the cross-process
+# zero-copy transport — a `shm_open` + `mmap` region with an atomic bump
+# allocator. Unix-only; implies `ipc` (descriptors are `ShmBlobRef`s). Off by
+# default so platforms without POSIX shm (WASM, browsers) don't pull in `libc`.
+shm = ["ipc", "dep:libc"]
 # DEPRECATED no-op: the typed Harel state-chart engine (`ChartBuilder`,
 # `StateChart`, reactive transition engine) is now part of core — pure Rust, no
 # extra dependencies, always available, alongside the other core reactive
@@ -95,6 +100,7 @@ lazily-macros = { version = "=0.22.0", path = "macros" }
 leptos_reactive = { version = "0.6", optional = true }
 arc-swap = "1"
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
+libc = { version = "0.2", optional = true }
 parking_lot = { version = "0.12", optional = true }
 postcard = { version = "1", optional = true, features = ["alloc"] }
 rmp-serde = { version = "1", optional = true }
@@ -108,6 +114,7 @@ tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls
 [dev-dependencies]
 criterion = "0.8"
 jsonschema = { version = "0.46.8", default-features = false }
+libc = "0.2"
 loom = "0.7"
 proptest = "1"
 rmp-serde = "1"

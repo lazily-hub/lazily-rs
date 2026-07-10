@@ -1595,6 +1595,19 @@ Implemented surface:
   generation, epoch, length, and checksum metadata; readers validate that
   header before accepting a descriptor. `IpcMessage` control frames can carry a
   `ShmBlobRef` instead of embedding large bytes inline.
+- **Cross-process zero-copy transport** (`#lzzcpy`): the `BlobBackend` trait
+  (`src/transport.rs`) is the pluggable-backend adapter seam. A producer calls
+  `spill_message(&mut msg, &mut backend, threshold)` to replace large
+  `Inline`/`Payload` sites with a `SharedBlob` descriptor; a receiver resolves
+  via a `BlobRouter` that routes by the descriptor's `backend` discriminator.
+  `InProcessBackend` wraps `ShmBlobArena` (in-process / FFI host); `ArrowBackend`
+  holds Arrow IPC stream bytes; `ShmBackend` (POSIX `shm_open` + `mmap`, behind
+  the `shm` feature) is the cross-process backend. The `ShmBlobRef` gained an
+  optional `backend` field (`BlobBackendKind::Shm` | `Arrow` | `InProcess`,
+  default `Shm`) so legacy descriptors validate unchanged. The formal laws
+  (spill-then-resolve identity, backend isolation, ABA generation safety,
+  checksum integrity) are proven for any backend in
+  `lazily-formal/LazilyFormal/ZeroCopyTransport.lean`.
 
 Formal companion: `lazily-spec/formal/lean` models the shared IPC
 Snapshot/Delta state machine in Lean 4 and proves the epoch sequencing,

@@ -19,8 +19,9 @@
 use std::collections::HashSet;
 
 use lazily::{
-    CausalReceipt, CausalReceipts, CrdtOp, CrdtSync, Delta, DeltaOp, EdgeSnapshot, IpcMessage,
-    NodeId, NodeKey, NodeSnapshot, NodeState, ReceiptMessage, ShmBlobRef, Snapshot, WireStamp,
+    BlobBackendKind, CausalReceipt, CausalReceipts, CrdtOp, CrdtSync, Delta, DeltaOp, EdgeSnapshot,
+    IpcMessage, NodeId, NodeKey, NodeSnapshot, NodeState, ReceiptMessage, ShmBlobRef, Snapshot,
+    WireStamp,
 };
 use serde_json::{Map, Value};
 
@@ -146,6 +147,7 @@ fn snapshot_wire_validates_schema() {
                     generation: 1,
                     epoch: 7,
                     checksum: 999,
+                    backend: BlobBackendKind::Shm,
                 },
             ),
             NodeSnapshot::payload(NodeId(4), "i32", vec![4]).with_key(key),

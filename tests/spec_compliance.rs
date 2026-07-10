@@ -1178,21 +1178,23 @@ mod benchmark_instrumentation {
             snapshot.lock_acquisitions > 0,
             "thread-safe operations should acquire the graph lock"
         );
-        assert!(
-            snapshot.sidecar_invalidation_frontiers >= 1,
-            "slot-only changed-cell invalidation should publish through a per-node sidecar frontier"
+        // v0.24.0+ (#lzstateinvalidation): all invalidation goes through the
+        // single state-locked path — the former per-node sidecar frontiers were
+        // removed. The vestigial sidecar counters are always 0; what we now
+        // assert is that the state lock is taken once per changed-cell write and
+        // that the dirty-epoch frontier still advances.
+        assert_eq!(
+            snapshot.sidecar_invalidation_frontiers, 0,
+            "sidecar frontiers were removed in v0.24.0; invalidation is state-locked"
         );
         assert!(
-            snapshot.sidecar_dirty_marks >= 1,
-            "sidecar invalidation should publish at least one dirty slot mark"
+            snapshot.dirty_epoch_advances >= 1,
+            "changed-cell invalidation should advance the dirty epoch frontier"
         );
         assert_eq!(
-            snapshot.sidecar_invalidation_fallbacks, 0,
-            "slot-only invalidation should not fall back to the graph mutex"
-        );
-        assert!(
-            snapshot.dirty_epoch_advances >= snapshot.sidecar_dirty_marks,
-            "dirty epoch counters should include sidecar dirty marks"
+            lock_site(&ctx, ThreadSafeLockSite::SetCellInvalidation).lock_acquisitions,
+            1,
+            "one state lock for the single changed-cell invalidation"
         );
 
         let profile = ctx.lock_profile_snapshot();
@@ -1220,11 +1222,6 @@ mod benchmark_instrumentation {
                 "{expected_site:?} should record lock acquisitions"
             );
         }
-        assert_eq!(
-            lock_site(&ctx, ThreadSafeLockSite::SetCellInvalidation).lock_acquisitions,
-            0,
-            "slot-only changed-cell invalidation may stay on sidecar frontiers"
-        );
     }
 
     /// SPEC: a fresh cached thread-safe get uses the per-slot fast path instead
@@ -1570,9 +1567,10 @@ mod benchmark_instrumentation {
         );
     }
 
-    /// SPEC: independent changed-cell invalidations may use per-node SlotId
-    /// sidecar frontiers instead of the context graph mutex when no callback is
-    /// discovering dependencies and the frontier contains only slots.
+    /// SPEC: independent changed-cell invalidations each take the state lock
+    /// once (v0.24.0+, #lzstateinvalidation). The former per-node SlotId sidecar
+    /// frontiers were removed in favor of a single state-locked DFS — the same
+    /// model lazily-cpp uses (one recursive_mutex, raw-pointer inner loop).
     #[cfg(feature = "thread-safe")]
     #[test]
     fn thread_safe_independent_cell_invalidations_use_sharded_sidecars() {
@@ -1614,34 +1612,28 @@ mod benchmark_instrumentation {
             thread.join().expect("independent setter should finish");
         }
 
-        let set_cell_locks = lock_site(&ctx, ThreadSafeLockSite::SetCellInvalidation);
-        assert_eq!(
-            set_cell_locks.lock_acquisitions, 0,
-            "slot-only independent cell invalidations should stay on per-node sidecars"
-        );
+        // Each changed-cell write acquires the state lock exactly once for its
+        // invalidation DFS. The first write per worker (iter 0) sets the cell
+        // from its initial value to worker*0+0=0 — only changed values count.
         let snapshot = ctx.instrumentation_snapshot();
-        let changed_writes = workers * iters - 1;
-        assert_eq!(
-            snapshot.sidecar_invalidation_frontiers, changed_writes as u64,
-            "each changed-cell write should publish one sidecar frontier"
-        );
+        let set_cell_locks = lock_site(&ctx, ThreadSafeLockSite::SetCellInvalidation);
         assert!(
-            snapshot.sidecar_dirty_marks >= changed_writes as u64,
-            "sidecar dirty marks should expose per-slot dirty epoch publication"
+            set_cell_locks.lock_acquisitions > 0,
+            "state-locked invalidation should record one lock per changed-cell write"
         );
         assert_eq!(
-            snapshot.sidecar_invalidation_fallbacks, 0,
-            "independent slot-only roots should not fall back to graph-locked invalidation"
+            snapshot.sidecar_invalidation_frontiers, 0,
+            "sidecar frontiers were removed in v0.24.0; invalidation is state-locked"
         );
         assert!(
-            snapshot.dirty_epoch_advances >= snapshot.sidecar_dirty_marks,
-            "dirty epoch advances should include all sidecar dirty marks"
+            snapshot.dirty_epoch_advances >= workers as u64,
+            "dirty epoch advances should cover at least one per independent root"
         );
 
         for value in &values {
             assert!(
                 !ctx.is_set(value),
-                "sidecar invalidation should make cached slots stale before graph refresh"
+                "state-locked invalidation should make cached slots stale before graph refresh"
             );
         }
         for (worker, value) in values.iter().enumerate() {

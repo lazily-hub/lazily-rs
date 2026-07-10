@@ -97,6 +97,8 @@ mod str0m_net;
 mod text_crdt;
 #[cfg(feature = "thread-safe")]
 mod thread_safe;
+#[cfg(feature = "ipc")]
+mod transport;
 mod typed_context;
 #[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
 mod webrtc_signaling;
@@ -167,8 +169,8 @@ pub use instrumentation::{
 pub use ipc::IpcCodec;
 #[cfg(feature = "ipc")]
 pub use ipc::{
-    CapabilityHandshake, CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot,
-    IpcMessage, IpcPayload, IpcSink, IpcSource, IpcValue, KeyIndex, NODE_KEY_MAX_LEN,
+    BlobBackendKind, CapabilityHandshake, CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp,
+    EdgeSnapshot, IpcMessage, IpcPayload, IpcSink, IpcSource, IpcValue, KeyIndex, NODE_KEY_MAX_LEN,
     NODE_KEY_MAX_SEGMENTS, NodeKey, NodeKeyError, NodeSnapshot, NodeState, PROTOCOL_ID,
     PROTOCOL_MAJOR_VERSION, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, ShmBlobRef,
     Snapshot, WireStamp,
@@ -226,6 +228,13 @@ pub use text_crdt::{OpId, TextCrdt, TextOp, TextVersionVector, parse_blocks};
 #[cfg(feature = "thread-safe")]
 pub use thread_safe::{
     ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,
+};
+#[cfg(all(unix, feature = "shm"))]
+pub use transport::ShmBackend;
+#[cfg(feature = "ipc")]
+pub use transport::{
+    ARROW_DEFAULT_CAPACITY, ArrowBackend, BlobBackend, BlobRouter, IN_PROCESS_DEFAULT_CAPACITY,
+    InProcessBackend, resolve_value, spill_message, spill_value,
 };
 pub use typed_context::{
     TypedCellFactorySource, TypedCellHandle, TypedCellHandleSource, TypedContext,

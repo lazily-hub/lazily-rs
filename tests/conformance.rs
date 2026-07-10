@@ -336,6 +336,50 @@ fn conformance_delta_shared_blob() {
 }
 
 // ---------------------------------------------------------------------------
+// Zero-copy transport fixture (#lzzcpy): SharedBlob descriptor with an
+// optional `backend` discriminator selecting the pluggable backend.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn conformance_delta_zero_copy_arrow() {
+    let fixture = load_fixture("delta_zero_copy_arrow.json");
+    assert_eq!(fixture.kind, "Delta");
+
+    let message = parse_wire(&fixture);
+    let IpcMessage::Delta(delta) = &message else {
+        panic!("expected Delta variant");
+    };
+
+    assert_eq!(delta.base_epoch, 8);
+    assert_eq!(delta.epoch, 9);
+    assert_eq!(delta.ops.len(), 1);
+
+    let DeltaOp::SlotValue { payload, .. } = &delta.ops[0] else {
+        panic!("expected SlotValue op");
+    };
+    let lazily::IpcValue::SharedBlob(blob) = payload else {
+        panic!("expected SharedBlob payload");
+    };
+    assert_eq!(blob.offset, 40);
+    assert_eq!(blob.len, 17);
+    assert_eq!(blob.epoch, 9);
+    // The optional `backend` discriminator selects the pluggable backend the
+    // receiver resolves against (vs the default `shm`). Validates against
+    // schemas/delta.json.
+    assert_eq!(
+        blob.backend,
+        lazily::BlobBackendKind::Arrow,
+        "backend discriminator should parse as Arrow"
+    );
+    assert_eq!(
+        assert_str(&fixture.assertions, "first_op_payload_backend"),
+        "arrow"
+    );
+
+    assert_round_trip_json(&message, &fixture);
+}
+
+// ---------------------------------------------------------------------------
 // Permission filtering cross-language contract
 // ---------------------------------------------------------------------------
 
@@ -465,6 +509,7 @@ fn conformance_msgpack_round_trips_canonical_fixtures() {
         "delta_sequential.json",
         "delta_non_sequential.json",
         "delta_shared_blob.json",
+        "delta_zero_copy_arrow.json",
     ] {
         let fixture = load_fixture(name);
         let message = parse_wire(&fixture);

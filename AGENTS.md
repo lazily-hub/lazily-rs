@@ -22,6 +22,7 @@ this repo.
 - `src/async_context.rs` — `AsyncContext` async reactive graph (feature-gated behind `async`)
 - `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph (feature-gated behind `thread-safe` since v0.18.0)
 - `src/queue.rs` — `QueueCell` (SPSC reactive FIFO + MPSC-via-`batch()` usage rule) + `QueueStorage` adapter trait + `VecDequeStorage` default backend (`#lzqueue`). Reader-kind invalidation (head/len/is_empty/is_full/closed); bounded reactive backpressure via `is_full`; closure lifecycle (drain / Closed-distinct-from-Empty / idempotent+terminal).
+- `src/transport.rs` — cross-process zero-copy transport (`#lzzcpy`): `BlobBackend` adapter trait + `InProcessBackend` (wraps `ShmBlobArena`) + `ArrowBackend` (Arrow IPC stream bytes) + `ShmBackend` (POSIX `shm_open`+`mmap`, `shm` feature, Linux) + `spill_message`/`resolve_value` policy + `BlobRouter` multi-backend resolver
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)

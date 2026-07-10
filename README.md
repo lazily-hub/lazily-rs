@@ -46,7 +46,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 | Registers (LWW / MV) + `PnCounter` + `CellCrdt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | IPC wire — `Snapshot` + `Delta` + `CrdtSync` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Shared-memory blob path (`ShmBlobArena`) | ✅ | ✅ | ✅ | ~ | ~ | ✅ | ✅ | ✅ |
-| Cross-process zero-copy transport (`BlobBackend` / shm / arrow) | — | — | — | — | — | — | — | ✅ |
+| Cross-process zero-copy transport (`BlobBackend` / shm / arrow) | ✅ | — | — | — | — | — | — | ✅ |
 | Distributed CRDT plane (`CrdtPlaneRuntime` / anti-entropy) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Distributed plane — WebRTC transport + signaling | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | State projection / mirror | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -331,29 +331,23 @@ those need the separate `AsyncContext` design captured in `SPEC.md`, including
 in-flight future deduplication, stale completion handling, cleanup ordering, and
 separate `Send` versus `LocalSet` surfaces.
 
-`ThreadSafeContext` intentionally keeps one mutex-backed graph lock while
-fresh cached slot reads use a per-slot read-mostly cached-value sidecar.
-Dependency edges, dirty/revision state, cached-value publication, batching, and
-effect queues still mutate under the graph mutex. In-flight recompute waiters
-use per-slot generation `Condvar` sidecars so they can park while the compute
-owner runs user code, and a completion only wakes waiters for that finished
-slot. Per-slot dependency summaries let cell-only dirty refreshes claim the
-SlotId-partitioned recompute sidecar and skip the graph-locked `get_refresh`
-dependency scan before the final publish mutation. Changed-cell and slot-value
-invalidation build an explicit frontier plan, then apply dirty flags, revisions,
-and effect scheduling in one graph-mutex mutation boundary; slot-only
-changed-cell frontiers may publish dirty state through per-node sidecars with
-cache-revision dirty epochs instead. The `thread_safe_graph_propagation` benchmarks
-compare fan-out eager validation, fan-out/fan-in lazy dirty epoch publication,
-and fan-in batched flush behavior with lock attribution, effect queue pushes,
-dependency-edge counters, sidecar dirty marks, sidecar fallbacks, and dirty
-epoch advances. Sharded-lock or CAS variants should wait for lock wait/hold
-benchmark evidence and a Loom or Shuttle safety model for stale in-flight
-completion, invalidation during compute, dynamic dependency cleanup/disposal,
-effect scheduling/disposal, and re-entrant callbacks. A lock-free versioned
-optimistic read path is deferred
-until cached values can be retained independently of graph-protected
-erased-value storage.
+`ThreadSafeContext` intentionally keeps one state `RwLock` (v0.24.0+,
+#lzstateinvalidation) while fresh cached slot reads use a per-slot read-mostly
+cached-value sidecar. Dependency edges, dirty/revision state, cached-value
+publication, batching, and effect queues all mutate under the state lock.
+In-flight recompute waiters use per-slot generation `Condvar` sidecars so they
+can park while the compute owner runs user code, and a completion only wakes
+waiters for that finished slot. Changed-cell and slot-value invalidation build
+an explicit frontier plan, then apply dirty flags, revisions, and effect
+scheduling in one state-lock mutation boundary with atomics-only dirty marking.
+The `thread_safe_graph_propagation` benchmarks compare fan-out eager validation,
+fan-out/fan-in lazy dirty epoch publication, and fan-in batched flush behavior
+with lock attribution. Sharded-lock or CAS variants should wait for lock
+wait/hold benchmark evidence and a Loom or Shuttle safety model for stale
+in-flight completion, invalidation during compute, dynamic dependency
+cleanup/disposal, effect scheduling/disposal, and re-entrant callbacks. A
+lock-free versioned optimistic read path is deferred until cached values can be
+retained independently of graph-protected erased-value storage.
 
 ## Benchmarks
 
@@ -399,6 +393,57 @@ Enable the `ffi` feature for the C ABI adapter. It exposes an opaque
 Rust-owned `LazilyFfiBytes` buffers with an explicit free function. The adapter
 re-encodes every accepted frame as canonical `IpcMessage` JSON, so FFI callers
 share the same state plane as other channels.
+
+## Cross-Process Zero-Copy Transport (`#lzzcpy`)
+
+A `Snapshot` / `Delta` / `CrdtSync` message may carry large payloads (an Arrow
+record-batch, an image, a serialized sub-document). Copying those bytes through
+the wire codec on every hop is the dominant cost of a distributed deployment.
+The zero-copy transport instead **spills** a large payload to a **blob backend**
+and ships a small `ShmBlobRef` descriptor; the receiver **resolves** the
+descriptor against the same backend and reads the bytes in place — no copy, no
+checksum recompute.
+
+Spec: [`lazily-spec/docs/zero-copy-transport.md`](../lazily-spec/docs/zero-copy-transport.md).
+Formal: [`lazily-formal/LazilyFormal/ZeroCopyTransport.lean`](../lazily-formal/LazilyFormal/ZeroCopyTransport.lean)
+— proves spill-then-resolve identity, backend isolation, ABA/generation safety,
+and checksum integrity for **any** backend satisfying the contract.
+
+```rust
+use lazily::{
+    BlobBackend, BlobRouter, InProcessBackend, ArrowBackend,
+    spill_message, Delta, DeltaOp, IpcMessage, NodeId,
+};
+
+let mut inproc = InProcessBackend::new()?;   // wraps ShmBlobArena (in-process)
+let mut arrow = ArrowBackend::new()?;         // holds Arrow IPC stream bytes
+
+// Producer: spill large Inline payloads above a threshold.
+let big = vec![0x5Au8; 500];
+let mut msg = IpcMessage::Delta(Delta::next(1, vec![DeltaOp::slot_value(NodeId(7), big.clone())]));
+let spilled = spill_message(&mut msg, &mut inproc, 64);
+assert_eq!(spilled, 500); // payload replaced with a SharedBlob descriptor
+
+// Receiver: resolve by routing the descriptor's `backend` discriminator.
+let mut router = BlobRouter::new();
+router.register(&inproc).register(&arrow);
+// ...after decoding the wire message...
+//   let bytes = router.resolve(&payload);  // zero-copy view into the backend
+```
+
+Three backends ship:
+
+| Backend | Holds the bytes | Cross-process? | Feature |
+|---|---|---|---|
+| `InProcessBackend` | wraps `ShmBlobArena` (single address space) | no | `ipc` |
+| `ArrowBackend` | Arrow IPC stream bytes (zero-copy columnar) | no | `ipc` |
+| `ShmBackend` | POSIX `shm_open` + `mmap` region | yes (same host) | `shm` |
+
+The `ShmBlobRef` descriptor gained an optional `backend` discriminator
+(`BlobBackendKind::Shm` \| `Arrow` \| `InProcess`), defaulting to `Shm` so
+legacy descriptors validate unchanged. New backends (RDMA/verbs, CUDA IPC) plug
+in by implementing the `BlobBackend` trait and adding a discriminator value — no
+transport or codec change.
 
 ## Related
 

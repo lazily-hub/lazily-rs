@@ -31,6 +31,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	test-lossless-tree \
 	test-schema-compliance \
 	test-statechart-conformance \
+	test-shm \
 	test-lean-formal \
 	test-lazily-formal \
 	test-signaling-client \
@@ -40,7 +41,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-collections-conformance test-queue-conformance test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+	check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-shm test-collections-conformance test-queue-conformance test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -105,6 +106,12 @@ test-ipc-binary:
 
 test-ipc-conformance:
 >$(CARGO) test --locked --features ipc --test conformance
+
+# Cross-process zero-copy transport (#lzzcpy): BlobBackend trait +
+# InProcessBackend / ArrowBackend + POSIX ShmBackend (shm feature). The lib
+# unit tests cover spill/resolve/router + the shm fork() cross-process smoke.
+test-shm:
+>$(CARGO) test --locked --features ipc,shm --lib transport::
 
 # Keyed cell collections conformance (#lzcellfamily / #lzkeyrecon): lazily-rs
 # replays the canonical compute fixtures in lazily-spec/conformance/collections/
