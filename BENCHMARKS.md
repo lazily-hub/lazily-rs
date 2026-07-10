@@ -532,12 +532,13 @@ cargo bench --features scale-bench --bench scale
 LAZILY_SCALE_N=2000000 cargo bench --features scale-bench --bench scale
 ```
 
-What the four cases show at `N = 1_000_000`: `build` constructs 2M nodes (~0.13 s),
-`cold_full_recalc` computes every formula from cold (~0.10 s), `full_recalc_invalidate_all`
-re-edits every input and recomputes the whole sheet (~0.065 s), and `viewport_recalc`
-edits one input and reads only a 1,000-cell viewport — **~4.5 µs**, ~22,000× cheaper
-than a full recalc because the lazy pull-based model leaves off-viewport formulas
-dirty and never recomputes them (the property a viewport-rendered spreadsheet needs).
+What the four cases show at `N = 1_000_000` (reference machine below): `build`
+constructs 2M nodes (~0.12 s), `cold_full_recalc` computes every formula from cold
+(~0.105 s), `full_recalc_invalidate_all` re-edits every input and recomputes the
+whole sheet (~0.080 s), and `viewport_recalc` edits one input and reads only a
+1,000-cell viewport — **~3.7 µs**, ~21,000× cheaper than a full recalc because the
+lazy pull-based model leaves off-viewport formulas dirty and never recomputes them
+(the property a viewport-rendered spreadsheet needs).
 (`build`/`cold_full_recalc`/`full_recalc_invalidate_all` are unaffected by the
 v0.22.2 `#lzslotfastpath` refresh fast path — they are cold/slow-path — so their
 figures are retained from the original run; only `viewport_recalc`, which is
@@ -559,20 +560,23 @@ How the two dominant spreadsheets bound a sheet:
 | **Microsoft Excel** | 1,048,576 rows × 16,384 columns per worksheet | **17,179,869,184** |
 
 **Google Sheets (10M cells) — measured.** Modeled as 5,000,000 input cells + 5,000,000
-formula cells (= 10M cells) by running the bench at `LAZILY_SCALE_N=5000000`. Single
-criterion run on this host (186 GB RAM):
+formula cells (= 10M cells) by running the bench at `LAZILY_SCALE_N=5000000`. Criterion
+median on the cross-language reference machine (AMD Ryzen 9 9950X3D), pinned to one core
+(`taskset -c 4`) and run serially so nothing contends for L3 / memory bandwidth:
 
 | case | mean | per cell |
 |---|---:|---:|
-| `build` (10M cells) | ~706 ms | ~71 ns |
-| `cold_full_recalc` (5M) | ~518 ms | ~104 ns |
-| `full_recalc_invalidate_all` (5M) | ~329 ms | ~66 ns |
-| `viewport_recalc` (1k) | ~4.1 µs | ~4 ns |
+| `build` (10M cells) | ~718 ms | ~72 ns |
+| `cold_full_recalc` (5M) | ~544 ms | ~109 ns |
+| `full_recalc_invalidate_all` (5M) | ~398 ms | ~80 ns |
+| `viewport_recalc` (1k) | ~3.8 µs | ~4 ns |
 
 So lazily backs a **full-capacity Google Sheets workbook**: build under a second, full
-recompute ~0.5 s, and — crucially — viewport recalc stays ~4 µs **independent of sheet
-size** (it was ~4.5 µs at 1M too), because the lazy pull-based model only recomputes the
+recompute ~0.5 s, and — crucially — viewport recalc stays ~3.8 µs **independent of sheet
+size** (it was ~3.7 µs at 1M too), because the lazy pull-based model only recomputes the
 cells you read. Reproduce: `LAZILY_SCALE_N=5000000 cargo bench --features scale-bench --bench scale`.
+Across the three implementations lazily-rs holds the **cheapest viewport reads** (3.7–3.8 µs);
+see the cross-language table in lazily-zig's `BENCHMARKS.md` for the full head-to-head.
 
 Controlled A/B isolating the v0.22.2 `#lzslotfastpath` refresh fast path on
 `viewport_recalc` (`--save-baseline pre_fix`, same session, toggling only
