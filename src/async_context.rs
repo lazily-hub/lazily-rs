@@ -520,7 +520,7 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
 
     let (compute, context_id, spawn_revision) = match inner.get_node(slot_id) {
         Some(AsyncNode::Slot(slot)) => {
-            if let AsyncSlotState::Computing { revision: _, .. } = &slot.state {
+            if let AsyncSlotState::Computing { .. } = &slot.state {
                 return slot
                     .notifier
                     .as_ref()

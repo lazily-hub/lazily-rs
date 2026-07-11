@@ -29,7 +29,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 | Feature | Rust | Python | Kotlin | JS | Dart | Zig | Go | C++ |
 | --------- | :----: | :------: | :------: | :--: | :----: | :---: | :--: | :---: |
 | Reactive graph — `Cell` / `Slot` / `Signal` / `Effect` / memo / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Materialization mode — eager default + lazy opt-in (`#lzmatmode`) | — | — | — | — | — | — | — | — |
+| Materialization mode — eager default + lazy opt-in (`#lzmatmode`) | ✅ | — | — | — | — | — | — | — |
 | Thread-safe context (lock-backed) | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ |
 | Async reactive context | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Flat state machine | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -286,6 +286,37 @@ let effect = ctx.effect(move |ctx| {
 
 effect.dispose(&ctx);
 ```
+
+### Materialization mode (`#lzmatmode`)
+
+Cell *kind* fixes **how** a cell converges; **materialization mode** is the orthogonal axis of **when** a derived cell's node is allocated. It trades memory and first-touch latency against cold full-scan cost, and is never observable through any cell's value. `MaterializedFamily<K, V>` is the keyed-context constructor that exposes the choice:
+
+- **Eager** (the default) allocates a derived slot for every key up front — a read is a direct node access.
+- **Lazy** (explicit opt-in) allocates a key's slot on its first read ("materialize on pull"); a never-read key is never allocated. Lazy is a keyed overlay on the eager core, not a second engine — the first read mints exactly the slot the eager build would have.
+
+The two modes are **observationally transparent**: a read returns the same value regardless of mode (mode changes allocation timing and memory, never results). *Lazy evaluation* (leaving off-viewport slots dirty until read) is provided in both modes and is independent of materialization.
+
+```rust
+use lazily::{Context, MaterializationMode, MaterializedFamily};
+
+let ctx = Context::new();
+let factory = |_ctx: &Context, k: &u32| k * 2;
+
+// Eager: every key materialized at build.
+let eager = MaterializedFamily::eager(&ctx, [1u32, 2, 3], factory);
+assert_eq!(eager.materialized_count(), 3);
+
+// Lazy: nothing materialized until first read.
+let lazy = MaterializedFamily::lazy(&ctx, factory);
+assert_eq!(lazy.observe(&ctx, &2), 4); // materialize on pull
+assert!(lazy.is_materialized(&2));
+assert!(!lazy.is_materialized(&1)); // never read -> never allocated
+
+// Identical read values under either mode.
+assert_eq!(eager.observe(&ctx, &2), lazy.observe(&ctx, &2));
+```
+
+Lazy pays off for sparsely-touched large keyed address spaces (e.g. a 10M-cell workbook where a session reads ~1% of derived cells): it lowers peak memory and makes "open" cost `O(inputs)` rather than `O(derived cells)`. Handle-based graphs that read most of what they build should stay eager. Proved in [lazily-formal](https://github.com/lazily-hub/lazily-formal)'s `Materialization` module and pinned by `lazily-spec/conformance/materialization/`.
 
 ## API
 
