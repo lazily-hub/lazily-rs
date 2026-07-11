@@ -86,7 +86,12 @@ fn check_val_fixture(name: &str) -> Value {
     assert_eq!(MaterializationMode::default(), MaterializationMode::Eager);
 
     let ctx = ThreadSafeContext::new();
-    let eager = slot_family(&ctx, MaterializationMode::Eager, keys.clone(), entries.clone());
+    let eager = slot_family(
+        &ctx,
+        MaterializationMode::Eager,
+        keys.clone(),
+        entries.clone(),
+    );
     let lazy = slot_family(&ctx, MaterializationMode::Lazy, keys.clone(), entries);
 
     assert_eq!(eager.present_count(), keys.len());
@@ -171,7 +176,12 @@ fn materialization_confluent_under_reordering() {
     let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
 
     let ctx_fwd = ThreadSafeContext::new();
-    let fwd = slot_family(&ctx_fwd, MaterializationMode::Lazy, keys.clone(), entries.clone());
+    let fwd = slot_family(
+        &ctx_fwd,
+        MaterializationMode::Lazy,
+        keys.clone(),
+        entries.clone(),
+    );
     let ctx_rev = ThreadSafeContext::new();
     let rev = slot_family(&ctx_rev, MaterializationMode::Lazy, keys.clone(), entries);
 
@@ -186,7 +196,11 @@ fn materialization_confluent_under_reordering() {
 
     // Same observed value per key regardless of the order it was materialized.
     for (k, v) in &fwd_vals {
-        let rv = rev_vals.iter().find(|(rk, _)| rk == k).map(|(_, v)| *v).unwrap();
+        let rv = rev_vals
+            .iter()
+            .find(|(rk, _)| rk == k)
+            .map(|(_, v)| *v)
+            .unwrap();
         assert_eq!(*v, rv, "observe {k} order-independent");
     }
     // Same present set regardless of materialization order.

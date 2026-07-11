@@ -86,7 +86,12 @@ async fn eventual_transparency_async() {
     assert_eq!(MaterializationMode::default(), MaterializationMode::Eager);
 
     let ctx_e = AsyncContext::new();
-    let eager = slot_family(&ctx_e, MaterializationMode::Eager, keys.clone(), entries.clone());
+    let eager = slot_family(
+        &ctx_e,
+        MaterializationMode::Eager,
+        keys.clone(),
+        entries.clone(),
+    );
     let ctx_l = AsyncContext::new();
     let lazy = slot_family(&ctx_l, MaterializationMode::Lazy, keys.clone(), entries);
 
