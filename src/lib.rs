@@ -77,7 +77,6 @@ mod instrumentation;
 mod ipc;
 #[cfg(feature = "lossless-tree")]
 mod lossless_tree_crdt;
-mod materialization;
 mod queue;
 mod receipt;
 mod reconcile;
@@ -192,7 +191,6 @@ pub use lossless_tree_crdt::{
     LeafKind, LosslessTreeCrdt, NodeSeed, TreeError, TreeNodeId, TreeOp, TreeOpId, TreeUpdate,
     TreeVersionFrontier,
 };
-pub use materialization::{MaterializationMode, MaterializedFamily};
 pub use queue::{
     QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, VecDequeStorage,
 };
