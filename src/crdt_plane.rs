@@ -37,15 +37,66 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::cell::CellHandle;
 use crate::context::Context;
-use crate::crdt::{CellCrdt, CrdtPlane, HlcStamp, OpLog, ReplicatedCell, StampFrontier};
+use crate::crdt::{
+    CellCrdt, CrdtPlane, HlcStamp, LwwRegister, OpLog, ReplicatedCell, StampFrontier,
+};
 use crate::distributed::{NodeId, PeerId};
 use crate::ipc::{CrdtOp, CrdtSync, IpcValue, KeyIndex, NodeKey, WireStamp};
+
+/// The base [`NodeId`] for entries a family materializes on first remote
+/// observation (`#lzfamilysync`). Local family nodes are private — keyed ops
+/// resolve by [`NodeKey`], never by raw `NodeId` — so this only needs to avoid
+/// colliding with application-assigned node ids; the runtime skips any id already
+/// in use.
+const FAMILY_NODE_BASE: u64 = 1 << 48;
+
+/// Materializes a fresh plane cell for a family entry from a remote peer's wire
+/// state, the missing half of family-granularity sync (`#lzfamilysync`).
+///
+/// The plain [`CrdtPlaneRuntime`] drops a keyed op whose entry is not already
+/// registered locally, so a family key added on one replica never appears on
+/// another. A registered `FamilyFactory` closes that gap: an inbound keyed op whose
+/// [`NodeKey`] first segment matches the factory's `namespace` materializes a fresh
+/// entry seeded from the op's converged state, so membership and derived aggregates
+/// converge across replicas.
+trait FamilyFactory {
+    /// The family namespace — matched against a keyed op's first [`NodeKey`]
+    /// segment (e.g. namespace `live` owns keys `live/2`, `live/3`).
+    fn namespace(&self) -> &str;
+    /// Build a fresh plane cell seeded from a remote entry's converged `bytes`.
+    /// Returns `None` if the bytes do not decode as this family's CRDT type.
+    fn materialize(&self, ctx: &Context, bytes: &[u8]) -> Option<Box<dyn PlaneCell>>;
+}
+
+/// A last-writer-wins family: entries are [`LwwRegister<V>`] cells.
+struct LwwFamilyFactory<V> {
+    namespace: String,
+    _marker: PhantomData<fn() -> V>,
+}
+
+impl<V> FamilyFactory for LwwFamilyFactory<V>
+where
+    V: Clone + PartialEq + Serialize + DeserializeOwned + 'static,
+{
+    fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    fn materialize(&self, ctx: &Context, bytes: &[u8]) -> Option<Box<dyn PlaneCell>> {
+        // The op's state IS the remote register's converged value, so binding a fresh
+        // cell from the decoded register seeds the new entry directly; the subsequent
+        // `merge_state` in `ingest` is then an idempotent no-op.
+        let remote: LwwRegister<V> = serde_json::from_slice(bytes).ok()?;
+        Some(Box::new(ReplicatedCell::bind(ctx, remote)))
+    }
+}
 
 /// Object-safe erasure over a `merge:crdt` root cell, so the runtime registry can
 /// hold heterogeneous register/CRDT cells keyed by [`NodeId`] and still merge a
@@ -92,6 +143,20 @@ pub struct CrdtPlaneRuntime {
     log: OpLog<CrdtOp>,
     cells: BTreeMap<NodeId, Box<dyn PlaneCell>>,
     keys: KeyIndex,
+    /// Registered family factories (`#lzfamilysync`), consulted when an inbound keyed
+    /// op has no locally-registered entry, so a remote-added family key materializes
+    /// here instead of being dropped.
+    families: Vec<Box<dyn FamilyFactory>>,
+    /// Per-namespace materialized keys, in first-materialization order, so a consumer
+    /// can enumerate a family's present set (deferral-not-dealloc: only grows).
+    family_members: BTreeMap<String, Vec<NodeKey>>,
+    /// Reactive membership signal bumped whenever a family entry materializes — a
+    /// derived aggregate over the family reads it so a remote-added key forces a
+    /// recompute (a brand-new entry's cell is not yet a dependency; the epoch is).
+    /// Created lazily on the first [`register_family_lww`](Self::register_family_lww).
+    membership_epoch: Option<CellHandle<u64>>,
+    /// Monotonic allocator for locally-private family entry node ids.
+    next_family_node: u64,
 }
 
 impl CrdtPlaneRuntime {
@@ -102,6 +167,10 @@ impl CrdtPlaneRuntime {
             log: OpLog::new(),
             cells: BTreeMap::new(),
             keys: KeyIndex::new(),
+            families: Vec::new(),
+            family_members: BTreeMap::new(),
+            membership_epoch: None,
+            next_family_node: FAMILY_NODE_BASE,
         }
     }
 
@@ -146,6 +215,149 @@ impl CrdtPlaneRuntime {
             self.keys.insert(key, node);
         }
         self.cells.insert(node, Box::new(cell));
+    }
+
+    /// Register a last-writer-wins **family** (`#lzfamilysync`) under `namespace`, so
+    /// a keyed op an entry of this family produces on a peer materializes an entry
+    /// here on [`ingest`](Self::ingest) instead of being dropped. Entries are
+    /// [`LwwRegister<V>`] cells addressed by `NodeKey` `namespace/<suffix>`.
+    ///
+    /// Creates the reactive membership signal on first call. Replicas that share a
+    /// session must register the same family namespace + value type.
+    pub fn register_family_lww<V>(&mut self, ctx: &Context, namespace: impl Into<String>)
+    where
+        V: Clone + PartialEq + Serialize + DeserializeOwned + 'static,
+    {
+        let namespace = namespace.into();
+        if self.membership_epoch.is_none() {
+            self.membership_epoch = Some(ctx.cell(0u64));
+        }
+        self.family_members.entry(namespace.clone()).or_default();
+        self.families.push(Box::new(LwwFamilyFactory::<V> {
+            namespace,
+            _marker: PhantomData,
+        }));
+    }
+
+    /// The reactive membership signal (`#lzfamilysync`): depend on it from a derived
+    /// aggregate over a family so a remote-materialized key forces a recompute.
+    /// `None` until the first family is registered.
+    pub fn membership_epoch(&self) -> Option<CellHandle<u64>> {
+        self.membership_epoch
+    }
+
+    /// Allocate a locally-private node id for a family entry, skipping any id already
+    /// in use so a family node can never collide with an application-registered cell.
+    fn mint_family_node(&mut self) -> NodeId {
+        loop {
+            let candidate = NodeId(self.next_family_node);
+            self.next_family_node = self.next_family_node.wrapping_add(1);
+            if !self.cells.contains_key(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    /// Bump the membership epoch so a derived aggregate over a family recomputes when
+    /// its present set grows.
+    fn bump_membership_epoch(&self, ctx: &Context) {
+        if let Some(epoch) = self.membership_epoch {
+            let current = ctx.get_cell(&epoch);
+            ctx.set_cell(&epoch, current.wrapping_add(1));
+        }
+    }
+
+    /// Insert or update a local LWW family entry `namespace/<key_suffix>` to `value`
+    /// at `now_micros`, returning the [`CrdtOp`] to broadcast (or `None` if the value
+    /// was unchanged). Materializes the entry (and bumps membership) on first insert.
+    pub fn family_set_lww<V>(
+        &mut self,
+        ctx: &Context,
+        namespace: &str,
+        key_suffix: &str,
+        value: V,
+        now_micros: u64,
+    ) -> Option<CrdtOp>
+    where
+        V: Clone + PartialEq + Serialize + DeserializeOwned + 'static,
+    {
+        let key = NodeKey::from_segments([namespace, key_suffix]).ok()?;
+        let stamp = self.plane.tick(now_micros);
+        let node = match self.keys.node_for_key(&key) {
+            Some(node) => node,
+            None => {
+                // First local insert: materialize a fresh entry seeded with `value`.
+                let node = self.mint_family_node();
+                let cell = ReplicatedCell::lww(ctx, value.clone(), stamp);
+                self.cells.insert(node, Box::new(cell));
+                self.keys.insert(key.clone(), node);
+                self.record_family_member(namespace, &key);
+                self.bump_membership_epoch(ctx);
+                let state = {
+                    let cell = self
+                        .cells
+                        .get(&node)?
+                        .as_any()
+                        .downcast_ref::<ReplicatedCell<LwwRegister<V>>>()?;
+                    serde_json::to_vec(cell.crdt()).ok()?
+                };
+                let op = CrdtOp::keyed(node, key, WireStamp::from(stamp), IpcValue::Inline(state));
+                self.log.record(stamp, op.clone());
+                return Some(op);
+            }
+        };
+        // Existing entry: a normal stamped LWW update.
+        let state = {
+            let cell = self
+                .cells
+                .get_mut(&node)?
+                .as_any_mut()
+                .downcast_mut::<ReplicatedCell<LwwRegister<V>>>()?;
+            if !cell.update(ctx, |register| {
+                register.set(value, stamp);
+            }) {
+                return None;
+            }
+            serde_json::to_vec(cell.crdt()).ok()?
+        };
+        let op = CrdtOp::keyed(node, key, WireStamp::from(stamp), IpcValue::Inline(state));
+        self.log.record(stamp, op.clone());
+        Some(op)
+    }
+
+    /// The materialized keys of family `namespace`, in first-materialization order.
+    pub fn family_keys(&self, namespace: &str) -> Vec<NodeKey> {
+        self.family_members
+            .get(namespace)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The current converged value of family entry `namespace/<key_suffix>`.
+    pub fn family_value_lww<V>(&self, namespace: &str, key_suffix: &str) -> Option<V>
+    where
+        V: Clone + PartialEq + 'static,
+    {
+        let key = NodeKey::from_segments([namespace, key_suffix]).ok()?;
+        let node = self.keys.node_for_key(&key)?;
+        let cell = self
+            .cells
+            .get(&node)?
+            .as_any()
+            .downcast_ref::<ReplicatedCell<LwwRegister<V>>>()?;
+        Some(cell.value())
+    }
+
+    /// Record a newly-materialized key in its family's present set (dedup so a
+    /// re-observed key does not duplicate).
+    fn record_family_member(&mut self, namespace: &str, key: &NodeKey) {
+        let members = self
+            .family_members
+            .entry(namespace.to_string())
+            .or_default();
+        if !members.contains(key) {
+            members.push(key.clone());
+        }
     }
 
     /// The reactive [`CellHandle`] of a registered cell — depend on it from a
@@ -244,6 +456,10 @@ impl CrdtPlaneRuntime {
             log,
             cells,
             keys,
+            families,
+            family_members,
+            membership_epoch,
+            next_family_node,
         } = self;
         log.apply_remote(incoming, |stamp, op| {
             plane.observe_remote(*stamp, now_micros);
@@ -252,8 +468,47 @@ impl CrdtPlaneRuntime {
                 .as_ref()
                 .and_then(|key| keys.node_for_key(key))
                 .unwrap_or(op.node);
-            if let (Some(cell), IpcValue::Inline(bytes)) = (cells.get_mut(&node), &op.state) {
+            let IpcValue::Inline(bytes) = &op.state else {
+                return;
+            };
+            if let Some(cell) = cells.get_mut(&node) {
                 cell.merge_state(ctx, bytes);
+                return;
+            }
+            // Materialize-on-ingest (`#lzfamilysync`): a keyed op whose entry is not
+            // registered locally materializes it if its key belongs to a registered
+            // family namespace, instead of being dropped (proved in lazily-formal
+            // `FamilySync.applyOp_present` / `applyOp_absent_adopts`).
+            let Some(key) = op.key.as_ref() else { return };
+            let Some(namespace) = key.segments().next() else {
+                return;
+            };
+            let Some(family) = families.iter().find(|f| f.namespace() == namespace) else {
+                return;
+            };
+            let Some(cell) = family.materialize(ctx, bytes) else {
+                return;
+            };
+            // Mint a locally-private node id, skipping any id already in use so a
+            // family entry can never collide with an application-registered cell.
+            let local_node = loop {
+                let candidate = NodeId(*next_family_node);
+                *next_family_node = (*next_family_node).wrapping_add(1);
+                if !cells.contains_key(&candidate) {
+                    break candidate;
+                }
+            };
+            cells.insert(local_node, cell);
+            keys.insert(key.clone(), local_node);
+            let members = family_members.entry(namespace.to_string()).or_default();
+            if !members.contains(key) {
+                members.push(key.clone());
+            }
+            // Bump membership so a derived aggregate over the family recomputes for the
+            // newly-present key (a brand-new cell is not yet a dependency; the epoch is).
+            if let Some(epoch) = membership_epoch.as_ref() {
+                let current = ctx.get_cell(epoch);
+                ctx.set_cell(epoch, current.wrapping_add(1));
             }
         })
     }
@@ -378,6 +633,89 @@ mod tests {
         assert_eq!(b.ingest(&ctx_b, &frame, 100), 1, "first apply lands");
         assert_eq!(b.ingest(&ctx_b, &frame, 101), 0, "re-apply is a no-op");
         assert_eq!(b.value::<LwwRegister<i64>>(NodeId(1)), Some(11));
+    }
+
+    #[test]
+    fn family_sync_materializes_remote_keys_and_converges() {
+        // Replica A adds two family entries; replica B has the family registered but no
+        // entries. Ingesting A's ops MATERIALIZES the entries on B (the `#lzfamilysync`
+        // gap, closed — proved in lazily-formal `FamilySync.applyOp_present` /
+        // `applyOp_absent_adopts`) instead of dropping them; membership + values
+        // converge.
+        let ctx_a = Context::new();
+        let mut a = CrdtPlaneRuntime::new(PeerId(1));
+        a.register_family_lww::<bool>(&ctx_a, "live");
+
+        let ctx_b = Context::new();
+        let mut b = CrdtPlaneRuntime::new(PeerId(2));
+        b.register_family_lww::<bool>(&ctx_b, "live");
+
+        let op2 = a
+            .family_set_lww::<bool>(&ctx_a, "live", "2", true, 100)
+            .unwrap();
+        let op3 = a
+            .family_set_lww::<bool>(&ctx_a, "live", "3", true, 101)
+            .unwrap();
+
+        assert!(b.family_keys("live").is_empty(), "B starts with no entries");
+
+        let frame = CrdtSync::new(a.wire_frontier(), vec![op2, op3]);
+        assert_eq!(
+            b.ingest(&ctx_b, &frame, 200),
+            2,
+            "both remote keys materialize on B"
+        );
+
+        // Membership propagated (`present_merge`); values adopted.
+        assert_eq!(b.family_keys("live").len(), 2);
+        assert_eq!(b.family_value_lww::<bool>("live", "2"), Some(true));
+        assert_eq!(b.family_value_lww::<bool>("live", "3"), Some(true));
+
+        // Re-ingest is a no-op (`applyOp_idem`).
+        assert_eq!(b.ingest(&ctx_b, &frame, 201), 0, "re-apply changes nothing");
+
+        // A later LWW update converges too: A flips live/2 to false.
+        let op2b = a
+            .family_set_lww::<bool>(&ctx_a, "live", "2", false, 300)
+            .unwrap();
+        let frame2 = CrdtSync::new(a.wire_frontier(), vec![op2b]);
+        assert_eq!(b.ingest(&ctx_b, &frame2, 400), 1);
+        assert_eq!(b.family_value_lww::<bool>("live", "2"), Some(false));
+        assert_eq!(
+            b.family_keys("live").len(),
+            2,
+            "membership only grows (deferral-not-dealloc)"
+        );
+    }
+
+    #[test]
+    fn family_membership_epoch_bumps_on_remote_materialize() {
+        // The reactive membership signal fires when a remote key materializes, so a
+        // derived aggregate over the family recomputes — the eventual-transparency
+        // property proved in lazily-formal `FamilySync.aggregate_converges`.
+        let ctx_a = Context::new();
+        let mut a = CrdtPlaneRuntime::new(PeerId(1));
+        a.register_family_lww::<bool>(&ctx_a, "live");
+        let op = a
+            .family_set_lww::<bool>(&ctx_a, "live", "7", true, 100)
+            .unwrap();
+
+        let ctx_b = Context::new();
+        let mut b = CrdtPlaneRuntime::new(PeerId(2));
+        b.register_family_lww::<bool>(&ctx_b, "live");
+        let epoch = b
+            .membership_epoch()
+            .expect("registering a family creates the membership epoch");
+        let before = ctx_b.get_cell(&epoch);
+
+        let frame = CrdtSync::new(a.wire_frontier(), vec![op]);
+        b.ingest(&ctx_b, &frame, 200);
+
+        assert_ne!(
+            before,
+            ctx_b.get_cell(&epoch),
+            "materializing a remote key bumps the membership epoch"
+        );
     }
 
     #[test]
