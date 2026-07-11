@@ -98,6 +98,8 @@ mod str0m_net;
 mod text_crdt;
 #[cfg(feature = "thread-safe")]
 mod thread_safe;
+#[cfg(feature = "thread-safe")]
+mod thread_safe_reactive_family;
 #[cfg(feature = "ipc")]
 mod transport;
 mod typed_context;
@@ -230,6 +232,10 @@ pub use text_crdt::{OpId, TextCrdt, TextOp, TextVersionVector, parse_blocks};
 #[cfg(feature = "thread-safe")]
 pub use thread_safe::{
     ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,
+};
+#[cfg(feature = "thread-safe")]
+pub use thread_safe_reactive_family::{
+    ThreadSafeCellFamily, ThreadSafeFamilyHandle, ThreadSafeReactiveFamily, ThreadSafeSlotFamily,
 };
 #[cfg(all(unix, feature = "shm"))]
 pub use transport::ShmBackend;
