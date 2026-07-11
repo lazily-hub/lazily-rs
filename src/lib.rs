@@ -54,6 +54,8 @@ macro_rules! define_schema {
 #[cfg(feature = "async")]
 #[allow(dead_code)]
 mod async_context;
+#[cfg(feature = "async")]
+mod async_reactive_family;
 #[cfg(feature = "webrtc")]
 mod bridge;
 mod cell;
@@ -114,6 +116,10 @@ mod ws_backend;
 pub use async_context::{
     AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncContextId, AsyncEffectHandle,
     AsyncSignalHandle, AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView,
+};
+#[cfg(feature = "async")]
+pub use async_reactive_family::{
+    AsyncCellFamily, AsyncFamilyHandle, AsyncReactiveFamily, AsyncSlotFamily,
 };
 #[cfg(feature = "webrtc")]
 pub use bridge::{BridgeHub, HubError};
