@@ -18,6 +18,7 @@ this repo.
 - `src/context.rs` — `Context` struct, dependency graph, thread-local tracking stack
 - `src/slot.rs` — `SlotHandle<T>` (lightweight `Copy` id into Context)
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
+- `src/reactive_family.rs` — `ReactiveFamily<K, V, H>` unified keyed reactive family (`#lzmatmode`) over the `FamilyHandle` trait (`CellHandle` input cells / `SlotHandle` derived slots) + `MaterializationMode` (eager default / lazy opt-in) + `EntryKind`; `CellFamily` is the input-cell specialization
 - `src/signal.rs` — eager `Signal` primitive (`ctx.signal`); a memoized Slot plus a puller Effect, exposed on `Context`, `ThreadSafeContext`, and `AsyncContext`
 - `src/async_context.rs` — `AsyncContext` async reactive graph (feature-gated behind `async`)
 - `src/thread_safe.rs` — `ThreadSafeContext` mutex-backed shared graph (feature-gated behind `thread-safe` since v0.18.0)
@@ -27,6 +28,7 @@ this repo.
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)
 - `tests/collections_conformance.rs` — keyed cell collections compute fixtures (lazily-spec/conformance/collections); value/membership/order independence, atomic move, LIS reconciliation, memoized semantic tree, manufactured text identity, character CRDT convergence
+- `tests/materialization_conformance.rs` — `ReactiveFamily` materialization mode (`#lzmatmode`) compute fixtures (lazily-spec/conformance/materialization/`*.json`); observational transparency eager vs lazy, deferral-not-deallocation present-set monotonicity, entry-kind orthogonal to mode (input cells always materialized / derived slots deferred under lazy)
 - `tests/queue_conformance.rs` — reactive queue (`QueueCell`) compute fixtures (lazily-spec/conformance/collections/`queuecell_*.json`); SPSC total FIFO, popped-head reader-kind independence, MPSC multi-writer inside `batch()`, bounded reactive backpressure (`is_full`), closure lifecycle
 - `tests/seqcrdt_conformance.rs` — move-aware sequence CRDT compute fixture (lazily-spec/conformance/collections/seqcrdt_convergence.json); concurrent-insert/move/value-edit convergence, tombstone commutativity (feature-gated, needs `distributed`)
 - `tests/schema_compliance.rs` — lazily-rs serde output validates against lazily-spec JSON Schemas (#lzspecschema)

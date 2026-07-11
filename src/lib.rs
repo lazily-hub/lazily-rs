@@ -78,6 +78,7 @@ mod ipc;
 #[cfg(feature = "lossless-tree")]
 mod lossless_tree_crdt;
 mod queue;
+mod reactive_family;
 mod receipt;
 mod reconcile;
 mod sem_tree;
@@ -194,6 +195,7 @@ pub use lossless_tree_crdt::{
 pub use queue::{
     QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, VecDequeStorage,
 };
+pub use reactive_family::{EntryKind, FamilyHandle, MaterializationMode, ReactiveFamily};
 pub use receipt::{
     CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,
     ReceiptProjection,
