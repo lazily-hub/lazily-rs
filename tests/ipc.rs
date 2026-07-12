@@ -662,8 +662,8 @@ mod binary {
 #[cfg(feature = "ipc-msgpack")]
 mod msgpack {
     use lazily::{
-        DecodeError, EdgeSnapshot, EncodeError, IpcCodec, IpcMessage, NodeId, NodeSnapshot,
-        Snapshot,
+        CrdtOp, CrdtSync, DecodeError, Delta, DeltaOp, EdgeSnapshot, EncodeError, IpcCodec,
+        IpcMessage, NodeId, NodeKey, NodeSnapshot, Snapshot, WireStamp,
     };
 
     #[test]
@@ -686,6 +686,116 @@ mod msgpack {
         assert_eq!(IpcCodec::MessagePack.name(), "msgpack");
         assert_eq!(IpcCodec::MessagePack.decode(&encoded).unwrap(), message);
         assert!(serde_json::from_slice::<IpcMessage>(&encoded).is_err());
+    }
+
+    #[test]
+    fn ipc_message_msgpack_round_trips_delta() {
+        // Pin the Delta variant (all DeltaOp kinds) across the cross-language
+        // binary default codec, matching the postcard coverage.
+        let delta = Delta::next(
+            3,
+            vec![
+                DeltaOp::cell_set(NodeId(1), vec![10, 20]),
+                DeltaOp::slot_value(NodeId(2), vec![30, 40]),
+                DeltaOp::invalidate(NodeId(3)),
+            ],
+        );
+        let message = IpcMessage::Delta(delta);
+
+        let encoded = message.encode_msgpack().unwrap();
+        let decoded = IpcMessage::decode_msgpack(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_msgpack_round_trips_keyed_and_unkeyed_nodes() {
+        // MessagePack is self-describing (`to_vec_named`): the optional `key`
+        // is omitted when absent, so both the keyed and unkeyed node must
+        // survive the round-trip — the omit-when-absent evolution rule.
+        let key = NodeKey::new("scores/alice").unwrap();
+        let snapshot = Snapshot::new(
+            7,
+            vec![
+                NodeSnapshot::payload(NodeId(1), "i32", vec![1]).with_key(key),
+                NodeSnapshot::opaque(NodeId(2), "opaque-type"),
+            ],
+            vec![],
+            vec![NodeId(1), NodeId(2)],
+        );
+        let message = IpcMessage::Snapshot(snapshot);
+
+        let encoded = message.encode_msgpack().unwrap();
+        let decoded = IpcMessage::decode_msgpack(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_msgpack_round_trips_crdt_sync() {
+        // The CrdtSync anti-entropy frame is the third IpcMessage variant; the
+        // spec promises it round-trips across all three codecs (JSON,
+        // MessagePack, postcard). Pin the MessagePack leg: the frontier, the
+        // optional NodeKey, and both keyed and unkeyed ops.
+        let sync = CrdtSync::new(
+            vec![(
+                1,
+                WireStamp {
+                    wall_time: 200,
+                    logical: 0,
+                    peer: 1,
+                },
+            )],
+            vec![
+                CrdtOp::new(
+                    NodeId(1),
+                    WireStamp {
+                        wall_time: 200,
+                        logical: 0,
+                        peer: 1,
+                    },
+                    vec![9],
+                ),
+                CrdtOp::keyed(
+                    NodeId(2),
+                    NodeKey::new("scores/alice").unwrap(),
+                    WireStamp {
+                        wall_time: 180,
+                        logical: 1,
+                        peer: 2,
+                    },
+                    vec![8, 7],
+                ),
+            ],
+        );
+        let message = IpcMessage::CrdtSync(sync);
+
+        let encoded = message.encode_msgpack().unwrap();
+        let decoded = IpcMessage::decode_msgpack(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_msgpack_is_smaller_than_json() {
+        // MessagePack is the negotiated cross-language binary default; it must
+        // beat the canonical JSON codec on the wire (JSON encodes blob bytes as
+        // arrays of integers — see protocol.md § IpcValue).
+        let snapshot = Snapshot::new(
+            42,
+            vec![NodeSnapshot::payload(NodeId(1), "i32", vec![1, 2, 3, 4])],
+            vec![EdgeSnapshot::new(NodeId(1), NodeId(2))],
+            vec![NodeId(1)],
+        );
+        let message = IpcMessage::Snapshot(snapshot);
+
+        let json_len = serde_json::to_vec(&message).unwrap().len();
+        let msgpack_len = message.encode_msgpack().unwrap().len();
+
+        assert!(
+            msgpack_len < json_len,
+            "msgpack ({msgpack_len}) should be smaller than json ({json_len})"
+        );
     }
 
     #[test]
