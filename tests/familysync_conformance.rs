@@ -91,8 +91,11 @@ fn family_sync_materialize_on_ingest_conformance() {
         let expect = &scenario["expect"];
 
         // Membership propagation: the target now holds exactly the expected keys.
-        let mut got_keys: Vec<String> =
-            target.family_keys(namespace).iter().map(suffix_of).collect();
+        let mut got_keys: Vec<String> = target
+            .family_keys(namespace)
+            .iter()
+            .map(suffix_of)
+            .collect();
         got_keys.sort();
         let mut want_keys: Vec<String> = expect["target_keys"]
             .as_array()
@@ -105,7 +108,9 @@ fn family_sync_materialize_on_ingest_conformance() {
 
         assert_eq!(
             target.family_keys(namespace).len() as u64,
-            expect["target_present_count"].as_u64().expect("present_count"),
+            expect["target_present_count"]
+                .as_u64()
+                .expect("present_count"),
             "[{name}] present count"
         );
 
