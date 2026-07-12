@@ -396,7 +396,8 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_clone_binary(
 /// Send one MessagePack-encoded `IpcMessage` through the FFI channel.
 ///
 /// Requires the `ipc-msgpack` feature. MessagePack encoding uses named fields
-/// so frames remain cross-language and canonical-JSON-compatible.
+/// so frames stay cross-language and field-compatible with the JSON reference
+/// codec (same field names; not byte-canonical across encoders).
 ///
 /// # Safety
 ///
@@ -497,9 +498,13 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_kind_msgpack(
     })
 }
 
-/// Validate and return canonical MessagePack bytes for a serialized `IpcMessage`.
+/// Validate and re-encode normalized MessagePack bytes for a serialized `IpcMessage`.
 ///
-/// Requires the `ipc-msgpack` feature.
+/// The output is the encoder's deterministic named-field encoding for this
+/// message, but MessagePack is **not** byte-canonical across encoders (map key
+/// order is encoder-defined) — do not treat these bytes as a cross-encoder
+/// canonical form. `json` (or positional `postcard`) is the byte-canonical form;
+/// `json` is the reference codec. Requires the `ipc-msgpack` feature.
 ///
 /// # Safety
 ///
