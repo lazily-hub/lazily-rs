@@ -213,7 +213,8 @@ pub use receipt::{
 pub use reconcile::{DiffOp, apply_to_map, apply_to_tree, reconcile};
 #[cfg(feature = "ipc")]
 pub use reliable_sync::{
-    DurableOutbox, InMemoryOutbox, OrSet, ResyncAction, ResyncCoordinator, WireLwwRegister,
+    Clock, DriverError, DurableOutbox, InMemoryOutbox, OrSet, Progress, ResyncAction,
+    ResyncCoordinator, SnapshotProvider, SyncDriver, WireLwwRegister,
 };
 pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]
