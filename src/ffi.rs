@@ -41,6 +41,10 @@ pub enum LazilyFfiMessageKind {
     Delta = 2,
     /// CRDT anti-entropy sync frame (multi-writer plane, `#lzcrdtplane5`).
     CrdtSync = 3,
+    /// Reliable-sync control frame: resync request (`#lzsync`).
+    ResyncRequest = 4,
+    /// Reliable-sync control frame: outbox ack / resume cursor (`#lzsync`).
+    OutboxAck = 5,
 }
 
 /// Byte buffer allocated by Rust and returned across the FFI boundary.
@@ -234,6 +238,8 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_kind_json(
             IpcMessage::Snapshot(_) => LazilyFfiMessageKind::Snapshot,
             IpcMessage::Delta(_) => LazilyFfiMessageKind::Delta,
             IpcMessage::CrdtSync(_) => LazilyFfiMessageKind::CrdtSync,
+            IpcMessage::ResyncRequest(_) => LazilyFfiMessageKind::ResyncRequest,
+            IpcMessage::OutboxAck(_) => LazilyFfiMessageKind::OutboxAck,
         };
         Ok(())
     })
@@ -362,6 +368,8 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_kind_binary(
             IpcMessage::Snapshot(_) => LazilyFfiMessageKind::Snapshot,
             IpcMessage::Delta(_) => LazilyFfiMessageKind::Delta,
             IpcMessage::CrdtSync(_) => LazilyFfiMessageKind::CrdtSync,
+            IpcMessage::ResyncRequest(_) => LazilyFfiMessageKind::ResyncRequest,
+            IpcMessage::OutboxAck(_) => LazilyFfiMessageKind::OutboxAck,
         };
         Ok(())
     })
@@ -493,6 +501,8 @@ pub unsafe extern "C" fn lazily_ffi_ipc_message_kind_msgpack(
             IpcMessage::Snapshot(_) => LazilyFfiMessageKind::Snapshot,
             IpcMessage::Delta(_) => LazilyFfiMessageKind::Delta,
             IpcMessage::CrdtSync(_) => LazilyFfiMessageKind::CrdtSync,
+            IpcMessage::ResyncRequest(_) => LazilyFfiMessageKind::ResyncRequest,
+            IpcMessage::OutboxAck(_) => LazilyFfiMessageKind::OutboxAck,
         };
         Ok(())
     })

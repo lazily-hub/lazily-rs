@@ -592,6 +592,8 @@ pub fn spill_message(
                 total += spill_value(&mut op.state, backend, threshold);
             }
         }
+        // Reliable-sync control frames carry no blob payload to spill.
+        IpcMessage::ResyncRequest(_) | IpcMessage::OutboxAck(_) => {}
     }
     total
 }

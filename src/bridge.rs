@@ -224,6 +224,8 @@ fn authorize_inbound(peer: PeerId, perms: &PeerPermissions, message: &IpcMessage
         // in `poll`'s Phase C (`#lzcrdtplane5b`); it never reaches this
         // write-authorization path. The arm stays for exhaustiveness.
         IpcMessage::CrdtSync(_) => Vec::new(),
+        // Reliable-sync control frames are not write ops; they carry no DeltaOps.
+        IpcMessage::ResyncRequest(_) | IpcMessage::OutboxAck(_) => Vec::new(),
     }
 }
 

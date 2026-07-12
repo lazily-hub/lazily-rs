@@ -139,6 +139,8 @@ impl<C: DataChannel> IpcSink for WebRtcSink<C> {
             IpcMessage::CrdtSync(s) => {
                 IpcMessage::CrdtSync(s.filter_readable(&self.permissions, self.peer))
             }
+            // Control frames carry no node content; permission filtering is identity.
+            control @ (IpcMessage::ResyncRequest(_) | IpcMessage::OutboxAck(_)) => control.clone(),
         };
         let frame = self
             .codec

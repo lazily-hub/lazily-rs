@@ -25,6 +25,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	test-ipc \
 	test-ipc-binary \
 	test-ipc-conformance \
+	test-reliable-sync-conformance \
 	test-collections-conformance \
 	test-queue-conformance \
 	test-seqcrdt-conformance \
@@ -41,7 +42,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-	check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-shm test-collections-conformance test-queue-conformance test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+	check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-reliable-sync-conformance test-shm test-collections-conformance test-queue-conformance test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -106,6 +107,13 @@ test-ipc-binary:
 
 test-ipc-conformance:
 >$(CARGO) test --locked --features ipc --test conformance
+
+# Reliable sync (#lzsync): ResyncCoordinator / DurableOutbox / OR-set-LWW
+# liveness + the ResyncRequest/OutboxAck control-frame codec round-trip. Replays
+# ../lazily-spec/conformance/reliable-sync/ (msgpack pin needs ipc-msgpack).
+test-reliable-sync-conformance:
+>$(CARGO) test --locked --features ipc,ipc-msgpack --test reliable_sync_conformance
+>$(CARGO) test --locked --features ipc,ipc-msgpack --lib reliable_sync::
 
 # Cross-process zero-copy transport (#lzzcpy): BlobBackend trait +
 # InProcessBackend / ArrowBackend + POSIX ShmBackend (shm feature). The lib

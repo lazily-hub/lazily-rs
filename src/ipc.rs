@@ -1095,13 +1095,23 @@ impl Delta {
         }
     }
 
-    /// Construct a delta with explicit epochs.
+    /// Construct a delta with explicit epochs. A multi-epoch-span delta
+    /// (`epoch > base_epoch + 1`) coalesces several accepted-event epochs into one
+    /// op batch (`#lzsync`, spec § Multi-epoch-span delta); `epoch == base_epoch + 1`
+    /// is the ordinary single-flush case.
     pub fn new(base_epoch: u64, epoch: u64, ops: Vec<DeltaOp>) -> Self {
         Self {
             base_epoch,
             epoch,
             ops,
         }
+    }
+
+    /// The accepted-event span this delta advances: `epoch - base_epoch` (usually
+    /// 1, `> 1` for a coalesced multi-epoch-span delta). Saturates at 0 for a
+    /// malformed backward delta.
+    pub fn span(&self) -> u64 {
+        self.epoch.saturating_sub(self.base_epoch)
     }
 
     /// Whether this delta is exactly the next delta after `last_epoch`.
@@ -1354,6 +1364,26 @@ impl CrdtSync {
     }
 }
 
+/// Reliable-sync reverse-channel control frame: request a covering `Snapshot`
+/// on a detected gap (`#lzsync`, spec § ResyncCoordinator). Carries no node
+/// content, so it is permission-filter- and blob-spill-transparent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ResyncRequest {
+    /// The requesting receiver's `last_epoch`; the sender replies with a
+    /// `Snapshot { epoch >= from_epoch }`.
+    pub from_epoch: u64,
+}
+
+/// Reliable-sync reverse-channel control frame: prove receipt through
+/// `through_epoch` (`#lzsync`, spec § DurableOutbox). Advances the sender's
+/// outbox retention cursor and doubles as the reconnect resume cursor. Carries
+/// no node content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct OutboxAck {
+    /// Highest epoch the receiver has fully applied.
+    pub through_epoch: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IpcMessage {
     /// Full graph image.
@@ -1363,6 +1393,24 @@ pub enum IpcMessage {
     /// A CRDT anti-entropy sync frame: op batch + stamp-frontier advertisement
     /// for the multi-writer plane (`#lzcrdtplane5`).
     CrdtSync(CrdtSync),
+    /// Reliable-sync control frame: request a covering `Snapshot` on a gap
+    /// (`#lzsync`). Reverse channel (receiver → sender).
+    ResyncRequest(ResyncRequest),
+    /// Reliable-sync control frame: ack/resume cursor (`#lzsync`). Reverse
+    /// channel (receiver → sender).
+    OutboxAck(OutboxAck),
+}
+
+impl IpcMessage {
+    /// Whether this is a reliable-sync reverse-channel control frame
+    /// (`ResyncRequest` / `OutboxAck`) — no node content, so permission
+    /// filtering and blob spilling are the identity on it.
+    pub fn is_control(&self) -> bool {
+        matches!(
+            self,
+            IpcMessage::ResyncRequest(_) | IpcMessage::OutboxAck(_)
+        )
+    }
 }
 
 /// Negotiated codec for serialized [`IpcMessage`] frames.

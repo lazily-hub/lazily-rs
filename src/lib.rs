@@ -83,6 +83,8 @@ mod queue;
 mod reactive_family;
 mod receipt;
 mod reconcile;
+#[cfg(feature = "ipc")]
+mod reliable_sync;
 mod sem_tree;
 #[cfg(feature = "distributed")]
 mod seq_crdt;
@@ -180,9 +182,9 @@ pub use ipc::IpcCodec;
 pub use ipc::{
     BlobBackendKind, CapabilityHandshake, CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp,
     EdgeSnapshot, IpcMessage, IpcPayload, IpcSink, IpcSource, IpcValue, KeyIndex, NODE_KEY_MAX_LEN,
-    NODE_KEY_MAX_SEGMENTS, NodeKey, NodeKeyError, NodeSnapshot, NodeState, PROTOCOL_ID,
-    PROTOCOL_MAJOR_VERSION, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError, ShmBlobRef,
-    Snapshot, WireStamp,
+    NODE_KEY_MAX_SEGMENTS, NodeKey, NodeKeyError, NodeSnapshot, NodeState, OutboxAck, PROTOCOL_ID,
+    PROTOCOL_MAJOR_VERSION, ResyncRequest, SHM_BLOB_HEADER_LEN, ShmBlobArena, ShmBlobArenaError,
+    ShmBlobRef, Snapshot, WireStamp,
 };
 #[cfg(all(
     feature = "ipc",
@@ -209,6 +211,10 @@ pub use receipt::{
     ReceiptProjection,
 };
 pub use reconcile::{DiffOp, apply_to_map, apply_to_tree, reconcile};
+#[cfg(feature = "ipc")]
+pub use reliable_sync::{
+    DurableOutbox, InMemoryOutbox, OrSet, ResyncAction, ResyncCoordinator, WireLwwRegister,
+};
 pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]
 pub use seq_crdt::{Position, SeqCrdt};
