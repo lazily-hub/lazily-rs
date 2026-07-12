@@ -1,23 +1,24 @@
-//! Cross-language conformance tests for the `ReactiveFamily` materialization
-//! mode (`#lzmatmode`), driven by the canonical fixtures in
+//! Cross-language conformance tests for `SlotMap` materialization
+//! (`#reactivemap`), driven by the canonical fixtures in
 //! `lazily-spec/conformance/materialization/`. These exercise the laws proved in
-//! `lazily-formal`'s `Materialization` module against the Rust `ReactiveFamily`
-//! vehicle:
+//! `lazily-formal`'s `Materialization` module against the Rust `SlotMap`
+//! specialization of [`ReactiveMap`]:
 //!
-//! - `observational_transparency.json` — eager and lazy return identical values
-//!   for every key (`observe_canonical` / `eager_lazy_observationally_equivalent`);
-//!   eager materializes all up front, lazy only the read keys; default is eager.
+//! - `observational_transparency.json` — eager (pre-mint loop) and lazy
+//!   (`get_or_insert_with` mint-on-access) return identical values for every key
+//!   (`observe_canonical` / `eager_lazy_observationally_equivalent`); eager
+//!   materializes all up front, lazy only the read keys; default is eager.
 //! - `deferral_not_deallocation.json` — the present set only *grows* and is
 //!   unchanged by a re-read (`materialize_present_monotone`); the lazy present
 //!   set is a subset of the eager one (`lazy_present_subset_eager`).
 //! - `entry_kind_orthogonal_to_mode.json` — input **cell** entries are
-//!   materialized in every mode; derived **slot** entries defer under lazy
+//!   materialized in every strategy; derived **slot** entries defer under lazy
 //!   (`cell_entries_materialized_in_every_mode` / `slot_entries_deferred_under_lazy`).
 
 use std::collections::HashSet;
 use std::fs;
 
-use lazily::{CellHandle, Context, EntryKind, MaterializationMode, ReactiveFamily, SlotHandle};
+use lazily::{CellMap, Context, EntryKind, SlotMap};
 use serde_json::Value;
 
 const SPEC_DIR: &str = "../lazily-spec/conformance/materialization";
@@ -61,6 +62,33 @@ fn parse_val_spec(fixture: &Value) -> Vec<(String, V)> {
         .collect()
 }
 
+/// A `Fn(&String) -> V + 'static` lookup over the fixture's `spec.val` table.
+fn lookup_fn(entries: Vec<(String, V)>) -> impl Fn(&String) -> V + Clone + 'static {
+    move |k: &String| -> V {
+        entries
+            .iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| *v)
+            .unwrap_or_else(|| panic!("no spec val for key {k}"))
+    }
+}
+
+/// An eager `SlotMap`: pre-mint the whole keyset.
+fn eager_slot_map(
+    ctx: &Context,
+    keys: Vec<String>,
+    entries: Vec<(String, V)>,
+) -> SlotMap<String, V> {
+    let map: SlotMap<String, V> = SlotMap::new(ctx);
+    map.materialize_all(ctx, keys, lookup_fn(entries));
+    map
+}
+
+/// A lazy `SlotMap`: empty, mint-on-access via `get_or_insert_with`.
+fn lazy_slot_map(ctx: &Context) -> SlotMap<String, V> {
+    SlotMap::new(ctx)
+}
+
 /// Assert the shared invariants both `spec.val` fixtures declare: default mode
 /// eager, observationally-transparent reads, eager materializes all, and the
 /// lazy present set after the read sequence equals the (deduped) read keys.
@@ -70,29 +98,15 @@ fn check_val_fixture(name: &str) -> Value {
     let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
     let expected = fixture.get("expected").expect("expected");
 
-    // default_mode_eager
+    // default_mode_eager: eager is the default materialization strategy.
     assert_eq!(
         expected.get("default_mode").and_then(|v| v.as_str()),
         Some("eager")
     );
-    assert_eq!(MaterializationMode::default(), MaterializationMode::Eager);
 
     let ctx = Context::new();
-    let lookup = {
-        let entries = entries.clone();
-        move |k: &String| -> V {
-            entries
-                .iter()
-                .find(|(key, _)| key == k)
-                .map(|(_, v)| *v)
-                .unwrap_or_else(|| panic!("no spec val for key {k}"))
-        }
-    };
-
-    let eager: ReactiveFamily<String, V, SlotHandle<V>> =
-        ReactiveFamily::eager(&ctx, keys.clone(), lookup.clone());
-    let lazy: ReactiveFamily<String, V, SlotHandle<V>> =
-        ReactiveFamily::lazy(&ctx, keys.clone(), lookup);
+    let eager = eager_slot_map(&ctx, keys.clone(), entries.clone());
+    let lazy = lazy_slot_map(&ctx);
 
     // eager_materializes_all
     assert_eq!(eager.present_count(), keys.len());
@@ -108,10 +122,15 @@ fn check_val_fixture(name: &str) -> Value {
         .get("observe")
         .and_then(|v| v.as_object())
         .expect("expected.observe");
+    let lookup = lookup_fn(entries);
     for (k, want) in observe {
         let want = want.as_i64().expect("observe int");
-        assert_eq!(eager.observe(&ctx, k.clone()), want, "eager observe {k}");
-        assert_eq!(lazy.observe(&ctx, k.clone()), want, "lazy observe {k}");
+        assert_eq!(eager.get(&ctx, k).unwrap(), want, "eager observe {k}");
+        assert_eq!(
+            lazy.get_or_insert_with(&ctx, k.clone(), lookup.clone()),
+            want,
+            "lazy observe {k}"
+        );
     }
 
     fixture
@@ -126,17 +145,14 @@ fn observational_transparency() {
     let fixture = check_val_fixture("observational_transparency.json");
     let expected = fixture.get("expected").unwrap();
 
-    // Replay the lazy read sequence on a fresh family; the lazy present set is
+    // Replay the lazy read sequence on a fresh map; the lazy present set is
     // exactly the read keys (lazy_defers_slots).
     let entries = parse_val_spec(&fixture);
-    let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
     let ctx = Context::new();
-    let lazy: ReactiveFamily<String, V, SlotHandle<V>> =
-        ReactiveFamily::lazy(&ctx, keys, move |k: &String| {
-            entries.iter().find(|(key, _)| key == k).unwrap().1
-        });
+    let lazy = lazy_slot_map(&ctx);
+    let lookup = lookup_fn(entries);
     for k in str_array(&fixture, "reads") {
-        lazy.observe(&ctx, k);
+        lazy.get_or_insert_with(&ctx, k, lookup.clone());
     }
     assert_eq!(
         as_set(&lazy.present_keys()),
@@ -154,12 +170,9 @@ fn deferral_not_deallocation() {
     let expected = fixture.get("expected").unwrap();
 
     let entries = parse_val_spec(&fixture);
-    let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
     let ctx = Context::new();
-    let lazy: ReactiveFamily<String, V, SlotHandle<V>> =
-        ReactiveFamily::lazy(&ctx, keys, move |k: &String| {
-            entries.iter().find(|(key, _)| key == k).unwrap().1
-        });
+    let lazy = lazy_slot_map(&ctx);
+    let lookup = lookup_fn(entries);
 
     // present_after_each_read: cumulative present-set size, monotone and
     // unchanged by a re-read (materialize_present_monotone).
@@ -172,7 +185,7 @@ fn deferral_not_deallocation() {
         .collect();
     let mut got_sizes = Vec::new();
     for k in str_array(&fixture, "reads") {
-        lazy.observe(&ctx, k);
+        lazy.get_or_insert_with(&ctx, k, lookup.clone());
         got_sizes.push(lazy.present_count());
     }
     assert_eq!(got_sizes, want_sizes, "cumulative present-set sizes");
@@ -209,10 +222,10 @@ fn entry_kind_orthogonal_to_mode() {
         .and_then(|v| v.as_object())
         .expect("spec.entries");
 
-    // Split the family's declared entries by kind: input cells vs derived slots.
-    // A single `ReactiveFamily<K,V,H>` fixes one handle kind, so a mixed-kind
-    // fixture is modelled by a cell family over the cell entries and a slot
-    // family over the slot entries — sharing one logical key space.
+    // Split the map's declared entries by kind: input cells vs derived slots.
+    // A single `ReactiveMap<K,V,H>` fixes one handle kind, so a mixed-kind
+    // fixture is modelled by a `CellMap` over the cell entries and a `SlotMap`
+    // over the slot entries — sharing one logical key space.
     let mut cell_keys: Vec<String> = Vec::new();
     let mut slot_keys: Vec<String> = Vec::new();
     let mut vals: Vec<(String, V)> = Vec::new();
@@ -226,29 +239,30 @@ fn entry_kind_orthogonal_to_mode() {
             other => panic!("unknown entry kind {other}"),
         }
     }
-    let lookup = {
-        let vals = vals.clone();
-        move |k: &String| vals.iter().find(|(key, _)| key == k).unwrap().1
-    };
+    let lookup = lookup_fn(vals);
 
     let ctx = Context::new();
 
     // Eager build: every entry present (cells + slots).
-    let eager_cells: ReactiveFamily<String, V, CellHandle<V>> =
-        ReactiveFamily::eager(&ctx, cell_keys.clone(), lookup.clone());
-    let eager_slots: ReactiveFamily<String, V, SlotHandle<V>> =
-        ReactiveFamily::eager(&ctx, slot_keys.clone(), lookup.clone());
+    let eager_cells: CellMap<String, V> = CellMap::new(&ctx);
+    for k in &cell_keys {
+        eager_cells.entry(&ctx, k.clone(), lookup(k));
+    }
+    let eager_slots: SlotMap<String, V> = SlotMap::new(&ctx);
+    eager_slots.materialize_all(&ctx, slot_keys.clone(), lookup.clone());
     assert_eq!(eager_cells.entry_kind(), EntryKind::Cell);
     assert_eq!(eager_slots.entry_kind(), EntryKind::Slot);
     let mut eager_present = as_set(&eager_cells.present_keys());
     eager_present.extend(eager_slots.present_keys());
     assert_eq!(eager_present, as_set(&str_array(expected, "eager_present")));
 
-    // Lazy build: cells present at build, slots deferred.
-    let lazy_cells: ReactiveFamily<String, V, CellHandle<V>> =
-        ReactiveFamily::lazy(&ctx, cell_keys.clone(), lookup.clone());
-    let lazy_slots: ReactiveFamily<String, V, SlotHandle<V>> =
-        ReactiveFamily::lazy(&ctx, slot_keys.clone(), lookup.clone());
+    // Lazy build: cells present at build (input cells are always materialized),
+    // slots deferred until read.
+    let lazy_cells: CellMap<String, V> = CellMap::new(&ctx);
+    for k in &cell_keys {
+        lazy_cells.entry(&ctx, k.clone(), lookup(k));
+    }
+    let lazy_slots: SlotMap<String, V> = SlotMap::new(&ctx);
     let present_at_build = as_set(&lazy_cells.present_keys());
     assert!(
         lazy_slots.present_keys().is_empty(),
@@ -262,9 +276,9 @@ fn entry_kind_orthogonal_to_mode() {
     // Reads (slot pulls) grow only the slot present set.
     for k in str_array(&fixture, "reads") {
         if slot_keys.contains(&k) {
-            lazy_slots.observe(&ctx, k);
+            lazy_slots.get_or_insert_with(&ctx, k, lookup.clone());
         } else {
-            lazy_cells.observe(&ctx, k);
+            lazy_cells.get_or_insert_with(&ctx, k, lookup.clone());
         }
     }
     let mut lazy_after = as_set(&lazy_cells.present_keys());
@@ -279,11 +293,14 @@ fn entry_kind_orthogonal_to_mode() {
     for (k, want) in observe {
         let want = want.as_i64().unwrap();
         if cell_keys.contains(k) {
-            assert_eq!(eager_cells.observe(&ctx, k.clone()), want);
-            assert_eq!(lazy_cells.observe(&ctx, k.clone()), want);
+            assert_eq!(eager_cells.get(&ctx, k), Some(want));
+            assert_eq!(lazy_cells.get(&ctx, k), Some(want));
         } else {
-            assert_eq!(eager_slots.observe(&ctx, k.clone()), want);
-            assert_eq!(lazy_slots.observe(&ctx, k.clone()), want);
+            assert_eq!(eager_slots.get(&ctx, k), Some(want));
+            assert_eq!(
+                lazy_slots.get_or_insert_with(&ctx, k.clone(), lookup.clone()),
+                want
+            );
         }
     }
 }

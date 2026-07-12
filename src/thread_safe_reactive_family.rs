@@ -1,42 +1,47 @@
-//! Thread-safe keyed reactive family (`#lzmatmode`, thread-safe flavor).
+//! Thread-safe keyed reactive collection (`#reactivemap`, thread-safe flavor).
 //!
-//! The `Send + Sync` analog of [`ReactiveFamily`](crate::ReactiveFamily): keys `K`
+//! The `Send + Sync` analog of [`ReactiveMap`](crate::ReactiveMap): keys `K`
 //! map to per-entry reactive nodes ([`CellHandle<V>`] input cells / [`SlotHandle<V>`]
-//! derived slots) allocated on a [`ThreadSafeContext`] per the family's
-//! [`MaterializationMode`]. Where [`ReactiveFamily`] is `Rc`-based and single-threaded,
-//! this family keeps its present-set state behind an `Arc<Mutex<..>>`, so it can live
-//! in a `Send` owner shared across threads (for example a relay hub stored behind a
-//! global mutex, where an `Rc`-based family cannot go).
+//! derived slots) allocated on a [`ThreadSafeContext`]. Where [`ReactiveMap`] is
+//! `Rc`-based and single-threaded, this map keeps its present-set state behind an
+//! `Arc<Mutex<..>>`, so it can live in a `Send` owner shared across threads (for
+//! example a relay hub stored behind a global mutex, where an `Rc`-based map
+//! cannot go).
 //!
-//! It obeys the same three laws as the single-threaded family (see the
-//! [`reactive_family`](crate::reactive_family) module docs):
-//! - **Eager/lazy contract:** eager materializes every declared node at build; lazy
-//!   defers derived (slot) nodes to first read. Cell entries are always materialized.
-//! - **Observational transparency:** `observe(key)` returns an identical value under
-//!   either mode.
-//! - **Present-set monotonicity:** the materialized set only grows (deferral, never
-//!   de-allocation).
+//! It obeys the same materialization laws as the single-threaded map:
+//! - **Eager/lazy behavior:** eager pre-mints every declared node
+//!   ([`materialize_all`](ThreadSafeReactiveMap::materialize_all)); lazy defers
+//!   derived (slot) nodes to first read
+//!   ([`get_or_insert_with`](ThreadSafeReactiveMap::get_or_insert_with)). There is
+//!   no eager/lazy mode flag.
+//! - **Observational transparency:** a read returns an identical value whether the
+//!   entry was pre-minted or minted on access.
+//! - **Present-set monotonicity:** the materialized set only grows (deferral,
+//!   never de-allocation).
 //!
-//! Mirrors the `ThreadSafeReactiveFamily` conformance case in lazily-spec and the
-//! `Materialization` proofs in lazily-formal.
+//! Its two specializations are [`ThreadSafeCellMap`] (input cells) and
+//! [`ThreadSafeSlotMap`] (derived slots). Mirrors the `ThreadSafeSlotMap`
+//! conformance case in lazily-spec and the `Materialization` proofs (plus
+//! **confluence**) in lazily-formal.
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
-use crate::reactive_family::{EntryKind, MaterializationMode};
+use crate::cell_family::EntryKind;
 use crate::{CellHandle, SlotHandle, ThreadSafeContext};
 
 mod sealed {
     pub trait Sealed {}
 }
 
-/// The node kinds a thread-safe family entry can take — the `Send + Sync` analog of
-/// [`FamilyHandle`](crate::FamilyHandle). Sealed to [`CellHandle`] (input cells) and
+/// The node kinds a thread-safe map entry can take — the `Send + Sync` analog of
+/// [`MapHandle`](crate::MapHandle). Sealed to [`CellHandle`] (input cells) and
 /// [`SlotHandle`] (derived slots); bindings do not add new kinds.
-pub trait ThreadSafeFamilyHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static {
-    /// This handle's entry kind. `CellHandle` is [`EntryKind::Cell`] (always
-    /// materialized); `SlotHandle` is [`EntryKind::Slot`] (mode-governed).
+pub trait ThreadSafeMapHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static {
+    /// This handle's entry kind. `CellHandle` is [`EntryKind::Cell`]; `SlotHandle`
+    /// is [`EntryKind::Slot`].
     const KIND: EntryKind;
 
     /// Allocate the node for one entry on `ctx`, with `compute` producing its
@@ -58,7 +63,7 @@ pub trait ThreadSafeFamilyHandle<V>: sealed::Sealed + Copy + Send + Sync + 'stat
 }
 
 impl<V> sealed::Sealed for CellHandle<V> {}
-impl<V: Send + Sync + 'static> ThreadSafeFamilyHandle<V> for CellHandle<V> {
+impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for CellHandle<V> {
     const KIND: EntryKind = EntryKind::Cell;
 
     fn materialize(
@@ -81,7 +86,7 @@ impl<V: Send + Sync + 'static> ThreadSafeFamilyHandle<V> for CellHandle<V> {
 }
 
 impl<V> sealed::Sealed for SlotHandle<V> {}
-impl<V: Send + Sync + 'static> ThreadSafeFamilyHandle<V> for SlotHandle<V> {
+impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for SlotHandle<V> {
     const KIND: EntryKind = EntryKind::Slot;
 
     fn materialize(
@@ -91,7 +96,7 @@ impl<V: Send + Sync + 'static> ThreadSafeFamilyHandle<V> for SlotHandle<V> {
     where
         V: PartialEq + Clone + Send + Sync + 'static,
     {
-        // A derived node: the same node an eager build would allocate.
+        // A derived node: the same node an eager pre-mint would allocate.
         ctx.computed(compute)
     }
 
@@ -103,8 +108,8 @@ impl<V: Send + Sync + 'static> ThreadSafeFamilyHandle<V> for SlotHandle<V> {
     }
 }
 
-/// Present-set state, guarded by the family's `Mutex`.
-struct FamilyState<K, H> {
+/// Present-set state, guarded by the map's `Mutex`.
+struct MapState<K, H> {
     /// Currently-allocated entries (the "present" set). Grows on materialize,
     /// never shrinks silently — deferral, not de-allocation.
     materialized: HashMap<K, H>,
@@ -112,120 +117,69 @@ struct FamilyState<K, H> {
     order: Vec<K>,
 }
 
-struct FamilyInner<K, V, H> {
-    mode: MaterializationMode,
-    /// Canonical per-key value producer (a derived slot's recompute; an input cell's
-    /// initial value). `Send + Sync` so it can be shared across threads.
-    factory: Arc<dyn Fn(&K) -> V + Send + Sync>,
-    state: Mutex<FamilyState<K, H>>,
+struct MapInner<K, H> {
+    state: Mutex<MapState<K, H>>,
 }
 
-/// The thread-safe unified keyed reactive family (`#lzmatmode`): keys `K` map to
-/// per-entry reactive nodes of handle kind `H` ([`CellHandle<V>`] for input cells,
-/// [`SlotHandle<V>`] for derived slots), allocated per its [`MaterializationMode`].
+/// The thread-safe keyed reactive collection (`#reactivemap`) generic over the
+/// entry handle kind `H` ([`CellHandle<V>`] for input cells, [`SlotHandle<V>`] for
+/// derived slots).
 ///
-/// Cheap to [`Clone`] (an `Arc` to shared inner state) and `Send + Sync`, so it can be
-/// captured by compute/effect closures and stored in a cross-thread owner. Operations
-/// run against the owning [`ThreadSafeContext`].
+/// Cheap to [`Clone`] (an `Arc` to shared inner state) and `Send + Sync`, so it can
+/// be captured by compute/effect closures and stored in a cross-thread owner.
+/// Operations run against the owning [`ThreadSafeContext`].
 ///
-/// See the module docs for the eager/lazy contract and the
-/// [`ThreadSafeCellFamily`]/[`ThreadSafeSlotFamily`] kind specializations.
-pub struct ThreadSafeReactiveFamily<K, V, H> {
-    inner: Arc<FamilyInner<K, V, H>>,
+/// See the module docs for the eager/lazy behavior and the
+/// [`ThreadSafeCellMap`]/[`ThreadSafeSlotMap`] kind specializations.
+pub struct ThreadSafeReactiveMap<K, V, H> {
+    inner: Arc<MapInner<K, H>>,
+    _marker: PhantomData<V>,
 }
 
-impl<K, V, H> Clone for ThreadSafeReactiveFamily<K, V, H> {
+impl<K, V, H> Clone for ThreadSafeReactiveMap<K, V, H> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            _marker: PhantomData,
         }
     }
 }
 
-impl<K, V, H> ThreadSafeReactiveFamily<K, V, H>
+impl<K, V, H> ThreadSafeReactiveMap<K, V, H>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: PartialEq + Clone + Send + Sync + 'static,
-    H: ThreadSafeFamilyHandle<V>,
+    H: ThreadSafeMapHandle<V>,
 {
-    fn build(
-        ctx: &ThreadSafeContext,
-        mode: MaterializationMode,
-        keys: impl IntoIterator<Item = K>,
-        factory: impl Fn(&K) -> V + Send + Sync + 'static,
-    ) -> Self {
-        let fam = Self {
-            inner: Arc::new(FamilyInner {
-                mode,
-                factory: Arc::new(factory),
-                state: Mutex::new(FamilyState {
+    /// Create an empty map bound to `ctx`.
+    pub fn new(_ctx: &ThreadSafeContext) -> Self {
+        Self {
+            inner: Arc::new(MapInner {
+                state: Mutex::new(MapState {
                     materialized: HashMap::new(),
                     order: Vec::new(),
                 }),
             }),
-        };
-        for key in keys {
-            // buildEager materializes every node; buildLazy materializes only input
-            // cells (`present := isInput`). A cell entry is always materialized
-            // regardless of mode; a slot entry only under eager.
-            if H::KIND == EntryKind::Cell || mode == MaterializationMode::Eager {
-                fam.materialize_key(ctx, key);
-            }
+            _marker: PhantomData,
         }
-        fam
     }
 
-    /// Build an **eager** family: every declared key's node is allocated now. This is
-    /// the default mode ([`MaterializationMode::Eager`]).
-    pub fn eager(
+    fn mint_with(
+        &self,
         ctx: &ThreadSafeContext,
-        keys: impl IntoIterator<Item = K>,
-        factory: impl Fn(&K) -> V + Send + Sync + 'static,
-    ) -> Self {
-        Self::build(ctx, MaterializationMode::Eager, keys, factory)
-    }
-
-    /// Build a **lazy** family: derived (slot) entries are deferred to first read;
-    /// input (cell) entries in `keys` are still materialized at build. Pass an empty
-    /// `keys` for a purely on-demand slot family.
-    pub fn lazy(
-        ctx: &ThreadSafeContext,
-        keys: impl IntoIterator<Item = K>,
-        factory: impl Fn(&K) -> V + Send + Sync + 'static,
-    ) -> Self {
-        Self::build(ctx, MaterializationMode::Lazy, keys, factory)
-    }
-
-    /// Build a family in the **default** mode (eager). Alias for [`eager`](Self::eager).
-    pub fn new(
-        ctx: &ThreadSafeContext,
-        keys: impl IntoIterator<Item = K>,
-        factory: impl Fn(&K) -> V + Send + Sync + 'static,
-    ) -> Self {
-        Self::eager(ctx, keys, factory)
-    }
-
-    fn materialize_key(&self, ctx: &ThreadSafeContext, key: K) -> H {
+        key: K,
+        compute: impl Fn(&ThreadSafeContext) -> V + Send + Sync + 'static,
+    ) -> H {
         // Fast path: already allocated. Release the lock before touching `ctx` so a
         // slot recompute triggered by materialization can never re-enter this lock.
         {
-            let state = self
-                .inner
-                .state
-                .lock()
-                .expect("family state mutex poisoned");
+            let state = self.inner.state.lock().expect("map state mutex poisoned");
             if let Some(handle) = state.materialized.get(&key) {
                 return *handle; // warm: already allocated.
             }
         }
-        let factory = Arc::clone(&self.inner.factory);
-        let k = key.clone();
-        let handle = H::materialize(ctx, move |_ctx| factory(&k));
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("family state mutex poisoned");
+        let handle = H::materialize(ctx, compute);
+        let mut state = self.inner.state.lock().expect("map state mutex poisoned");
         // Lost a materialization race for this key: first writer wins so the key keeps
         // a stable handle (cell-identity). Our freshly-allocated node is orphaned in
         // `ctx` (unreferenced, never observed) — a rare, harmless cost.
@@ -237,17 +191,47 @@ where
         handle
     }
 
-    /// Get the entry handle for `key`, materializing it on first access (the lazy
-    /// pull) and caching it. Under eager mode an entry is already present, so this
-    /// returns the cached handle.
-    pub fn get(&self, ctx: &ThreadSafeContext, key: K) -> H {
-        self.materialize_key(ctx, key)
+    /// Get the entry handle for `key`, minting it via `factory(&key)` on first
+    /// access (the lazy pull) and caching it. Returns the same handle on repeat.
+    pub fn get_or_insert_handle(
+        &self,
+        ctx: &ThreadSafeContext,
+        key: K,
+        factory: impl Fn(&K) -> V + Send + Sync + 'static,
+    ) -> H {
+        let k = key.clone();
+        self.mint_with(ctx, key, move |_ctx| factory(&k))
     }
 
-    /// Observe `key`'s value — the transparency law: the returned value is identical
-    /// under either mode. Materializes the entry if absent.
-    pub fn observe(&self, ctx: &ThreadSafeContext, key: K) -> V {
-        self.get(ctx, key).observe(ctx)
+    /// Get the value at `key`, minting the entry via `factory(&key)` first if
+    /// absent. For a [`ThreadSafeSlotMap`] this is the lazy materialization pull.
+    pub fn get_or_insert_with(
+        &self,
+        ctx: &ThreadSafeContext,
+        key: K,
+        factory: impl Fn(&K) -> V + Send + Sync + 'static,
+    ) -> V {
+        self.get_or_insert_handle(ctx, key, factory).observe(ctx)
+    }
+
+    /// Observe `key`'s value if the entry is present, else `None`. Non-minting.
+    pub fn observe(&self, ctx: &ThreadSafeContext, key: &K) -> Option<V> {
+        let handle = {
+            let state = self.inner.state.lock().expect("map state mutex poisoned");
+            state.materialized.get(key).copied()
+        };
+        handle.map(|h| h.observe(ctx))
+    }
+
+    /// Return the existing entry handle for `key`, or `None`. Non-minting.
+    pub fn handle(&self, key: &K) -> Option<H> {
+        self.inner
+            .state
+            .lock()
+            .expect("map state mutex poisoned")
+            .materialized
+            .get(key)
+            .copied()
     }
 
     /// Whether `key` is currently materialized (present in the allocated set).
@@ -256,7 +240,7 @@ where
         self.inner
             .state
             .lock()
-            .expect("family state mutex poisoned")
+            .expect("map state mutex poisoned")
             .materialized
             .contains_key(key)
     }
@@ -267,7 +251,7 @@ where
         self.inner
             .state
             .lock()
-            .expect("family state mutex poisoned")
+            .expect("map state mutex poisoned")
             .order
             .clone()
     }
@@ -277,30 +261,67 @@ where
         self.inner
             .state
             .lock()
-            .expect("family state mutex poisoned")
+            .expect("map state mutex poisoned")
             .order
             .len()
     }
 
-    /// This family's materialization mode.
-    pub fn mode(&self) -> MaterializationMode {
-        self.inner.mode
-    }
-
-    /// This family's entry kind ([`EntryKind::Cell`] for a cell family,
-    /// [`EntryKind::Slot`] for a slot family).
+    /// This map's entry kind ([`EntryKind::Cell`] for a cell map,
+    /// [`EntryKind::Slot`] for a slot map).
     pub fn entry_kind(&self) -> EntryKind {
         H::KIND
     }
 }
 
-/// A thread-safe **input-cell** family: every entry is an always-materialized
-/// [`CellHandle<V>`]. The `Send + Sync` analog of [`CellFamily`](crate::CellFamily).
-pub type ThreadSafeCellFamily<K, V> = ThreadSafeReactiveFamily<K, V, CellHandle<V>>;
+/// `ThreadSafeCellMap`-only surface: `set` (an input is settable).
+impl<K, V> ThreadSafeReactiveMap<K, V, CellHandle<V>>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: PartialEq + Clone + Send + Sync + 'static,
+{
+    /// Set the value at `key`, inserting a new input cell if absent. Cell-only.
+    pub fn set(&self, ctx: &ThreadSafeContext, key: K, value: V) {
+        let existing = {
+            let state = self.inner.state.lock().expect("map state mutex poisoned");
+            state.materialized.get(&key).copied()
+        };
+        if let Some(handle) = existing {
+            ctx.set_cell(&handle, value);
+            return;
+        }
+        self.get_or_insert_handle(ctx, key, move |_| value.clone());
+    }
+}
 
-/// A thread-safe **derived-slot** family: entries are [`SlotHandle<V>`] governed by
-/// the family's [`MaterializationMode`].
-pub type ThreadSafeSlotFamily<K, V> = ThreadSafeReactiveFamily<K, V, SlotHandle<V>>;
+/// `ThreadSafeSlotMap`-only surface: the eager pre-mint helper.
+impl<K, V> ThreadSafeReactiveMap<K, V, SlotHandle<V>>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: PartialEq + Clone + Send + Sync + 'static,
+{
+    /// **Eager materialization**: pre-mint a derived slot for every key in `keys`.
+    /// Observationally identical to minting each lazily on first read.
+    pub fn materialize_all(
+        &self,
+        ctx: &ThreadSafeContext,
+        keys: impl IntoIterator<Item = K>,
+        factory: impl Fn(&K) -> V + Send + Sync + 'static,
+    ) {
+        let factory = Arc::new(factory);
+        for key in keys {
+            let f = Arc::clone(&factory);
+            self.get_or_insert_handle(ctx, key, move |k| f(k));
+        }
+    }
+}
+
+/// A thread-safe **input-cell** map: every entry is an always-materialized
+/// [`CellHandle<V>`]. The `Send + Sync` analog of [`CellMap`](crate::CellMap).
+pub type ThreadSafeCellMap<K, V> = ThreadSafeReactiveMap<K, V, CellHandle<V>>;
+
+/// A thread-safe **derived-slot** map: entries are [`SlotHandle<V>`] minted lazily
+/// on access or eagerly via [`materialize_all`](ThreadSafeReactiveMap::materialize_all).
+pub type ThreadSafeSlotMap<K, V> = ThreadSafeReactiveMap<K, V, SlotHandle<V>>;
 
 #[cfg(test)]
 mod tests {
@@ -309,73 +330,66 @@ mod tests {
     fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]
-    fn family_is_send_sync() {
-        // The whole point: a thread-safe family can live in a `Send + Sync` owner.
-        assert_send_sync::<ThreadSafeCellFamily<u64, bool>>();
-        assert_send_sync::<ThreadSafeSlotFamily<u64, usize>>();
+    fn map_is_send_sync() {
+        // The whole point: a thread-safe map can live in a `Send + Sync` owner.
+        assert_send_sync::<ThreadSafeCellMap<u64, bool>>();
+        assert_send_sync::<ThreadSafeSlotMap<u64, usize>>();
     }
 
     #[test]
-    fn default_mode_is_eager() {
-        assert_eq!(MaterializationMode::default(), MaterializationMode::Eager);
-    }
-
-    #[test]
-    fn eager_cell_family_materializes_all_at_build() {
+    fn eager_cell_map_materializes_all_at_build() {
         let ctx = ThreadSafeContext::new();
-        let fam: ThreadSafeCellFamily<u64, bool> =
-            ThreadSafeReactiveFamily::eager(&ctx, [1, 2, 3], |_| true);
+        let fam: ThreadSafeCellMap<u64, bool> = ThreadSafeCellMap::new(&ctx);
+        for k in [1u64, 2, 3] {
+            fam.set(&ctx, k, true);
+        }
         assert_eq!(fam.entry_kind(), EntryKind::Cell);
-        assert_eq!(fam.mode(), MaterializationMode::Eager);
         assert_eq!(fam.present_count(), 3);
         assert!(fam.is_present(&1) && fam.is_present(&2) && fam.is_present(&3));
         assert_eq!(fam.present_keys(), vec![1, 2, 3]);
     }
 
     #[test]
-    fn lazy_slot_family_defers_until_read() {
+    fn lazy_slot_map_defers_until_read() {
         let ctx = ThreadSafeContext::new();
-        // Empty declared keys + lazy → nothing materialized until observed.
-        let fam: ThreadSafeSlotFamily<u64, usize> =
-            ThreadSafeReactiveFamily::lazy(&ctx, [], |k| (*k as usize) * 10);
-        assert_eq!(fam.mode(), MaterializationMode::Lazy);
+        // Empty map + lazy → nothing materialized until observed.
+        let fam: ThreadSafeSlotMap<u64, usize> = ThreadSafeSlotMap::new(&ctx);
         assert_eq!(fam.present_count(), 0);
         assert!(!fam.is_present(&2));
-        assert_eq!(fam.observe(&ctx, 2), 20);
+        assert_eq!(fam.get_or_insert_with(&ctx, 2, |k| (*k as usize) * 10), 20);
         assert!(fam.is_present(&2));
         assert_eq!(fam.present_count(), 1);
     }
 
     #[test]
-    fn lazy_cell_entries_still_materialize_at_build() {
+    fn eager_slot_map_materializes_all_up_front() {
         let ctx = ThreadSafeContext::new();
-        // Cells are always materialized regardless of mode.
-        let fam: ThreadSafeCellFamily<u64, bool> =
-            ThreadSafeReactiveFamily::lazy(&ctx, [7, 8], |_| false);
+        let fam: ThreadSafeSlotMap<u64, usize> = ThreadSafeSlotMap::new(&ctx);
+        fam.materialize_all(&ctx, [7, 8], |k| *k as usize);
         assert_eq!(fam.present_count(), 2);
     }
 
     #[test]
     fn observational_transparency_eager_equals_lazy() {
         let ctx_e = ThreadSafeContext::new();
-        let eager: ThreadSafeSlotFamily<u64, usize> =
-            ThreadSafeReactiveFamily::eager(&ctx_e, [1, 2, 3], |k| (*k as usize) * 2);
+        let eager: ThreadSafeSlotMap<u64, usize> = ThreadSafeSlotMap::new(&ctx_e);
+        eager.materialize_all(&ctx_e, [1, 2, 3], |k| (*k as usize) * 2);
         let ctx_l = ThreadSafeContext::new();
-        let lazy: ThreadSafeSlotFamily<u64, usize> =
-            ThreadSafeReactiveFamily::lazy(&ctx_l, [1, 2, 3], |k| (*k as usize) * 2);
+        let lazy: ThreadSafeSlotMap<u64, usize> = ThreadSafeSlotMap::new(&ctx_l);
         for k in [1u64, 2, 3] {
-            assert_eq!(eager.observe(&ctx_e, k), lazy.observe(&ctx_l, k));
+            let ve = eager.observe(&ctx_e, &k).unwrap();
+            let vl = lazy.get_or_insert_with(&ctx_l, k, |k| (*k as usize) * 2);
+            assert_eq!(ve, vl);
         }
     }
 
     #[test]
     fn present_set_grows_monotonically() {
         let ctx = ThreadSafeContext::new();
-        let fam: ThreadSafeSlotFamily<u64, usize> =
-            ThreadSafeReactiveFamily::lazy(&ctx, [], |k| *k as usize);
-        let _ = fam.observe(&ctx, 5);
-        let _ = fam.observe(&ctx, 5); // repeat: no growth
-        let _ = fam.observe(&ctx, 9);
+        let fam: ThreadSafeSlotMap<u64, usize> = ThreadSafeSlotMap::new(&ctx);
+        let _ = fam.get_or_insert_with(&ctx, 5, |k| *k as usize);
+        let _ = fam.get_or_insert_with(&ctx, 5, |k| *k as usize); // repeat: no growth
+        let _ = fam.get_or_insert_with(&ctx, 9, |k| *k as usize);
         assert_eq!(fam.present_count(), 2);
         assert_eq!(fam.present_keys(), vec![5, 9]);
     }
@@ -385,21 +399,23 @@ mod tests {
         // The agent-doc liveness shape: cell inputs + a derived count that recomputes
         // reactively when a cell flips — no pull-time scan.
         let ctx = ThreadSafeContext::new();
-        let liveness: ThreadSafeCellFamily<u64, bool> =
-            ThreadSafeReactiveFamily::eager(&ctx, [10, 20, 30], |_| true);
+        let liveness: ThreadSafeCellMap<u64, bool> = ThreadSafeCellMap::new(&ctx);
+        for k in [10u64, 20, 30] {
+            liveness.set(&ctx, k, true);
+        }
         let live_count = {
             let liveness = liveness.clone();
             ctx.computed(move |c| {
                 liveness
                     .present_keys()
                     .into_iter()
-                    .filter(|k| liveness.get(c, *k).observe(c))
+                    .filter(|k| liveness.observe(c, k).unwrap_or(false))
                     .count()
             })
         };
         assert_eq!(ctx.get(&live_count), 3);
         // Flip one editor offline → derived count recomputes reactively.
-        let h20 = liveness.get(&ctx, 20);
+        let h20 = liveness.handle(&20).unwrap();
         ctx.set_cell(&h20, false);
         assert_eq!(ctx.get(&live_count), 2);
         ctx.set_cell(&h20, true);
@@ -410,13 +426,15 @@ mod tests {
     fn shared_across_threads() {
         use std::thread;
         let ctx = Arc::new(ThreadSafeContext::new());
-        let fam: ThreadSafeCellFamily<u64, bool> =
-            ThreadSafeReactiveFamily::eager(&ctx, [1, 2, 3, 4], |_| true);
+        let fam: ThreadSafeCellMap<u64, bool> = ThreadSafeCellMap::new(&ctx);
+        for k in [1u64, 2, 3, 4] {
+            fam.set(&ctx, k, true);
+        }
         let handles: Vec<_> = (1u64..=4)
             .map(|k| {
                 let fam = fam.clone();
                 let ctx = Arc::clone(&ctx);
-                thread::spawn(move || fam.observe(&ctx, k))
+                thread::spawn(move || fam.observe(&ctx, &k).unwrap())
             })
             .collect();
         for h in handles {

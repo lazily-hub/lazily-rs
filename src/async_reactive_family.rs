@@ -1,42 +1,44 @@
-//! Async keyed reactive family (`#lzmatmode`, async flavor).
+//! Async keyed reactive collection (`#reactivemap`, async flavor).
 //!
-//! The [`AsyncContext`] analog of [`ReactiveFamily`](crate::ReactiveFamily): keys `K`
+//! The [`AsyncContext`] analog of [`ReactiveMap`](crate::ReactiveMap): keys `K`
 //! map to per-entry async reactive nodes ([`AsyncCellHandle<V>`] input cells /
-//! [`AsyncSlotHandle<V>`] derived slots) allocated per the family's
-//! [`MaterializationMode`]. Like [`ThreadSafeReactiveFamily`](crate::ThreadSafeReactiveFamily)
-//! it keeps its present-set state behind an `Arc<Mutex<..>>` (the [`AsyncContext`] is
-//! itself `Send + Sync`), so it can live in a cross-task owner.
+//! [`AsyncSlotHandle<V>`] derived slots). Like
+//! [`ThreadSafeReactiveMap`](crate::ThreadSafeReactiveMap) it keeps its present-set
+//! state behind an `Arc<Mutex<..>>` (the [`AsyncContext`] is itself `Send + Sync`),
+//! so it can live in a cross-task owner.
 //!
-//! The eager/lazy contract and present-set monotonicity are identical to the
-//! single-threaded family. The transparency law is **eventual**: an async derived
+//! The eager/lazy behavior and present-set monotonicity are identical to the
+//! single-threaded map: eager pre-mints the keyset
+//! ([`materialize_all`](AsyncReactiveMap::materialize_all)); lazy mints on access
+//! ([`get_or_insert_handle`](AsyncReactiveMap::get_or_insert_handle)). There is no
+//! eager/lazy mode flag. The transparency law is **eventual**: an async derived
 //! slot read is `None` while pending and resolves to the canonical value — so
-//! `observe` returns [`Option<V>`]. Input cells are always resolved
-//! (`observe` returns `Some`). Drive a slot to resolution with
-//! [`AsyncContext::get_async`] on the handle from [`AsyncSlotFamily::get`].
+//! [`observe`](AsyncReactiveMap::observe) returns [`Option<V>`]. Input cells are
+//! always resolved. Drive a slot to resolution with [`AsyncContext::get_async`] on
+//! the handle from [`get_or_insert_handle`](AsyncReactiveMap::get_or_insert_handle).
 //!
-//! To keep the three families API-parallel the per-key factory is the same sync
-//! `Fn(&K) -> V` as the sync/thread-safe families; a derived slot wraps it in a
-//! ready future. Mirrors the async materialization case in lazily-spec and the
+//! Its two specializations are [`AsyncCellMap`] (input cells) and [`AsyncSlotMap`]
+//! (derived slots). Mirrors the async materialization case in lazily-spec and the
 //! `AsyncMaterialization` proofs (eventual transparency) in lazily-formal.
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
-use crate::reactive_family::{EntryKind, MaterializationMode};
+use crate::cell_family::EntryKind;
 use crate::{AsyncCellHandle, AsyncContext, AsyncSlotHandle};
 
 mod sealed {
     pub trait Sealed {}
 }
 
-/// The node kinds an async family entry can take — the [`AsyncContext`] analog of
-/// [`FamilyHandle`](crate::FamilyHandle). Sealed to [`AsyncCellHandle`] (input cells)
+/// The node kinds an async map entry can take — the [`AsyncContext`] analog of
+/// [`MapHandle`](crate::MapHandle). Sealed to [`AsyncCellHandle`] (input cells)
 /// and [`AsyncSlotHandle`] (derived slots).
-pub trait AsyncFamilyHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static {
+pub trait AsyncMapHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static {
     /// This handle's entry kind. `AsyncCellHandle` is [`EntryKind::Cell`] (always
-    /// materialized, always resolved); `AsyncSlotHandle` is [`EntryKind::Slot`]
-    /// (mode-governed, resolves asynchronously).
+    /// resolved); `AsyncSlotHandle` is [`EntryKind::Slot`] (resolves asynchronously).
     const KIND: EntryKind;
 
     /// Allocate the node for one entry on `ctx`. `compute` is the per-key value
@@ -55,7 +57,7 @@ pub trait AsyncFamilyHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static {
 }
 
 impl<V> sealed::Sealed for AsyncCellHandle<V> {}
-impl<V: Send + Sync + 'static> AsyncFamilyHandle<V> for AsyncCellHandle<V> {
+impl<V: Send + Sync + 'static> AsyncMapHandle<V> for AsyncCellHandle<V> {
     const KIND: EntryKind = EntryKind::Cell;
 
     fn materialize(ctx: &AsyncContext, compute: Arc<dyn Fn() -> V + Send + Sync>) -> Self
@@ -74,7 +76,7 @@ impl<V: Send + Sync + 'static> AsyncFamilyHandle<V> for AsyncCellHandle<V> {
 }
 
 impl<V> sealed::Sealed for AsyncSlotHandle<V> {}
-impl<V: Send + Sync + 'static> AsyncFamilyHandle<V> for AsyncSlotHandle<V> {
+impl<V: Send + Sync + 'static> AsyncMapHandle<V> for AsyncSlotHandle<V> {
     const KIND: EntryKind = EntryKind::Slot;
 
     fn materialize(ctx: &AsyncContext, compute: Arc<dyn Fn() -> V + Send + Sync>) -> Self
@@ -96,115 +98,70 @@ impl<V: Send + Sync + 'static> AsyncFamilyHandle<V> for AsyncSlotHandle<V> {
     }
 }
 
-/// Present-set state, guarded by the family's `Mutex`.
-struct FamilyState<K, H> {
+/// Present-set state, guarded by the map's `Mutex`.
+struct MapState<K, H> {
     materialized: HashMap<K, H>,
     order: Vec<K>,
 }
 
-struct FamilyInner<K, V, H> {
-    mode: MaterializationMode,
-    factory: Arc<dyn Fn(&K) -> V + Send + Sync>,
-    state: Mutex<FamilyState<K, H>>,
+struct MapInner<K, H> {
+    state: Mutex<MapState<K, H>>,
 }
 
-/// The async unified keyed reactive family (`#lzmatmode`): keys `K` map to per-entry
-/// async reactive nodes of handle kind `H` ([`AsyncCellHandle<V>`] input cells,
-/// [`AsyncSlotHandle<V>`] derived slots), allocated per its [`MaterializationMode`].
+/// The async keyed reactive collection (`#reactivemap`) generic over the entry
+/// handle kind `H` ([`AsyncCellHandle<V>`] input cells, [`AsyncSlotHandle<V>`]
+/// derived slots).
 ///
 /// Cheap to [`Clone`] (an `Arc` to shared inner state) and `Send + Sync`. See the
-/// module docs for the eager/lazy contract and the eventual-transparency law.
-pub struct AsyncReactiveFamily<K, V, H> {
-    inner: Arc<FamilyInner<K, V, H>>,
+/// module docs for the eager/lazy behavior and the eventual-transparency law.
+pub struct AsyncReactiveMap<K, V, H> {
+    inner: Arc<MapInner<K, H>>,
+    _marker: PhantomData<V>,
 }
 
-impl<K, V, H> Clone for AsyncReactiveFamily<K, V, H> {
+impl<K, V, H> Clone for AsyncReactiveMap<K, V, H> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            _marker: PhantomData,
         }
     }
 }
 
-impl<K, V, H> AsyncReactiveFamily<K, V, H>
+impl<K, V, H> AsyncReactiveMap<K, V, H>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: PartialEq + Clone + Send + Sync + 'static,
-    H: AsyncFamilyHandle<V>,
+    H: AsyncMapHandle<V>,
 {
-    fn build(
-        ctx: &AsyncContext,
-        mode: MaterializationMode,
-        keys: impl IntoIterator<Item = K>,
-        factory: impl Fn(&K) -> V + Send + Sync + 'static,
-    ) -> Self {
-        let fam = Self {
-            inner: Arc::new(FamilyInner {
-                mode,
-                factory: Arc::new(factory),
-                state: Mutex::new(FamilyState {
+    /// Create an empty map bound to `ctx`.
+    pub fn new(_ctx: &AsyncContext) -> Self {
+        Self {
+            inner: Arc::new(MapInner {
+                state: Mutex::new(MapState {
                     materialized: HashMap::new(),
                     order: Vec::new(),
                 }),
             }),
-        };
-        for key in keys {
-            if H::KIND == EntryKind::Cell || mode == MaterializationMode::Eager {
-                fam.materialize_key(ctx, key);
-            }
+            _marker: PhantomData,
         }
-        fam
     }
 
-    /// Build an **eager** family (the default mode): every declared key allocated now.
-    pub fn eager(
+    fn mint_with(
+        &self,
         ctx: &AsyncContext,
-        keys: impl IntoIterator<Item = K>,
-        factory: impl Fn(&K) -> V + Send + Sync + 'static,
-    ) -> Self {
-        Self::build(ctx, MaterializationMode::Eager, keys, factory)
-    }
-
-    /// Build a **lazy** family: derived (slot) entries deferred to first read; input
-    /// cells still materialized at build.
-    pub fn lazy(
-        ctx: &AsyncContext,
-        keys: impl IntoIterator<Item = K>,
-        factory: impl Fn(&K) -> V + Send + Sync + 'static,
-    ) -> Self {
-        Self::build(ctx, MaterializationMode::Lazy, keys, factory)
-    }
-
-    /// Build a family in the **default** mode (eager). Alias for [`eager`](Self::eager).
-    pub fn new(
-        ctx: &AsyncContext,
-        keys: impl IntoIterator<Item = K>,
-        factory: impl Fn(&K) -> V + Send + Sync + 'static,
-    ) -> Self {
-        Self::eager(ctx, keys, factory)
-    }
-
-    fn materialize_key(&self, ctx: &AsyncContext, key: K) -> H {
+        key: K,
+        compute: Arc<dyn Fn() -> V + Send + Sync>,
+    ) -> H {
         // Fast path under the lock; release before touching `ctx`.
         {
-            let state = self
-                .inner
-                .state
-                .lock()
-                .expect("family state mutex poisoned");
+            let state = self.inner.state.lock().expect("map state mutex poisoned");
             if let Some(handle) = state.materialized.get(&key) {
                 return *handle;
             }
         }
-        let factory = Arc::clone(&self.inner.factory);
-        let k = key.clone();
-        let compute: Arc<dyn Fn() -> V + Send + Sync> = Arc::new(move || factory(&k));
         let handle = H::materialize(ctx, compute);
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("family state mutex poisoned");
+        let mut state = self.inner.state.lock().expect("map state mutex poisoned");
         // First writer wins on a race so the key keeps a stable handle.
         if let Some(existing) = state.materialized.get(&key) {
             return *existing;
@@ -214,17 +171,39 @@ where
         handle
     }
 
-    /// Get the entry handle for `key`, materializing it on first access. For a slot
-    /// family this is the [`AsyncSlotHandle`] to drive with [`AsyncContext::get_async`].
-    pub fn get(&self, ctx: &AsyncContext, key: K) -> H {
-        self.materialize_key(ctx, key)
+    /// Get the entry handle for `key`, minting it via `factory(&key)` on first
+    /// access and caching it. For a slot map this is the [`AsyncSlotHandle`] to
+    /// drive with [`AsyncContext::get_async`].
+    pub fn get_or_insert_handle(
+        &self,
+        ctx: &AsyncContext,
+        key: K,
+        factory: impl Fn(&K) -> V + Send + Sync + 'static,
+    ) -> H {
+        let k = key.clone();
+        let compute: Arc<dyn Fn() -> V + Send + Sync> = Arc::new(move || factory(&k));
+        self.mint_with(ctx, key, compute)
     }
 
-    /// Non-blocking observe: `Some(value)` for a cell or resolved slot, `None` for a
-    /// pending slot. The eventual-transparency law: once resolved, this equals the
-    /// canonical value under either mode.
-    pub fn observe(&self, ctx: &AsyncContext, key: K) -> Option<V> {
-        self.get(ctx, key).observe(ctx)
+    /// Non-blocking observe of an existing entry: `Some(value)` for a cell or
+    /// resolved slot, `None` for a pending slot or an absent key. Non-minting.
+    pub fn observe(&self, ctx: &AsyncContext, key: &K) -> Option<V> {
+        let handle = {
+            let state = self.inner.state.lock().expect("map state mutex poisoned");
+            state.materialized.get(key).copied()
+        };
+        handle.and_then(|h| h.observe(ctx))
+    }
+
+    /// Return the existing entry handle for `key`, or `None`. Non-minting.
+    pub fn handle(&self, key: &K) -> Option<H> {
+        self.inner
+            .state
+            .lock()
+            .expect("map state mutex poisoned")
+            .materialized
+            .get(key)
+            .copied()
     }
 
     /// Whether `key` is currently materialized (present). Non-reactive.
@@ -232,7 +211,7 @@ where
         self.inner
             .state
             .lock()
-            .expect("family state mutex poisoned")
+            .expect("map state mutex poisoned")
             .materialized
             .contains_key(key)
     }
@@ -242,7 +221,7 @@ where
         self.inner
             .state
             .lock()
-            .expect("family state mutex poisoned")
+            .expect("map state mutex poisoned")
             .order
             .clone()
     }
@@ -252,29 +231,66 @@ where
         self.inner
             .state
             .lock()
-            .expect("family state mutex poisoned")
+            .expect("map state mutex poisoned")
             .order
             .len()
     }
 
-    /// This family's materialization mode.
-    pub fn mode(&self) -> MaterializationMode {
-        self.inner.mode
-    }
-
-    /// This family's entry kind.
+    /// This map's entry kind.
     pub fn entry_kind(&self) -> EntryKind {
         H::KIND
     }
 }
 
-/// An async **input-cell** family: every entry is an always-resolved
-/// [`AsyncCellHandle<V>`].
-pub type AsyncCellFamily<K, V> = AsyncReactiveFamily<K, V, AsyncCellHandle<V>>;
+/// `AsyncCellMap`-only surface: `set` (an input is settable).
+impl<K, V> AsyncReactiveMap<K, V, AsyncCellHandle<V>>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: PartialEq + Clone + Send + Sync + 'static,
+{
+    /// Set the value at `key`, inserting a new input cell if absent. Cell-only.
+    pub fn set(&self, ctx: &AsyncContext, key: K, value: V) {
+        let existing = {
+            let state = self.inner.state.lock().expect("map state mutex poisoned");
+            state.materialized.get(&key).copied()
+        };
+        if let Some(handle) = existing {
+            ctx.set_cell(&handle, value);
+            return;
+        }
+        self.get_or_insert_handle(ctx, key, move |_| value.clone());
+    }
+}
 
-/// An async **derived-slot** family: entries are [`AsyncSlotHandle<V>`] governed by
-/// the family's [`MaterializationMode`], resolved via [`AsyncContext::get_async`].
-pub type AsyncSlotFamily<K, V> = AsyncReactiveFamily<K, V, AsyncSlotHandle<V>>;
+/// `AsyncSlotMap`-only surface: the eager pre-mint helper.
+impl<K, V> AsyncReactiveMap<K, V, AsyncSlotHandle<V>>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: PartialEq + Clone + Send + Sync + 'static,
+{
+    /// **Eager materialization**: pre-mint a derived slot for every key in `keys`.
+    pub fn materialize_all(
+        &self,
+        ctx: &AsyncContext,
+        keys: impl IntoIterator<Item = K>,
+        factory: impl Fn(&K) -> V + Send + Sync + 'static,
+    ) {
+        let factory = Arc::new(factory);
+        for key in keys {
+            let f = Arc::clone(&factory);
+            self.get_or_insert_handle(ctx, key, move |k| f(k));
+        }
+    }
+}
+
+/// An async **input-cell** map: every entry is an always-resolved
+/// [`AsyncCellHandle<V>`].
+pub type AsyncCellMap<K, V> = AsyncReactiveMap<K, V, AsyncCellHandle<V>>;
+
+/// An async **derived-slot** map: entries are [`AsyncSlotHandle<V>`] minted lazily
+/// on access or eagerly via [`materialize_all`](AsyncReactiveMap::materialize_all),
+/// resolved via [`AsyncContext::get_async`].
+pub type AsyncSlotMap<K, V> = AsyncReactiveMap<K, V, AsyncSlotHandle<V>>;
 
 #[cfg(test)]
 mod tests {
@@ -283,30 +299,31 @@ mod tests {
     fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]
-    fn family_is_send_sync() {
-        assert_send_sync::<AsyncCellFamily<u64, bool>>();
-        assert_send_sync::<AsyncSlotFamily<u64, usize>>();
+    fn map_is_send_sync() {
+        assert_send_sync::<AsyncCellMap<u64, bool>>();
+        assert_send_sync::<AsyncSlotMap<u64, usize>>();
     }
 
     #[tokio::test]
-    async fn eager_cell_family_resolves_immediately() {
+    async fn eager_cell_map_resolves_immediately() {
         let ctx = AsyncContext::new();
-        let fam: AsyncCellFamily<u64, bool> = AsyncReactiveFamily::eager(&ctx, [1, 2, 3], |_| true);
+        let fam: AsyncCellMap<u64, bool> = AsyncCellMap::new(&ctx);
+        for k in [1u64, 2, 3] {
+            fam.set(&ctx, k, true);
+        }
         assert_eq!(fam.entry_kind(), EntryKind::Cell);
         assert_eq!(fam.present_count(), 3);
-        assert_eq!(fam.observe(&ctx, 2), Some(true));
+        assert_eq!(fam.observe(&ctx, &2), Some(true));
         assert_eq!(fam.present_keys(), vec![1, 2, 3]);
     }
 
     #[tokio::test]
-    async fn lazy_slot_family_defers_until_read() {
+    async fn lazy_slot_map_defers_until_read() {
         let ctx = AsyncContext::new();
-        let fam: AsyncSlotFamily<u64, usize> =
-            AsyncReactiveFamily::lazy(&ctx, [], |k| (*k as usize) * 10);
-        assert_eq!(fam.mode(), MaterializationMode::Lazy);
+        let fam: AsyncSlotMap<u64, usize> = AsyncSlotMap::new(&ctx);
         assert_eq!(fam.present_count(), 0);
         // Materialize + drive to resolution.
-        let handle = fam.get(&ctx, 4);
+        let handle = fam.get_or_insert_handle(&ctx, 4, |k| (*k as usize) * 10);
         assert!(fam.is_present(&4));
         assert_eq!(fam.present_count(), 1);
         assert_eq!(ctx.get_async(&handle).await, 40);
@@ -315,14 +332,15 @@ mod tests {
     #[tokio::test]
     async fn eventual_transparency_eager_equals_lazy() {
         let ctx_e = AsyncContext::new();
-        let eager: AsyncSlotFamily<u64, usize> =
-            AsyncReactiveFamily::eager(&ctx_e, [1, 2, 3], |k| (*k as usize) * 2);
+        let eager: AsyncSlotMap<u64, usize> = AsyncSlotMap::new(&ctx_e);
+        eager.materialize_all(&ctx_e, [1, 2, 3], |k| (*k as usize) * 2);
         let ctx_l = AsyncContext::new();
-        let lazy: AsyncSlotFamily<u64, usize> =
-            AsyncReactiveFamily::lazy(&ctx_l, [1, 2, 3], |k| (*k as usize) * 2);
+        let lazy: AsyncSlotMap<u64, usize> = AsyncSlotMap::new(&ctx_l);
         for k in [1u64, 2, 3] {
-            let ve = ctx_e.get_async(&eager.get(&ctx_e, k)).await;
-            let vl = ctx_l.get_async(&lazy.get(&ctx_l, k)).await;
+            let ve = ctx_e.get_async(&eager.handle(&k).unwrap()).await;
+            let vl = ctx_l
+                .get_async(&lazy.get_or_insert_handle(&ctx_l, k, |k| (*k as usize) * 2))
+                .await;
             assert_eq!(ve, vl);
         }
     }
@@ -330,21 +348,23 @@ mod tests {
     #[tokio::test]
     async fn present_set_grows_monotonically() {
         let ctx = AsyncContext::new();
-        let fam: AsyncSlotFamily<u64, usize> = AsyncReactiveFamily::lazy(&ctx, [], |k| *k as usize);
-        let _ = fam.get(&ctx, 5);
-        let _ = fam.get(&ctx, 5);
-        let _ = fam.get(&ctx, 9);
+        let fam: AsyncSlotMap<u64, usize> = AsyncSlotMap::new(&ctx);
+        let _ = fam.get_or_insert_handle(&ctx, 5, |k| *k as usize);
+        let _ = fam.get_or_insert_handle(&ctx, 5, |k| *k as usize);
+        let _ = fam.get_or_insert_handle(&ctx, 9, |k| *k as usize);
         assert_eq!(fam.present_count(), 2);
         assert_eq!(fam.present_keys(), vec![5, 9]);
     }
 
     #[tokio::test]
-    async fn cell_family_reacts_to_set() {
+    async fn cell_map_reacts_to_set() {
         let ctx = AsyncContext::new();
-        let fam: AsyncCellFamily<u64, bool> = AsyncReactiveFamily::eager(&ctx, [10, 20], |_| true);
-        assert_eq!(fam.observe(&ctx, 20), Some(true));
-        let h = fam.get(&ctx, 20);
-        ctx.set_cell(&h, false);
-        assert_eq!(fam.observe(&ctx, 20), Some(false));
+        let fam: AsyncCellMap<u64, bool> = AsyncCellMap::new(&ctx);
+        for k in [10u64, 20] {
+            fam.set(&ctx, k, true);
+        }
+        assert_eq!(fam.observe(&ctx, &20), Some(true));
+        fam.set(&ctx, 20, false);
+        assert_eq!(fam.observe(&ctx, &20), Some(false));
     }
 }

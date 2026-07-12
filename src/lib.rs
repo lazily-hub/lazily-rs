@@ -80,7 +80,6 @@ mod ipc;
 #[cfg(feature = "lossless-tree")]
 mod lossless_tree_crdt;
 mod queue;
-mod reactive_family;
 mod receipt;
 mod reconcile;
 #[cfg(feature = "ipc")]
@@ -120,13 +119,11 @@ pub use async_context::{
     AsyncSignalHandle, AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView,
 };
 #[cfg(feature = "async")]
-pub use async_reactive_family::{
-    AsyncCellFamily, AsyncFamilyHandle, AsyncReactiveFamily, AsyncSlotFamily,
-};
+pub use async_reactive_family::{AsyncCellMap, AsyncMapHandle, AsyncReactiveMap, AsyncSlotMap};
 #[cfg(feature = "webrtc")]
 pub use bridge::{BridgeHub, HubError};
 pub use cell::CellHandle;
-pub use cell_family::{CellFamily, CellMap};
+pub use cell_family::{CellMap, EntryKind, MapHandle, ReactiveMap, SlotMap};
 pub use cell_tree::CellTree;
 #[cfg(feature = "ipc")]
 pub use command::{
@@ -205,7 +202,6 @@ pub use lossless_tree_crdt::{
 pub use queue::{
     QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, VecDequeStorage,
 };
-pub use reactive_family::{EntryKind, FamilyHandle, MaterializationMode, ReactiveFamily};
 pub use receipt::{
     CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,
     ReceiptProjection,
@@ -248,7 +244,7 @@ pub use thread_safe::{
 };
 #[cfg(feature = "thread-safe")]
 pub use thread_safe_reactive_family::{
-    ThreadSafeCellFamily, ThreadSafeFamilyHandle, ThreadSafeReactiveFamily, ThreadSafeSlotFamily,
+    ThreadSafeCellMap, ThreadSafeMapHandle, ThreadSafeReactiveMap, ThreadSafeSlotMap,
 };
 #[cfg(all(unix, feature = "shm"))]
 pub use transport::ShmBackend;

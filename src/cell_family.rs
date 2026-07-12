@@ -1,8 +1,30 @@
-//! Keyed reactive collections: [`CellMap`] and [`CellFamily`] (#lzcellfamily).
+//! Keyed reactive collections: the generic [`ReactiveMap`] and its
+//! [`CellMap`] / [`SlotMap`] specializations (`#reactivemap`).
 //!
 //! `Context` addresses nodes by opaque [`SlotId`](crate::context). These types
 //! add a *keyed* layer on top: a hash collection whose **membership is itself
-//! reactive**, with one independently-tracked value cell per entry.
+//! reactive**, with one independently-tracked reactive node per entry.
+//!
+//! # One primitive, two specializations
+//!
+//! There is a single keyed primitive, generic over the entry's **handle kind**
+//! `H` (the [`MapHandle`] trait, implemented by [`CellHandle`] for input cells
+//! and [`SlotHandle`] for derived slots):
+//!
+//! - **[`CellMap<K, V>`] = `ReactiveMap<K, V, CellHandle<V>>`** — **input-cell**
+//!   entries. Adds cell-only [`set`](ReactiveMap::set) and eager value-minting
+//!   ([`entry`](ReactiveMap::entry) / [`entry_with`](ReactiveMap::entry_with)).
+//! - **[`SlotMap<K, V>`] = `ReactiveMap<K, V, SlotHandle<V>>`** — **derived-slot**
+//!   entries. [`get_or_insert_with`](ReactiveMap::get_or_insert_with) mints a
+//!   slot on first access (**lazy materialization**); a slot's value is derived,
+//!   so `SlotMap` has **no `set`**. Eager materialization is a pre-mint loop over
+//!   the keyset ([`materialize_all`](ReactiveMap::materialize_all)); lazy is
+//!   mint-on-access. There is **no eager/lazy mode flag**.
+//!
+//! The shared surface — `get_or_insert_with` / `remove` / `move_*` / membership /
+//! order / `keys` / `len` / `contains_key` — lives on the generic `ReactiveMap`.
+//! `set` and eager value-minting are the `CellMap`-only specialization; the
+//! pre-mint eager helper is the `SlotMap`-only specialization.
 //!
 //! # Fine-grained vs. coarse
 //!
@@ -10,17 +32,13 @@
 //! every single-entry mutation replaces the whole map, so any reader of any
 //! entry is invalidated and (over a wire) the entire map is re-sent.
 //!
-//! [`CellMap`] is *fine-grained*. Each entry is its own [`CellHandle<V>`], so:
+//! [`ReactiveMap`] is *fine-grained*. Each entry is its own reactive node, so:
 //!
 //! - A reader that depends on entry `a` is **not** invalidated when entry `b`
 //!   changes — only that entry's dependents recompute.
 //! - Membership (the set of keys) is tracked by a dedicated version cell, so
-//!   [`keys`](CellMap::keys) / [`len`](CellMap::len) readers recompute only
-//!   when keys are **added or removed**, not when an existing value changes.
-//!
-//! [`CellFamily`] layers a value factory on top of [`CellMap`]: a parameterized
-//! factory (à la Recoil/Jotai `atomFamily`) that lazily mints and caches one
-//! cell per key on first access via [`CellFamily::get`].
+//!   [`keys`](ReactiveMap::keys) / [`len`](ReactiveMap::len) readers recompute
+//!   only when keys are **added or removed**, not when an existing value changes.
 //!
 //! ```
 //! use lazily::{CellMap, Context};
@@ -46,24 +64,121 @@
 use std::cell::{Cell as StdCell, RefCell};
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::Context;
 use crate::cell::CellHandle;
+use crate::slot::SlotHandle;
 
-/// A keyed reactive collection: a hash map of `K -> CellHandle<V>` with reactive
-/// membership and independently-tracked per-entry value cells.
+/// Which kind of reactive node a [`ReactiveMap`] entry is — the handle-kind axis
+/// the map abstracts over.
+///
+/// Mirrors `EntryKind` in `lazily-formal`'s `Materialization` module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// An **input** cell ([`CellHandle`]) — always materialized on `get`.
+    Cell,
+    /// A **derived** slot ([`SlotHandle`]) — materialized eagerly (pre-mint) or
+    /// lazily on first read.
+    Slot,
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// The entry-handle axis a [`ReactiveMap`] abstracts over. Implemented by
+/// [`CellHandle`] (input cells) and [`SlotHandle`] (derived slots) only — the
+/// two node kinds of the cell model. Sealed: bindings do not add new kinds.
+pub trait MapHandle<V>: sealed::Sealed + Copy + 'static {
+    /// This handle's entry kind. `CellHandle` is [`EntryKind::Cell`]; `SlotHandle`
+    /// is [`EntryKind::Slot`].
+    const KIND: EntryKind;
+
+    /// Allocate the node for one entry in `ctx`, with `compute` producing its
+    /// canonical value. An input cell sets the value directly; a derived slot
+    /// wraps `compute` as its recomputation.
+    fn materialize(ctx: &Context, compute: impl Fn(&Context) -> V + 'static) -> Self
+    where
+        V: PartialEq + Clone + 'static;
+
+    /// Read this entry's value through its owning context (subscribes the caller
+    /// as any cell/slot read does).
+    fn observe(self, ctx: &Context) -> V
+    where
+        V: Clone + 'static;
+
+    /// Detach this entry's node from the graph on removal — clear its cached
+    /// value and its dependents.
+    fn clear_dependents(self, ctx: &Context);
+}
+
+impl<V> sealed::Sealed for CellHandle<V> {}
+impl<V: 'static> MapHandle<V> for CellHandle<V> {
+    const KIND: EntryKind = EntryKind::Cell;
+
+    fn materialize(ctx: &Context, compute: impl Fn(&Context) -> V + 'static) -> Self
+    where
+        V: PartialEq + Clone + 'static,
+    {
+        // An input has no derivation: materialize by setting its value directly.
+        ctx.cell(compute(ctx))
+    }
+
+    fn observe(self, ctx: &Context) -> V
+    where
+        V: Clone + 'static,
+    {
+        ctx.get_cell(&self)
+    }
+
+    fn clear_dependents(self, ctx: &Context) {
+        CellHandle::clear_dependents(&self, ctx);
+    }
+}
+
+impl<V> sealed::Sealed for SlotHandle<V> {}
+impl<V: 'static> MapHandle<V> for SlotHandle<V> {
+    const KIND: EntryKind = EntryKind::Slot;
+
+    fn materialize(ctx: &Context, compute: impl Fn(&Context) -> V + 'static) -> Self
+    where
+        V: PartialEq + Clone + 'static,
+    {
+        // A derived node: the same node an eager pre-mint would allocate.
+        ctx.computed(compute)
+    }
+
+    fn observe(self, ctx: &Context) -> V
+    where
+        V: Clone + 'static,
+    {
+        ctx.get(&self)
+    }
+
+    fn clear_dependents(self, ctx: &Context) {
+        self.clear(ctx);
+    }
+}
+
+/// A keyed reactive collection generic over the entry handle kind `H`: a hash map
+/// of `K -> H` with reactive membership and independently-tracked per-entry nodes.
 ///
 /// Cheap to [`Clone`] (an `Rc` to the shared inner state) so it can be captured
 /// by compute/effect closures. All operations are taken against the owning
 /// [`Context`]; like the rest of `lazily`, the graph data lives in the context.
-pub struct CellMap<K, V> {
-    inner: Rc<CellMapInner<K, V>>,
+///
+/// The two specializations a binding exposes are [`CellMap`] (input cells) and
+/// [`SlotMap`] (derived slots). See the module docs.
+pub struct ReactiveMap<K, V, H> {
+    inner: Rc<ReactiveMapInner<K, H>>,
+    _marker: PhantomData<V>,
 }
 
-struct CellMapInner<K, V> {
-    /// Per-key value cells. Each entry is its own reactive node.
-    entries: RefCell<HashMap<K, CellHandle<V>>>,
+struct ReactiveMapInner<K, H> {
+    /// Per-key reactive nodes. Each entry is its own reactive node.
+    entries: RefCell<HashMap<K, H>>,
     /// Insertion-ordered authoritative key list (snapshot returned by `keys`).
     order: RefCell<Vec<K>>,
     /// Reactive *set-membership* signal. Holds a monotonic version bumped only
@@ -83,23 +198,25 @@ struct CellMapInner<K, V> {
     order_version: StdCell<u64>,
 }
 
-impl<K, V> Clone for CellMap<K, V> {
+impl<K, V, H> Clone for ReactiveMap<K, V, H> {
     fn clone(&self) -> Self {
         Self {
             inner: Rc::clone(&self.inner),
+            _marker: PhantomData,
         }
     }
 }
 
-impl<K, V> CellMap<K, V>
+impl<K, V, H> ReactiveMap<K, V, H>
 where
     K: Eq + Hash + Clone + 'static,
     V: PartialEq + Clone + 'static,
+    H: MapHandle<V>,
 {
     /// Create an empty collection bound to `ctx`.
     pub fn new(ctx: &Context) -> Self {
         Self {
-            inner: Rc::new(CellMapInner {
+            inner: Rc::new(ReactiveMapInner {
                 entries: RefCell::new(HashMap::new()),
                 order: RefCell::new(Vec::new()),
                 membership: ctx.cell(0u64),
@@ -107,6 +224,7 @@ where
                 order_signal: ctx.cell(0u64),
                 order_version: StdCell::new(0),
             }),
+            _marker: PhantomData,
         }
     }
 
@@ -130,31 +248,43 @@ where
         self.bump_order(ctx);
     }
 
-    /// Return the value cell for `key`, minting it with `default` (computed via
-    /// the closure) on first access. Subsequent calls return the cached handle.
-    ///
-    /// Adding a new key bumps reactive membership; re-fetching an existing key
-    /// does not.
-    pub fn entry_with(&self, ctx: &Context, key: K, default: impl FnOnce() -> V) -> CellHandle<V> {
-        if let Some(handle) = self.inner.entries.borrow().get(&key) {
-            return *handle;
+    /// Mint the entry node for `key` (via `H::materialize` with `compute` as its
+    /// canonical value producer) on first access, caching the handle and bumping
+    /// reactive membership. Re-minting an existing key returns the cached handle.
+    fn mint_with(&self, ctx: &Context, key: K, compute: impl Fn(&Context) -> V + 'static) -> H {
+        if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
+            return handle; // warm: already allocated.
         }
-        let handle = ctx.cell(default());
+        let handle = H::materialize(ctx, compute);
         self.inner.entries.borrow_mut().insert(key.clone(), handle);
         self.inner.order.borrow_mut().push(key);
         self.bump_membership(ctx);
         handle
     }
 
-    /// Return the value cell for `key`, minting it with `default` on first
-    /// access. Convenience wrapper over [`entry_with`](CellMap::entry_with).
-    pub fn entry(&self, ctx: &Context, key: K, default: V) -> CellHandle<V> {
-        self.entry_with(ctx, key, || default)
+    /// Get the value at `key`, minting the entry via `factory(&key)` first if the
+    /// key is absent — the mint-on-access recipe. For a [`SlotMap`] this is the
+    /// **lazy materialization** pull; for a [`CellMap`] it seeds an input cell.
+    ///
+    /// Bumps reactive membership only on insert; an existing key returns its
+    /// current value without re-running the factory.
+    pub fn get_or_insert_with(
+        &self,
+        ctx: &Context,
+        key: K,
+        factory: impl Fn(&K) -> V + 'static,
+    ) -> V {
+        if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
+            return handle.observe(ctx);
+        }
+        let k = key.clone();
+        let handle = self.mint_with(ctx, key, move |_ctx| factory(&k));
+        handle.observe(ctx)
     }
 
-    /// Return the existing value cell for `key`, or `None`. Non-reactive: this
+    /// Return the existing entry handle for `key`, or `None`. Non-reactive: this
     /// does not subscribe the caller to membership.
-    pub fn handle(&self, key: &K) -> Option<CellHandle<V>> {
+    pub fn handle(&self, key: &K) -> Option<H> {
         self.inner.entries.borrow().get(key).copied()
     }
 
@@ -162,39 +292,14 @@ where
     /// is invalidated when this entry changes, not when siblings change).
     pub fn get(&self, ctx: &Context, key: &K) -> Option<V> {
         let handle = self.inner.entries.borrow().get(key).copied();
-        handle.map(|h| ctx.get_cell(&h))
-    }
-
-    /// Set the value at `key`, inserting a new entry (and bumping membership) if
-    /// it does not exist yet. Updating an existing entry leaves membership
-    /// untouched and invalidates only that entry's dependents.
-    pub fn set(&self, ctx: &Context, key: K, value: V) {
-        if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
-            handle.set(ctx, value);
-            return;
-        }
-        self.entry_with(ctx, key, || value);
-    }
-
-    /// Get the value at `key`, inserting `factory(&key)` first if the key is
-    /// absent — the auto-mint recipe (`CellFamily` without a standing factory;
-    /// see `lazily-spec/cell-model.md` § Materialization). Bumps reactive
-    /// membership only on insert; an existing key returns its current value.
-    pub fn get_or_insert_with(&self, ctx: &Context, key: K, factory: impl FnOnce(&K) -> V) -> V {
-        if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
-            return ctx.get_cell(&handle);
-        }
-        let value = factory(&key);
-        let ret = value.clone();
-        self.entry_with(ctx, key, || value);
-        ret
+        handle.map(|h| h.observe(ctx))
     }
 
     /// Remove `key`'s entry. Bumps reactive membership and clears the removed
     /// entry's dependents. Returns whether the key was present.
     ///
     /// Note: the underlying node id is not recycled (the runtime exposes no
-    /// node-free API yet); the orphaned cell stops driving any dependents.
+    /// node-free API yet); the orphaned node stops driving any dependents.
     pub fn remove(&self, ctx: &Context, key: &K) -> bool {
         let removed = self.inner.entries.borrow_mut().remove(key);
         let Some(handle) = removed else {
@@ -214,6 +319,23 @@ where
         self.inner.order.borrow().clone()
     }
 
+    /// The currently-materialized (present) keys, in first-materialization order.
+    /// Non-reactive; the present set only grows (deferral, not de-allocation).
+    pub fn present_keys(&self) -> Vec<K> {
+        self.inner.order.borrow().clone()
+    }
+
+    /// Number of currently-materialized (present) entries. Non-reactive.
+    pub fn present_count(&self) -> usize {
+        self.inner.order.borrow().len()
+    }
+
+    /// Whether `key` is currently materialized (present in the allocated set).
+    /// Non-reactive.
+    pub fn is_present(&self, key: &K) -> bool {
+        self.inner.entries.borrow().contains_key(key)
+    }
+
     /// Current 0-based position of `key` in the order, or `None` if absent.
     /// Non-reactive.
     pub fn position(&self, key: &K) -> Option<usize> {
@@ -223,8 +345,8 @@ where
     /// Atomically move `key` to `index` in the order (`#lzcellmove`).
     ///
     /// This is the *atomic, optimized* reorder: the entry keeps the **same**
-    /// value cell, the same dependents, and its CRDT lineage — unlike the naive
-    /// `remove` + `entry` which re-mints the cell and bumps membership twice.
+    /// node, the same dependents, and its CRDT lineage — unlike the naive
+    /// `remove` + re-mint which re-allocates the node and bumps membership twice.
     /// Only the order signal is bumped (once), so `keys` readers recompute but
     /// `len`/`contains_key` readers — which track set identity, not order —
     /// stay cached.
@@ -305,69 +427,87 @@ where
     pub fn len_untracked(&self) -> usize {
         self.inner.order.borrow().len()
     }
-}
 
-/// A parameterized factory of reactive cells, keyed by `K` (à la Recoil/Jotai
-/// `atomFamily`). The factory lazily mints and caches one [`CellHandle<V>`] per
-/// distinct key; repeated [`get`](CellFamily::get)s of the same key return the
-/// same cell.
-///
-/// Built on top of [`CellMap`], so membership is reactive and entries are
-/// fine-grained. Cheap to [`Clone`].
-///
-/// ```
-/// use lazily::{CellFamily, Context};
-///
-/// let ctx = Context::new();
-/// // One counter cell per id, defaulting to the id itself.
-/// let counters: CellFamily<u32, u32> = CellFamily::new(&ctx, |&id| id);
-/// let a = counters.get(&ctx, 7);
-/// assert_eq!(a.get(&ctx), 7);
-/// // Same key -> same cell.
-/// assert_eq!(counters.get(&ctx, 7).get(&ctx), 7);
-/// ```
-pub struct CellFamily<K, V> {
-    map: CellMap<K, V>,
-    factory: Rc<dyn Fn(&K) -> V>,
-}
-
-impl<K, V> Clone for CellFamily<K, V> {
-    fn clone(&self) -> Self {
-        Self {
-            map: self.map.clone(),
-            factory: Rc::clone(&self.factory),
-        }
+    /// This map's entry kind ([`EntryKind::Cell`] for a [`CellMap`],
+    /// [`EntryKind::Slot`] for a [`SlotMap`]).
+    pub fn entry_kind(&self) -> EntryKind {
+        H::KIND
     }
 }
 
-impl<K, V> CellFamily<K, V>
+/// A keyed **input-cell** collection: every entry is a settable [`CellHandle<V>`].
+///
+/// The `CellMap` specialization of [`ReactiveMap`] adds cell-only `set` and eager
+/// value-minting (`entry` / `entry_with`) on top of the shared reactive keyed
+/// surface.
+pub type CellMap<K, V> = ReactiveMap<K, V, CellHandle<V>>;
+
+/// A keyed **derived-slot** collection: every entry is a [`SlotHandle<V>`] whose
+/// value is derived. `get_or_insert_with` mints a slot on first access (lazy
+/// materialization); [`materialize_all`](ReactiveMap::materialize_all) pre-mints
+/// the keyset (eager). A slot's value is derived, so `SlotMap` has **no `set`**.
+pub type SlotMap<K, V> = ReactiveMap<K, V, SlotHandle<V>>;
+
+/// `CellMap`-only surface: eager value-minting and `set` (an input is settable).
+impl<K, V> ReactiveMap<K, V, CellHandle<V>>
 where
     K: Eq + Hash + Clone + 'static,
     V: PartialEq + Clone + 'static,
 {
-    /// Create a family whose entries are produced by `factory` on first access.
-    pub fn new(ctx: &Context, factory: impl Fn(&K) -> V + 'static) -> Self {
-        Self {
-            map: CellMap::new(ctx),
-            factory: Rc::new(factory),
+    /// Return the value cell for `key`, minting it with `default` (computed via
+    /// the closure) on first access. Subsequent calls return the cached handle.
+    ///
+    /// Adding a new key bumps reactive membership; re-fetching an existing key
+    /// does not. Cell-only: eager value-minting has no derived-slot analog.
+    pub fn entry_with(&self, ctx: &Context, key: K, default: impl FnOnce() -> V) -> CellHandle<V> {
+        if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
+            return handle;
         }
+        let value = default();
+        self.mint_with(ctx, key, move |_ctx| value.clone())
     }
 
-    /// Get (minting on first access via the factory) the cell for `key`.
-    pub fn get(&self, ctx: &Context, key: K) -> CellHandle<V> {
-        let factory = Rc::clone(&self.factory);
-        let k = key.clone();
-        self.map.entry_with(ctx, key, move || factory(&k))
+    /// Return the value cell for `key`, minting it with `default` on first
+    /// access. Convenience wrapper over [`entry_with`](Self::entry_with).
+    pub fn entry(&self, ctx: &Context, key: K, default: V) -> CellHandle<V> {
+        self.entry_with(ctx, key, || default)
     }
 
-    /// Borrow the underlying [`CellMap`] for membership/iteration APIs.
-    pub fn map(&self) -> &CellMap<K, V> {
-        &self.map
+    /// Set the value at `key`, inserting a new entry (and bumping membership) if
+    /// it does not exist yet. Updating an existing entry leaves membership
+    /// untouched and invalidates only that entry's dependents.
+    ///
+    /// Cell-only: an input is settable; a derived [`SlotMap`] slot is not.
+    pub fn set(&self, ctx: &Context, key: K, value: V) {
+        if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
+            handle.set(ctx, value);
+            return;
+        }
+        self.entry_with(ctx, key, || value);
     }
+}
 
-    /// Remove `key` from the family (see [`CellMap::remove`]).
-    pub fn remove(&self, ctx: &Context, key: &K) -> bool {
-        self.map.remove(ctx, key)
+/// `SlotMap`-only surface: the eager pre-mint helper. Lazy materialization is
+/// [`get_or_insert_with`](ReactiveMap::get_or_insert_with) on the shared surface.
+impl<K, V> ReactiveMap<K, V, SlotHandle<V>>
+where
+    K: Eq + Hash + Clone + 'static,
+    V: PartialEq + Clone + 'static,
+{
+    /// **Eager materialization**: pre-mint a derived slot for every key in
+    /// `keys` via `factory`, up front. Observationally identical to minting each
+    /// key lazily on first read — it only changes *when* the nodes are allocated.
+    pub fn materialize_all(
+        &self,
+        ctx: &Context,
+        keys: impl IntoIterator<Item = K>,
+        factory: impl Fn(&K) -> V + 'static,
+    ) {
+        let factory = Rc::new(factory);
+        for key in keys {
+            let f = Rc::clone(&factory);
+            self.get_or_insert_with(ctx, key, move |k| f(k));
+        }
     }
 }
 
@@ -391,25 +531,31 @@ mod tests {
     fn get_or_insert_with_mints_once_then_returns_existing() {
         let ctx = Context::new();
         let map: CellMap<&str, i32> = CellMap::new(&ctx);
-        let mut calls = 0;
+        let calls = Rc::new(StdCell::new(0));
         // First access mints via the factory.
         assert_eq!(
-            map.get_or_insert_with(&ctx, "a", |_| {
-                calls += 1;
-                7
+            map.get_or_insert_with(&ctx, "a", {
+                let calls = Rc::clone(&calls);
+                move |_| {
+                    calls.set(calls.get() + 1);
+                    7
+                }
             }),
             7
         );
         assert_eq!(map.len_untracked(), 1);
         // Second access returns the existing value; factory is NOT called again.
         assert_eq!(
-            map.get_or_insert_with(&ctx, "a", |_| {
-                calls += 1;
-                999
+            map.get_or_insert_with(&ctx, "a", {
+                let calls = Rc::clone(&calls);
+                move |_| {
+                    calls.set(calls.get() + 1);
+                    999
+                }
             }),
             7
         );
-        assert_eq!(calls, 1);
+        assert_eq!(calls.get(), 1);
         // An explicit set is observed by a subsequent get_or_insert_with.
         map.set(&ctx, "a", 42);
         assert_eq!(map.get_or_insert_with(&ctx, "a", |_| 0), 42);
@@ -467,15 +613,31 @@ mod tests {
     }
 
     #[test]
-    fn family_mints_via_factory_and_caches() {
+    fn slot_map_mints_lazily_and_caches() {
         let ctx = Context::new();
-        let fam: CellFamily<u32, u32> = CellFamily::new(&ctx, |&k| k * 2);
-        let c7 = fam.get(&ctx, 7);
-        assert_eq!(c7.get(&ctx), 14);
-        // Same key -> same cell (factory not re-run / value preserved).
-        c7.set(&ctx, 100);
-        assert_eq!(fam.get(&ctx, 7).get(&ctx), 100);
-        assert_eq!(fam.map().len_untracked(), 1);
+        let fam: SlotMap<u32, u32> = SlotMap::new(&ctx);
+        // Nothing present until first access.
+        assert_eq!(fam.present_count(), 0);
+        assert_eq!(fam.get_or_insert_with(&ctx, 7, |&k| k * 2), 14);
+        assert_eq!(fam.present_count(), 1);
+        assert!(fam.is_present(&7));
+        // Same key -> same derived slot (value preserved, factory not re-run).
+        let h = fam.handle(&7).unwrap();
+        assert_eq!(h.get(&ctx), 14);
+        assert_eq!(fam.get_or_insert_with(&ctx, 7, |&k| k * 999), 14);
+    }
+
+    #[test]
+    fn slot_map_materialize_all_is_eager() {
+        let ctx = Context::new();
+        let fam: SlotMap<u32, u32> = SlotMap::new(&ctx);
+        fam.materialize_all(&ctx, [0u32, 1, 2, 5, 9], |&k| k * 3);
+        assert_eq!(fam.present_count(), 5);
+        for k in [0u32, 1, 2, 5, 9] {
+            assert!(fam.is_present(&k));
+        }
+        assert_eq!(fam.get(&ctx, &5), Some(15));
+        assert_eq!(fam.entry_kind(), EntryKind::Slot);
     }
 
     #[test]

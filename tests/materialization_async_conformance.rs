@@ -1,16 +1,17 @@
-//! Async `ReactiveFamily` materialization conformance (`#lzmatmode`, async
+//! Async `AsyncSlotMap` materialization conformance (`#reactivemap`, async
 //! flavor). Replays the canonical fixtures in
-//! `lazily-spec/conformance/materialization/` through [`AsyncReactiveFamily`],
-//! proving the async flavor obeys the same present-set materialization laws and
-//! the **eventual transparency** law proved in `lazily-formal`'s
+//! `lazily-spec/conformance/materialization/` through [`AsyncSlotMap`], proving
+//! the async flavor obeys the same present-set materialization laws and the
+//! **eventual transparency** law proved in `lazily-formal`'s
 //! `AsyncMaterialization` module: a driven (resolved) async slot observes the
-//! canonical value, identical under eager or lazy.
+//! canonical value, identical whether pre-minted (eager) or minted on access
+//! (lazy).
 #![cfg(feature = "async")]
 
 use std::collections::HashSet;
 use std::fs;
 
-use lazily::{AsyncContext, AsyncReactiveFamily, AsyncSlotHandle, MaterializationMode};
+use lazily::{AsyncContext, AsyncSlotMap};
 use serde_json::Value;
 
 const SPEC_DIR: &str = "../lazily-spec/conformance/materialization";
@@ -50,28 +51,30 @@ fn as_set(keys: &[String]) -> HashSet<String> {
     keys.iter().cloned().collect()
 }
 
-fn slot_family(
-    ctx: &AsyncContext,
-    mode: MaterializationMode,
-    keys: Vec<String>,
-    entries: Vec<(String, V)>,
-) -> AsyncReactiveFamily<String, V, AsyncSlotHandle<V>> {
-    let lookup = move |k: &String| -> V {
+fn lookup_fn(entries: Vec<(String, V)>) -> impl Fn(&String) -> V + Clone + Send + Sync + 'static {
+    move |k: &String| -> V {
         entries
             .iter()
             .find(|(key, _)| key == k)
             .map(|(_, v)| *v)
             .unwrap_or_else(|| panic!("no val for {k}"))
-    };
-    match mode {
-        MaterializationMode::Eager => AsyncReactiveFamily::eager(ctx, keys, lookup),
-        MaterializationMode::Lazy => AsyncReactiveFamily::lazy(ctx, keys, lookup),
     }
 }
 
-/// Eventual transparency + present-set laws replayed through the async family:
+/// An eager `AsyncSlotMap`: pre-mint the whole keyset.
+fn eager_slot_map(
+    ctx: &AsyncContext,
+    keys: Vec<String>,
+    entries: Vec<(String, V)>,
+) -> AsyncSlotMap<String, V> {
+    let map: AsyncSlotMap<String, V> = AsyncSlotMap::new(ctx);
+    map.materialize_all(ctx, keys, lookup_fn(entries));
+    map
+}
+
+/// Eventual transparency + present-set laws replayed through the async map:
 /// eager materializes all, lazy defers all, and a driven slot resolves to the
-/// canonical value identically under either mode.
+/// canonical value identically whether pre-minted or minted on access.
 #[tokio::test]
 async fn eventual_transparency_async() {
     if !present() {
@@ -83,17 +86,11 @@ async fn eventual_transparency_async() {
     let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
     let expected = fixture.get("expected").unwrap();
 
-    assert_eq!(MaterializationMode::default(), MaterializationMode::Eager);
-
     let ctx_e = AsyncContext::new();
-    let eager = slot_family(
-        &ctx_e,
-        MaterializationMode::Eager,
-        keys.clone(),
-        entries.clone(),
-    );
+    let eager = eager_slot_map(&ctx_e, keys.clone(), entries.clone());
     let ctx_l = AsyncContext::new();
-    let lazy = slot_family(&ctx_l, MaterializationMode::Lazy, keys.clone(), entries);
+    let lazy: AsyncSlotMap<String, V> = AsyncSlotMap::new(&ctx_l);
+    let lookup = lookup_fn(entries);
 
     // Present-set laws (allocation axis, unchanged by async resolution).
     assert_eq!(eager.present_count(), keys.len());
@@ -104,18 +101,20 @@ async fn eventual_transparency_async() {
     assert_eq!(lazy.present_count(), 0);
 
     // Eventual transparency: drive each slot; resolved value = canonical, and the
-    // eager and lazy families agree.
+    // eager and lazy maps agree.
     for (k, want) in expected.get("observe").and_then(|v| v.as_object()).unwrap() {
         let want = want.as_i64().unwrap();
-        let ve = ctx_e.get_async(&eager.get(&ctx_e, k.clone())).await;
-        let vl = ctx_l.get_async(&lazy.get(&ctx_l, k.clone())).await;
+        let ve = ctx_e.get_async(&eager.handle(k).unwrap()).await;
+        let vl = ctx_l
+            .get_async(&lazy.get_or_insert_handle(&ctx_l, k.clone(), lookup.clone()))
+            .await;
         assert_eq!(ve, want, "eager async observe {k}");
         assert_eq!(vl, want, "lazy async observe {k}");
     }
 }
 
 /// The lazy present set after the fixture read sequence is exactly the read keys
-/// (deferral, not de-allocation) — same as the sync/thread-safe families.
+/// (deferral, not de-allocation) — same as the sync/thread-safe maps.
 #[tokio::test]
 async fn deferral_not_deallocation_async() {
     if !present() {
@@ -125,12 +124,12 @@ async fn deferral_not_deallocation_async() {
     let fixture = load("observational_transparency.json");
     let expected = fixture.get("expected").unwrap();
     let entries = val_entries(&fixture);
-    let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
 
     let ctx = AsyncContext::new();
-    let lazy = slot_family(&ctx, MaterializationMode::Lazy, keys, entries);
+    let lazy: AsyncSlotMap<String, V> = AsyncSlotMap::new(&ctx);
+    let lookup = lookup_fn(entries);
     for k in str_array(&fixture, "reads") {
-        let _ = lazy.get(&ctx, k);
+        let _ = lazy.get_or_insert_handle(&ctx, k, lookup.clone());
     }
     assert_eq!(
         as_set(&lazy.present_keys()),

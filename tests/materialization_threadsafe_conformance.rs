@@ -1,17 +1,17 @@
-//! Thread-safe `ReactiveFamily` materialization conformance (`#lzmatmode`,
+//! Thread-safe `ThreadSafeSlotMap` materialization conformance (`#reactivemap`,
 //! thread-safe flavor). Replays the canonical fixtures in
-//! `lazily-spec/conformance/materialization/` through
-//! [`ThreadSafeReactiveFamily`], proving the `Send + Sync` flavor obeys the same
-//! materialization laws as the single-threaded family — plus **confluence** (the
-//! order-independence proved in `lazily-formal`'s `Materialization` module:
-//! `materialize_present_comm` / `materialize_observe_comm`), the property that
-//! justifies mutex-serialized concurrent materialization.
+//! `lazily-spec/conformance/materialization/` through [`ThreadSafeSlotMap`],
+//! proving the `Send + Sync` flavor obeys the same materialization laws as the
+//! single-threaded map — plus **confluence** (the order-independence proved in
+//! `lazily-formal`'s `Materialization` module: `materialize_present_comm` /
+//! `materialize_observe_comm`), the property that justifies mutex-serialized
+//! concurrent materialization.
 #![cfg(feature = "thread-safe")]
 
 use std::collections::HashSet;
 use std::fs;
 
-use lazily::{MaterializationMode, SlotHandle, ThreadSafeContext, ThreadSafeReactiveFamily};
+use lazily::{ThreadSafeContext, ThreadSafeSlotMap};
 use serde_json::Value;
 
 const SPEC_DIR: &str = "../lazily-spec/conformance/materialization";
@@ -51,28 +51,30 @@ fn as_set(keys: &[String]) -> HashSet<String> {
     keys.iter().cloned().collect()
 }
 
-fn slot_family(
-    ctx: &ThreadSafeContext,
-    mode: MaterializationMode,
-    keys: Vec<String>,
-    entries: Vec<(String, V)>,
-) -> ThreadSafeReactiveFamily<String, V, SlotHandle<V>> {
-    let lookup = move |k: &String| -> V {
+fn lookup_fn(entries: Vec<(String, V)>) -> impl Fn(&String) -> V + Clone + Send + Sync + 'static {
+    move |k: &String| -> V {
         entries
             .iter()
             .find(|(key, _)| key == k)
             .map(|(_, v)| *v)
             .unwrap_or_else(|| panic!("no val for {k}"))
-    };
-    match mode {
-        MaterializationMode::Eager => ThreadSafeReactiveFamily::eager(ctx, keys, lookup),
-        MaterializationMode::Lazy => ThreadSafeReactiveFamily::lazy(ctx, keys, lookup),
     }
 }
 
-/// The shared `spec.val` laws, replayed through the thread-safe family: default
+/// An eager `ThreadSafeSlotMap`: pre-mint the whole keyset.
+fn eager_slot_map(
+    ctx: &ThreadSafeContext,
+    keys: Vec<String>,
+    entries: Vec<(String, V)>,
+) -> ThreadSafeSlotMap<String, V> {
+    let map: ThreadSafeSlotMap<String, V> = ThreadSafeSlotMap::new(ctx);
+    map.materialize_all(ctx, keys, lookup_fn(entries));
+    map
+}
+
+/// The shared `spec.val` laws, replayed through the thread-safe map: default
 /// eager, eager materializes all, lazy defers all, observationally-transparent
-/// reads under either mode.
+/// reads under either strategy.
 fn check_val_fixture(name: &str) -> Value {
     let fixture = load(name);
     let entries = val_entries(&fixture);
@@ -83,16 +85,11 @@ fn check_val_fixture(name: &str) -> Value {
         expected.get("default_mode").and_then(|v| v.as_str()),
         Some("eager")
     );
-    assert_eq!(MaterializationMode::default(), MaterializationMode::Eager);
 
     let ctx = ThreadSafeContext::new();
-    let eager = slot_family(
-        &ctx,
-        MaterializationMode::Eager,
-        keys.clone(),
-        entries.clone(),
-    );
-    let lazy = slot_family(&ctx, MaterializationMode::Lazy, keys.clone(), entries);
+    let eager = eager_slot_map(&ctx, keys.clone(), entries.clone());
+    let lazy: ThreadSafeSlotMap<String, V> = ThreadSafeSlotMap::new(&ctx);
+    let lookup = lookup_fn(entries);
 
     assert_eq!(eager.present_count(), keys.len());
     assert_eq!(
@@ -103,8 +100,12 @@ fn check_val_fixture(name: &str) -> Value {
 
     for (k, want) in expected.get("observe").and_then(|v| v.as_object()).unwrap() {
         let want = want.as_i64().unwrap();
-        assert_eq!(eager.observe(&ctx, k.clone()), want, "eager observe {k}");
-        assert_eq!(lazy.observe(&ctx, k.clone()), want, "lazy observe {k}");
+        assert_eq!(eager.observe(&ctx, k).unwrap(), want, "eager observe {k}");
+        assert_eq!(
+            lazy.get_or_insert_with(&ctx, k.clone(), lookup.clone()),
+            want,
+            "lazy observe {k}"
+        );
     }
     fixture
 }
@@ -118,12 +119,12 @@ fn observational_transparency_thread_safe() {
     let fixture = check_val_fixture("observational_transparency.json");
     let expected = fixture.get("expected").unwrap();
     let entries = val_entries(&fixture);
-    let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
 
     let ctx = ThreadSafeContext::new();
-    let lazy = slot_family(&ctx, MaterializationMode::Lazy, keys, entries);
+    let lazy: ThreadSafeSlotMap<String, V> = ThreadSafeSlotMap::new(&ctx);
+    let lookup = lookup_fn(entries);
     for k in str_array(&fixture, "reads") {
-        lazy.observe(&ctx, k);
+        lazy.get_or_insert_with(&ctx, k, lookup.clone());
     }
     assert_eq!(
         as_set(&lazy.present_keys()),
@@ -140,10 +141,10 @@ fn deferral_not_deallocation_thread_safe() {
     let fixture = check_val_fixture("deferral_not_deallocation.json");
     let expected = fixture.get("expected").unwrap();
     let entries = val_entries(&fixture);
-    let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
 
     let ctx = ThreadSafeContext::new();
-    let lazy = slot_family(&ctx, MaterializationMode::Lazy, keys, entries);
+    let lazy: ThreadSafeSlotMap<String, V> = ThreadSafeSlotMap::new(&ctx);
+    let lookup = lookup_fn(entries);
     let want_sizes: Vec<usize> = expected
         .get("present_after_each_read")
         .and_then(|v| v.as_array())
@@ -153,7 +154,7 @@ fn deferral_not_deallocation_thread_safe() {
         .collect();
     let mut got = Vec::new();
     for k in str_array(&fixture, "reads") {
-        lazy.observe(&ctx, k);
+        lazy.get_or_insert_with(&ctx, k, lookup.clone());
         got.push(lazy.present_count());
     }
     assert_eq!(got, want_sizes);
@@ -162,9 +163,9 @@ fn deferral_not_deallocation_thread_safe() {
 }
 
 /// **Confluence** (`materialize_present_comm` / `materialize_observe_comm`): two
-/// lazy families over the same spec, read in *opposite* key orders, reach the
-/// same present set and identical observed values — the order-independence that
-/// makes the `Arc<Mutex>`-serialized family safe under any interleaving.
+/// lazy maps over the same spec, read in *opposite* key orders, reach the same
+/// present set and identical observed values — the order-independence that makes
+/// the `Arc<Mutex>`-serialized map safe under any interleaving.
 #[test]
 fn materialization_confluent_under_reordering() {
     if !present() {
@@ -176,22 +177,24 @@ fn materialization_confluent_under_reordering() {
     let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
 
     let ctx_fwd = ThreadSafeContext::new();
-    let fwd = slot_family(
-        &ctx_fwd,
-        MaterializationMode::Lazy,
-        keys.clone(),
-        entries.clone(),
-    );
+    let fwd: ThreadSafeSlotMap<String, V> = ThreadSafeSlotMap::new(&ctx_fwd);
     let ctx_rev = ThreadSafeContext::new();
-    let rev = slot_family(&ctx_rev, MaterializationMode::Lazy, keys.clone(), entries);
+    let rev: ThreadSafeSlotMap<String, V> = ThreadSafeSlotMap::new(&ctx_rev);
+    let lookup = lookup_fn(entries);
 
     let mut fwd_vals = Vec::new();
     for k in keys.iter() {
-        fwd_vals.push((k.clone(), fwd.observe(&ctx_fwd, k.clone())));
+        fwd_vals.push((
+            k.clone(),
+            fwd.get_or_insert_with(&ctx_fwd, k.clone(), lookup.clone()),
+        ));
     }
     let mut rev_vals = Vec::new();
     for k in keys.iter().rev() {
-        rev_vals.push((k.clone(), rev.observe(&ctx_rev, k.clone())));
+        rev_vals.push((
+            k.clone(),
+            rev.get_or_insert_with(&ctx_rev, k.clone(), lookup.clone()),
+        ));
     }
 
     // Same observed value per key regardless of the order it was materialized.

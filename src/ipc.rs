@@ -604,7 +604,7 @@ pub struct NodeSnapshot {
     /// Serialized value bytes, or `Opaque` when the node is visible but
     /// type-erased serialization was not available.
     pub state: NodeState,
-    /// Optional wire-stable keyed address for this node (a `CellMap`/`CellFamily`
+    /// Optional wire-stable keyed address for this node (a `CellMap`/`SlotMap`
     /// entry's path). `None` keeps today's opaque-NodeId-only addressing.
     pub key: Option<NodeKey>,
 }
