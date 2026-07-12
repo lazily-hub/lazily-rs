@@ -176,6 +176,20 @@ where
         self.entry_with(ctx, key, || value);
     }
 
+    /// Get the value at `key`, inserting `factory(&key)` first if the key is
+    /// absent — the auto-mint recipe (`CellFamily` without a standing factory;
+    /// see `lazily-spec/cell-model.md` § Materialization). Bumps reactive
+    /// membership only on insert; an existing key returns its current value.
+    pub fn get_or_insert_with(&self, ctx: &Context, key: K, factory: impl FnOnce(&K) -> V) -> V {
+        if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
+            return ctx.get_cell(&handle);
+        }
+        let value = factory(&key);
+        let ret = value.clone();
+        self.entry_with(ctx, key, || value);
+        ret
+    }
+
     /// Remove `key`'s entry. Bumps reactive membership and clears the removed
     /// entry's dependents. Returns whether the key was present.
     ///
@@ -371,6 +385,34 @@ mod tests {
         assert_eq!(a1.id, a2.id);
         assert_eq!(a1.get(&ctx), 1);
         assert_eq!(map.len_untracked(), 1);
+    }
+
+    #[test]
+    fn get_or_insert_with_mints_once_then_returns_existing() {
+        let ctx = Context::new();
+        let map: CellMap<&str, i32> = CellMap::new(&ctx);
+        let mut calls = 0;
+        // First access mints via the factory.
+        assert_eq!(
+            map.get_or_insert_with(&ctx, "a", |_| {
+                calls += 1;
+                7
+            }),
+            7
+        );
+        assert_eq!(map.len_untracked(), 1);
+        // Second access returns the existing value; factory is NOT called again.
+        assert_eq!(
+            map.get_or_insert_with(&ctx, "a", |_| {
+                calls += 1;
+                999
+            }),
+            7
+        );
+        assert_eq!(calls, 1);
+        // An explicit set is observed by a subsequent get_or_insert_with.
+        map.set(&ctx, "a", 42);
+        assert_eq!(map.get_or_insert_with(&ctx, "a", |_| 0), 42);
     }
 
     #[test]
