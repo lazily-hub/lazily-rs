@@ -134,3 +134,52 @@ fn per_subscriber_reader_invalidation_is_independent() {
     assert!(!ctx.is_set(&alpha_reader));
     assert!(!ctx.is_set(&beta_reader));
 }
+
+#[test]
+fn tail_and_offline_advance_are_noops() {
+    let ctx = Context::new();
+    let topic = TopicCell::<String>::new(&ctx);
+    let worker = "worker".to_owned();
+
+    topic.subscribe(&ctx, worker.clone(), TopicDurability::Durable);
+    topic.publish(&ctx, "a".into());
+    assert_eq!(topic.advance(&ctx, &worker).as_deref(), Some("a"));
+    assert_eq!(topic.advance(&ctx, &worker), None);
+    assert_eq!(topic.subscription(&worker).unwrap().cursor, 1);
+
+    assert!(topic.disconnect(&ctx, &worker));
+    topic.publish(&ctx, "b".into());
+    assert!(topic.read_stream(&ctx, &worker).is_empty());
+    assert_eq!(topic.advance(&ctx, &worker), None);
+    assert_eq!(topic.subscription(&worker).unwrap().cursor, 1);
+
+    assert_eq!(
+        topic.reconnect(&ctx, worker.clone()),
+        TopicSubscribeOutcome::Reconnected
+    );
+    assert_eq!(topic.read_stream(&ctx, &worker), ["b"]);
+    assert_eq!(topic.gc(), 1);
+    assert_eq!(topic.base_offset(), 1);
+    assert_eq!(topic.subscription(&worker).unwrap().cursor, 1);
+}
+
+#[test]
+#[should_panic(expected = "disconnected ephemeral TopicCell subscriptions must be removed")]
+fn snapshot_rejects_disconnected_ephemeral_subscription() {
+    let ctx = Context::new();
+    let _ = TopicCell::<String>::from_snapshot(
+        &ctx,
+        TopicSnapshot {
+            base_offset: 0,
+            elements: Vec::new(),
+            subscriptions: HashMap::from([(
+                "viewer".to_owned(),
+                TopicSubscriptionSnapshot {
+                    cursor: 0,
+                    durability: TopicDurability::Ephemeral,
+                    connected: false,
+                },
+            )]),
+        },
+    );
+}

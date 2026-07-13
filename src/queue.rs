@@ -799,6 +799,10 @@ where
                 (snapshot.base_offset..=end_offset).contains(&sub.cursor),
                 "TopicCell cursor must be within the retained absolute offset range"
             );
+            assert!(
+                sub.durability != TopicDurability::Ephemeral || sub.connected,
+                "disconnected ephemeral TopicCell subscriptions must be removed"
+            );
         }
 
         let state = Rc::new(std::cell::RefCell::new(TopicState {
