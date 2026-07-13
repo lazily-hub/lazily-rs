@@ -32,6 +32,8 @@ this repo.
 - `src/relay_transport.rs` — RelayCell Phase 4 (`#relaycell`): the `Transport<T>` delivery seam (`deliver`/`poll`/`has_pending`) + `InProcTransport` (direct) and `FramedTransport` (MTU-style framing = CrossThread/Ipc/Ws). The merge algebra, not the transport, guarantees convergence (transport_independent).
 - `src/queue.rs` — `QueueCell` (SPSC reactive FIFO + MPSC-via-`batch()` usage rule) + `QueueStorage` adapter trait + `VecDequeStorage` default backend (`#lzqueue`). Reader-kind invalidation (head/len/is_empty/is_full/closed); bounded reactive backpressure via `is_full`; closure lifecycle (drain / Closed-distinct-from-Empty / idempotent+terminal).
 - `src/transport.rs` — cross-process zero-copy transport (`#lzzcpy`): `BlobBackend` adapter trait + `InProcessBackend` (wraps `ShmBlobArena`) + `ArrowBackend` (Arrow IPC stream bytes) + `ShmBackend` (POSIX `shm_open`+`mmap`, `shm` feature, Linux) + `spill_message`/`resolve_value` policy + `BlobRouter` multi-backend resolver
+- `src/crdt_tree.rs` — `CrdtTree` lossless document contract (`#lzcrdttree`): merge, frontier, delta, empty-frontier snapshot, and materialized value; implemented by `TextCrdt`
+- `src/outbox.rs` — storage-independent durable outbox (`#lzdurableoutbox`): `OutboxStore` ordered-byte boundary, shared `Outbox<S>` append/ack/prune/replay protocol, in-memory backend, and `durable-sqlite` adapter
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)

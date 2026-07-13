@@ -25,6 +25,7 @@
 //! json + msgpack like the state frames.
 
 use crate::ipc::{Delta, IpcMessage, IpcSink, IpcSource, OutboxAck, ResyncRequest, WireStamp};
+use crate::outbox::DurableOutbox;
 use std::collections::{BTreeSet, VecDeque};
 
 /// Receiver decision for an inbound frame (spec § ResyncCoordinator).
@@ -148,66 +149,6 @@ impl ResyncCoordinator {
 /// re-sends everything the peer has not yet acked. Combined with the receiver's
 /// idempotent `Ignore` of already-applied deltas, this is at-least-once delivery
 /// with exactly-once effect.
-pub trait DurableOutbox {
-    /// Persist `msg` at `epoch` before it is handed to the transport.
-    fn append(&mut self, epoch: u64, msg: IpcMessage);
-    /// The peer proved receipt through `epoch`; retained frames `<= epoch` MAY be pruned.
-    fn ack_through(&mut self, epoch: u64);
-    /// Retained frames with `epoch > cursor`, in ascending epoch order.
-    fn replay_from(&self, cursor: u64) -> Vec<(u64, IpcMessage)>;
-    /// Epochs still retained (not yet acked), ascending — for diagnostics/tests.
-    fn retained_epochs(&self) -> Vec<u64>;
-}
-
-/// In-memory [`DurableOutbox`] — correct within a process lifetime; the default.
-#[derive(Debug, Clone, Default)]
-pub struct InMemoryOutbox {
-    entries: Vec<(u64, IpcMessage)>,
-    acked_through: u64,
-}
-
-impl InMemoryOutbox {
-    /// An empty outbox.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The highest acked epoch (retention cursor).
-    pub fn acked_through(&self) -> u64 {
-        self.acked_through
-    }
-}
-
-impl DurableOutbox for InMemoryOutbox {
-    fn append(&mut self, epoch: u64, msg: IpcMessage) {
-        self.entries.push((epoch, msg));
-    }
-
-    fn ack_through(&mut self, epoch: u64) {
-        if epoch > self.acked_through {
-            self.acked_through = epoch;
-        }
-        self.entries.retain(|(e, _)| *e > self.acked_through);
-    }
-
-    fn replay_from(&self, cursor: u64) -> Vec<(u64, IpcMessage)> {
-        let mut out: Vec<(u64, IpcMessage)> = self
-            .entries
-            .iter()
-            .filter(|(e, _)| *e > cursor)
-            .cloned()
-            .collect();
-        out.sort_by_key(|(e, _)| *e);
-        out
-    }
-
-    fn retained_epochs(&self) -> Vec<u64> {
-        let mut es: Vec<u64> = self.entries.iter().map(|(e, _)| *e).collect();
-        es.sort_unstable();
-        es
-    }
-}
-
 /// An observed-remove set (OR-set) liveness cell.
 ///
 /// Models one entry's presence via add/remove tags: a `(doc, pid)` is *present*
@@ -581,6 +522,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InMemoryOutbox;
     use crate::ipc::Delta;
 
     fn st(w: u64) -> WireStamp {

@@ -68,6 +68,8 @@ mod context;
 mod crdt;
 #[cfg(all(feature = "distributed", feature = "webrtc"))]
 mod crdt_plane;
+#[cfg(feature = "lossless-tree")]
+mod crdt_tree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
 mod effect;
@@ -80,6 +82,8 @@ mod ipc;
 #[cfg(feature = "lossless-tree")]
 mod lossless_tree_crdt;
 mod merge;
+#[cfg(feature = "ipc")]
+pub mod outbox;
 mod queue;
 mod receipt;
 mod reconcile;
@@ -147,6 +151,8 @@ pub use crdt::{
 };
 #[cfg(all(feature = "distributed", feature = "webrtc"))]
 pub use crdt_plane::CrdtPlaneRuntime;
+#[cfg(feature = "lossless-tree")]
+pub use crdt_tree::CrdtTree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
 pub use effect::{EffectCallbackResult, EffectHandle};
@@ -210,6 +216,10 @@ pub use merge::CrdtJoin;
 pub use merge::{
     KeepLatest, Max, MergeCellHandle, MergePolicy, RawFifo, Reactive, SetUnion, Source, Sum,
 };
+#[cfg(feature = "ipc")]
+pub use outbox::{DurableOutbox, InMemoryOutbox, InMemoryStore, OutboxStore};
+#[cfg(feature = "durable-sqlite")]
+pub use outbox::{SqliteOutbox, SqliteStore, SqliteStoreError, ensure_outbox_schema};
 pub use queue::{
     QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, TopicCell,
     TopicDurability, TopicSnapshot, TopicSubscribeOutcome, TopicSubscriptionSnapshot,
@@ -228,8 +238,8 @@ pub use relay_roles::{Inbox, Outbox};
 pub use relay_transport::{FramedTransport, InProcTransport, Transport};
 #[cfg(feature = "ipc")]
 pub use reliable_sync::{
-    Clock, DriverError, DurableOutbox, InMemoryOutbox, OrSet, Progress, ResyncAction,
-    ResyncCoordinator, SnapshotProvider, SyncDriver, WireLwwRegister,
+    Clock, DriverError, OrSet, Progress, ResyncAction, ResyncCoordinator, SnapshotProvider,
+    SyncDriver, WireLwwRegister,
 };
 pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]

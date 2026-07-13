@@ -125,6 +125,21 @@ ctx.batch(|ctx| {
 });
 ```
 
+### Lossless CRDT documents and durable replay
+
+`CrdtTree` is the shared document contract for identity-preserving merge,
+version-vector deltas, and materialized values. A snapshot is deliberately the
+same operation as `delta_since` an empty frontier, so full hydration and
+incremental synchronization cannot drift into separate semantics. `TextCrdt`
+implements the contract, and downstream document CRDTs can implement it without
+depending on a storage backend.
+
+Reliable senders use `Outbox<S>` for one append/ack/prune/replay protocol and an
+`OutboxStore` for five ordered-byte persistence operations. `InMemoryStore`
+exercises the same path in tests; the `durable-sqlite` feature adds
+`SqliteStore`/`SqliteOutbox`, partitioned by document hash, so acknowledged
+epochs remain pruned across process restarts.
+
 ### Decorator-style typed factories
 
 `#[lazily::cell]` and `#[lazily::slot]` provide the same factory style as

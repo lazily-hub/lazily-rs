@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.37.0"
+version = "0.38.0"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -41,7 +41,8 @@ distributed = []
 lossless-tree = ["distributed"]
 ffi = ["ipc", "dep:serde_json"]
 instrumentation = []
-ipc = ["serde"]
+ipc = ["serde", "dep:serde_json"]
+durable-sqlite = ["ipc", "dep:rusqlite"]
 ipc-binary = ["ipc", "dep:postcard"]
 ipc-msgpack = ["ipc", "dep:rmp-serde"]
 # Loom model tests for the thread-safe context. Implies `thread-safe` so the
@@ -106,6 +107,7 @@ postcard = { version = "1", optional = true, features = ["alloc"] }
 rmp-serde = { version = "1", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
+rusqlite = { version = "0.40", optional = true, features = ["bundled"] }
 smallvec = { version = "1", optional = true }
 str0m = { version = "0.20", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
@@ -119,6 +121,7 @@ loom = "0.7"
 proptest = "1"
 rmp-serde = "1"
 serde_json = "1"
+tempfile = "3"
 
 [[example]]
 name = "tokio_sync"
