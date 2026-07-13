@@ -84,6 +84,7 @@ mod queue;
 mod receipt;
 mod reconcile;
 mod relay;
+mod relay_transport;
 #[cfg(feature = "ipc")]
 mod reliable_sync;
 mod sem_tree;
@@ -218,6 +219,7 @@ pub use reconcile::{DiffOp, apply_to_map, apply_to_tree, reconcile};
 pub use relay::{
     BackpressurePolicy, BoundDim, IngressOutcome, Overflow, RelayCell, RelayConfigError,
 };
+pub use relay_transport::{FramedTransport, InProcTransport, Transport};
 #[cfg(feature = "ipc")]
 pub use reliable_sync::{
     Clock, DriverError, DurableOutbox, InMemoryOutbox, OrSet, Progress, ResyncAction,
