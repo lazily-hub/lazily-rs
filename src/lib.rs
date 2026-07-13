@@ -84,6 +84,8 @@ mod queue;
 mod receipt;
 mod reconcile;
 mod relay;
+mod relay_policy;
+mod relay_roles;
 mod relay_transport;
 #[cfg(feature = "ipc")]
 mod reliable_sync;
@@ -219,6 +221,8 @@ pub use reconcile::{DiffOp, apply_to_map, apply_to_tree, reconcile};
 pub use relay::{
     BackpressurePolicy, BoundDim, IngressOutcome, Overflow, RelayCell, RelayConfigError,
 };
+pub use relay_policy::{ExpiryPolicy, KeyedRelay, PriorityStorage, RatePolicy, WindowPolicy};
+pub use relay_roles::{Inbox, Outbox};
 pub use relay_transport::{FramedTransport, InProcTransport, Transport};
 #[cfg(feature = "ipc")]
 pub use reliable_sync::{
