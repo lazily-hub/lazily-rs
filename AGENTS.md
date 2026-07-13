@@ -31,6 +31,10 @@ this repo.
 - `src/relay_policy.rs` — RelayCell Phase 6 (`#relaycell`): extra reactive policies — `RatePolicy` (token bucket), `WindowPolicy` (debounce/throttle flush groups), `ExpiryPolicy` (TTL over a logical clock), `PriorityStorage<T>` (max-priority, FIFO within priority), `KeyedRelay<K,T,M>` (sharded relays by key). Logical-clock time for determinism.
 - `src/relay_transport.rs` — RelayCell Phase 4 (`#relaycell`): the `Transport<T>` delivery seam (`deliver`/`poll`/`has_pending`) + `InProcTransport` (direct) and `FramedTransport` (MTU-style framing = CrossThread/Ipc/Ws). The merge algebra, not the transport, guarantees convergence (transport_independent).
 - `src/queue.rs` — `QueueCell` (SPSC reactive FIFO + MPSC-via-`batch()` usage rule) + `QueueStorage` adapter trait + `VecDequeStorage` default backend (`#lzqueue`). Reader-kind invalidation (head/len/is_empty/is_full/closed); bounded reactive backpressure via `is_full`; closure lifecycle (drain / Closed-distinct-from-Empty / idempotent+terminal).
+- `src/work_queue.rs` — `WorkQueueCell` competing-consumer local authority
+  (`#lzworkqueue`): FIFO exclusive claims with stable item/fresh delivery ids,
+  worker-owned ack/nack, strict visibility-timeout redelivery, bounded attempts,
+  DLQ, and independent pending/in-flight/dead-letter reader kinds.
 - `src/transport.rs` — cross-process zero-copy transport (`#lzzcpy`): `BlobBackend` adapter trait + `InProcessBackend` (wraps `ShmBlobArena`) + `ArrowBackend` (Arrow IPC stream bytes) + `ShmBackend` (POSIX `shm_open`+`mmap`, `shm` feature, Linux) + `spill_message`/`resolve_value` policy + `BlobRouter` multi-backend resolver
 - `src/crdt_tree.rs` — `CrdtTree` lossless document contract (`#lzcrdttree`): merge, frontier, delta, empty-frontier snapshot, and materialized value; implemented by `TextCrdt`
 - `src/outbox.rs` — storage-independent durable outbox (`#lzdurableoutbox`): `OutboxStore` ordered-byte boundary, shared `Outbox<S>` append/ack/prune/replay protocol, in-memory backend, and `durable-sqlite` adapter
@@ -50,6 +54,9 @@ this repo.
 - `tests/merge_conformance.rs` — RelayCell Phase 1 (`#relaycell`) cross-language fixture replay (lazily-spec/conformance/collections/`mergecell_algebra.json`); KeepLatest/Sum/Max per-op converged value + invalidation (idempotent/identity no-op), fixture flags vs policy `const`s
 - `tests/merge_laws.rs` — RelayCell Phase 1 (`#relaycell`) property-based law-tests: every `MergePolicy` is associative; commutativity/idempotency asserted per `const` flag (and flag-honesty counterexamples); `Cell ≡ MergeCell<KeepLatest>`, converged-state determinism regardless of op order, idempotent-`⊕` free dedup via the `PartialEq` store-guard, `Reactive`/`Source` supertype uniformity
 - `tests/queue_conformance.rs` — reactive queue (`QueueCell`) compute fixtures (lazily-spec/conformance/collections/`queuecell_*.json`); SPSC total FIFO, popped-head reader-kind independence, MPSC multi-writer inside `batch()`, bounded reactive backpressure (`is_full`), closure lifecycle
+- `tests/work_queue_conformance.rs` — canonical `workqueue_*.json` replay:
+  exclusive competing delivery, ownership rejection, at-least-once lease
+  redelivery, and poison routing to the DLQ
 - `tests/seqcrdt_conformance.rs` — move-aware sequence CRDT compute fixture (lazily-spec/conformance/collections/seqcrdt_convergence.json); concurrent-insert/move/value-edit convergence, tombstone commutativity (feature-gated, needs `distributed`)
 - `tests/schema_compliance.rs` — lazily-rs serde output validates against lazily-spec JSON Schemas (#lzspecschema)
 - `tests/command_conformance.rs` — command/RPC message plane (`command-plane-v1`) fixture replay (lazily-spec/conformance/message-passing); projection reducer + RPC facade terminal-only rule (feature-gated `ipc`)

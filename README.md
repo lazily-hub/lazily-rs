@@ -42,6 +42,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 | Stable-id alignment (manufactured identity) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reactive queue (`QueueCell` SPSC/MPSC + `QueueStorage` adapter) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Broadcast topic (`TopicCell`) — independent cursors + durable replay + safe GC (`#lztopiccell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Competing-consumer work queue (`WorkQueueCell`) — exclusive leases + ack/nack + redelivery + DLQ (`#lzworkqueue`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Merge algebra + `MergeCell` — associative `MergePolicy` (`KeepLatest`/`Sum`/`Max`/`SetUnion`/`RawFifo`), `Cell ≡ MergeCell<KeepLatest>`, `Reactive`/`Source` split (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | RelayCell — conflating relay + `BackpressurePolicy` + `SpillStore` + `Transport` + Inbox/Outbox + Rate/Window/Expiry/Priority/keyed policies (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Free-text character CRDT (`TextCrdt`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -239,6 +240,27 @@ actor_rpc`). For a distributed actor whose messages cross a process boundary
 with causal-receipt delivery guarantees, project this same shape onto the
 command/RPC plane (`CommandRpcClient` / `CommandTransport` in `src/command.rs`,
 feature `ipc`).
+
+### Competing-consumer work queue
+
+`WorkQueueCell` is the pull-based local-authority work queue: `claim` hands the
+oldest pending item to exactly one worker under a fresh delivery ID; only that
+worker can `ack` or `nack` it. Unacked leases redeliver after their strict
+visibility deadline, and items reaching `max_deliveries` move to the DLQ.
+
+```rust
+use lazily::{Context, WorkQueueCell};
+
+let ctx = Context::new();
+let work = WorkQueueCell::<String>::new(&ctx, 30, 3);
+work.push(&ctx, "render-report".into());
+let delivery = work.claim(&ctx, "worker-a".into(), 100).unwrap();
+assert!(work.ack(&ctx, &"worker-a".into(), delivery.delivery_id));
+```
+
+The instance is the serialization point. A distributed/HA backend must put
+`claim` behind its leader or consensus log; the local shell does not pretend to
+provide cross-process consensus.
 
 ## Why Lazy?
 
