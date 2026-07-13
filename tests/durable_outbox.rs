@@ -44,6 +44,11 @@ fn generic_outbox_replays_canonical_store_fixture() {
     };
     assert_eq!(fixture["model"], "OutboxStore");
     for scenario in fixture["scenarios"].as_array().unwrap() {
+        if scenario["save_cursor"].is_array() {
+            // The shared in-memory adapter is owned by value; the serialized
+            // multi-handle case is replayed against SQLite below.
+            continue;
+        }
         let mut outbox = InMemoryOutbox::default();
         for epoch in scenario["put_epochs"].as_array().unwrap() {
             let epoch = epoch.as_u64().unwrap();
@@ -132,4 +137,37 @@ fn sqlite_outbox_recovers_cursor_and_unacked_suffix_after_reopen() {
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
+}
+
+#[cfg(feature = "durable-sqlite")]
+#[test]
+fn stale_sqlite_handle_cannot_regress_serialized_cursor() {
+    use lazily::SqliteOutbox;
+
+    let fixture = fixture().expect("lazily-spec outbox-store fixture");
+    let scenario = fixture["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scenario| scenario["name"] == "stale handle cannot regress serialized cursor")
+        .expect("serialized stale-handle scenario");
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("stale-cursor.db");
+    let mut stale = SqliteOutbox::open(&path, "doc").unwrap();
+    let mut current = SqliteOutbox::open(&path, "doc").unwrap();
+    for save in scenario["save_cursor"].as_array().unwrap() {
+        let epoch = save["epoch"].as_u64().unwrap();
+        match save["handle"].as_str().unwrap() {
+            "current" => current.ack_through(epoch),
+            "stale" => stale.ack_through(epoch),
+            handle => panic!("unknown fixture handle {handle}"),
+        }
+    }
+    let expected = scenario["expect"]["loaded_cursor"].as_u64().unwrap();
+    assert_eq!(stale.acked_through(), expected);
+    drop(stale);
+    drop(current);
+
+    let reopened = SqliteOutbox::open(&path, "doc").unwrap();
+    assert_eq!(reopened.acked_through(), expected);
 }

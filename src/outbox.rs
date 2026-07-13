@@ -38,7 +38,7 @@ impl<S: OutboxStore> Outbox<S> {
     }
 
     pub fn acked_through(&self) -> u64 {
-        self.acked_through
+        self.acked_through.max(self.store.load_cursor())
     }
 
     pub fn store(&self) -> &S {
@@ -63,16 +63,17 @@ impl<S: OutboxStore> DurableOutbox for Outbox<S> {
     }
 
     fn ack_through(&mut self, epoch: u64) {
-        if epoch > self.acked_through {
-            self.acked_through = epoch;
-            self.store.save_cursor(epoch);
+        let target = epoch.max(self.acked_through).max(self.store.load_cursor());
+        if target > self.acked_through {
+            self.store.save_cursor(target);
+            self.acked_through = target;
         }
-        self.store.delete_through(self.acked_through);
+        self.store.delete_through(target);
     }
 
     fn replay_from(&self, cursor: u64) -> Vec<(u64, IpcMessage)> {
         self.store
-            .scan_after(cursor.max(self.acked_through))
+            .scan_after(cursor.max(self.acked_through).max(self.store.load_cursor()))
             .into_iter()
             .filter_map(|(epoch, frame)| match serde_json::from_slice(&frame) {
                 Ok(message) => Some((epoch, message)),
@@ -86,7 +87,7 @@ impl<S: OutboxStore> DurableOutbox for Outbox<S> {
 
     fn retained_epochs(&self) -> Vec<u64> {
         self.store
-            .scan_after(self.acked_through)
+            .scan_after(self.acked_through.max(self.store.load_cursor()))
             .into_iter()
             .map(|(epoch, _)| epoch)
             .collect()
@@ -300,7 +301,9 @@ mod sqlite {
 
         fn save_cursor(&mut self, epoch: u64) {
             if let Err(error) = self.connection.execute(
-                "INSERT OR REPLACE INTO reliable_sync_outbox_cursor (document_hash, acked_through) VALUES (?1, ?2)",
+                "INSERT INTO reliable_sync_outbox_cursor (document_hash, acked_through) VALUES (?1, ?2) \
+                 ON CONFLICT(document_hash) DO UPDATE SET acked_through = \
+                 MAX(reliable_sync_outbox_cursor.acked_through, excluded.acked_through)",
                 params![self.document_hash, epoch as i64],
             ) {
                 eprintln!("[durable-outbox] {}: save cursor {epoch}: {error}", self.document_hash);
