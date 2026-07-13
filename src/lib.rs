@@ -211,7 +211,9 @@ pub use merge::{
     KeepLatest, Max, MergeCellHandle, MergePolicy, RawFifo, Reactive, SetUnion, Source, Sum,
 };
 pub use queue::{
-    QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, VecDequeStorage,
+    QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, TopicCell,
+    TopicDurability, TopicSnapshot, TopicSubscribeOutcome, TopicSubscriptionSnapshot,
+    VecDequeStorage,
 };
 pub use receipt::{
     CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,

@@ -94,7 +94,8 @@
 //! `lazily-spec/docs/distributed-queue-prd.md` for the future consensus-backed
 //! `RaftQueueStorage` backend.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::Context;
@@ -680,28 +681,415 @@ pub struct QueueReaderHandles<T> {
 }
 
 // ---------------------------------------------------------------------------
-// TopicCell / WorkQueueCell — future-work stubs
+// TopicCell — broadcast log with independent reactive subscriber cursors
 // ---------------------------------------------------------------------------
 
-// `TopicCell` (SPMC broadcast / MPMC pub-sub) and `WorkQueueCell` (true MPMC
-// with exclusive handoff) are genuinely distinct primitives — they differ in
-// *invalidation model and handoff semantics*, not in producer/consumer
-// cardinality (see `lazily-spec/cell-model.md` § "Future queue primitives").
-//
-// They are reserved for future work and are NOT in v1 conformance:
-//
-// - **TopicCell** — every subscriber receives every pushed element. Each
-//   subscriber maintains its own cursor; the topic retains elements until all
-//   cursors have advanced past them (GC frontier = slowest subscriber). Lands
-//   with the distributed-queue PRD Phase 3. Formal stub:
-//   `lazily-formal/LazilyFormal/TopicCell.lean`.
-//
-// - **WorkQueueCell** — N consumers compete for elements from a shared FIFO;
-//   each element is delivered to exactly one consumer (exclusive handoff). This
-//   requires an authority (designated leader peer) to serialize pop-assignment —
-//   pure CRDT cannot provide it. Lands with the distributed-queue PRD Phase 2
-//   (consensus core). Formal stub:
-//   `lazily-formal/LazilyFormal/WorkQueueCell.lean`.
+/// Whether a [`TopicCell`] subscription survives disconnects and participates
+/// in the retention frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TopicDurability {
+    /// Cursor state persists while disconnected and holds back safe GC.
+    Durable,
+    /// Cursor state exists only for the connected session and never holds GC.
+    Ephemeral,
+}
+
+/// Public, serializable-in-spirit state for one topic subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicSubscriptionSnapshot {
+    /// Absolute offset of the next element to read.
+    pub cursor: u64,
+    /// Durable subscriptions survive disconnect; ephemeral ones are removed.
+    pub durability: TopicDurability,
+    /// Offline durable subscriptions retain data but are not scheduled.
+    pub connected: bool,
+}
+
+/// Durable state required to recreate a [`TopicCell`] without moving cursors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicSnapshot<T, I: Eq + Hash = String> {
+    /// Absolute offset of `elements[0]`.
+    pub base_offset: u64,
+    /// Retained append log, oldest first.
+    pub elements: Vec<T>,
+    /// Stable subscriber identity to persisted subscription state.
+    pub subscriptions: HashMap<I, TopicSubscriptionSnapshot>,
+}
+
+/// Result of subscribing a stable identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopicSubscribeOutcome {
+    /// A new cursor was created at the current tail.
+    Created,
+    /// An offline durable cursor was reconnected without moving it.
+    Reconnected,
+    /// The identity was already connected; no state changed.
+    AlreadyConnected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TopicSubscription {
+    cursor: u64,
+    durability: TopicDurability,
+    connected: bool,
+}
+
+struct TopicState<T, I> {
+    base_offset: u64,
+    elements: VecDeque<T>,
+    subscriptions: HashMap<I, TopicSubscription>,
+}
+
+struct TopicCellInner<T, I> {
+    state: Rc<std::cell::RefCell<TopicState<T, I>>>,
+    // A distinct demand-driven reader per stable subscriber is the essential
+    // invalidation boundary: publish fans out to connected readers; advance,
+    // disconnect, and reconnect touch only the named reader.
+    readers: std::cell::RefCell<HashMap<I, SlotHandle<Vec<T>>>>,
+}
+
+/// A broadcast topic: every subscriber receives every published element using
+/// an independent, non-destructive cursor (`#lztopiccell`).
+///
+/// Elements are retained until every durable cursor has passed them. Ephemeral
+/// subscriptions start at the current tail, disappear on disconnect, and never
+/// hold the GC frontier. Each subscription owns a demand-driven reactive read
+/// stream, so advancing one subscriber never invalidates another subscriber.
+pub struct TopicCell<T, I = String> {
+    inner: Rc<TopicCellInner<T, I>>,
+}
+
+impl<T, I> Clone for TopicCell<T, I> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Rc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T, I> TopicCell<T, I>
+where
+    T: PartialEq + Clone + 'static,
+    I: Eq + Hash + Clone + 'static,
+{
+    /// Create an empty topic at absolute offset zero.
+    pub fn new(_ctx: &Context) -> Self {
+        Self {
+            inner: Rc::new(TopicCellInner {
+                state: Rc::new(std::cell::RefCell::new(TopicState {
+                    base_offset: 0,
+                    elements: VecDeque::new(),
+                    subscriptions: HashMap::new(),
+                })),
+                readers: std::cell::RefCell::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Restore an atomic topic snapshot. Durable cursors are preserved exactly;
+    /// connected ephemeral records are accepted for live-state fixture replay.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any cursor lies outside `base_offset..=end_offset`.
+    pub fn from_snapshot(ctx: &Context, snapshot: TopicSnapshot<T, I>) -> Self {
+        let end_offset = snapshot.base_offset + snapshot.elements.len() as u64;
+        for sub in snapshot.subscriptions.values() {
+            assert!(
+                (snapshot.base_offset..=end_offset).contains(&sub.cursor),
+                "TopicCell cursor must be within the retained absolute offset range"
+            );
+        }
+
+        let state = Rc::new(std::cell::RefCell::new(TopicState {
+            base_offset: snapshot.base_offset,
+            elements: snapshot.elements.into(),
+            subscriptions: snapshot
+                .subscriptions
+                .into_iter()
+                .map(|(id, sub)| {
+                    (
+                        id,
+                        TopicSubscription {
+                            cursor: sub.cursor,
+                            durability: sub.durability,
+                            connected: sub.connected,
+                        },
+                    )
+                })
+                .collect(),
+        }));
+        let topic = Self {
+            inner: Rc::new(TopicCellInner {
+                state,
+                readers: std::cell::RefCell::new(HashMap::new()),
+            }),
+        };
+        let ids: Vec<I> = topic
+            .inner
+            .state
+            .borrow()
+            .subscriptions
+            .keys()
+            .cloned()
+            .collect();
+        for id in ids {
+            topic.ensure_reader(ctx, id);
+        }
+        topic
+    }
+
+    fn ensure_reader(&self, ctx: &Context, id: I) -> SlotHandle<Vec<T>> {
+        if let Some(handle) = self.inner.readers.borrow().get(&id) {
+            return *handle;
+        }
+        let state = Rc::clone(&self.inner.state);
+        let reader_id = id.clone();
+        let handle = ctx.memo(move |_ctx| {
+            let state = state.borrow();
+            let Some(sub) = state.subscriptions.get(&reader_id) else {
+                return Vec::new();
+            };
+            if !sub.connected {
+                return Vec::new();
+            }
+            let skip = sub.cursor.saturating_sub(state.base_offset) as usize;
+            state.elements.iter().skip(skip).cloned().collect()
+        });
+        self.inner.readers.borrow_mut().insert(id, handle);
+        handle
+    }
+
+    /// Create a cursor at the current tail, or reconnect an existing durable
+    /// identity without moving its cursor. Once an identity exists its stored
+    /// durability wins over the caller's argument.
+    pub fn subscribe(
+        &self,
+        ctx: &Context,
+        id: I,
+        durability: TopicDurability,
+    ) -> TopicSubscribeOutcome {
+        let existing = {
+            let mut state = self.inner.state.borrow_mut();
+            if let Some(sub) = state.subscriptions.get_mut(&id) {
+                if sub.connected {
+                    Some((TopicSubscribeOutcome::AlreadyConnected, false))
+                } else {
+                    sub.connected = true;
+                    Some((TopicSubscribeOutcome::Reconnected, true))
+                }
+            } else {
+                let cursor = state.base_offset + state.elements.len() as u64;
+                state.subscriptions.insert(
+                    id.clone(),
+                    TopicSubscription {
+                        cursor,
+                        durability,
+                        connected: true,
+                    },
+                );
+                None
+            }
+        };
+
+        let reader = self.ensure_reader(ctx, id);
+        match existing {
+            Some((outcome, true)) => {
+                ctx.clear_slots(&[reader.id]);
+                outcome
+            }
+            Some((outcome, false)) => outcome,
+            None => TopicSubscribeOutcome::Created,
+        }
+    }
+
+    /// Reconnect a durable identity, preserving its cursor. Unknown identities
+    /// are created as durable subscriptions at the current tail.
+    pub fn reconnect(&self, ctx: &Context, id: I) -> TopicSubscribeOutcome {
+        self.subscribe(ctx, id, TopicDurability::Durable)
+    }
+
+    /// Disconnect a subscriber. Durable records remain offline at the same
+    /// cursor; ephemeral records and their retention-neutral session state are
+    /// removed. Returns whether state changed.
+    pub fn disconnect(&self, ctx: &Context, id: &I) -> bool {
+        let (changed, remove_reader) = {
+            let mut state = self.inner.state.borrow_mut();
+            let Some(sub) = state.subscriptions.get_mut(id) else {
+                return false;
+            };
+            if !sub.connected {
+                return false;
+            }
+            if sub.durability == TopicDurability::Ephemeral {
+                state.subscriptions.remove(id);
+                (true, true)
+            } else {
+                sub.connected = false;
+                (true, false)
+            }
+        };
+        let reader = if remove_reader {
+            self.inner.readers.borrow_mut().remove(id)
+        } else {
+            self.inner.readers.borrow().get(id).copied()
+        };
+        if let Some(reader) = reader {
+            ctx.clear_slots(&[reader.id]);
+        }
+        changed
+    }
+
+    /// Append exactly one element, leaving every cursor unchanged. Returns its
+    /// absolute offset and invalidates every connected subscriber independently.
+    pub fn publish(&self, ctx: &Context, value: T) -> u64 {
+        let (offset, connected): (u64, Vec<I>) = {
+            let mut state = self.inner.state.borrow_mut();
+            let offset = state.base_offset + state.elements.len() as u64;
+            state.elements.push_back(value);
+            let connected = state
+                .subscriptions
+                .iter()
+                .filter(|(_, sub)| sub.connected && sub.cursor <= offset)
+                .map(|(id, _)| id.clone())
+                .collect();
+            (offset, connected)
+        };
+        let readers = self.inner.readers.borrow();
+        let roots: Vec<_> = connected
+            .iter()
+            .filter_map(|id| readers.get(id).map(|reader| reader.id))
+            .collect();
+        ctx.clear_slots(&roots);
+        offset
+    }
+
+    /// Reactive suffix read for one connected subscriber. Unknown and offline
+    /// subscribers observe an empty stream.
+    pub fn read_stream(&self, ctx: &Context, id: &I) -> Vec<T> {
+        self.inner
+            .readers
+            .borrow()
+            .get(id)
+            .copied()
+            .map(|reader| ctx.get(&reader))
+            .unwrap_or_default()
+    }
+
+    /// Reactive read of the element at a subscriber's cursor.
+    pub fn read(&self, ctx: &Context, id: &I) -> Option<T> {
+        self.read_stream(ctx, id).into_iter().next()
+    }
+
+    /// Advance only the named connected cursor by one, returning the element it
+    /// passed. At the tail, for an offline subscriber, or for an unknown id this
+    /// is a no-op returning `None`.
+    pub fn advance(&self, ctx: &Context, id: &I) -> Option<T> {
+        let value = {
+            let mut state = self.inner.state.borrow_mut();
+            let (cursor, connected) = state
+                .subscriptions
+                .get(id)
+                .map(|sub| (sub.cursor, sub.connected))?;
+            let end_offset = state.base_offset + state.elements.len() as u64;
+            if !connected || cursor >= end_offset {
+                return None;
+            }
+            let index = cursor.saturating_sub(state.base_offset) as usize;
+            let value = state.elements.get(index).cloned()?;
+            state
+                .subscriptions
+                .get_mut(id)
+                .expect("subscription exists")
+                .cursor += 1;
+            value
+        };
+        if let Some(reader) = self.inner.readers.borrow().get(id) {
+            ctx.clear_slots(&[reader.id]);
+        }
+        Some(value)
+    }
+
+    /// Remove the prefix below the minimum durable cursor, or all retained
+    /// elements when no durable subscription exists. Subscriber cursors remain
+    /// absolute, so safe GC invalidates no reader. Returns the removed count.
+    pub fn gc(&self) -> usize {
+        let mut state = self.inner.state.borrow_mut();
+        let end_offset = state.base_offset + state.elements.len() as u64;
+        let frontier = state
+            .subscriptions
+            .values()
+            .filter(|sub| sub.durability == TopicDurability::Durable)
+            .map(|sub| sub.cursor)
+            .min()
+            .unwrap_or(end_offset);
+        let remove = frontier.saturating_sub(state.base_offset) as usize;
+        state.elements.drain(..remove);
+        state.base_offset = frontier;
+        remove
+    }
+
+    /// Absolute offset of the first retained element.
+    pub fn base_offset(&self) -> u64 {
+        self.inner.state.borrow().base_offset
+    }
+
+    /// Absolute offset immediately after the retained append log.
+    pub fn end_offset(&self) -> u64 {
+        let state = self.inner.state.borrow();
+        state.base_offset + state.elements.len() as u64
+    }
+
+    /// Non-reactive retained-log snapshot, oldest first.
+    pub fn elements(&self) -> Vec<T> {
+        self.inner.state.borrow().elements.iter().cloned().collect()
+    }
+
+    /// Snapshot one subscription record.
+    pub fn subscription(&self, id: &I) -> Option<TopicSubscriptionSnapshot> {
+        self.inner
+            .state
+            .borrow()
+            .subscriptions
+            .get(id)
+            .map(|sub| TopicSubscriptionSnapshot {
+                cursor: sub.cursor,
+                durability: sub.durability,
+                connected: sub.connected,
+            })
+    }
+
+    /// Handle to the named subscriber's reactive unread suffix.
+    pub fn reader_handle(&self, id: &I) -> Option<SlotHandle<Vec<T>>> {
+        self.inner.readers.borrow().get(id).copied()
+    }
+
+    /// Atomic durable/live-state snapshot suitable for restart and conformance.
+    pub fn snapshot(&self) -> TopicSnapshot<T, I> {
+        let state = self.inner.state.borrow();
+        TopicSnapshot {
+            base_offset: state.base_offset,
+            elements: state.elements.iter().cloned().collect(),
+            subscriptions: state
+                .subscriptions
+                .iter()
+                .map(|(id, sub)| {
+                    (
+                        id.clone(),
+                        TopicSubscriptionSnapshot {
+                            cursor: sub.cursor,
+                            durability: sub.durability,
+                            connected: sub.connected,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+// `WorkQueueCell` remains separate future work: N consumers compete for
+// exclusive handoff, which requires an authority to serialize assignment.
 
 #[cfg(test)]
 mod tests {
