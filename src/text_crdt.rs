@@ -184,8 +184,28 @@ impl TextCrdt {
 
     /// Insert all of `s` starting at visible index `index`.
     pub fn insert_str(&mut self, index: usize, s: &str) {
-        for (i, ch) in s.chars().enumerate() {
-            self.insert(index + i, ch);
+        let visible = self.ordered_ids(false);
+        if index > visible.len() {
+            // Preserve `insert`'s historical out-of-range behavior. Valid edit
+            // positions take the linear fast path below.
+            for (i, ch) in s.chars().enumerate() {
+                self.insert(index + i, ch);
+            }
+            return;
+        }
+
+        let mut origin = index.checked_sub(1).and_then(|i| visible.get(i).copied());
+        for ch in s.chars() {
+            let id = self.next_id();
+            self.elems.insert(
+                id,
+                Elem {
+                    ch,
+                    origin,
+                    deleted: None,
+                },
+            );
+            origin = Some(id);
         }
     }
 
@@ -230,12 +250,23 @@ impl TextCrdt {
 
     /// Tombstone the visible character at `index`. No-op if out of range.
     pub fn delete(&mut self, index: usize) {
+        self.delete_range(index, 1);
+    }
+
+    /// Tombstone up to `len` visible characters starting at `index`.
+    ///
+    /// The visible order is projected once for the whole edit, keeping large
+    /// range deletions linear instead of rebuilding the origin tree per
+    /// character.
+    pub fn delete_range(&mut self, index: usize, len: usize) {
         let visible = self.ordered_ids(false);
-        if let Some(id) = visible.get(index).copied() {
+        let end = index.saturating_add(len).min(visible.len());
+        let ids = visible.get(index..end).unwrap_or_default();
+        for id in ids {
             // Mint a distinct OpId for the deletion so GC can later test whether
             // the *delete* is causally stable. No-op if already tombstoned.
             let del = self.next_id();
-            if let Some(e) = self.elems.get_mut(&id)
+            if let Some(e) = self.elems.get_mut(id)
                 && e.deleted.is_none()
             {
                 e.deleted = Some(del);
@@ -553,6 +584,30 @@ mod tests {
         t.delete(0); // drop 'h'
         assert_eq!(t.text(), "ello!");
         assert_eq!(t.len(), 5);
+    }
+
+    #[test]
+    fn batch_insert_and_delete_match_character_edits() {
+        let base = TextCrdt::from_str(1, "alpha omega");
+
+        let mut batched = base.clone();
+        batched.insert_str(6, "beta ");
+        batched.delete_range(0, 6);
+
+        let mut character_edits = base;
+        for (i, ch) in "beta ".chars().enumerate() {
+            character_edits.insert(6 + i, ch);
+        }
+        for _ in 0..6 {
+            character_edits.delete(0);
+        }
+
+        assert_eq!(batched.text(), "beta omega");
+        assert_eq!(batched.text(), character_edits.text());
+        assert_eq!(
+            batched.delta_since(&TextVersionVector::new()),
+            character_edits.delta_since(&TextVersionVector::new())
+        );
     }
 
     #[test]
