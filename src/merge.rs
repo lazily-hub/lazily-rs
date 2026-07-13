@@ -61,6 +61,13 @@ pub trait MergePolicy<T> {
     /// `true` iff `⊕` is idempotent — re-applying an op is a no-op
     /// (`merge(merge(a, b), b) == merge(a, b)`).
     const IDEMPOTENT: bool;
+
+    /// `true` iff coalescing (merging accumulated ops into one) actually *bounds*
+    /// the state — the precondition for the `Conflate` overflow action. All
+    /// conflating policies (band / monoid / semilattice) bound; only `RawFifo`
+    /// (concat: order + multiplicity are meaning) grows without bound, so it
+    /// cannot conflate and a relay MUST reject `Conflate` for it (analysis §4.3).
+    const CONFLATES: bool = true;
 }
 
 /// Keep-latest (right-zero) band: `old ⊕ op = op`. Associative and idempotent,
@@ -147,6 +154,9 @@ where
     }
     const COMMUTATIVE: bool = false;
     const IDEMPOTENT: bool = false;
+    // Concat grows without bound: order + multiplicity are meaning, so a RawFifo
+    // relay cannot conflate — only Block / Drop / Spill are sound.
+    const CONFLATES: bool = false;
 }
 
 /// Blanket semilattice policy over any existing [`CellCrdt`] unit — wires the
