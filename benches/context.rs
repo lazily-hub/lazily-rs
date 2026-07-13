@@ -1396,11 +1396,62 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
     group.finish();
 }
 
+/// Phase-0 demand-driven reader-kinds (`relaycell-backpressure-analysis.md`
+/// §5): a `QueueCell` op with **zero subscribers** should collapse toward raw
+/// storage cost, because no reader-kind value is derived and no effect is
+/// scheduled (the merge cost law, §4.0). The A/B here documents that collapse:
+/// `raw_vecdeque_push_pop` is the floor, `unsubscribed_push_pop` should sit near
+/// it, and `subscribed_len_push_pop` is the reactive-tax upper bound the
+/// unsubscribed path avoids.
+fn bench_queue_reactive_shell_overhead(c: &mut Criterion) {
+    use lazily::QueueCell;
+    use std::collections::VecDeque;
+
+    let mut group = c.benchmark_group("queue_reactive_shell_overhead");
+
+    group.bench_function("raw_vecdeque_push_pop", |b| {
+        let mut q: VecDeque<i32> = VecDeque::new();
+        b.iter(|| {
+            q.push_back(black_box(1));
+            black_box(q.pop_front());
+        });
+    });
+
+    group.bench_function("unsubscribed_push_pop", |b| {
+        let ctx = Context::new();
+        let q: QueueCell<i32> = QueueCell::new(&ctx);
+        b.iter(|| {
+            q.try_push(&ctx, black_box(1)).unwrap();
+            black_box(q.try_pop(&ctx).unwrap());
+        });
+    });
+
+    group.bench_function("subscribed_len_push_pop", |b| {
+        let ctx = Context::new();
+        let q: QueueCell<i32> = QueueCell::new(&ctx);
+        let seen = Rc::new(LocalCell::new(0usize));
+        let _effect = {
+            let q = q.clone();
+            let seen = Rc::clone(&seen);
+            ctx.effect(move |ctx| {
+                seen.set(q.len(ctx));
+            })
+        };
+        b.iter(|| {
+            q.try_push(&ctx, black_box(1)).unwrap();
+            black_box(q.try_pop(&ctx).unwrap());
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(20);
     targets =
         bench_cached_reads,
+        bench_queue_reactive_shell_overhead,
         bench_cold_first_get,
         bench_dependency_fan_out,
         bench_set_cell_invalidation,

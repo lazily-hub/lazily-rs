@@ -47,3 +47,11 @@ impl<T> Clone for SlotHandle<T> {
 }
 
 impl<T> Copy for SlotHandle<T> {}
+
+// Hand-written so the impl does not add a `T: Debug` bound (the handle is just
+// an id and carries no `T`). Mirrors `CellHandle`'s derived `Debug`.
+impl<T> std::fmt::Debug for SlotHandle<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlotHandle").field("id", &self.id).finish()
+    }
+}

@@ -732,8 +732,16 @@ impl Context {
             if self.is_batching() {
                 self.inner.borrow_mut().batched_cells.push(handle.id);
             } else {
-                self.invalidate_cell_dependents_now(handle.id);
-                self.flush_effects();
+                // Store-without-cascade: dirty-mark the dependent cone, then flush
+                // effects ONLY when the cone actually contains an Effect. A cell
+                // with no active (Effect-bearing) dependent stores its latest
+                // value (already done above, so a late subscriber reads it
+                // glitch-free) and marks lazy Slot dependents dirty, but pays no
+                // effect-scheduling flush — the write side of the merge cost law
+                // (relaycell-backpressure-analysis.md §4.0 / §5).
+                if self.invalidate_cell_dependents_now(handle.id) {
+                    self.flush_effects();
+                }
             }
         }
     }
@@ -1069,6 +1077,39 @@ impl Context {
         self.clear_slot_now(id);
     }
 
+    /// Batch-aware multi-root slot invalidation. Clears each id's cached value
+    /// and recursively clears dependents in ONE frontier walk, then flushes any
+    /// scheduled effects exactly once. Used by demand-driven derived readers
+    /// (e.g. [`QueueCell`](crate::QueueCell) reader-kinds) that own an
+    /// out-of-graph mutation source and must invalidate several derived slots
+    /// atomically on a single op — a push/pop whose `len`/`is_full` transition
+    /// together must never glitch. Unsubscribed + uncached roots hit the
+    /// `clear_frontier` no-op fast path, so an op nobody observes costs ~O(roots)
+    /// with no derivation, no effect scheduling, and no flush.
+    pub(crate) fn clear_slots(&self, ids: &[SlotId]) {
+        if ids.is_empty() {
+            return;
+        }
+        if self.is_batching() {
+            self.inner.borrow_mut().batched_slots.extend_from_slice(ids);
+            return;
+        }
+        let effects_to_schedule = {
+            let mut inner = self.inner.borrow_mut();
+            Self::clear_frontier_locked(&mut inner.nodes, ids)
+        };
+        // Store-without-cascade (read-side dual): if clearing the roots reached
+        // no Effect, there is nothing to flush — an unobserved op skips the
+        // flush machinery entirely and returns after a single frontier walk.
+        if effects_to_schedule.is_empty() {
+            return;
+        }
+        for (effect_id, force) in effects_to_schedule {
+            self.schedule_effect(effect_id, force);
+        }
+        self.flush_effects();
+    }
+
     pub(crate) fn flush_effects_after_invalidation(&self) {
         if !self.is_batching() {
             self.flush_effects();
@@ -1095,8 +1136,12 @@ impl Context {
         self.flush_effects();
     }
 
-    fn invalidate_cell_dependents_now(&self, id: SlotId) {
-        self.invalidate_dependents_now(id);
+    /// Returns `true` iff at least one Effect was scheduled (i.e. the dependent
+    /// cone contains an active reactor that must flush). A `false` result is the
+    /// store-without-cascade fast path: the value is already stored and lazy Slot
+    /// dependents are dirty-marked, but no effect flush is owed.
+    fn invalidate_cell_dependents_now(&self, id: SlotId) -> bool {
+        self.invalidate_dependents_now(id)
     }
 
     fn clear_cell_dependents_now(&self, id: SlotId) {
@@ -1118,19 +1163,23 @@ impl Context {
     /// Replaces the former recursive `mark_slot_dirty` / `invalidate_dependent_from_changed_value`
     /// which re-borrowed per node — for fan-out 256 this cuts ~768 RefCell operations
     /// to 1 (#lzbatchborrow).
-    fn invalidate_dependents_now(&self, id: SlotId) {
+    fn invalidate_dependents_now(&self, id: SlotId) -> bool {
         let effects_to_schedule = {
             let mut inner = self.inner.borrow_mut();
             let roots = match Self::get_node(&inner.nodes, id) {
+                Some(Node::Cell(c)) if c.dependents.is_empty() => return false,
+                Some(Node::Slot(s)) if s.dependents.is_empty() => return false,
                 Some(Node::Cell(c)) => c.dependents.clone(),
                 Some(Node::Slot(s)) => s.dependents.clone(),
-                _ => return,
+                _ => return false,
             };
             Self::mark_frontier_locked(&mut inner.nodes, &roots)
         };
+        let scheduled = !effects_to_schedule.is_empty();
         for (effect_id, force) in effects_to_schedule {
             self.schedule_effect(effect_id, force);
         }
+        scheduled
     }
 
     /// Single-borrow DFS dirty-marking. Roots get `force=true`; transitive

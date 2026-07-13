@@ -28,6 +28,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	test-reliable-sync-conformance \
 	test-collections-conformance \
 	test-queue-conformance \
+	test-queue-demand-driven \
 	test-seqcrdt-conformance \
 	test-lossless-tree \
 	test-schema-compliance \
@@ -42,7 +43,7 @@ LEAN_FORMAL_DIR ?= ../lazily-formal
 	benchmark-update \
 	instrumentation-profile
 
-	check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-reliable-sync-conformance test-shm test-collections-conformance test-queue-conformance test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
+	check: fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-ffi test-ffi-binary test-ipc test-ipc-binary test-ipc-conformance test-reliable-sync-conformance test-shm test-collections-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-check
 
 fmt:
 >$(CARGO) fmt --all --check
@@ -79,6 +80,12 @@ test-async:
 # seam (window 1) alongside the async feature; test-async alone compiles it out.
 test-async-resolve:
 >$(CARGO) test --locked --features "async instrumentation" --test async_resolve_loop
+
+# Phase-0 demand-driven reader-kind + store-without-cascade acceptance
+# (relaycell-backpressure-analysis.md §5/§4.0): asserts the merge cost law via
+# instrumentation counters — unobserved ops derive nothing, bursts coalesce.
+test-queue-demand-driven:
+>$(CARGO) test --locked --features instrumentation --test queue_demand_driven
 
 test-loom:
 >$(CARGO) test --locked --features loom --test thread_safe_loom

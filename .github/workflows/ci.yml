@@ -70,6 +70,9 @@ jobs:
       - name: Test async resolve-loop windows (#k03k)
         run: cargo +stable test --locked --features "async instrumentation" --test async_resolve_loop
 
+      - name: Test demand-driven reader-kinds + store-without-cascade (Phase 0 #relaycell)
+        run: cargo +stable test --locked --features instrumentation --test queue_demand_driven
+
       - name: Test IPC conformance against canonical spec fixtures (#lzspecconf)
         run: |
           test -d ../lazily-spec/conformance || { echo "::error::../lazily-spec/conformance missing — conformance.rs would silently fall back to local fixtures"; exit 1; }
