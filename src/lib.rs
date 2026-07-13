@@ -93,6 +93,7 @@ mod signal;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
 mod slot;
+mod spill;
 mod stable_id;
 mod state_machine;
 pub mod statechart;
@@ -229,6 +230,7 @@ pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
 pub use slot::SlotHandle;
+pub use spill::{SpillMode, SpillPage, SpillStore};
 pub use stable_id::{
     Alignment, Block, BlockKey, Match, align, assign_stable_keys, block_key, similarity,
 };
