@@ -79,6 +79,7 @@ mod instrumentation;
 mod ipc;
 #[cfg(feature = "lossless-tree")]
 mod lossless_tree_crdt;
+mod merge;
 mod queue;
 mod receipt;
 mod reconcile;
@@ -198,6 +199,11 @@ pub use lazily_macros::{cell, slot};
 pub use lossless_tree_crdt::{
     LeafKind, LosslessTreeCrdt, NodeSeed, TreeError, TreeNodeId, TreeOp, TreeOpId, TreeUpdate,
     TreeVersionFrontier,
+};
+#[cfg(feature = "distributed")]
+pub use merge::CrdtJoin;
+pub use merge::{
+    KeepLatest, Max, MergeCellHandle, MergePolicy, RawFifo, Reactive, SetUnion, Source, Sum,
 };
 pub use queue::{
     QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, VecDequeStorage,

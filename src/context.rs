@@ -8,6 +8,7 @@ use smallvec::SmallVec;
 
 use crate::cell::CellHandle;
 use crate::effect::{EffectCallbackResult, EffectHandle};
+use crate::merge::{MergeCellHandle, MergePolicy};
 use crate::signal::SignalHandle;
 use crate::slot::SlotHandle;
 
@@ -680,6 +681,44 @@ impl Context {
         };
         self.insert_node(id, Node::Cell(node));
         CellHandle::new(id)
+    }
+
+    /// Create a [`MergeCellHandle`] — a cell whose write is a *merge* under
+    /// policy `M`, rather than a replace. `Cell ≡ MergeCell<KeepLatest>`
+    /// (relaycell-backpressure-analysis.md §4.0). Backed by an ordinary cell
+    /// node, so it inherits the store-without-cascade write fast path.
+    pub fn merge_cell<T, M>(&self, initial: T) -> MergeCellHandle<T, M>
+    where
+        T: PartialEq + 'static,
+        M: MergePolicy<T>,
+    {
+        MergeCellHandle::new(self.cell(initial))
+    }
+
+    /// Fold `op` into a cell's value under policy `M` (the merge write). Reads
+    /// the current value untracked, computes `M::merge(old, op)`, then routes
+    /// through [`set_cell`](Context::set_cell) so the `PartialEq` store-guard
+    /// (free dedup when `⊕(old, op) == old`), batching, and
+    /// store-without-cascade all apply unchanged.
+    pub fn apply_merge<T, M>(&self, handle: &CellHandle<T>, op: T)
+    where
+        T: PartialEq + Clone + 'static,
+        M: MergePolicy<T>,
+    {
+        let merged = {
+            let inner = self.inner.borrow();
+            if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
+                assert!(
+                    c.type_id == TypeId::of::<T>(),
+                    "type mismatch in apply_merge"
+                );
+                let old = unsafe { downcast_ref_unchecked::<T>(&c.value) };
+                M::merge(old, op)
+            } else {
+                panic!("apply_merge on non-cell id");
+            }
+        };
+        self.set_cell(handle, merged);
     }
 
     /// Return the context-local cell handle for factory `K`, creating it on
