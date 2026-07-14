@@ -64,6 +64,7 @@ mod cell_tree;
 #[cfg(feature = "ipc")]
 mod command;
 mod context;
+mod coordination;
 #[cfg(feature = "distributed")]
 mod crdt;
 #[cfg(all(feature = "distributed", feature = "webrtc"))]
@@ -147,6 +148,10 @@ pub use command::{
     DedupePolicy, applied_receipt, rejected_receipt,
 };
 pub use context::Context;
+pub use coordination::{
+    BarrierCell, BarrierCore, LeaderCell, LeaderRole, LeaseCell, LeaseCore, LockCell,
+    SemaphoreCell, SemaphoreCore,
+};
 #[cfg(feature = "distributed")]
 pub use crdt::{
     CellCrdt, CrdtPlane, Hlc, HlcStamp, LwwRegister, MergeMechanism, MvRegister, OpIdFrontier,
