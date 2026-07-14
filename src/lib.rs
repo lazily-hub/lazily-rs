@@ -85,6 +85,7 @@ mod merge;
 #[cfg(feature = "ipc")]
 pub mod outbox;
 mod queue;
+mod rateshape;
 mod receipt;
 mod reconcile;
 mod relay;
@@ -227,6 +228,11 @@ pub use queue::{
     TopicDurability, TopicSnapshot, TopicSubscribeOutcome, TopicSubscriptionSnapshot,
     VecDequeStorage,
 };
+pub use rateshape::{
+    DebounceCell, DebounceCore, ExpiryPolicy, Lcg, ProbabilisticSampleCell,
+    ProbabilisticSampleCore, RatePolicy, SampleCell, SampleCore, SampleMode, SampleRng,
+    ThrottleCell, ThrottleCore, ThrottleEdge, WindowPolicy,
+};
 pub use receipt::{
     CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,
     ReceiptProjection,
@@ -235,7 +241,7 @@ pub use reconcile::{DiffOp, apply_to_map, apply_to_tree, reconcile};
 pub use relay::{
     BackpressurePolicy, BoundDim, IngressOutcome, Overflow, RelayCell, RelayConfigError,
 };
-pub use relay_policy::{ExpiryPolicy, KeyedRelay, PriorityStorage, RatePolicy, WindowPolicy};
+pub use relay_policy::{KeyedRelay, PriorityStorage};
 pub use relay_roles::{Inbox, Outbox};
 pub use relay_transport::{FramedTransport, InProcTransport, Transport};
 #[cfg(feature = "ipc")]
