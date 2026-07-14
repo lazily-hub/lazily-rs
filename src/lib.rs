@@ -101,6 +101,7 @@ mod resilience;
 mod sem_tree;
 #[cfg(feature = "distributed")]
 mod seq_crdt;
+mod service;
 mod signal;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
@@ -273,6 +274,10 @@ pub use resilience::{
 pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]
 pub use seq_crdt::{Position, SeqCrdt};
+pub use service::{
+    DiscoveryCell, DiscoveryCore, Health, HealthCell, HealthCore, ReadinessCell, ReadinessCore,
+    RegistryOp, ServiceRegistry, ServiceRegistryCore,
+};
 pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
