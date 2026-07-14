@@ -81,6 +81,7 @@ mod instrumentation;
 mod ipc;
 #[cfg(feature = "lossless-tree")]
 mod lossless_tree_crdt;
+mod membership;
 mod merge;
 #[cfg(feature = "ipc")]
 pub mod outbox;
@@ -213,6 +214,10 @@ pub use lazily_macros::{cell, slot};
 pub use lossless_tree_crdt::{
     LeafKind, LosslessTreeCrdt, NodeSeed, TreeError, TreeNodeId, TreeOp, TreeOpId, TreeUpdate,
     TreeVersionFrontier,
+};
+pub use membership::{
+    MembershipCell, MembershipConfig, MembershipCore, PeerChangeEvent, PeerSet, PeerState,
+    PhiAccrual,
 };
 #[cfg(feature = "distributed")]
 pub use merge::CrdtJoin;
