@@ -97,6 +97,7 @@ mod relay_roles;
 mod relay_transport;
 #[cfg(feature = "ipc")]
 mod reliable_sync;
+mod resilience;
 mod sem_tree;
 #[cfg(feature = "distributed")]
 mod seq_crdt;
@@ -264,6 +265,10 @@ pub use relay_transport::{FramedTransport, InProcTransport, Transport};
 pub use reliable_sync::{
     Clock, DriverError, OrSet, Progress, ResyncAction, ResyncCoordinator, SnapshotProvider,
     SyncDriver, WireLwwRegister,
+};
+pub use resilience::{
+    BreakerState, BulkheadCell, BulkheadCore, CircuitBreakerCell, CircuitBreakerCore,
+    RetryPolicyCell, RetryPolicyCore, TimeoutCell, TimeoutCore,
 };
 pub use sem_tree::SemTree;
 #[cfg(feature = "distributed")]
