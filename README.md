@@ -28,7 +28,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 <!-- coverage-table:start -->
 | Feature | Rust | Python | Kotlin | JS | Dart | Zig | Go | C++ |
 | --------- | :----: | :------: | :------: | :--: | :----: | :---: | :--: | :---: |
-| Reactive graph — `Cell` / `Slot` / `Signal` / `Effect` / memo / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Reactive graph — core `Cell` / `Slot` / `Effect` (+ derived `Signal` = `Slot.eager`) / memo / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Keyed-map materialization (`SlotMap`) — mint-on-access derived slots: transparency + deferral (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Thread-safe keyed map (`ThreadSafeSlotMap`) — `Send + Sync` + materialization confluence (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Async keyed map (`AsyncSlotMap`) — eventual transparency (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -302,7 +302,7 @@ A `CellHandle<T>` holds a mutable value. `cell.set(&ctx, value)` and `ctx.set_ce
 
 ### Signal
 
-A `SignalHandle<T>` is an **eager** derived value — the eager counterpart to a lazy Slot, one step further along the `Slot -> Cell -> Signal` progression. Where a Slot only marks itself dirty on invalidation and recomputes on the next read, a Signal recomputes *the instant a dependency is invalidated*, before the invalidating `set`/`set_cell`/`batch` call returns. The value is always materialized, so observers never see an intermediate unset value — a dependency change drives the value directly from `v1` to `v2`.
+A `SignalHandle<T>` is an **eager** derived value — a *derived construct, not a core primitive* (`Signal ≡ Slot.eager`: a memo Slot plus a puller Effect). Where a Slot only marks itself dirty on invalidation and recomputes on the next read, a Signal recomputes *the instant a dependency is invalidated*, before the invalidating `set`/`set_cell`/`batch` call returns. The value is always materialized, so observers never see an intermediate unset value — a dependency change drives the value directly from `v1` to `v2`.
 
 ```rust
 let n = ctx.cell(1);
