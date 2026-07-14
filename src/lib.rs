@@ -125,6 +125,7 @@ mod typed_context;
 mod webrtc_signaling;
 #[cfg(feature = "webrtc")]
 mod webrtc_transport;
+mod windowing;
 mod work_queue;
 #[cfg(feature = "websocket")]
 mod ws_backend;
@@ -325,6 +326,10 @@ pub use webrtc_signaling::{WebrtcSignalingError, answer_next_offer, offer_to_pee
 #[cfg(feature = "webrtc")]
 pub use webrtc_transport::{
     DataChannel, InMemoryDataChannel, WebRtcSink, WebRtcSource, WebRtcTransportError,
+};
+pub use windowing::{
+    SessionCore, SessionWindow, SlidingCore, SlidingWindow, TumblingCountCore, TumblingCountWindow,
+    TumblingTimeCore, TumblingTimeWindow,
 };
 pub use work_queue::{
     WorkQueueCell, WorkQueueDeadLetter, WorkQueueDeadLetterReason, WorkQueueDelivery,
