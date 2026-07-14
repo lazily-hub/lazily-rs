@@ -86,6 +86,7 @@ mod membership;
 mod merge;
 #[cfg(feature = "ipc")]
 pub mod outbox;
+mod presence;
 mod queue;
 mod rateshape;
 mod receipt;
@@ -233,6 +234,10 @@ pub use merge::{
 pub use outbox::{DurableOutbox, InMemoryOutbox, InMemoryStore, OutboxStore};
 #[cfg(feature = "durable-sqlite")]
 pub use outbox::{SqliteOutbox, SqliteStore, SqliteStoreError, ensure_outbox_schema};
+pub use presence::{
+    AwarenessCell, Durable, Ephemeral, EphemeralCell, EphemeralCore, EphemeralMapCore,
+    EphemeralValue, PresenceCell,
+};
 pub use queue::{
     QueueCell, QueuePopError, QueuePushError, QueueReaderHandles, QueueStorage, TopicCell,
     TopicDurability, TopicSnapshot, TopicSubscribeOutcome, TopicSubscriptionSnapshot,
