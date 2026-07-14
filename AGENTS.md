@@ -35,9 +35,11 @@ this repo.
   (`#lzworkqueue`): FIFO exclusive claims with stable item/fresh delivery ids,
   worker-owned ack/nack, strict visibility-timeout redelivery, bounded attempts,
   DLQ, and independent pending/in-flight/dead-letter reader kinds.
+- `src/time.rs` — temporal source primitives (`#lztime`): logical-clock-driven `TimelineSource` cores (`TimerCore`/`IntervalCore`/`CronCore`/`DeadlineCore`) split from thin reactive cells (`TimerCell` single-shot / `IntervalCell` periodic / `CronCell` pattern-periodic / `DeadlineCell<T>` value+deadline → `Deadlined`), plus `ManualClock`. Edge-only reactive invalidation; `BytesPayload` cores (`DeadlineCell` is `PyObjectPayload`). Foundation for leases/expiry/windows/presence.
 - `src/transport.rs` — cross-process zero-copy transport (`#lzzcpy`): `BlobBackend` adapter trait + `InProcessBackend` (wraps `ShmBlobArena`) + `ArrowBackend` (Arrow IPC stream bytes) + `ShmBackend` (POSIX `shm_open`+`mmap`, `shm` feature, Linux) + `spill_message`/`resolve_value` policy + `BlobRouter` multi-backend resolver
 - `src/crdt_tree.rs` — `CrdtTree` lossless document contract (`#lzcrdttree`): merge, frontier, delta, empty-frontier snapshot, and materialized value; implemented by `TextCrdt`
 - `src/outbox.rs` — storage-independent durable outbox (`#lzdurableoutbox`): `OutboxStore` ordered-byte boundary, shared `Outbox<S>` append/ack/prune/replay protocol, in-memory backend, and `durable-sqlite` adapter
+- `tests/temporal_conformance.rs` — temporal sources (`#lztime`) compute fixtures (lazily-spec/conformance/temporal/`*.json`); timer single-shot idempotent fire, interval boundary counting under clock jumps, cron pattern matching, deadline expiry preserving value, edge-only reader invalidation
 - `tests/integration.rs` — 13 integration tests
 - `tests/spec_compliance.rs` — 68 spec compliance tests
 - `tests/conformance.rs` — cross-language IPC fixture round-trip tests (lazily-spec/conformance)

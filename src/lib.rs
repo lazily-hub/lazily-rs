@@ -113,6 +113,7 @@ mod text_crdt;
 mod thread_safe;
 #[cfg(feature = "thread-safe")]
 mod thread_safe_reactive_family;
+mod time;
 #[cfg(feature = "ipc")]
 mod transport;
 mod typed_context;
@@ -276,6 +277,10 @@ pub use thread_safe::{
 #[cfg(feature = "thread-safe")]
 pub use thread_safe_reactive_family::{
     ThreadSafeCellMap, ThreadSafeMapHandle, ThreadSafeReactiveMap, ThreadSafeSlotMap,
+};
+pub use time::{
+    CronCell, CronCore, DeadlineCell, DeadlineCore, Deadlined, IntervalCell, IntervalCore,
+    ManualClock, TimelineSource, TimerCell, TimerCore,
 };
 #[cfg(all(unix, feature = "shm"))]
 pub use transport::ShmBackend;
