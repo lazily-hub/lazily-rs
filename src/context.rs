@@ -1,6 +1,6 @@
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 #[cfg(not(feature = "vec_edges"))]
@@ -163,12 +163,23 @@ struct ContextInner {
     next_id: u64,
     free_ids: Vec<u64>,
     pending_effects: VecDeque<SlotId>,
-    scheduled_effects: HashSet<SlotId>,
+    /// Effect-schedule membership bitset, indexed by node slot. Mirrors the
+    /// thread-safe variant (thread_safe.rs): a `Vec<bool>` beats `HashSet` for
+    /// the bounded, dense node-id space and avoids per-schedule hashing.
+    scheduled_effects: Vec<bool>,
     flushing_effects: bool,
     batch_depth: usize,
     batched_cells: EdgeVec,
     batched_cell_clears: EdgeVec,
     batched_slots: EdgeVec,
+    /// Reusable DFS stack for `mark_frontier_locked` / `clear_frontier_locked`.
+    /// Holds `(id, force)` so the former separate `stack` + `force_stack`
+    /// allocations collapse into one with better pop locality (#lzbatchborrow).
+    mark_scratch: Vec<(SlotId, bool)>,
+    /// Reusable sink for `(effect_id, force)` pairs collected during a frontier
+    /// walk. Taken out for one invalidation and restored afterward so its
+    /// capacity survives across invalidations instead of reallocating per call.
+    effects_scratch: Vec<(SlotId, bool)>,
     factory_handles: HashMap<FactoryKey, FactoryEntry>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
@@ -214,12 +225,14 @@ impl Context {
                 next_id: 0,
                 free_ids: Vec::new(),
                 pending_effects: VecDeque::new(),
-                scheduled_effects: HashSet::new(),
+                scheduled_effects: Vec::new(),
                 flushing_effects: false,
                 batch_depth: 0,
                 batched_cells: EdgeVec::new(),
                 batched_cell_clears: EdgeVec::new(),
                 batched_slots: EdgeVec::new(),
+                mark_scratch: Vec::new(),
+                effects_scratch: Vec::new(),
                 factory_handles: HashMap::new(),
                 #[cfg(feature = "instrumentation")]
                 instrumentation: crate::instrumentation::InstrumentationCounters::default(),
@@ -321,12 +334,21 @@ impl Context {
         }
     }
 
-    fn remove_dependent_edge(&self, dependency_id: SlotId, dependent_id: SlotId) {
-        #[cfg(feature = "instrumentation")]
-        let mut edge_removed = false;
-        {
-            let mut inner = self.inner.borrow_mut();
-            if let Some(dep_node) = Self::get_node_mut(&mut inner.nodes, dependency_id) {
+    /// Remove every `dependent_id` edge from `old_deps`'s dependents under a
+    /// SINGLE `ContextInner` borrow. Mirrors the thread-safe variant's
+    /// `remove_stale_dependencies_locked` (thread_safe.rs): the former per-edge
+    /// `remove_dependent_edge` calls each re-borrowed the `RefCell`, so a
+    /// fan-out-256 recompute paid 256 borrow_mut acquisitions instead of one
+    /// (#lzbatchborrow).
+    fn remove_dependent_edges_locked(
+        inner: &mut ContextInner,
+        dependent_id: SlotId,
+        old_deps: &[SlotId],
+    ) {
+        for dependency_id in old_deps {
+            #[cfg(feature = "instrumentation")]
+            let mut edge_removed = false;
+            if let Some(dep_node) = Self::get_node_mut(&mut inner.nodes, *dependency_id) {
                 match dep_node {
                     Node::Slot(s) => {
                         #[cfg(feature = "instrumentation")]
@@ -351,7 +373,6 @@ impl Context {
                     Node::Effect(_) => {}
                 }
             }
-
             #[cfg(feature = "instrumentation")]
             if edge_removed {
                 inner.instrumentation.record_dependency_edge_removed();
@@ -575,7 +596,11 @@ impl Context {
 
         let mut dependency_changed = false;
         for dep_id in dependencies {
-            if self.is_slot_node(dep_id) && self.refresh_slot(dep_id) {
+            // refresh_slot returns false for non-slot ids (its fast path and
+            // every later borrow fall through to `_ => ...`), so the explicit
+            // is_slot_node borrow+lookup is redundant — calling refresh_slot
+            // directly collapses two RefCell borrows per dependency into one.
+            if self.refresh_slot(dep_id) {
                 dependency_changed = true;
             }
         }
@@ -625,9 +650,7 @@ impl Context {
             };
             old_deps = std::mem::take(&mut slot.dependencies);
             compute = Rc::clone(&slot.compute);
-        }
-        for dep_id in old_deps {
-            self.remove_dependent_edge(dep_id, id);
+            Self::remove_dependent_edges_locked(&mut inner, id, &old_deps);
         }
 
         push_tracking_frame(id);
@@ -869,6 +892,12 @@ impl Context {
             let cell_clears = std::mem::take(&mut inner.batched_cell_clears);
             let slots = std::mem::take(&mut inner.batched_slots);
 
+            // Reusable effects sink: cleared once here, appended across all
+            // frontier walks, then taken out (so it can outlive the borrow while
+            // effects are scheduled) and restored afterward so its capacity
+            // survives to the next invalidation instead of reallocating.
+            inner.effects_scratch.clear();
+
             // Collect invalidation roots from all changed cells.
             let mut roots: Vec<SlotId> = Vec::new();
             for cell_id in &cells {
@@ -876,7 +905,7 @@ impl Context {
                     roots.extend_from_slice(&c.dependents);
                 }
             }
-            let mark_effects = Self::mark_frontier_locked(&mut inner.nodes, &roots);
+            Self::mark_frontier_locked(&mut inner, &roots);
 
             // Collect clear roots from all cleared cells.
             let mut clear_roots: Vec<SlotId> = Vec::new();
@@ -885,20 +914,17 @@ impl Context {
                     clear_roots.extend_from_slice(&c.dependents);
                 }
             }
-            let clear_effects = Self::clear_frontier_locked(&mut inner.nodes, &clear_roots);
+            Self::clear_frontier_locked(&mut inner, &clear_roots);
 
             // Clear slots directly.
-            let slot_effects = Self::clear_frontier_locked(&mut inner.nodes, &slots);
+            Self::clear_frontier_locked(&mut inner, &slots);
 
-            mark_effects
-                .into_iter()
-                .chain(clear_effects)
-                .chain(slot_effects)
-                .collect::<Vec<_>>()
+            std::mem::take(&mut inner.effects_scratch)
         };
-        for (effect_id, force) in all_effects {
-            self.schedule_effect(effect_id, force);
+        for (effect_id, force) in &all_effects {
+            self.schedule_effect(*effect_id, *force);
         }
+        self.inner.borrow_mut().effects_scratch = all_effects;
         self.flush_effects();
     }
 
@@ -931,24 +957,22 @@ impl Context {
 
     /// Dispose an effect by handle.
     pub fn dispose_effect(&self, handle: &EffectHandle) {
-        let (dependencies, cleanup) = {
+        let cleanup = {
             let mut inner = self.inner.borrow_mut();
             // Deschedule and drain any pending flush entry BEFORE recycling the
             // id, mirroring ThreadSafeContext::dispose_effect. A stale
             // pending_effects entry can alias a recycled id (free_ids is LIFO)
             // and trigger a spurious run of a freshly allocated node.
             inner.pending_effects.retain(|queued| *queued != handle.id);
-            inner.scheduled_effects.remove(&handle.id);
+            Self::deschedule_effect(&mut inner, handle.id);
             let Some(Node::Effect(effect)) = Self::take_node(&mut inner.nodes, handle.id) else {
                 return;
             };
+            Self::remove_dependent_edges_locked(&mut inner, handle.id, &effect.dependencies);
             inner.free_ids.push(handle.id.0);
-            (effect.dependencies, effect.cleanup)
+            effect.cleanup
         };
 
-        for dep_id in dependencies {
-            self.remove_dependent_edge(dep_id, handle.id);
-        }
         if let Some(cleanup) = cleanup {
             cleanup();
         }
@@ -978,7 +1002,13 @@ impl Context {
             return;
         }
 
-        if inner.scheduled_effects.insert(id) {
+        let idx = Self::node_index(id).expect("SlotId does not fit usize");
+        let already_scheduled = idx < inner.scheduled_effects.len() && inner.scheduled_effects[idx];
+        if !already_scheduled {
+            if idx >= inner.scheduled_effects.len() {
+                inner.scheduled_effects.resize(idx + 1, false);
+            }
+            inner.scheduled_effects[idx] = true;
             inner.pending_effects.push_back(id);
             #[cfg(feature = "instrumentation")]
             {
@@ -988,10 +1018,24 @@ impl Context {
         }
     }
 
+    fn deschedule_effect(inner: &mut ContextInner, id: SlotId) {
+        let idx = Self::node_index(id).expect("SlotId does not fit usize");
+        if idx < inner.scheduled_effects.len() {
+            inner.scheduled_effects[idx] = false;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_effect_scheduled(&self, id: SlotId) -> bool {
+        let inner = self.inner.borrow();
+        let idx = Self::node_index(id).expect("SlotId does not fit usize");
+        idx < inner.scheduled_effects.len() && inner.scheduled_effects[idx]
+    }
+
     fn remove_pending_effect(&self, id: SlotId) {
         let mut inner = self.inner.borrow_mut();
         inner.pending_effects.retain(|queued| *queued != id);
-        inner.scheduled_effects.remove(&id);
+        Self::deschedule_effect(&mut inner, id);
     }
 
     pub(crate) fn flush_effects(&self) {
@@ -1008,7 +1052,7 @@ impl Context {
                 let mut inner = self.inner.borrow_mut();
                 match inner.pending_effects.pop_front() {
                     Some(id) => {
-                        inner.scheduled_effects.remove(&id);
+                        Self::deschedule_effect(&mut inner, id);
                         id
                     }
                     None => {
@@ -1040,11 +1084,9 @@ impl Context {
             cleanup = effect.cleanup.take();
             effect.force_run = false;
             run = Rc::clone(&effect.run);
+            Self::remove_dependent_edges_locked(&mut inner, id, &old_deps);
         }
 
-        for dep_id in old_deps {
-            self.remove_dependent_edge(dep_id, id);
-        }
         if let Some(cleanup) = cleanup {
             cleanup();
         }
@@ -1165,18 +1207,21 @@ impl Context {
         }
         let effects_to_schedule = {
             let mut inner = self.inner.borrow_mut();
-            Self::clear_frontier_locked(&mut inner.nodes, ids)
+            inner.effects_scratch.clear();
+            Self::clear_frontier_locked(&mut inner, ids);
+            std::mem::take(&mut inner.effects_scratch)
         };
         // Store-without-cascade (read-side dual): if clearing the roots reached
         // no Effect, there is nothing to flush — an unobserved op skips the
         // flush machinery entirely and returns after a single frontier walk.
-        if effects_to_schedule.is_empty() {
-            return;
+        if !effects_to_schedule.is_empty() {
+            for (effect_id, force) in effects_to_schedule.iter().copied() {
+                self.schedule_effect(effect_id, force);
+            }
+            self.flush_effects();
         }
-        for (effect_id, force) in effects_to_schedule {
-            self.schedule_effect(effect_id, force);
-        }
-        self.flush_effects();
+        // Restore the reusable sink so its capacity survives to the next call.
+        self.inner.borrow_mut().effects_scratch = effects_to_schedule;
     }
 
     pub(crate) fn flush_effects_after_invalidation(&self) {
@@ -1189,11 +1234,14 @@ impl Context {
         let effects_to_schedule = {
             let mut inner = self.inner.borrow_mut();
             let roots = [id];
-            Self::clear_frontier_locked(&mut inner.nodes, &roots)
+            inner.effects_scratch.clear();
+            Self::clear_frontier_locked(&mut inner, &roots);
+            std::mem::take(&mut inner.effects_scratch)
         };
-        for (effect_id, force) in effects_to_schedule {
+        for (effect_id, force) in effects_to_schedule.iter().copied() {
             self.schedule_effect(effect_id, force);
         }
+        self.inner.borrow_mut().effects_scratch = effects_to_schedule;
     }
 
     pub(crate) fn clear_cell_dependents(&self, id: SlotId) {
@@ -1220,11 +1268,14 @@ impl Context {
                 Some(Node::Cell(c)) => c.dependents.clone(),
                 _ => return,
             };
-            Self::clear_frontier_locked(&mut inner.nodes, &roots)
+            inner.effects_scratch.clear();
+            Self::clear_frontier_locked(&mut inner, &roots);
+            std::mem::take(&mut inner.effects_scratch)
         };
-        for (effect_id, force) in effects_to_schedule {
+        for (effect_id, force) in effects_to_schedule.iter().copied() {
             self.schedule_effect(effect_id, force);
         }
+        self.inner.borrow_mut().effects_scratch = effects_to_schedule;
     }
 
     /// Batched BFS invalidation: marks all reachable slots dirty under a SINGLE
@@ -1242,30 +1293,35 @@ impl Context {
                 Some(Node::Slot(s)) => s.dependents.clone(),
                 _ => return false,
             };
-            Self::mark_frontier_locked(&mut inner.nodes, &roots)
+            inner.effects_scratch.clear();
+            Self::mark_frontier_locked(&mut inner, &roots);
+            std::mem::take(&mut inner.effects_scratch)
         };
         let scheduled = !effects_to_schedule.is_empty();
-        for (effect_id, force) in effects_to_schedule {
+        for (effect_id, force) in effects_to_schedule.iter().copied() {
             self.schedule_effect(effect_id, force);
         }
+        self.inner.borrow_mut().effects_scratch = effects_to_schedule;
         scheduled
     }
 
     /// Single-borrow DFS dirty-marking. Roots get `force=true`; transitive
     /// descendants get `force=false` (matching the former recursive semantics).
-    /// Returns `(effect_id, force)` pairs for the caller to schedule after the
-    /// borrow is released. Uses stack-based DFS with SmallVec to avoid heap
-    /// allocation for the common small-fan-out case (#lzbatchborrow).
-    fn mark_frontier_locked(nodes: &mut [Option<Node>], roots: &[SlotId]) -> Vec<(SlotId, bool)> {
-        let mut effects: Vec<(SlotId, bool)> = Vec::new();
-        // DFS stack — order doesn't matter for invalidation marking.
-        let mut stack: Vec<SlotId> = Vec::with_capacity(roots.len());
-        let mut force_stack: Vec<bool> = Vec::with_capacity(roots.len());
+    /// Appends `(effect_id, force)` pairs to `effects_scratch` for the caller to
+    /// schedule after the borrow is released. Reuses the `ContextInner`'s
+    /// `mark_scratch`/`effects_scratch` buffers so an invalidation no longer
+    /// allocates a DFS stack + force stack per call: the former separate
+    /// `stack` and `force_stack` collapse into one `Vec<(SlotId, bool)>` with
+    /// better pop locality (#lzbatchborrow).
+    fn mark_frontier_locked(inner: &mut ContextInner, roots: &[SlotId]) {
+        let nodes = &mut inner.nodes;
+        let stack = &mut inner.mark_scratch;
+        let effects = &mut inner.effects_scratch;
+        stack.clear();
         for &root in roots {
-            stack.push(root);
-            force_stack.push(true);
+            stack.push((root, true));
         }
-        while let (Some(id), Some(force)) = (stack.pop(), force_stack.pop()) {
+        while let Some((id, force)) = stack.pop() {
             match Self::get_node_mut(nodes, id) {
                 Some(Node::Slot(slot)) => {
                     let should_propagate = !slot.dirty || (force && !slot.force_recompute);
@@ -1275,8 +1331,7 @@ impl Context {
                     }
                     if should_propagate {
                         for dep_id in &slot.dependents {
-                            stack.push(*dep_id);
-                            force_stack.push(false);
+                            stack.push((*dep_id, false));
                         }
                     }
                 }
@@ -1286,18 +1341,19 @@ impl Context {
                 _ => {}
             }
         }
-        effects
     }
 
     /// Single-borrow DFS value-clearing. Clears slot values and dirty flags
-    /// recursively, collecting effects to schedule.
-    fn clear_frontier_locked(nodes: &mut [Option<Node>], roots: &[SlotId]) -> Vec<(SlotId, bool)> {
-        let mut effects: Vec<(SlotId, bool)> = Vec::new();
-        let mut stack: Vec<SlotId> = Vec::with_capacity(roots.len());
+    /// recursively, appending effects to schedule to `effects_scratch`.
+    fn clear_frontier_locked(inner: &mut ContextInner, roots: &[SlotId]) {
+        let nodes = &mut inner.nodes;
+        let stack = &mut inner.mark_scratch;
+        let effects = &mut inner.effects_scratch;
+        stack.clear();
         for &root in roots {
-            stack.push(root);
+            stack.push((root, true));
         }
-        while let Some(id) = stack.pop() {
+        while let Some((id, _)) = stack.pop() {
             match Self::get_node_mut(nodes, id) {
                 Some(Node::Slot(slot)) => {
                     if slot.value.is_none() && !slot.dirty {
@@ -1307,7 +1363,7 @@ impl Context {
                     slot.dirty = false;
                     slot.force_recompute = false;
                     for dep_id in &slot.dependents {
-                        stack.push(*dep_id);
+                        stack.push((*dep_id, true));
                     }
                 }
                 Some(Node::Effect(_)) => {
@@ -1316,7 +1372,6 @@ impl Context {
                 _ => {}
             }
         }
-        effects
     }
 
     fn notify_slot_value_changed(&self, id: SlotId) {
@@ -1448,8 +1503,8 @@ mod tests {
         {
             let inner = ctx.inner.borrow();
             assert!(inner.pending_effects.contains(&effect.id));
-            assert!(inner.scheduled_effects.contains(&effect.id));
         }
+        assert!(ctx.is_effect_scheduled(effect.id));
 
         effect.dispose(&ctx);
 
@@ -1458,7 +1513,7 @@ mod tests {
             !inner.pending_effects.contains(&effect.id),
             "dispose must drain the pending_effects queue"
         );
-        assert!(!inner.scheduled_effects.contains(&effect.id));
+        assert!(!ctx.is_effect_scheduled(effect.id));
         assert_eq!(inner.free_ids.as_slice(), &[effect.id.0]);
     }
 

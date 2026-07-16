@@ -1727,7 +1727,17 @@ impl ThreadSafeContext {
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.slot_fast_path(id)
+        let idx = node_index(id)?;
+        // Hold the `slot_fast_paths` read guard across `read_fresh` instead of
+        // cloning the `Arc` (refcount inc/dec) per cached read. `read_fresh`
+        // takes `&self` and only touches the fast path's own value storage /
+        // atomics, never re-entering `slot_fast_paths`; the only writer of that
+        // registry is slot creation (never nested with the value lock), so the
+        // overlapping read locks cannot deadlock.
+        let guard = self.inner.slot_fast_paths.read();
+        guard
+            .get(idx)
+            .and_then(|opt| opt.as_ref())
             .and_then(|fast_path| fast_path.read_fresh())
     }
 
