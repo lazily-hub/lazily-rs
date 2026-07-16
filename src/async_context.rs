@@ -691,25 +691,7 @@ impl AsyncContext {
                 _ => panic!("AsyncCellHandle does not point to a Cell node"),
             }
         }
-        for dep_id in &dependents {
-            let is_effect = {
-                let inner = self.inner.lock();
-                matches!(inner.get_node(*dep_id), Some(AsyncNode::Effect(_)))
-            };
-            if is_effect {
-                let mut inner = self.inner.lock();
-                Self::schedule_async_effect(&mut inner, *dep_id);
-            } else {
-                self.invalidate_async_slot(*dep_id);
-            }
-        }
-        let has_effects = {
-            let inner = self.inner.lock();
-            !inner.pending_async_effects.is_empty()
-        };
-        if has_effects {
-            self.flush_async_effects();
-        }
+        self.invalidate_frontier_async(&dependents);
     }
 
     pub(crate) fn get_slot_state(&self, id: SlotId) -> AsyncSlotStateView {
@@ -770,48 +752,69 @@ impl AsyncContext {
         }
     }
 
-    fn invalidate_async_slot(&self, id: SlotId) {
-        let slot_dependents;
-        let effect_dependents;
-        let old_notifier;
-        let in_flight_handle;
-        {
+    /// Single-locked invalidation frontier (#lzasyncfrontier). Walks the entire
+    /// dependent cone of `roots` under ONE mutex acquisition — collecting slots
+    /// to invalidate, their superseded notifiers / in-flight compute handles,
+    /// and the effects to schedule — then releases the lock and performs the
+    /// abort / notifier-drop / effect-schedule / flush work outside it. Mirrors
+    /// the thread-safe variant's `ThreadSafeInvalidationPlan::from_roots_locked`
+    /// → `apply_locked` split (thread_safe.rs).
+    ///
+    /// The recursive predecessor re-locked the mutex per dependent and per
+    /// scheduled effect; a fan-out-N invalidation paid O(N) lock acquisitions.
+    /// Notifier drops and in-flight aborts still happen after the lock is
+    /// released, preserving the `#k03k` resolve-window semantics (a superseded
+    /// compute's `watch` senders drop without a final `Resolved` send, so a
+    /// waiting `get_async` re-resolves to the latest value instead of panicking).
+    fn invalidate_frontier_async(&self, roots: &[SlotId]) {
+        let (effects, in_flight_handles, notifiers) = {
             let mut inner = self.inner.lock();
-            match inner.get_node_mut(id) {
-                Some(AsyncNode::Slot(slot)) => {
-                    let result = slot.invalidate();
-                    in_flight_handle = match result {
-                        InvalidationResult::HadInFlight(handle) => Some(handle),
-                        _ => None,
-                    };
-                    old_notifier = slot.notifier.take();
-                    let all_dependents = slot.dependents.clone();
-                    let mut sd = EdgeVec::new();
-                    let mut ed = EdgeVec::new();
-                    for d in &all_dependents {
-                        match inner.get_node(*d) {
-                            Some(AsyncNode::Effect(_)) => ed.push(*d),
-                            _ => sd.push(*d),
+            // SmallVec-backed scratch so the common small-cone (1-2 dependents)
+            // case never heap-allocates; deep cones spill transparently.
+            let mut stack: smallvec::SmallVec<[SlotId; 16]> = smallvec::SmallVec::new();
+            stack.extend_from_slice(roots);
+            let mut effects: EdgeVec = EdgeVec::new();
+            let mut in_flight_handles: smallvec::SmallVec<[JoinHandle<()>; 4]> =
+                smallvec::SmallVec::new();
+            let mut notifiers: smallvec::SmallVec<[watch::Sender<AsyncCompletion>; 4]> =
+                smallvec::SmallVec::new();
+            while let Some(id) = stack.pop() {
+                match inner.get_node_mut(id) {
+                    Some(AsyncNode::Slot(slot)) => {
+                        if let InvalidationResult::HadInFlight(handle) = slot.invalidate() {
+                            in_flight_handles.push(handle);
+                        }
+                        if let Some(notifier) = slot.notifier.take() {
+                            notifiers.push(notifier);
+                        }
+                        let dependents = slot.dependents.clone();
+                        for dep_id in &dependents {
+                            match inner.get_node(*dep_id) {
+                                Some(AsyncNode::Effect(_)) => effects.push(*dep_id),
+                                _ => stack.push(*dep_id),
+                            }
                         }
                     }
-                    slot_dependents = sd;
-                    effect_dependents = ed;
+                    Some(AsyncNode::Effect(_)) => {
+                        effects.push(id);
+                    }
+                    _ => {}
                 }
-                _ => return,
             }
-        }
-        if let Some(handle) = in_flight_handle {
+            (effects, in_flight_handles, notifiers)
+        };
+        for handle in in_flight_handles {
             handle.abort();
         }
-        drop(old_notifier);
-        for dep_id in &effect_dependents {
+        drop(notifiers);
+        let has_effects = !effects.is_empty();
+        if has_effects {
             let mut inner = self.inner.lock();
-            Self::schedule_async_effect(&mut inner, *dep_id);
+            for effect_id in &effects {
+                Self::schedule_async_effect(&mut inner, *effect_id);
+            }
         }
-        for dep_id in slot_dependents {
-            self.invalidate_async_slot(dep_id);
-        }
-        if !effect_dependents.is_empty() {
+        if has_effects {
             self.flush_async_effects();
         }
     }
@@ -1001,17 +1004,18 @@ impl AsyncContext {
             if inner.batch_depth == 0 {
                 let batched = inner.batched_cells.drain().collect::<Vec<_>>();
                 drop(inner);
-                for cell_id in batched {
-                    let dependents = {
-                        let inner = self.inner.lock();
-                        match inner.get_node(cell_id) {
-                            Some(AsyncNode::Cell(c)) => c.dependents.clone(),
-                            _ => EdgeVec::new(),
-                        }
-                    };
-                    for dep_id in dependents {
-                        self.invalidate_async_slot(dep_id);
+                // Batch ALL batched cells' dependents into a single frontier
+                // walk under one lock (#lzasyncfrontier), instead of re-locking
+                // per cell / per dependent.
+                let mut roots: EdgeVec = EdgeVec::new();
+                for cell_id in &batched {
+                    let inner = self.inner.lock();
+                    if let Some(AsyncNode::Cell(c)) = inner.get_node(*cell_id) {
+                        roots.extend_from_slice(&c.dependents);
                     }
+                }
+                if !roots.is_empty() {
+                    self.invalidate_frontier_async(&roots);
                 }
             }
         }

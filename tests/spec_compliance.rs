@@ -121,10 +121,15 @@ mod context {
     #[test]
     fn get_cell_rc_returns_reference_counted_cell_value() {
         let ctx = Context::new();
-        let cell = ctx.cell(42i32);
+        // Use a heap-backed value (32 bytes > the inline cap) so the shared-
+        // allocation guarantee of get_cell_rc is exercised: both Rc's must
+        // alias. Small inline-eligible values have no shared box to refcount,
+        // so get_cell_rc materializes a fresh Rc for them (value-correctness
+        // for that path is covered by get_cell_rc_avoids_clone_for_non_clone_type).
+        let cell = ctx.cell([42u64; 4]);
         let rc1 = ctx.get_cell_rc(&cell);
         let rc2 = ctx.get_cell_rc(&cell);
-        assert_eq!(*rc1, 42);
+        assert_eq!(*rc1, [42u64; 4]);
         assert!(
             Rc::ptr_eq(&rc1, &rc2),
             "both Rc should point to the same allocation"

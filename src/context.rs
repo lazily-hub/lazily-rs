@@ -13,9 +13,9 @@ use crate::signal::SignalHandle;
 use crate::slot::SlotHandle;
 
 /// Type alias for the erased compute function stored in slots.
-type ComputeFn = dyn Fn(&Context) -> Rc<dyn Any>;
+type ComputeFn = dyn Fn(&Context) -> AnyValue;
 /// Type alias for the erased equality function stored in slots.
-type EqualsFn = dyn Fn(&dyn Any, &dyn Any) -> bool;
+type EqualsFn = dyn Fn(&AnyValue, &AnyValue) -> bool;
 /// Type alias for the erased effect callback stored in effects.
 type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
 
@@ -67,9 +67,95 @@ fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
     }
 }
 
-#[inline]
-unsafe fn downcast_ref_unchecked<T: 'static>(any: &Rc<dyn Any>) -> &T {
-    unsafe { &*(&**any as *const dyn Any as *const T) }
+// ---------------------------------------------------------------------------
+// SmallAny inline value storage (#lzsmallany)
+// ---------------------------------------------------------------------------
+
+// Inline storage envelope (mirrors the thread-safe INLINE_CAP/INLINE_ALIGN in
+// thread_safe.rs): small, trivially-droppable values (i64/f64 and similar
+// scalars) are stored inline in the node instead of behind a heap `Rc` box.
+// lazily-cpp's SmallAny gives it a ~3x cold-recalc lead purely from skipping
+// one heap allocation per recompute; this closes that gap.
+const VALUE_INLINE_CAP: usize = 24;
+const VALUE_INLINE_ALIGN: usize = 16;
+
+// SAFETY: the `align(16)` guarantees any T with `align_of::<T>() <= 16` can be
+// written into the buffer at its required alignment.
+#[repr(C, align(16))]
+pub(crate) struct InlineBuf([core::mem::MaybeUninit<u8>; VALUE_INLINE_CAP]);
+
+/// Type-erased reactive value. `None` is the unset slot state; `Inline` holds a
+/// small, trivially-droppable T bitwise (no `Rc` heap allocation); `Heap` falls
+/// back to the classic `Rc<dyn Any>` for large or `Drop`-bearing types.
+///
+/// `Inline` is only ever used for T with `size_of::<T>() <= VALUE_INLINE_CAP`,
+/// `align_of::<T>() <= VALUE_INLINE_ALIGN`, and `needs_drop::<T>() == false`,
+/// so overwriting or dropping an `Inline` variant never needs to run a
+/// destructor — the derived `Drop` only has to release the `Heap` `Rc`.
+pub(crate) enum AnyValue {
+    None,
+    Inline(InlineBuf),
+    Heap(Rc<dyn Any>),
+}
+
+impl AnyValue {
+    /// Erase `value` into either inline storage or a heap `Rc`, picking inline
+    /// only when it is safe to store bitwise (small, well-aligned, no drop).
+    #[inline]
+    pub(crate) fn from_value<T: 'static>(value: T) -> Self {
+        if core::mem::size_of::<T>() <= VALUE_INLINE_CAP
+            && core::mem::align_of::<T>() <= VALUE_INLINE_ALIGN
+            && !core::mem::needs_drop::<T>()
+        {
+            let mut buf = InlineBuf([core::mem::MaybeUninit::uninit(); VALUE_INLINE_CAP]);
+            // SAFETY: `buf` is 16-aligned (InlineBuf) and 24 bytes wide; T fits
+            // both and is being written at its required alignment.
+            unsafe {
+                core::ptr::write(buf.0.as_mut_ptr() as *mut T, value);
+            }
+            AnyValue::Inline(buf)
+        } else {
+            AnyValue::Heap(Rc::new(value))
+        }
+    }
+
+    /// Borrow the stored value as `&T`, trusting the caller's type (the node's
+    /// `TypeTag` assert has already proven T matches). Works for both inline
+    /// and heap storage.
+    #[inline]
+    pub(crate) unsafe fn as_t_ref_unchecked<T: 'static>(&self) -> &T {
+        match self {
+            AnyValue::Inline(buf) => unsafe { &*(buf.0.as_ptr() as *const T) },
+            AnyValue::Heap(rc) => unsafe { &*(&**rc as *const dyn Any as *const T) },
+            AnyValue::None => unsafe { core::hint::unreachable_unchecked() },
+        }
+    }
+
+    /// Clone the stored value into a fresh `Rc<T>`. For heap storage this is a
+    /// refcount bump (no deep clone); for inline storage there is no shared box
+    /// to refcount, so a new `Rc` is materialized (inline-eligible T is trivially
+    /// droppable, so owning it in an `Rc` is sound).
+    #[inline]
+    pub(crate) unsafe fn rc_clone_unchecked<T: 'static>(&self) -> Rc<T> {
+        match self {
+            AnyValue::Heap(rc) => {
+                let rc: Rc<dyn Any> = Rc::clone(rc);
+                unsafe {
+                    let ptr = Rc::into_raw(rc) as *const T;
+                    Rc::from_raw(ptr)
+                }
+            }
+            AnyValue::Inline(buf) => {
+                Rc::new(unsafe { core::ptr::read(buf.0.as_ptr() as *const T) })
+            }
+            AnyValue::None => unsafe { core::hint::unreachable_unchecked() },
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_none(&self) -> bool {
+        matches!(self, AnyValue::None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +186,7 @@ pub(crate) fn current_tracking_frame() -> Option<SlotId> {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct SlotNode {
-    pub(crate) value: Option<Rc<dyn Any>>,
+    pub(crate) value: AnyValue,
     pub(crate) type_id: TypeTag,
     pub(crate) compute: Rc<ComputeFn>,
     pub(crate) equals: Option<Box<EqualsFn>>,
@@ -115,7 +201,7 @@ pub(crate) struct SlotNode {
 }
 
 pub(crate) struct CellNode {
-    pub(crate) value: Rc<dyn Any>,
+    pub(crate) value: AnyValue,
     pub(crate) type_id: TypeTag,
     pub(crate) dependents: EdgeVec,
 }
@@ -410,9 +496,9 @@ impl Context {
     {
         self.slot_with_equals(
             compute,
-            Some(Box::new(|old, new| {
-                let old = old.downcast_ref::<T>().expect("type mismatch in slot");
-                let new = new.downcast_ref::<T>().expect("type mismatch in slot");
+            Some(Box::new(|old: &AnyValue, new: &AnyValue| {
+                let old = unsafe { old.as_t_ref_unchecked::<T>() };
+                let new = unsafe { new.as_t_ref_unchecked::<T>() };
                 old == new
             })),
         )
@@ -451,9 +537,9 @@ impl Context {
     {
         let id = self.alloc_id();
         let node = SlotNode {
-            value: None,
+            value: AnyValue::None,
             type_id: node_type_tag::<T>(),
-            compute: Rc::new(move |ctx| Rc::new(compute(ctx))),
+            compute: Rc::new(move |ctx| AnyValue::from_value(compute(ctx))),
             equals,
             dependencies: EdgeVec::new(),
             dependents: EdgeVec::new(),
@@ -483,17 +569,13 @@ impl Context {
 
         let inner = self.inner.borrow();
         if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id)
-            && let Some(ref val) = slot.value
+            && !slot.value.is_none()
         {
             assert!(
                 slot.type_id == node_type_tag::<T>(),
                 "type mismatch in slot"
             );
-            let rc: Rc<dyn Any> = val.clone();
-            return unsafe {
-                let ptr = Rc::into_raw(rc) as *const T;
-                Rc::from_raw(ptr)
-            };
+            return unsafe { slot.value.rc_clone_unchecked::<T>() };
         }
         panic!("get_rc called on unset or non-slot id");
     }
@@ -509,13 +591,13 @@ impl Context {
 
         let inner = self.inner.borrow();
         if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, id)
-            && let Some(ref val) = slot.value
+            && !slot.value.is_none()
         {
             assert!(
                 slot.type_id == node_type_tag::<T>(),
                 "type mismatch in slot"
             );
-            return unsafe { downcast_ref_unchecked::<T>(val) }.clone();
+            return unsafe { slot.value.as_t_ref_unchecked::<T>() }.clone();
         }
         panic!("get_slot called on unset or non-slot id");
     }
@@ -570,7 +652,7 @@ impl Context {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
                 Some(Node::Slot(slot)) => {
-                    if slot.value.is_some() && !slot.dirty && !slot.force_recompute {
+                    if !slot.value.is_none() && !slot.dirty && !slot.force_recompute {
                         return false;
                     }
                 }
@@ -663,17 +745,17 @@ impl Context {
                 Some(Node::Slot(slot)) => slot,
                 _ => return false,
             };
-            let had_value = slot.value.is_some();
+            let had_value = !slot.value.is_none();
             let unchanged = match (&slot.value, &slot.equals) {
-                (Some(old), Some(equals)) => equals(old.as_ref(), result.as_ref()),
-                _ => false,
+                (AnyValue::None, _) | (_, None) => false,
+                (old, Some(equals)) => equals(old, &result),
             };
             slot.dirty = false;
             slot.force_recompute = false;
             if unchanged {
                 false
             } else {
-                slot.value = Some(result);
+                slot.value = result;
                 had_value
             }
         };
@@ -694,7 +776,7 @@ impl Context {
         let inner = self.inner.borrow();
         if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
             assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
-            unsafe { downcast_ref_unchecked::<T>(&c.value) }.clone()
+            unsafe { c.value.as_t_ref_unchecked::<T>() }.clone()
         } else {
             panic!("get_cell called on non-cell id");
         }
@@ -709,11 +791,7 @@ impl Context {
         let inner = self.inner.borrow();
         if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
             assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
-            let rc: Rc<dyn Any> = c.value.clone();
-            unsafe {
-                let ptr = Rc::into_raw(rc) as *const T;
-                Rc::from_raw(ptr)
-            }
+            unsafe { c.value.rc_clone_unchecked::<T>() }
         } else {
             panic!("get_cell_rc called on non-cell id");
         }
@@ -725,7 +803,7 @@ impl Context {
     pub fn cell<T: PartialEq + 'static>(&self, value: T) -> CellHandle<T> {
         let id = self.alloc_id();
         let node = CellNode {
-            value: Rc::new(value),
+            value: AnyValue::from_value(value),
             type_id: node_type_tag::<T>(),
             dependents: EdgeVec::new(),
         };
@@ -762,7 +840,7 @@ impl Context {
                     c.type_id == node_type_tag::<T>(),
                     "type mismatch in apply_merge"
                 );
-                let old = unsafe { downcast_ref_unchecked::<T>(&c.value) };
+                let old = unsafe { c.value.as_t_ref_unchecked::<T>() };
                 M::merge(old, op)
             } else {
                 panic!("apply_merge on non-cell id");
@@ -807,7 +885,7 @@ impl Context {
                     c.type_id == node_type_tag::<T>(),
                     "type mismatch in cell set"
                 );
-                let old = unsafe { downcast_ref_unchecked::<T>(&c.value) };
+                let old = unsafe { c.value.as_t_ref_unchecked::<T>() };
                 *old != new_value
             } else {
                 panic!("set_cell on non-cell id");
@@ -818,7 +896,7 @@ impl Context {
             {
                 let mut inner = self.inner.borrow_mut();
                 if let Some(Node::Cell(c)) = Self::get_node_mut(&mut inner.nodes, handle.id) {
-                    c.value = Rc::new(new_value);
+                    c.value = AnyValue::from_value(new_value);
                 }
             }
             if self.is_batching() {
@@ -1359,7 +1437,7 @@ impl Context {
                     if slot.value.is_none() && !slot.dirty {
                         continue;
                     }
-                    slot.value = None;
+                    slot.value = AnyValue::None;
                     slot.dirty = false;
                     slot.force_recompute = false;
                     for dep_id in &slot.dependents {
@@ -1382,7 +1460,7 @@ impl Context {
     pub fn is_set<T: 'static>(&self, handle: &SlotHandle<T>) -> bool {
         let inner = self.inner.borrow();
         if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id) {
-            slot.value.is_some() && !slot.dirty
+            !slot.value.is_none() && !slot.dirty
         } else {
             false
         }
