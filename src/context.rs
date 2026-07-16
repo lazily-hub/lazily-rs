@@ -24,9 +24,30 @@ type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
 pub struct SlotId(pub(crate) u64);
 
 #[cfg(not(feature = "vec_edges"))]
-type EdgeVec = SmallVec<[SlotId; 4]>;
+type EdgeVec = SmallVec<[SlotId; 2]>;
 #[cfg(feature = "vec_edges")]
 type EdgeVec = Vec<SlotId>;
+
+// The per-node `TypeId` exists only to power belt-and-suspenders type-mismatch
+// asserts. In release builds it is a zero-sized `()` so it costs nothing to
+// store (16 B/node saved at 10M-node scale); in debug builds it is a real
+// `TypeId` and the asserts run.
+#[cfg(debug_assertions)]
+type TypeTag = TypeId;
+#[cfg(not(debug_assertions))]
+type TypeTag = ();
+
+#[inline]
+fn node_type_tag<T: 'static>() -> TypeTag {
+    #[cfg(debug_assertions)]
+    {
+        TypeId::of::<T>()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        ()
+    }
+}
 
 fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
     if edges.contains(&id) {
@@ -80,7 +101,7 @@ pub(crate) fn current_tracking_frame() -> Option<SlotId> {
 
 pub(crate) struct SlotNode {
     pub(crate) value: Option<Rc<dyn Any>>,
-    pub(crate) type_id: TypeId,
+    pub(crate) type_id: TypeTag,
     pub(crate) compute: Rc<ComputeFn>,
     pub(crate) equals: Option<Box<EqualsFn>>,
     pub(crate) dependencies: EdgeVec,
@@ -95,7 +116,7 @@ pub(crate) struct SlotNode {
 
 pub(crate) struct CellNode {
     pub(crate) value: Rc<dyn Any>,
-    pub(crate) type_id: TypeId,
+    pub(crate) type_id: TypeTag,
     pub(crate) dependents: EdgeVec,
 }
 
@@ -410,7 +431,7 @@ impl Context {
         let id = self.alloc_id();
         let node = SlotNode {
             value: None,
-            type_id: TypeId::of::<T>(),
+            type_id: node_type_tag::<T>(),
             compute: Rc::new(move |ctx| Rc::new(compute(ctx))),
             equals,
             dependencies: EdgeVec::new(),
@@ -443,7 +464,10 @@ impl Context {
         if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id)
             && let Some(ref val) = slot.value
         {
-            assert!(slot.type_id == TypeId::of::<T>(), "type mismatch in slot");
+            assert!(
+                slot.type_id == node_type_tag::<T>(),
+                "type mismatch in slot"
+            );
             let rc: Rc<dyn Any> = val.clone();
             return unsafe {
                 let ptr = Rc::into_raw(rc) as *const T;
@@ -466,7 +490,10 @@ impl Context {
         if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, id)
             && let Some(ref val) = slot.value
         {
-            assert!(slot.type_id == TypeId::of::<T>(), "type mismatch in slot");
+            assert!(
+                slot.type_id == node_type_tag::<T>(),
+                "type mismatch in slot"
+            );
             return unsafe { downcast_ref_unchecked::<T>(val) }.clone();
         }
         panic!("get_slot called on unset or non-slot id");
@@ -643,7 +670,7 @@ impl Context {
 
         let inner = self.inner.borrow();
         if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
-            assert!(c.type_id == TypeId::of::<T>(), "type mismatch in cell");
+            assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
             unsafe { downcast_ref_unchecked::<T>(&c.value) }.clone()
         } else {
             panic!("get_cell called on non-cell id");
@@ -658,7 +685,7 @@ impl Context {
 
         let inner = self.inner.borrow();
         if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
-            assert!(c.type_id == TypeId::of::<T>(), "type mismatch in cell");
+            assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
             let rc: Rc<dyn Any> = c.value.clone();
             unsafe {
                 let ptr = Rc::into_raw(rc) as *const T;
@@ -676,7 +703,7 @@ impl Context {
         let id = self.alloc_id();
         let node = CellNode {
             value: Rc::new(value),
-            type_id: TypeId::of::<T>(),
+            type_id: node_type_tag::<T>(),
             dependents: EdgeVec::new(),
         };
         self.insert_node(id, Node::Cell(node));
@@ -709,7 +736,7 @@ impl Context {
             let inner = self.inner.borrow();
             if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
                 assert!(
-                    c.type_id == TypeId::of::<T>(),
+                    c.type_id == node_type_tag::<T>(),
                     "type mismatch in apply_merge"
                 );
                 let old = unsafe { downcast_ref_unchecked::<T>(&c.value) };
@@ -753,7 +780,10 @@ impl Context {
         let changed = {
             let inner = self.inner.borrow();
             if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
-                assert!(c.type_id == TypeId::of::<T>(), "type mismatch in cell set");
+                assert!(
+                    c.type_id == node_type_tag::<T>(),
+                    "type mismatch in cell set"
+                );
                 let old = unsafe { downcast_ref_unchecked::<T>(&c.value) };
                 *old != new_value
             } else {
