@@ -198,6 +198,10 @@ pub(crate) struct SlotNode {
     /// dependency cycles (a slot that reads itself directly or transitively)
     /// before the pull-based recompute walk overflows the stack.
     pub(crate) in_progress: bool,
+    /// #lzspecrevisionengine: last global revision at which this slot was
+    /// verified clean. In revision mode, staleness is `verified_at < revision`
+    /// (O(1) write — no dirty walk) rather than the `dirty` flag.
+    pub(crate) verified_at: u64,
 }
 
 pub(crate) struct CellNode {
@@ -267,6 +271,18 @@ struct ContextInner {
     /// capacity survives across invalidations instead of reallocating per call.
     effects_scratch: Vec<(SlotId, bool)>,
     factory_handles: HashMap<FactoryKey, FactoryEntry>,
+    /// #lzspecrevisionengine: global revision counter, bumped once per
+    /// value-changing write. In revision mode, slot staleness is detected by
+    /// `verified_at < revision` instead of the `dirty` flag, giving O(1)
+    /// writes (no dependent cone walk). Push mode (default) leaves this at 0.
+    revision: u64,
+    /// #lzspecrevisionengine: whether this Context uses the revision (pull)
+    /// invalidation engine instead of the default push (dirty-walk) engine.
+    /// Per-Context choice; never mixed within one graph.
+    revision_mode: bool,
+    /// #lzspecrevisionengine: all effect node ids, for the revision-mode
+    /// effect-flush scan (O(effects) per flush, not O(cone) per write).
+    all_effect_ids: Vec<SlotId>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
@@ -305,6 +321,22 @@ impl Drop for RefreshGuard<'_> {
 
 impl Context {
     pub fn new() -> Self {
+        Self::new_impl(false)
+    }
+
+    /// Create a Context using the **revision (pull) invalidation engine** instead
+    /// of the default push (dirty-walk) engine (`#lzspecrevisionengine`).
+    ///
+    /// In revision mode, a cell write bumps a global revision counter (O(1),
+    /// no dependent cone walk). Slot staleness is detected lazily on read via
+    /// `verified_at < revision`. Observable values are provably identical to
+    /// push mode (`get_equiv_push`, lazily-formal). Pick revision for
+    /// write-heavy / high-fan-out workloads; keep push (default) for read-heavy.
+    pub fn with_revision_engine() -> Self {
+        Self::new_impl(true)
+    }
+
+    fn new_impl(revision_mode: bool) -> Self {
         Self {
             inner: RefCell::new(ContextInner {
                 nodes: Vec::new(),
@@ -320,6 +352,9 @@ impl Context {
                 mark_scratch: Vec::new(),
                 effects_scratch: Vec::new(),
                 factory_handles: HashMap::new(),
+                revision: 0,
+                revision_mode,
+                all_effect_ids: Vec::new(),
                 #[cfg(feature = "instrumentation")]
                 instrumentation: crate::instrumentation::InstrumentationCounters::default(),
             }),
@@ -546,6 +581,7 @@ impl Context {
             dirty: false,
             force_recompute: false,
             in_progress: false,
+            verified_at: 0,
         };
         self.insert_node(id, Node::Slot(node));
         SlotHandle::new(id)
@@ -652,7 +688,13 @@ impl Context {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
                 Some(Node::Slot(slot)) => {
-                    if !slot.value.is_none() && !slot.dirty && !slot.force_recompute {
+                    if inner.revision_mode {
+                        // #lzspecrevisionengine: staleness = verified_at < revision.
+                        // Clean (verified_at == revision) and has a value → cache hit.
+                        if !slot.value.is_none() && slot.verified_at == inner.revision {
+                            return false;
+                        }
+                    } else if !slot.value.is_none() && !slot.dirty && !slot.force_recompute {
                         return false;
                     }
                 }
@@ -693,7 +735,16 @@ impl Context {
                 Some(Node::Slot(slot)) => slot,
                 _ => return false,
             };
-            slot.value.is_none() || slot.force_recompute || dependency_changed
+            if inner.revision_mode {
+                // #lzspecrevisionengine: reaching here means verified_at <
+                // revision (the fast path didn't short-circuit). The slot is
+                // stale and must recompute. The memo guard in recompute_slot_now
+                // handles the value early-cutoff (if the recomputed value
+                // equals the cache, downstream caches are preserved).
+                true
+            } else {
+                slot.value.is_none() || slot.force_recompute || dependency_changed
+            }
         };
 
         if !needs_recompute {
@@ -741,6 +792,7 @@ impl Context {
 
         let changed = {
             let mut inner = self.inner.borrow_mut();
+            let (rev_mode, rev) = (inner.revision_mode, inner.revision);
             let slot = match Self::get_node_mut(&mut inner.nodes, id) {
                 Some(Node::Slot(slot)) => slot,
                 _ => return false,
@@ -752,6 +804,9 @@ impl Context {
             };
             slot.dirty = false;
             slot.force_recompute = false;
+            if rev_mode {
+                slot.verified_at = rev;
+            }
             if unchanged {
                 false
             } else {
@@ -901,6 +956,13 @@ impl Context {
             }
             if self.is_batching() {
                 self.inner.borrow_mut().batched_cells.push(handle.id);
+            } else if self.inner.borrow().revision_mode {
+                // #lzspecrevisionengine: O(1) write — bump the global revision
+                // counter; no dependent cone walk. Slot staleness is detected
+                // lazily on read via `verified_at < revision`. Effects are
+                // notified via the revision-mode flush scan.
+                self.inner.borrow_mut().revision += 1;
+                self.flush_effects_revision();
             } else {
                 // Store-without-cascade: dirty-mark the dependent cone, then flush
                 // effects ONLY when the cone actually contains an Effect. A cell
@@ -954,6 +1016,17 @@ impl Context {
     }
 
     fn flush_batched_invalidations(&self) {
+        // #lzspecrevisionengine: in revision mode, bump the global revision
+        // once for the entire batch (O(1)), then scan effects for staleness.
+        // The push-mode DFS (below) is skipped entirely.
+        if self.inner.borrow().revision_mode {
+            self.inner.borrow_mut().revision += 1;
+            self.flush_effects_revision();
+            self.inner.borrow_mut().batched_cells.clear();
+            self.inner.borrow_mut().batched_cell_clears.clear();
+            self.inner.borrow_mut().batched_slots.clear();
+            return;
+        }
         // Batch ALL invalidation/clear roots from all changed cells/slots into
         // ONE DFS pass under a SINGLE `borrow_mut` — avoids N separate
         // `borrow_mut` + DFS-queue allocations for N batched cells (#lzbatchborrow).
@@ -1027,6 +1100,7 @@ impl Context {
             force_run: true,
         };
         self.insert_node(id, Node::Effect(node));
+        self.inner.borrow_mut().all_effect_ids.push(id);
         let handle = EffectHandle::new(id);
         self.schedule_effect(id, false);
         self.flush_effects();
@@ -1141,6 +1215,35 @@ impl Context {
             };
             self.run_effect(id);
         }
+    }
+
+    /// #lzspecrevisionengine: revision-mode effect flush. Scans all registered
+    /// effects and schedules those whose dependencies are stale
+    /// (`verified_at < revision`). O(effects) per flush, not O(cone) per write —
+    /// the effect-side cost is decoupled from the write-path cone walk that
+    /// revision mode eliminates.
+    fn flush_effects_revision(&self) {
+        let stale_effects: Vec<SlotId> = {
+            let inner = self.inner.borrow();
+            inner
+                .all_effect_ids
+                .iter()
+                .filter(|&&eid| match Self::get_node(&inner.nodes, eid) {
+                    Some(Node::Effect(e)) => {
+                        e.dependencies.iter().any(|dep| {
+                            matches!(Self::get_node(&inner.nodes, *dep),
+                                Some(Node::Slot(s)) if s.verified_at < inner.revision)
+                        }) || e.force_run
+                    }
+                    _ => false,
+                })
+                .copied()
+                .collect()
+        };
+        for eid in stale_effects {
+            self.schedule_effect(eid, true);
+        }
+        self.flush_effects();
     }
 
     fn run_effect(&self, id: SlotId) {
@@ -1453,6 +1556,13 @@ impl Context {
     }
 
     fn notify_slot_value_changed(&self, id: SlotId) {
+        // #lzspecrevisionengine: in revision mode, downstream slots detect
+        // staleness via `verified_at < revision` (the global revision was bumped
+        // on the write). No dirty walk needed — the cone walk is the push cost
+        // revision mode eliminates.
+        if self.inner.borrow().revision_mode {
+            return;
+        }
         self.invalidate_dependents_now(id);
     }
 

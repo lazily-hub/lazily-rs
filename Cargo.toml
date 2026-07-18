@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.42.0"
+version = "0.43.0"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -188,3 +188,8 @@ required-features = ["tokio"]
 name = "wire_optimizations"
 harness = false
 required-features = ["json-base64"]
+
+# #lzspecrevisionengine: push vs revision crossover on high-fan-out workloads.
+[[bench]]
+name = "revision_engine"
+harness = false

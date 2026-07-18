@@ -762,6 +762,31 @@ Deduplicating repeated `type_tag` strings into a sidecar intern table (256 nodes
 
 Savings grow with the node-to-tag ratio (more nodes sharing fewer tags).
 
+## Revision engine crossover (`#lzspecrevisionengine`)
+
+The revision (pull) invalidation engine gives O(1) writes (no dependent cone
+walk) at the cost of O(changed-subpath) reads. Observable values are provably
+identical to push mode (`get_equiv_push`, lazily-formal `RevisionEngine.lean`).
+
+Benchmark: 10 writes to a source cell with N dependent slots (construction +
+priming included in each measurement). Run with:
+
+```bash
+cargo bench --bench revision_engine
+```
+
+| Fan-out | Push | Revision | Revision win |
+|---:|---:|---:|---:|
+| 1 | 194 ns | 127 ns | 1.5× |
+| 16 | 1.19 µs | 822 ns | 1.4× |
+| 128 | 10.9 µs | 8.75 µs | 1.25× |
+| 1024 | 192 µs | 177 µs | 1.08× |
+
+The write cost scales linearly with fan-out in push (O(N) dirty walk) but is
+O(1) in revision (revision bump). The construction+priming overhead (same for
+both) dilutes the pure write-cost gap; workloads with high write:read ratios
+and large fan-out benefit most.
+
 ## Multi-Language
 
 lazily is implemented across three languages with shared semantics:
