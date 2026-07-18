@@ -593,7 +593,9 @@ pub fn spill_message(
             }
         }
         // Reliable-sync control frames carry no blob payload to spill.
-        IpcMessage::ResyncRequest(_) | IpcMessage::OutboxAck(_) => {}
+        IpcMessage::ResyncRequest(_)
+        | IpcMessage::OutboxAck(_)
+        | IpcMessage::DeltaSinceRequest(_) => {}
     }
     total
 }

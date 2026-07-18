@@ -1412,6 +1412,31 @@ pub struct OutboxAck {
     pub through_epoch: u64,
 }
 
+/// Delta-CRDT sync request (`#lzspecdeltacrdt`): an explicit, lightweight
+/// control frame that asks a peer to ship only the CRDT cell states the
+/// requester has not yet observed (past `their_frontier`), rather than the
+/// full converged state per anti-entropy round.
+///
+/// The receiver responds with a [`CrdtSync`] whose `ops` carry only the states
+/// past `their_frontier`. The join is the same semilattice (`apply_delta` ≡
+/// `merge`), so a delta is safe to resend and applies in any order. A binding
+/// that does not implement delta-CRDT sync falls back to full-state shipping
+/// when it does not recognize this frame.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeltaSinceRequest {
+    /// The requester's per-peer stamp frontier — the highest [`WireStamp`] it
+    /// has observed from each peer. The receiver ships only ops whose stamp
+    /// dominates this frontier.
+    pub their_frontier: Vec<(u64, WireStamp)>,
+}
+
+impl DeltaSinceRequest {
+    /// Construct a delta request from a wire frontier.
+    pub fn new(their_frontier: Vec<(u64, WireStamp)>) -> Self {
+        Self { their_frontier }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IpcMessage {
     /// Full graph image.
@@ -1427,6 +1452,9 @@ pub enum IpcMessage {
     /// Reliable-sync control frame: ack/resume cursor (`#lzsync`). Reverse
     /// channel (receiver → sender).
     OutboxAck(OutboxAck),
+    /// Delta-CRDT sync request (`#lzspecdeltacrdt`): asks for only the cell
+    /// states past the requester's frontier, not the full converged state.
+    DeltaSinceRequest(DeltaSinceRequest),
 }
 
 impl IpcMessage {
@@ -1436,7 +1464,9 @@ impl IpcMessage {
     pub fn is_control(&self) -> bool {
         matches!(
             self,
-            IpcMessage::ResyncRequest(_) | IpcMessage::OutboxAck(_)
+            IpcMessage::ResyncRequest(_)
+                | IpcMessage::OutboxAck(_)
+                | IpcMessage::DeltaSinceRequest(_)
         )
     }
 }

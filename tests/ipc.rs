@@ -1,10 +1,10 @@
 #![cfg(feature = "ipc")]
 
 use lazily::{
-    CapabilityHandshake, CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, EdgeSnapshot,
-    IpcMessage, KeyIndex, NODE_KEY_MAX_SEGMENTS, NodeId, NodeKey, NodeKeyError, NodeSnapshot,
-    NodeState, OpKind, PeerId, PeerPermissions, RemoteOp, SHM_BLOB_HEADER_LEN, ShmBlobArena,
-    ShmBlobArenaError, Snapshot, WireStamp,
+    CapabilityHandshake, CrdtOp, CrdtSync, Delta, DeltaApplyStatus, DeltaOp, DeltaSinceRequest,
+    EdgeSnapshot, IpcMessage, KeyIndex, NODE_KEY_MAX_SEGMENTS, NodeId, NodeKey, NodeKeyError,
+    NodeSnapshot, NodeState, OpKind, PeerId, PeerPermissions, RemoteOp, SHM_BLOB_HEADER_LEN,
+    ShmBlobArena, ShmBlobArenaError, Snapshot, WireStamp,
 };
 
 const PEER_A: PeerId = PeerId(1);
@@ -1129,5 +1129,40 @@ mod capability_handshake {
             .with_fragmentation(false)
             .with_features(["signaling-relay"]);
         assert!(a.is_compatible_with(&b));
+    }
+
+    // --- #lzspecdeltacrdt ---
+
+    #[test]
+    fn delta_since_request_round_trips() {
+        let req = DeltaSinceRequest::new(vec![
+            (
+                1,
+                WireStamp {
+                    wall_time: 100,
+                    logical: 2,
+                    peer: 1,
+                },
+            ),
+            (
+                2,
+                WireStamp {
+                    wall_time: 90,
+                    logical: 5,
+                    peer: 2,
+                },
+            ),
+        ]);
+        let json = serde_json::to_string(&IpcMessage::DeltaSinceRequest(req.clone())).unwrap();
+        assert!(json.contains("DeltaSinceRequest"));
+        let back: IpcMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, IpcMessage::DeltaSinceRequest(req));
+    }
+
+    #[test]
+    fn delta_since_request_is_control() {
+        let req = DeltaSinceRequest::new(vec![]);
+        let msg = IpcMessage::DeltaSinceRequest(req);
+        assert!(msg.is_control());
     }
 }

@@ -48,7 +48,7 @@ use crate::crdt::{
     CellCrdt, CrdtPlane, HlcStamp, LwwRegister, OpLog, ReplicatedCell, StampFrontier,
 };
 use crate::distributed::{NodeId, PeerId};
-use crate::ipc::{CrdtOp, CrdtSync, IpcValue, KeyIndex, NodeKey, WireStamp};
+use crate::ipc::{CrdtOp, CrdtSync, DeltaSinceRequest, IpcValue, KeyIndex, NodeKey, WireStamp};
 
 /// The base [`NodeId`] for entries a family materializes on first remote
 /// observation (`#lzfamilysync`). Local family nodes are private — keyed ops
@@ -547,6 +547,19 @@ impl CrdtPlaneRuntime {
     /// half of the protocol.
     pub fn sync_reply(&self, request: &CrdtSync) -> CrdtSync {
         self.sync_frame_since(&wire_frontier_to_stamp(&request.frontier))
+    }
+
+    /// Reply to a [`DeltaSinceRequest`] (`#lzspecdeltacrdt`): ship only the
+    /// CRDT cell states past the requester's frontier. This is the delta-sync
+    /// analog of [`sync_reply`]: the requester sends its version vector
+    /// explicitly (no ops), and the receiver responds with only the ops the
+    /// requester is missing — not the full converged state.
+    ///
+    /// An empty response (no ops past the frontier) is valid: the requester is
+    /// up to date. The join is the same semilattice (`apply_delta` ≡ `merge`),
+    /// so the delta is safe to resend and applies in any order.
+    pub fn delta_reply(&self, request: &DeltaSinceRequest) -> CrdtSync {
+        self.sync_frame_since(&wire_frontier_to_stamp(&request.their_frontier))
     }
 }
 

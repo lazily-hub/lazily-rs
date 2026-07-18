@@ -127,9 +127,10 @@ impl ResyncCoordinator {
         match msg {
             IpcMessage::Snapshot(s) => self.ingest_snapshot(s.epoch),
             IpcMessage::Delta(d) => self.ingest_delta(d),
-            IpcMessage::CrdtSync(_) | IpcMessage::ResyncRequest(_) | IpcMessage::OutboxAck(_) => {
-                ResyncAction::Ignore
-            }
+            IpcMessage::CrdtSync(_)
+            | IpcMessage::ResyncRequest(_)
+            | IpcMessage::OutboxAck(_)
+            | IpcMessage::DeltaSinceRequest(_) => ResyncAction::Ignore,
         }
     }
 
@@ -486,6 +487,12 @@ where
                 }
                 IpcMessage::CrdtSync(_) => {
                     // Idempotent anti-entropy plane — the host folds it directly.
+                    progress.applied.push(msg);
+                }
+                IpcMessage::DeltaSinceRequest(_) => {
+                    // #lzspecdeltacrdt: delta-CRDT request — the host handles
+                    // the response via the CRDT plane; the sync driver passes
+                    // it through like a CrdtSync.
                     progress.applied.push(msg);
                 }
                 IpcMessage::Snapshot(_) | IpcMessage::Delta(_) => {
