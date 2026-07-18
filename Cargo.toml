@@ -1,6 +1,6 @@
 [package]
 name = "lazily"
-version = "0.41.0"
+version = "0.42.0"
 edition = "2024"
 # let_chains is used throughout (context.rs, async_context.rs, state_machine.rs);
 # it stabilized in Rust 1.88. Declare MSRV so cargo's resolver surfaces it.
@@ -45,6 +45,11 @@ ipc = ["serde", "dep:serde_json"]
 durable-sqlite = ["ipc", "dep:rusqlite"]
 ipc-binary = ["ipc", "dep:postcard"]
 ipc-msgpack = ["ipc", "dep:rmp-serde"]
+# #lzspecbase64: over the JSON codec, encode `Inline`/`Payload` byte arrays as
+# base64 strings (~4× wire, ~3× parse win vs JSON-u8 arrays). Capability-gated
+# at runtime; `json-u8` stays the canonical fixture form. Implies `ffi` (the
+# JSON codec surface).
+json-base64 = ["ffi", "dep:base64"]
 # Loom model tests for the thread-safe context. Implies `thread-safe` so the
 # model has something to test.
 loom = ["thread-safe"]
@@ -100,6 +105,7 @@ scale-compare = ["dep:leptos_reactive"]
 lazily-macros = { version = "=0.22.0", path = "macros" }
 leptos_reactive = { version = "0.6", optional = true }
 arc-swap = "1"
+base64 = { version = "0.22", optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
 libc = { version = "0.2", optional = true }
 parking_lot = { version = "0.12", optional = true }
@@ -175,3 +181,10 @@ required-features = ["webrtc"]
 name = "tokio_sync"
 harness = false
 required-features = ["tokio"]
+
+# #lzperfaudit Phase 3 wire-format optimizations: frontier suppression,
+# json-base64 codec, batch string-intern table.
+[[bench]]
+name = "wire_optimizations"
+harness = false
+required-features = ["json-base64"]

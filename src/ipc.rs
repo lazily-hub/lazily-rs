@@ -1330,9 +1330,19 @@ impl CrdtOp {
 /// watermark — `min` over membership — that drives tombstone GC
 /// (`SeqCrdt::gc` / `TextCrdt::gc_with`). The exchange is bounded, idempotent,
 /// and resumable; re-sending a frame the receiver already has is a no-op.
+///
+/// **Frontier suppression (`#lzspecfrontiersuppress`).** Under the ratified spec
+/// relaxation, an empty/omitted `frontier` means "unchanged since the last frame
+/// the receiver accepted" — the receiver reuses its last-merged frontier. The
+/// serde attribute `skip_serializing_if = "Vec::is_empty"` omits the field on
+/// the wire; a missing field deserializes as an empty vec (backward-compatible).
+/// A cold-start receiver with no prior frontier MUST request a full sync.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CrdtSync {
     /// Per-peer highest observed stamp: `(peer, stamp)`, the sender's frontier.
+    /// Empty/omitted means "unchanged since last accepted frame"
+    /// (`#lzspecfrontiersuppress`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frontier: Vec<(u64, WireStamp)>,
     /// The op batch this frame ships.
     pub ops: Vec<CrdtOp>,
@@ -1361,6 +1371,24 @@ impl CrdtSync {
             frontier: self.frontier.clone(),
             ops,
         }
+    }
+
+    /// Build an **ops-only** frame that suppresses the frontier advertisement
+    /// (`#lzspecfrontiersuppress`). The sender ships `ops` with an empty
+    /// frontier; on the wire the `frontier` field is omitted entirely. The
+    /// receiver reuses its last-merged frontier to compute the watermark. A
+    /// sender MUST NOT use this for a frame whose frontier has advanced since
+    /// the last accepted frame.
+    pub fn ops_only(ops: Vec<CrdtOp>) -> Self {
+        Self {
+            frontier: Vec::new(),
+            ops,
+        }
+    }
+
+    /// Whether this frame suppresses its frontier advertisement (empty/omitted).
+    pub fn is_frontier_suppressed(&self) -> bool {
+        self.frontier.is_empty()
     }
 }
 
@@ -1645,6 +1673,46 @@ impl IpcMessage {
     #[cfg(any(feature = "ffi", feature = "webrtc"))]
     pub fn decode_json(bytes: &[u8]) -> Result<Self, DecodeError> {
         serde_json::from_slice(bytes).map_err(DecodeError::Json)
+    }
+
+    /// Encode using the `json-base64` capability (`#lzspecbase64`): `Inline` and
+    /// `Payload` byte arrays travel as base64 strings instead of JSON arrays of
+    /// integers (~4× wire reduction, ~3× parse cost). The field structure is
+    /// otherwise identical to [`Self::encode_json`].
+    #[cfg(feature = "json-base64")]
+    pub fn encode_json_base64(&self) -> Result<Vec<u8>, EncodeError> {
+        let mut value = serde_json::to_value(self).map_err(EncodeError::Json)?;
+        base64_transform::encode_byte_arrays(&mut value);
+        serde_json::to_vec(&value).map_err(EncodeError::Json)
+    }
+
+    /// Decode a `json-base64`-encoded frame (`#lzspecbase64`).
+    #[cfg(feature = "json-base64")]
+    pub fn decode_json_base64(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(DecodeError::Json)?;
+        base64_transform::decode_byte_arrays(&mut value);
+        serde_json::from_value(value).map_err(DecodeError::Json)
+    }
+
+    /// Encode with a sidecar string-intern table (`#lzspecintern`): repeated
+    /// `type_tag` strings within the batch are deduplicated into a small
+    /// `intern.strings` table and replaced by integer ids, cutting wire size
+    /// when many nodes share few type tags. The decoded message is identical.
+    #[cfg(any(feature = "ffi", feature = "webrtc"))]
+    pub fn encode_json_intern(&self) -> Result<Vec<u8>, EncodeError> {
+        let mut value = serde_json::to_value(self).map_err(EncodeError::Json)?;
+        intern_transform::encode_intern(&mut value);
+        serde_json::to_vec(&value).map_err(EncodeError::Json)
+    }
+
+    /// Decode an intern-table-encoded frame (`#lzspecintern`).
+    #[cfg(any(feature = "ffi", feature = "webrtc"))]
+    pub fn decode_json_intern(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(DecodeError::Json)?;
+        intern_transform::decode_intern(&mut value);
+        serde_json::from_value(value).map_err(DecodeError::Json)
     }
 
     #[cfg(feature = "ipc-msgpack")]
@@ -1955,4 +2023,208 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
             .try_into()
             .expect("slice size checked"),
     )
+}
+
+/// `#lzspecbase64`: walk a `serde_json::Value` tree to convert `Inline`/`Payload`
+/// byte arrays between the JSON-u8 array form (canonical) and the base64 string
+/// form (capability-gated). The variants are externally-tagged (`{"Inline":
+/// [...]}` / `{"Payload": [...]}`) and always carry bytes, so there is no
+/// ambiguity between a base64 string and a legitimate string field.
+#[cfg(feature = "json-base64")]
+mod base64_transform {
+    use base64::{Engine as _, engine::general_purpose};
+    use serde_json::Value;
+
+    /// Field names whose array value is a byte payload.
+    const BYTE_FIELDS: [&str; 2] = ["Inline", "Payload"];
+
+    /// Replace every `{"Inline": [u8]}` / `{"Payload": [u8]}` array with a
+    /// base64 string.
+    pub fn encode_byte_arrays(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                for field in BYTE_FIELDS {
+                    let replacement = map.get(field).filter(|v| v.is_array()).map(|arr| {
+                        let bytes = json_array_to_bytes(arr);
+                        Value::String(general_purpose::STANDARD.encode(&bytes))
+                    });
+                    if let Some(encoded) = replacement {
+                        map.insert((*field).to_string(), encoded);
+                    }
+                }
+                for (_, v) in map.iter_mut() {
+                    encode_byte_arrays(v);
+                }
+            }
+            Value::Array(items) => {
+                for item in items.iter_mut() {
+                    encode_byte_arrays(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Replace every `{"Inline": "...string..."}` / `{"Payload": "...string..."}`
+    /// base64 string with the JSON-u8 array form so `serde_json::from_value`
+    /// reconstructs the typed struct.
+    pub fn decode_byte_arrays(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                for field in BYTE_FIELDS {
+                    let replacement = map
+                        .get(field)
+                        .and_then(|s| s.as_str())
+                        .and_then(|text| general_purpose::STANDARD.decode(text).ok())
+                        .map(|bytes| {
+                            Value::Array(
+                                bytes
+                                    .into_iter()
+                                    .map(|b| Value::from(u64::from(b)))
+                                    .collect(),
+                            )
+                        });
+                    if let Some(arr) = replacement {
+                        map.insert((*field).to_string(), arr);
+                    }
+                }
+                for (_, v) in map.iter_mut() {
+                    decode_byte_arrays(v);
+                }
+            }
+            Value::Array(items) => {
+                for item in items.iter_mut() {
+                    decode_byte_arrays(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn json_array_to_bytes(value: &Value) -> Vec<u8> {
+        value
+            .as_array()
+            .expect("checked array")
+            .iter()
+            .map(|n| n.as_u64().unwrap_or(0) as u8)
+            .collect()
+    }
+}
+
+/// `#lzspecintern`: walk a `serde_json::Value` tree to deduplicate repeated
+/// `type_tag` strings into a sidecar `intern.strings` table, replacing each tag
+/// with an integer id (`type_tag_id`). On decode, the reverse expansion restores
+/// the canonical `type_tag` string so `serde_json::from_value` is unchanged.
+#[cfg(any(feature = "ffi", feature = "webrtc"))]
+mod intern_transform {
+    use std::collections::HashMap;
+
+    use serde_json::{Map, Value};
+
+    const TYPE_TAG: &str = "type_tag";
+    const TYPE_TAG_ID: &str = "type_tag_id";
+    const INTERN: &str = "intern";
+
+    /// Deduplicate `type_tag` strings under the batch root and emit
+    /// `intern.strings` + per-node `type_tag_id`.
+    pub fn encode_intern(value: &mut Value) {
+        let Some(root) = value.as_object_mut() else {
+            return;
+        };
+        // The batch root is the single key (Snapshot/Delta/CrdtSync).
+        let Some(batch) = root.values_mut().next() else {
+            return;
+        };
+        let Some(batch_map) = batch.as_object_mut() else {
+            return;
+        };
+
+        let mut table: Vec<String> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        walk_encode(batch_map, &mut table, &mut index);
+
+        if !table.is_empty() {
+            let strings: Vec<Value> = table.into_iter().map(Value::String).collect();
+            let mut intern = Map::new();
+            intern.insert("strings".to_string(), Value::Array(strings));
+            batch_map.insert(INTERN.to_string(), Value::Object(intern));
+        }
+    }
+
+    /// Expand `intern.strings` + per-node `type_tag_id` back to canonical
+    /// `type_tag` strings.
+    pub fn decode_intern(value: &mut Value) {
+        let Some(root) = value.as_object_mut() else {
+            return;
+        };
+        let Some(batch) = root.values_mut().next() else {
+            return;
+        };
+        let Some(batch_map) = batch.as_object_mut() else {
+            return;
+        };
+
+        let strings: Vec<String> = batch_map
+            .remove(INTERN)
+            .and_then(|v| v.get("strings").cloned())
+            .and_then(|s| s.as_array().map(|a| a.to_vec()))
+            .map(|arr| {
+                arr.into_iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !strings.is_empty() {
+            walk_decode(batch_map, &strings);
+        }
+    }
+
+    fn walk_encode(
+        map: &mut Map<String, Value>,
+        table: &mut Vec<String>,
+        index: &mut HashMap<String, usize>,
+    ) {
+        if let Some(tag) = map.get(TYPE_TAG).and_then(|v| v.as_str()).map(String::from) {
+            let id = *index.entry(tag).or_insert_with(|| {
+                let id = table.len();
+                table.push(map.get(TYPE_TAG).unwrap().as_str().unwrap().to_string());
+                id
+            });
+            map.remove(TYPE_TAG);
+            map.insert(TYPE_TAG_ID.to_string(), Value::from(id));
+        }
+        for (_, v) in map.iter_mut() {
+            if let Some(child) = v.as_object_mut() {
+                walk_encode(child, table, index);
+            } else if let Some(items) = v.as_array_mut() {
+                for item in items.iter_mut() {
+                    if let Some(child) = item.as_object_mut() {
+                        walk_encode(child, table, index);
+                    }
+                }
+            }
+        }
+    }
+
+    fn walk_decode(map: &mut Map<String, Value>, strings: &[String]) {
+        if let Some(tag) = map
+            .remove(TYPE_TAG_ID)
+            .and_then(|v| v.as_u64())
+            .and_then(|id| strings.get(id as usize))
+        {
+            map.insert(TYPE_TAG.to_string(), Value::String(tag.clone()));
+        }
+        for (_, v) in map.iter_mut() {
+            if let Some(child) = v.as_object_mut() {
+                walk_decode(child, strings);
+            } else if let Some(items) = v.as_array_mut() {
+                for item in items.iter_mut() {
+                    if let Some(child) = item.as_object_mut() {
+                        walk_decode(child, strings);
+                    }
+                }
+            }
+        }
+    }
 }

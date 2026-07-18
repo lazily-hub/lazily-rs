@@ -721,6 +721,47 @@ read stays in the **microsecond** range, independent of sheet size, because
 off-viewport formulas are left dirty and never recomputed (~2,000–60,000× cheaper
 than a full recalc across the three runtimes).
 
+## Phase 3 Wire-Format Optimizations (`#lzperfaudit`)
+
+Three spec-ratified wire wins (`#lzspecfrontiersuppress`, `#lzspecbase64`,
+`#lzspecintern`), measured by `benches/wire_optimizations.rs`. Run with:
+
+```bash
+cargo bench --features json-base64 --bench wire_optimizations
+```
+
+### `#lzspecfrontiersuppress` — optional CrdtSync frontier
+
+Omitting the stamp frontier when unchanged cuts wire size and encode/decode cost:
+
+| Variant | Wire size | Encode | Decode |
+|---|---:|---:|---:|
+| with frontier (8 peers) | 879 B | ~740 ns | ~1.6 µs |
+| ops only (suppressed) | 514 B (**−42%**) | ~463 ns | ~1.0 µs |
+
+### `#lzspecbase64` — base64 byte arrays vs JSON-u8 arrays
+
+Under the `json-base64` capability flag, `Inline`/`Payload` bytes travel as base64
+strings instead of JSON integer arrays:
+
+| Payload | json-u8 wire | base64 wire | Savings | Decode (u8 → b64) |
+|---:|---:|---:|---:|---|
+| 64 B | 395 B | 228 B | **42%** | 911 ns → 710 ns |
+| 1 KiB | 4,235 B | 1,508 B | **64%** | 36 µs → 25 µs |
+| 16 KiB | 65,675 B | 21,988 B | **67%** | 89 µs → 65 µs |
+
+### `#lzspecintern` — batch string-intern table
+
+Deduplicating repeated `type_tag` strings into a sidecar intern table (256 nodes,
+4 distinct tags):
+
+| Variant | Wire size | Savings |
+|---|---:|---:|
+| inline tags | 15,729 B | — |
+| interned | 14,890 B | **5%** |
+
+Savings grow with the node-to-tag ratio (more nodes sharing fewer tags).
+
 ## Multi-Language
 
 lazily is implemented across three languages with shared semantics:

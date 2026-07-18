@@ -287,6 +287,129 @@ fn crdt_sync_filter_omits_non_readable_ops_but_keeps_frontier() {
     assert_eq!(filtered.frontier, frontier);
 }
 
+// --- #lzspecfrontiersuppress ---
+
+#[test]
+fn crdt_sync_frontier_suppress_omits_empty_frontier() {
+    let ops = vec![CrdtOp::new(
+        NodeId(7),
+        WireStamp {
+            wall_time: 13,
+            logical: 0,
+            peer: 1,
+        },
+        vec![7],
+    )];
+    let suppressed = CrdtSync::ops_only(ops.clone());
+    assert!(suppressed.is_frontier_suppressed());
+
+    let json = serde_json::to_string(&IpcMessage::CrdtSync(suppressed.clone())).unwrap();
+    // The frontier field must be absent on the wire.
+    assert!(
+        !json.contains("\"frontier\""),
+        "frontier should be omitted, got: {json}"
+    );
+
+    // Round-trips back.
+    let back: IpcMessage = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, IpcMessage::CrdtSync(suppressed));
+}
+
+#[test]
+fn crdt_sync_with_frontier_still_serializes_frontier() {
+    let sync = CrdtSync::new(
+        vec![(
+            1,
+            WireStamp {
+                wall_time: 5,
+                logical: 0,
+                peer: 1,
+            },
+        )],
+        vec![CrdtOp::new(
+            NodeId(1),
+            WireStamp {
+                wall_time: 5,
+                logical: 0,
+                peer: 1,
+            },
+            vec![1],
+        )],
+    );
+    let json = serde_json::to_string(&IpcMessage::CrdtSync(sync.clone())).unwrap();
+    assert!(json.contains("\"frontier\""), "frontier should be present");
+    let back: IpcMessage = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, IpcMessage::CrdtSync(sync));
+}
+
+// --- #lzspecbase64 ---
+
+#[cfg(feature = "json-base64")]
+#[test]
+fn json_base64_round_trips_and_shrinks_payload() {
+    let payload = vec![0xACu8; 256];
+    let snapshot = Snapshot::new(
+        1,
+        vec![NodeSnapshot::payload(NodeId(1), "bytes", payload.clone())],
+        vec![EdgeSnapshot::new(NodeId(1), NodeId(1))],
+        vec![NodeId(1)],
+    );
+    let msg = IpcMessage::Snapshot(snapshot);
+
+    let canonical = msg.encode_json().unwrap();
+    let base64_encoded = msg.encode_json_base64().unwrap();
+
+    // base64 must be materially smaller than the JSON-u8 array form.
+    assert!(
+        base64_encoded.len() < canonical.len() / 2,
+        "base64 {} should be < half of canonical {}",
+        base64_encoded.len(),
+        canonical.len()
+    );
+
+    // Round-trip.
+    let back = IpcMessage::decode_json_base64(&base64_encoded).unwrap();
+    assert_eq!(back, msg);
+}
+
+// --- #lzspecintern ---
+
+#[test]
+fn json_intern_round_trips_and_dedups_type_tags() {
+    // Intern wins at scale: many nodes sharing few type tags. The per-tag string
+    // cost is paid once in the intern table instead of N times inline.
+    let nodes: Vec<NodeSnapshot> = (0..64)
+        .map(|i| {
+            NodeSnapshot::payload(
+                NodeId(i + 1),
+                if i % 2 == 0 { "alpha" } else { "beta" },
+                vec![i as u8],
+            )
+        })
+        .collect();
+    let roots: Vec<NodeId> = nodes.iter().map(|n| n.node).collect();
+    let snapshot = Snapshot::new(1, nodes, vec![], roots);
+    let msg = IpcMessage::Snapshot(snapshot);
+
+    let canonical = serde_json::to_vec(&msg).unwrap();
+    let interned = msg.encode_json_intern().unwrap();
+    let interned_str = String::from_utf8(interned.clone()).unwrap();
+
+    assert!(
+        interned_str.contains("\"intern\""),
+        "intern table should be present"
+    );
+    assert!(
+        interned.len() < canonical.len(),
+        "interned {} should be < canonical {}",
+        interned.len(),
+        canonical.len()
+    );
+
+    let back = IpcMessage::decode_json_intern(&interned).unwrap();
+    assert_eq!(back, msg);
+}
+
 #[test]
 fn shm_blob_arena_round_trips_payload_by_descriptor() {
     let mut arena = ShmBlobArena::with_capacity(SHM_BLOB_HEADER_LEN + 128).unwrap();
