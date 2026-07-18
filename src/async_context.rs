@@ -241,9 +241,50 @@ pub(crate) struct AsyncContextInner {
     batched_cells: HashSet<SlotId>,
     pending_async_effects: Vec<SlotId>,
     scheduled_async_effects: HashSet<SlotId>,
+    /// Free-list of dependency trackers recycled between compute/effect runs
+    /// (`#lzrsdeppool`). Every spawn used to mint a fresh
+    /// `Arc<Mutex<HashSet<SlotId>>>`; pooling reuses both the `Arc` allocation
+    /// and the set's table capacity, so a steady-state graph stops allocating
+    /// on the spawn path entirely. Trackers only re-enter the pool when the
+    /// spawn holds the sole reference (see [`Self::recycle_deps`]).
+    deps_pool: Vec<Arc<Mutex<HashSet<SlotId>>>>,
 }
 
+/// Upper bound on pooled dependency trackers. Async spawns are bounded by the
+/// number of concurrently in-flight nodes; capping retention keeps a burst from
+/// pinning trackers (and their table capacity) for the context's lifetime.
+const DEPS_POOL_CAP: usize = 32;
+
 impl AsyncContextInner {
+    /// Hand out a cleared dependency tracker, reusing a pooled one when
+    /// available (`#lzrsdeppool`).
+    fn take_deps(&mut self) -> Arc<Mutex<HashSet<SlotId>>> {
+        self.deps_pool
+            .pop()
+            .unwrap_or_else(|| Arc::new(Mutex::new(HashSet::new())))
+    }
+
+    /// Return a tracker to the pool, restoring `set` (the extracted dependency
+    /// set) as its storage so the table capacity survives (`#lzrsdeppool`).
+    ///
+    /// `Arc::get_mut` is the safety gate: it yields `Some` only when this is the
+    /// last reference, so a compute future that leaked its `AsyncComputeContext`
+    /// past its own completion can never observe a tracker handed to a later
+    /// spawn. It also avoids locking the tracker while `AsyncContextInner` is
+    /// held — `AsyncComputeContext::get_cell` locks deps *then* inner, so the
+    /// reverse order would invert the lock hierarchy.
+    fn recycle_deps(&mut self, mut deps: Arc<Mutex<HashSet<SlotId>>>, mut set: HashSet<SlotId>) {
+        if self.deps_pool.len() >= DEPS_POOL_CAP {
+            return;
+        }
+        let Some(tracker) = Arc::get_mut(&mut deps) else {
+            return;
+        };
+        set.clear();
+        *tracker.get_mut() = set;
+        self.deps_pool.push(deps);
+    }
+
     pub(crate) fn alloc_id(&mut self) -> SlotId {
         match self.free_ids.pop() {
             Some(id) => SlotId(id),
@@ -536,7 +577,7 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
     let inner_for_compute = inner_arc.clone();
     let tx_clone = tx.clone();
 
-    let deps_arc = Arc::new(Mutex::new(HashSet::new()));
+    let deps_arc = inner.take_deps();
     let deps_for_extract = deps_arc.clone();
     let slot_gen = inner.generation(slot_id);
 
@@ -549,12 +590,17 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
             dependencies: deps_arc,
         };
         let result = compute(compute_ctx).await;
-        let deps = deps_for_extract.lock().clone();
+        // Take (not clone) the tracked set: the tracker is dead once this run
+        // completes, so moving the set out saves a full `HashSet` clone per
+        // compute and lets the capacity be recycled with it (`#lzrsdeppool`).
+        let deps = std::mem::take(&mut *deps_for_extract.lock());
         {
             let mut inner = inner_for_compute.lock();
             let current_revision = match inner.get_node(slot_id) {
                 Some(AsyncNode::Slot(s)) => s.revision,
                 _ => {
+                    inner.recycle_deps(deps_for_extract, deps);
+                    drop(inner);
                     let _ = tx_clone.send(AsyncCompletion::Error(Arc::new(std::io::Error::other(
                         "slot node removed during compute",
                     ))));
@@ -562,9 +608,11 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
                 }
             };
             if current_revision != spawn_revision {
+                inner.recycle_deps(deps_for_extract, deps);
                 return;
             }
             AsyncContext::update_dependencies(&mut inner, slot_id, &deps);
+            inner.recycle_deps(deps_for_extract, deps);
             if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(slot_id) {
                 slot.transition_to_resolved(spawn_revision, result.clone());
             }
@@ -600,6 +648,7 @@ impl AsyncContext {
                 batched_cells: HashSet::new(),
                 pending_async_effects: Vec::new(),
                 scheduled_async_effects: HashSet::new(),
+                deps_pool: Vec::new(),
             })),
             #[cfg(feature = "instrumentation")]
             window1_hook: Mutex::new(None),
@@ -1251,28 +1300,32 @@ impl AsyncContext {
                             cleanup();
                         }
                     }
-                    let deps_arc = Arc::new(Mutex::new(HashSet::new()));
+                    let (context_id, deps_arc) = {
+                        let mut inner = inner_for_ctx.lock();
+                        let deps = inner.take_deps();
+                        (inner.context_id, deps)
+                    };
                     let deps_for_extract = deps_arc.clone();
                     let compute_ctx = AsyncComputeContext {
-                        _context_id: {
-                            let inner = inner_for_ctx.lock();
-                            inner.context_id
-                        },
+                        _context_id: context_id,
                         _node_id: effect_id,
                         _node_gen: effect_gen,
                         inner: inner_for_ctx.clone(),
                         dependencies: deps_arc,
                     };
                     let cleanup = fn_arc(compute_ctx).await;
-                    let deps = deps_for_extract.lock().clone();
+                    // See the slot path: take rather than clone (`#lzrsdeppool`).
+                    let deps = std::mem::take(&mut *deps_for_extract.lock());
                     {
                         let mut inner = inner_for_ctx.lock();
                         if inner.generation(effect_id) == effect_gen {
                             AsyncContext::update_effect_dependencies(&mut inner, effect_id, &deps);
+                            inner.recycle_deps(deps_for_extract, deps);
                             if let Some(AsyncNode::Effect(e)) = inner.get_node_mut(effect_id) {
                                 e.cleanup = cleanup;
                             }
                         } else {
+                            inner.recycle_deps(deps_for_extract, deps);
                             // The effect was disposed (and its id possibly
                             // recycled) while this run was in-flight. Never write
                             // cleanup/edges into the aliased node; instead run
@@ -1765,6 +1818,75 @@ mod tests {
                 assert!(s.dependencies.contains(&cell_b.id));
             }
         }
+    }
+
+    // #lzrsdeppool: every spawn used to mint a fresh dependency tracker
+    // (`Arc` + `HashSet`). The pool recycles the allocation *and* the set's
+    // table capacity, so a steady-state graph stops allocating on the spawn
+    // path. `async_dependency_updates_on_rerun` above is the correctness half:
+    // a reused tracker must still re-discover edges from scratch.
+    #[tokio::test]
+    async fn dependency_trackers_are_pooled_and_reused() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(0i32);
+        let slot = ctx.computed_async(move |cctx| {
+            let v = cctx.get_cell(&cell);
+            async move { v }
+        });
+        assert_eq!(ctx.get_async(&slot).await, 0);
+
+        let pooled = {
+            let inner = ctx.inner.lock();
+            assert_eq!(
+                inner.deps_pool.len(),
+                1,
+                "completed run returns its tracker"
+            );
+            assert!(
+                inner.deps_pool[0].lock().capacity() > 0,
+                "table capacity is recycled with the tracker, not just the Arc"
+            );
+            Arc::as_ptr(&inner.deps_pool[0])
+        };
+
+        for i in 1..40i32 {
+            ctx.set_cell(&cell, i);
+            assert_eq!(ctx.get_async(&slot).await, i);
+            assert!(ctx.inner.lock().deps_pool.len() <= DEPS_POOL_CAP);
+        }
+
+        let inner = ctx.inner.lock();
+        assert_eq!(inner.deps_pool.len(), 1, "steady state reuses one tracker");
+        assert_eq!(
+            Arc::as_ptr(&inner.deps_pool[0]),
+            pooled,
+            "the same allocation is recycled across recomputes"
+        );
+    }
+
+    // #lzrsdeppool: `recycle_deps` gates on `Arc::get_mut`, so a compute that
+    // stashed its tracker somewhere outliving the run keeps that tracker out of
+    // the pool — a later spawn can never be handed a tracker someone else still
+    // writes into.
+    #[tokio::test]
+    async fn leaked_dependency_tracker_is_not_recycled() {
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i32);
+        type LeakedTrackers = Arc<Mutex<Vec<Arc<Mutex<HashSet<SlotId>>>>>>;
+        let leaked: LeakedTrackers = Arc::new(Mutex::new(Vec::new()));
+        let leaked_for_compute = leaked.clone();
+        let slot = ctx.computed_async(move |cctx| {
+            leaked_for_compute.lock().push(cctx.dependencies.clone());
+            let v = cctx.get_cell(&cell);
+            async move { v }
+        });
+
+        assert_eq!(ctx.get_async(&slot).await, 1);
+        assert_eq!(leaked.lock().len(), 1);
+        assert!(
+            ctx.inner.lock().deps_pool.is_empty(),
+            "a tracker still referenced elsewhere must not re-enter the pool"
+        );
     }
 
     // #lzasyncdispose2: disposing an effect bumps the per-index generation and
