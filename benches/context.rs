@@ -1393,6 +1393,38 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
         b.iter(|| black_box(ctx.get_cell_rc(black_box(&cell))));
     });
 
+    // #lzrsgetarc: the `Send + Sync` analog to `get_rc`. The pair below is the
+    // honest A/B — `get_arc` is *not* a free win, it trades a `T::clone` for an
+    // atomic refcount bump. For a `usize` that is a wash (or worse, since it
+    // bypasses the cached-read sidecar); for a value with a heap buffer the
+    // clone is an allocation plus a memcpy and the `Arc` is not.
+    group.bench_function("thread_safe_arc_slot", |b| {
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell(42usize);
+        let slot = ctx.computed(move |ctx| ctx.get_cell(&cell));
+        black_box(ctx.get(&slot));
+
+        b.iter(|| black_box(ctx.get_arc(black_box(&slot))));
+    });
+
+    group.bench_function("thread_safe_string_slot", |b| {
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell(64usize);
+        let slot = ctx.computed(move |ctx| "lazily".repeat(ctx.get_cell(&cell)));
+        black_box(ctx.get(&slot));
+
+        b.iter(|| black_box(ctx.get(black_box(&slot))));
+    });
+
+    group.bench_function("thread_safe_arc_string_slot", |b| {
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell(64usize);
+        let slot = ctx.computed(move |ctx| "lazily".repeat(ctx.get_cell(&cell)));
+        black_box(ctx.get(&slot));
+
+        b.iter(|| black_box(ctx.get_arc(black_box(&slot))));
+    });
+
     group.finish();
 }
 

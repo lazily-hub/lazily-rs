@@ -94,6 +94,7 @@ pub struct ThreadSafeContext {
 | `ctx.memo(\|ctx\| T)` | Create a `Send + Sync` lazily-computed slot with a `PartialEq` memoization guard |
 | `slot.get(&ctx)` | Get value from any thread (computes if unset) |
 | `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
+| `ctx.get_arc(&slot)` | Get slot value as `Arc<T>`, avoiding deep clone (the `Send + Sync` analog of `ctx.get_rc`) |
 | `ctx.cell(value)` | Create a mutable `Send + Sync` cell |
 | `cell.get(&ctx)` | Get cell value from any thread |
 | `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
@@ -834,6 +835,10 @@ Read-path fast-path:
 
 `get_rc()` and `get_cell_rc()` follow the same pattern but clone the
 reference-counted pointer instead of cloning the inner value.
+`ThreadSafeContext::get_arc()` is their `Send + Sync` analog. It reads the
+authoritative `Arc` on the node rather than the cached-read sidecar (which
+stores `T` by value and so has no box to share), which means it is a wash for
+small `Copy` values and a win in proportion to the cost of cloning `T`.
 
 The compute-function signature (`dyn Fn(&Context) -> Rc<dyn Any>` for
 `Context`, `dyn Fn(&ThreadSafeContext) -> Box<ThreadSafeAny>` for

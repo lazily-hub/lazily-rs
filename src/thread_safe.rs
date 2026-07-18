@@ -824,6 +824,51 @@ impl ThreadSafeSlotFastPath {
         Arc::clone(&self.compute)
     }
 
+    /// `read_fresh` for `get_arc` (`#lzrsgetarc`): clones the published `Arc`
+    /// instead of the value behind it, under the same
+    /// `cache_revision`/`dirty`/`force_recompute` envelope.
+    ///
+    /// `Inline` returns `None` — it stores `T` bitwise with no box to share, so
+    /// the caller falls back to the locked node read. That is the right split:
+    /// inline storage is only ever selected for small `Copy` values, which is
+    /// exactly the case where `get` is cheaper than `get_arc` anyway.
+    fn read_fresh_arc<T>(&self) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        let cache_revision = self.cache_revision.load(Ordering::Acquire);
+        if self.dirty.load(Ordering::Acquire) || self.force_recompute.load(Ordering::Acquire) {
+            return None;
+        }
+
+        let value = match &self.value {
+            CachedReadStorage::Locked(lock) => lock.read().as_ref().map(|value| {
+                assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
+                Arc::clone(value)
+                    .downcast::<T>()
+                    .expect("type mismatch in slot")
+            }),
+            CachedReadStorage::LockFree(swap) => {
+                let snapshot = swap.load();
+                snapshot.as_ref().map(|outer| {
+                    let value: &Arc<ThreadSafeAny> = outer;
+                    assert!(self.type_id == TypeId::of::<T>(), "type mismatch in slot");
+                    Arc::clone(value)
+                        .downcast::<T>()
+                        .expect("type mismatch in slot")
+                })
+            }
+            CachedReadStorage::Inline(_) => None,
+        };
+        if self.cache_revision.load(Ordering::Acquire) != cache_revision
+            || self.dirty.load(Ordering::Acquire)
+            || self.force_recompute.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        value
+    }
+
     fn read_fresh<T>(&self) -> Option<T>
     where
         T: Clone + Send + Sync + 'static,
@@ -1741,6 +1786,20 @@ impl ThreadSafeContext {
             .and_then(|fast_path| fast_path.read_fresh())
     }
 
+    /// `try_read_fresh_slot_fast_path` for [`Self::get_arc`] (`#lzrsgetarc`).
+    /// Same guard-held-across-read reasoning as its sibling.
+    fn try_read_fresh_slot_arc_fast_path<T>(&self, id: SlotId) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        let idx = node_index(id)?;
+        let guard = self.inner.slot_fast_paths.read();
+        guard
+            .get(idx)
+            .and_then(|opt| opt.as_ref())
+            .and_then(|fast_path| fast_path.read_fresh_arc())
+    }
+
     fn slot_recompute_in_flight(&self, id: SlotId) -> bool {
         self.slot_fast_path(id)
             .map(|fast_path| fast_path.recompute_in_flight())
@@ -2077,6 +2136,101 @@ impl ThreadSafeContext {
         T: Clone + Send + Sync + 'static,
     {
         self.get_slot(handle.id)
+    }
+
+    /// Read a slot without cloning its value (`#lzrsgetarc`) — the `Send + Sync`
+    /// counterpart to [`Context::get_rc`].
+    ///
+    /// [`ThreadSafeContext::get`] deep-clones on every read, which is pure waste
+    /// when the caller only wants to observe a large value (a `String`, a `Vec`,
+    /// a map). Slot values are already stored behind an `Arc`, so handing that
+    /// `Arc` out costs a refcount bump instead.
+    ///
+    /// Prefer [`ThreadSafeContext::get`] for small `Copy` values: those slots use
+    /// the inline cached-read fast path, which this method deliberately bypasses
+    /// (there is no shared box to share, so `get` is strictly cheaper).
+    pub fn get_arc<T>(&self, handle: &SlotHandle<T>) -> Arc<T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.get_slot_arc(handle.id)
+    }
+
+    fn get_slot_arc<T>(&self, id: SlotId) -> Arc<T>
+    where
+        T: Send + Sync + 'static,
+    {
+        if let Some(parent_id) = track_dependency(self.context_id(), id) {
+            self.register_dependency(id, parent_id);
+        }
+
+        loop {
+            if self.slot_recompute_in_flight(id) {
+                let _ = self.wait_for_slot_recompute(id);
+                continue;
+            }
+
+            if self.slot_needs_refresh_without_slot_dependencies(id) {
+                let _ = self.recompute_slot_now(id);
+                continue;
+            }
+
+            match self.read_slot_arc_or_dependencies::<T>(id) {
+                ThreadSafeSlotRead::Fresh(value) => return value,
+                ThreadSafeSlotRead::Refresh(dependencies) => {
+                    self.refresh_slot_with_dependencies(id, dependencies);
+                }
+            }
+        }
+    }
+
+    /// `read_slot_or_dependencies` for [`Self::get_arc`]: reads the authoritative
+    /// `slot.value` `Arc` rather than the cached-read sidecar, which stores `T`
+    /// by value and so cannot hand back a shared box. `recompute_slot_now`
+    /// publishes both, so the `Arc` is fresh whenever the sidecar is.
+    fn read_slot_arc_or_dependencies<T>(&self, id: SlotId) -> ThreadSafeSlotRead<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        #[cfg(feature = "instrumentation")]
+        let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
+        if let Some(value) = self.try_read_fresh_slot_arc_fast_path(id) {
+            return ThreadSafeSlotRead::Fresh(value);
+        }
+
+        let state = self.read_state();
+        match state.get_node(id) {
+            Some(ThreadSafeNode::Slot(slot)) => {
+                if !slot.fast_path.needs_refresh()
+                    && let (false, false, Some(value)) =
+                        (slot.dirty, slot.force_recompute, &slot.value)
+                {
+                    assert!(
+                        slot.fast_path.type_id == TypeId::of::<T>(),
+                        "type mismatch in slot"
+                    );
+                    ThreadSafeSlotRead::Fresh(
+                        Arc::clone(value)
+                            .downcast::<T>()
+                            .expect("type mismatch in slot"),
+                    )
+                } else {
+                    ThreadSafeSlotRead::Refresh(
+                        slot.dependencies
+                            .iter()
+                            .filter(|dependency_id| {
+                                matches!(
+                                    state.get_node(**dependency_id),
+                                    Some(ThreadSafeNode::Slot(_))
+                                )
+                            })
+                            .copied()
+                            .collect(),
+                    )
+                }
+            }
+            _ => panic!("get_arc called on non-slot id"),
+        }
     }
 
     fn get_slot<T>(&self, id: SlotId) -> T
@@ -3040,6 +3194,68 @@ mod tests {
             ctx.set_cell(&cell, 5);
             assert_eq!(ctx.get(&doubled), 50, "{strategy:?} after set");
         }
+    }
+
+    // #lzrsgetarc: `get` deep-clones the value on every read; `get_arc` hands
+    // out the stored `Arc` instead, so repeat reads of an expensive value cost
+    // a refcount bump.
+    #[test]
+    fn get_arc_shares_one_allocation_across_reads() {
+        for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
+            let ctx = ThreadSafeContext::with_read_strategy(strategy);
+            let cell = ctx.cell(3_usize);
+            let text = ctx.computed(move |c| "ab".repeat(c.get_cell(&cell)));
+
+            let first = ctx.get_arc(&text);
+            let second = ctx.get_arc(&text);
+            assert_eq!(&*first, "ababab", "{strategy:?}");
+            assert!(
+                Arc::ptr_eq(&first, &second),
+                "{strategy:?}: cached reads must share one allocation"
+            );
+            assert_eq!(
+                ctx.get(&text),
+                *first,
+                "{strategy:?}: get agrees with get_arc"
+            );
+        }
+    }
+
+    #[test]
+    fn get_arc_recomputes_after_invalidation() {
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell(1_usize);
+        let text = ctx.computed(move |c| "x".repeat(c.get_cell(&cell)));
+
+        let stale = ctx.get_arc(&text);
+        assert_eq!(&*stale, "x");
+
+        ctx.set_cell(&cell, 4);
+        let fresh = ctx.get_arc(&text);
+        assert_eq!(&*fresh, "xxxx");
+        assert!(
+            !Arc::ptr_eq(&stale, &fresh),
+            "recompute publishes a new allocation"
+        );
+        // The handle taken before the write stays valid and unmutated — that is
+        // the point of handing out an `Arc` rather than a borrow.
+        assert_eq!(&*stale, "x");
+    }
+
+    #[test]
+    fn get_arc_tracks_dependencies_like_get() {
+        let ctx = ThreadSafeContext::new();
+        let cell = ctx.cell(2_usize);
+        let inner = ctx.computed(move |c| "y".repeat(c.get_cell(&cell)));
+        let outer = ctx.computed(move |c| c.get_arc(&inner).len());
+
+        assert_eq!(ctx.get(&outer), 2);
+        ctx.set_cell(&cell, 5);
+        assert_eq!(
+            ctx.get(&outer),
+            5,
+            "a get_arc read inside a compute must register the edge"
+        );
     }
 
     fn slot_storage_kind<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> &'static str
