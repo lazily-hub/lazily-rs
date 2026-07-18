@@ -374,6 +374,7 @@ fn json_base64_round_trips_and_shrinks_payload() {
 
 // --- #lzspecintern ---
 
+#[cfg(any(feature = "ffi", feature = "webrtc"))]
 #[test]
 fn json_intern_round_trips_and_dedups_type_tags() {
     // Intern wins at scale: many nodes sharing few type tags. The per-tag string

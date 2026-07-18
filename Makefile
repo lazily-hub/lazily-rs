@@ -107,7 +107,7 @@ test-ffi-binary:
 >$(CARGO) test --locked --features "ffi ipc-binary" --test ffi
 
 test-ipc:
->$(CARGO) test --locked --features ipc --test ipc
+>$(CARGO) test --locked --features ffi --test ipc
 
 test-ipc-binary:
 >$(CARGO) test --locked --features ipc-binary --test ipc
