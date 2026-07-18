@@ -225,7 +225,12 @@ fn authorize_inbound(peer: PeerId, perms: &PeerPermissions, message: &IpcMessage
         // write-authorization path. The arm stays for exhaustiveness.
         IpcMessage::CrdtSync(_) => Vec::new(),
         // Reliable-sync control frames are not write ops; they carry no DeltaOps.
-        IpcMessage::ResyncRequest(_) | IpcMessage::OutboxAck(_) => Vec::new(),
+        // `DeltaSinceRequest` (#lzspecdeltacrdt) is a read request — the reply is
+        // built by `CrdtPlaneRuntime::delta_reply` and read-filtered on the way
+        // out, so it grants the requester no write authority here.
+        IpcMessage::ResyncRequest(_)
+        | IpcMessage::OutboxAck(_)
+        | IpcMessage::DeltaSinceRequest(_) => Vec::new(),
     }
 }
 
