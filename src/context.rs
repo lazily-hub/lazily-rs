@@ -1424,6 +1424,66 @@ impl Context {
         drop(cell);
     }
 
+    /// Open a teardown group: nodes created through it are disposed when it
+    /// drops.
+    ///
+    /// ```
+    /// # use lazily::Context;
+    /// let ctx = Context::new();
+    /// let topic = ctx.cell(0u64);
+    /// {
+    ///     let conn = ctx.child();
+    ///     let a = conn.computed(move |c| c.get_cell(&topic) + 1);
+    ///     let _b = conn.computed(move |c| c.get(&a) * 2);   // `a` captured, still Copy
+    ///     assert_eq!(ctx.get(&a), 1);
+    /// } // both slots disposed here
+    /// ```
+    ///
+    /// Grouping bounds *teardown*, not visibility: a child's nodes read
+    /// parent-owned or sibling-owned nodes freely.
+    ///
+    /// Handles stay `Copy`. The child itself is never captured by a compute
+    /// closure — only handles are — so it avoids the `'static` requirement that
+    /// makes a per-node borrowing wrapper impossible.
+    ///
+    /// Same caveat as [`Context::dispose_slot`]: dropping a group tears down its
+    /// nodes even if something outside the group still reads them, which throws
+    /// on that reader's next recompute.
+    pub fn child(&self) -> ChildContext<'_> {
+        ChildContext {
+            ctx: self,
+            owned: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Tear down whatever node `id` names, dispatching on its own kind.
+    ///
+    /// The kind is read from the arena rather than remembered by the caller, so
+    /// a teardown group stores 8 bytes per node and no tag.
+    fn dispose_id(&self, id: SlotId) {
+        let kind = match Self::get_node(&self.inner.borrow().nodes, id) {
+            Some(Node::Slot(_)) => 0u8,
+            Some(Node::Cell(_)) => 1,
+            Some(Node::Effect(_)) => 2,
+            None => return,
+        };
+        let marker = std::marker::PhantomData;
+        match kind {
+            0 => self.dispose_slot(&SlotHandle::<()> {
+                id,
+                _marker: marker,
+            }),
+            1 => self.dispose_cell(&CellHandle::<()> {
+                id,
+                _marker: marker,
+            }),
+            _ => self.dispose_effect(&EffectHandle {
+                id,
+                _marker: marker,
+            }),
+        }
+    }
+
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
         let inner = self.inner.borrow();
@@ -1947,6 +2007,89 @@ impl Default for Context {
     }
 }
 
+/// A teardown group over a [`Context`]: nodes created through it are disposed
+/// when it drops. See [`Context::child`].
+///
+/// Records only ids — 8 bytes per node, no boxing — and reads each node's kind
+/// from the arena at teardown.
+pub struct ChildContext<'ctx> {
+    ctx: &'ctx Context,
+    owned: RefCell<Vec<SlotId>>,
+}
+
+impl ChildContext<'_> {
+    /// Create a lazily-computed slot owned by this group.
+    pub fn computed<T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        T: 'static,
+        F: Fn(&Context) -> T + 'static,
+    {
+        let handle = self.ctx.computed(compute);
+        self.owned.borrow_mut().push(handle.id);
+        handle
+    }
+
+    /// Create a memoized slot owned by this group.
+    pub fn memo<T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        T: PartialEq + 'static,
+        F: Fn(&Context) -> T + 'static,
+    {
+        let handle = self.ctx.memo(compute);
+        self.owned.borrow_mut().push(handle.id);
+        handle
+    }
+
+    /// Create a source cell owned by this group.
+    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> CellHandle<T> {
+        let handle = self.ctx.cell(value);
+        self.owned.borrow_mut().push(handle.id);
+        handle
+    }
+
+    /// Register an effect owned by this group.
+    pub fn effect<F, R>(&self, run: F) -> EffectHandle
+    where
+        F: Fn(&Context) -> R + 'static,
+        R: EffectCallbackResult + 'static,
+    {
+        let handle = self.ctx.effect(run);
+        self.owned.borrow_mut().push(handle.id);
+        handle
+    }
+
+    /// The context this group belongs to.
+    pub fn context(&self) -> &Context {
+        self.ctx
+    }
+
+    /// How many nodes this group owns.
+    pub fn len(&self) -> usize {
+        self.owned.borrow().len()
+    }
+
+    /// Whether this group owns nothing.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Give up the group without disposing anything it created.
+    pub fn leak(self) {
+        self.owned.borrow_mut().clear();
+    }
+}
+
+impl Drop for ChildContext<'_> {
+    fn drop(&mut self) {
+        // Reverse creation order: dependents before what they read, so a group
+        // does not transiently dangle inside itself while tearing down.
+        let owned = std::mem::take(&mut *self.owned.borrow_mut());
+        for id in owned.into_iter().rev() {
+            self.ctx.dispose_id(id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1957,6 +2100,110 @@ mod tests {
     // has an entry exactly while its edge list is longer than the threshold.
     // Both fast paths assert on that, so a violation panics rather than
     // silently reading a stale position.
+
+    #[test]
+    fn child_context_disposes_its_group_on_drop() {
+        let ctx = Context::new();
+        let topic = ctx.cell(1usize);
+        let probe;
+        {
+            let conn = ctx.child();
+            let a = conn.computed(move |c| c.get_cell(&topic) + 1);
+            let _b = conn.computed(move |c| c.get(&a) * 10);
+            assert_eq!(conn.len(), 2);
+            probe = a;
+            assert_eq!(ctx.get(&probe), 2);
+            match Context::get_node(&ctx.inner.borrow().nodes, topic.id) {
+                Some(Node::Cell(c)) => assert!(c.dependents.contains(&probe.id)),
+                _ => panic!("expected cell"),
+            }
+        }
+        let inner = ctx.inner.borrow();
+        match Context::get_node(&inner.nodes, topic.id) {
+            Some(Node::Cell(c)) => assert!(
+                c.dependents.is_empty(),
+                "the group's edges must be gone with it"
+            ),
+            _ => panic!("expected cell"),
+        }
+        assert!(inner.free_ids.contains(&probe.id.0), "ids recycled");
+    }
+
+    #[test]
+    fn child_context_keeps_handles_copy() {
+        // The point of the design: a source is captured by two closures with no
+        // clone, because handles are still Copy ids.
+        let ctx = Context::new();
+        let topic = ctx.cell(5usize);
+        let conn = ctx.child();
+        let a = conn.computed(move |c| c.get_cell(&topic) + 1);
+        let b = conn.computed(move |c| c.get_cell(&topic) + 2);
+        assert_eq!(ctx.get(&a) + ctx.get(&b), 13);
+    }
+
+    #[test]
+    fn child_context_reads_across_groups() {
+        // Grouping bounds teardown, not visibility.
+        let ctx = Context::new();
+        let topic = ctx.cell(2usize);
+        let outer = ctx.computed(move |c| c.get_cell(&topic) * 3);
+        let conn = ctx.child();
+        let inner = conn.computed(move |c| c.get(&outer) + 1);
+        assert_eq!(ctx.get(&inner), 7);
+    }
+
+    #[test]
+    fn child_context_owns_cells_and_effects_too() {
+        let ctx = Context::new();
+        let (cell_id, effect_id);
+        {
+            let conn = ctx.child();
+            let cell = conn.cell(1usize);
+            cell_id = cell.id;
+            let effect = conn.effect(move |c| {
+                let _ = c.get_cell(&cell);
+            });
+            effect_id = effect.id;
+            assert_eq!(conn.len(), 2);
+        }
+        let inner = ctx.inner.borrow();
+        assert!(inner.free_ids.contains(&cell_id.0), "cell recycled");
+        assert!(inner.free_ids.contains(&effect_id.0), "effect recycled");
+    }
+
+    #[test]
+    fn child_context_leak_keeps_the_group_alive() {
+        let ctx = Context::new();
+        let topic = ctx.cell(1usize);
+        let escaped = {
+            let conn = ctx.child();
+            let slot = conn.computed(move |c| c.get_cell(&topic) * 10);
+            conn.leak();
+            slot
+        };
+        assert_eq!(ctx.get(&escaped), 10);
+        ctx.set_cell(&topic, 4);
+        assert_eq!(ctx.get(&escaped), 40);
+    }
+
+    #[test]
+    fn child_context_keeps_churn_flat() {
+        // The leak case, written as groups: each subscriber is its own group.
+        let ctx = Context::new();
+        let topic = ctx.cell(0usize);
+        for cycle in 0..500usize {
+            let conn = ctx.child();
+            let slot = conn.computed(move |c| c.get_cell(&topic) + cycle);
+            assert_eq!(ctx.get(&slot), cycle);
+        }
+        match Context::get_node(&ctx.inner.borrow().nodes, topic.id) {
+            Some(Node::Cell(c)) => assert!(
+                c.dependents.is_empty(),
+                "every group must have torn itself down"
+            ),
+            _ => panic!("expected cell"),
+        }
+    }
 
     #[test]
     fn disposal_tolerates_a_capture_whose_drop_reenters() {

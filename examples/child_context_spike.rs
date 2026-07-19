@@ -17,64 +17,16 @@
 //! 4. The known gap: dropping a child tears out nodes another child still
 //!    reads. Same contract as dispose_slot today; Rc/Weak is what fixes this.
 
-use std::cell::RefCell;
 use std::time::Instant;
 
-use lazily::{Context, SlotHandle};
-
-/// How this spike remembers to tear a node down. A real implementation would
-/// store `(SlotId, kind)` instead of boxing a closure per node — see the
-/// teardown column in the cost model.
-type DisposeFn = Box<dyn FnOnce(&Context)>;
-
-/// A teardown group. Nodes created through it are disposed when it drops.
-struct Child<'ctx> {
-    ctx: &'ctx Context,
-    owned: RefCell<Vec<DisposeFn>>,
-}
-
-impl<'ctx> Child<'ctx> {
-    fn new(ctx: &'ctx Context) -> Self {
-        Self {
-            ctx,
-            owned: RefCell::new(Vec::new()),
-        }
-    }
-
-    /// Create a slot owned by this group. Returns a plain `Copy` handle.
-    fn computed<T, F>(&self, compute: F) -> SlotHandle<T>
-    where
-        T: Clone + 'static,
-        F: Fn(&Context) -> T + 'static,
-    {
-        let handle = self.ctx.computed(compute);
-        self.owned
-            .borrow_mut()
-            .push(Box::new(move |ctx: &Context| ctx.dispose_slot(&handle)) as DisposeFn);
-        handle
-    }
-
-    fn len(&self) -> usize {
-        self.owned.borrow().len()
-    }
-}
-
-impl Drop for Child<'_> {
-    fn drop(&mut self) {
-        // Reverse order: dependents before the things they read, so a group
-        // tears itself down without transiently dangling inside itself.
-        for dispose in self.owned.borrow_mut().drain(..).rev() {
-            dispose(self.ctx);
-        }
-    }
-}
+use lazily::Context;
 
 fn claim_1_group_disposes_on_drop() {
     let ctx = Context::new();
     let topic = ctx.cell(1u64);
     let probe;
     {
-        let conn = Child::new(&ctx);
+        let conn = ctx.child();
         let a = conn.computed(move |c| c.get_cell(&topic) + 1);
         let _b = conn.computed(move |c| c.get(&a) * 10);
         assert_eq!(conn.len(), 2);
@@ -95,7 +47,7 @@ fn claim_1_group_disposes_on_drop() {
 fn claim_2_handles_stay_copy() {
     let ctx = Context::new();
     let topic = ctx.cell(5u64);
-    let conn = Child::new(&ctx);
+    let conn = ctx.child();
     // `topic` captured twice, no clone: still a Copy handle.
     let a = conn.computed(move |c| c.get_cell(&topic) + 1);
     let b = conn.computed(move |c| c.get_cell(&topic) + 2);
@@ -107,7 +59,7 @@ fn claim_3_cross_group_reads_work() {
     let ctx = Context::new();
     let topic = ctx.cell(2u64);
     let outer = ctx.computed(move |c| c.get_cell(&topic) * 3);
-    let conn = Child::new(&ctx);
+    let conn = ctx.child();
     let inner = conn.computed(move |c| c.get(&outer) + 1);
     assert_eq!(ctx.get(&inner), 7, "a child node reads a parent-owned node");
     println!("  claim 3 ok — grouping bounds teardown, not visibility");
@@ -135,7 +87,7 @@ fn cost_model(width: usize) {
     let plain_teardown = start.elapsed().as_nanos() as f64 / width as f64;
 
     let start = Instant::now();
-    let child = Child::new(&ctx);
+    let child = ctx.child();
     for i in 0..width {
         let s = child.computed(move |c| c.get_cell(&topic) + i as u64);
         ctx.get(&s);
