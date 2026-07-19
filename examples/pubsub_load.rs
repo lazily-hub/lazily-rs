@@ -194,7 +194,9 @@ fn churn_soak() {
     let start = Instant::now();
     for cycle in 0..CHURN_CYCLES {
         let victim = rng.below(subscriber_a.len());
-        subscriber_a.swap_remove(victim);
+        // Unsubscribe properly: without dispose_slot the node and its edge on
+        // the topic survive for the life of the context.
+        ctx.dispose_slot(&subscriber_a.swap_remove(victim));
         let salt = cycle as u64;
         let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + salt);
         ctx.get(&slot);

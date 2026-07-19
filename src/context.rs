@@ -634,6 +634,50 @@ impl Context {
     /// `remove_dependent_edge` calls each re-borrowed the `RefCell`, so a
     /// fan-out-256 recompute paid 256 borrow_mut acquisitions instead of one
     /// (#lzbatchborrow).
+    /// Detach `dependency_id` from each of `dependent_a`'s dependency lists.
+    ///
+    /// The mirror of `remove_dependent_edges_locked`, needed when a node is
+    /// torn down while others still point at it.
+    fn remove_dependency_edges_locked(
+        inner: &mut ContextInner,
+        dependency_id: SlotId,
+        dependent_a: &[SlotId],
+    ) {
+        for dependent_id in dependent_a {
+            let inner_mut = &mut *inner;
+            if let Some(node) = Self::get_node_mut(&mut inner_mut.nodes, *dependent_id) {
+                let index = &mut inner_mut.dependencies_index;
+                match node {
+                    Node::Slot(slot) => {
+                        edge_remove(&mut slot.dependencies, dependency_id, *dependent_id, index);
+                    }
+                    Node::Effect(effect) => {
+                        edge_remove(
+                            &mut effect.dependencies,
+                            dependency_id,
+                            *dependent_id,
+                            index,
+                        );
+                    }
+                    Node::Cell(_) => {}
+                }
+            }
+        }
+    }
+
+    /// Drop both index side-table entries for `id`.
+    ///
+    /// Mandatory before recycling an id: `free_ids` is LIFO, so a stale entry
+    /// would alias the very next node allocated.
+    fn drop_edge_index_entries(inner: &mut ContextInner, id: SlotId) {
+        if !inner.dependencies_index.is_empty() {
+            inner.dependencies_index.remove(&id);
+        }
+        if !inner.dependents_index.is_empty() {
+            inner.dependents_index.remove(&id);
+        }
+    }
+
     fn remove_dependent_edges_locked(
         inner: &mut ContextInner,
         dependent_id: SlotId,
@@ -1306,12 +1350,7 @@ impl Context {
             Self::remove_dependent_edges_locked(&mut inner, handle.id, &effect.dependencies);
             // The id is about to be recycled, so drop both index entries — a
             // stale one would alias the next node allocated with this id.
-            if !inner.dependencies_index.is_empty() {
-                inner.dependencies_index.remove(&handle.id);
-            }
-            if !inner.dependents_index.is_empty() {
-                inner.dependents_index.remove(&handle.id);
-            }
+            Self::drop_edge_index_entries(&mut inner, handle.id);
             inner.free_ids.push(handle.id.0);
             effect.cleanup
         };
@@ -1319,6 +1358,53 @@ impl Context {
         if let Some(cleanup) = cleanup {
             cleanup();
         }
+    }
+
+    /// Tear down a derived slot: detach both edge directions, clear the node,
+    /// and recycle its id.
+    ///
+    /// Without this a slot is permanent. `SlotHandle` is `Copy` — an id, not an
+    /// owner — so dropping every handle reclaims nothing, and the node and its
+    /// edge on each dependency survive for the life of the context. Under
+    /// subscribe/unsubscribe churn that is unbounded growth in both memory and
+    /// propagation cost: the dependent list keeps lengthening even though the
+    /// live subscriber count does not.
+    ///
+    /// Callers must ensure nothing still reads the slot in a live compute.
+    /// Reading a disposed node throws on the next recompute — the same contract
+    /// as [`Context::dispose_effect`] and the JS binding's `disposeSlot`.
+    pub fn dispose_slot<T>(&self, handle: &SlotHandle<T>) {
+        let mut inner = self.inner.borrow_mut();
+        // Check the kind BEFORE taking: a stale handle whose id has been
+        // recycled must not tear down whatever now owns it.
+        if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Slot(_))) {
+            return;
+        }
+        let Some(Node::Slot(slot)) = Self::take_node(&mut inner.nodes, handle.id) else {
+            return;
+        };
+        Self::remove_dependent_edges_locked(&mut inner, handle.id, &slot.dependencies);
+        Self::remove_dependency_edges_locked(&mut inner, handle.id, &slot.dependents);
+        Self::drop_edge_index_entries(&mut inner, handle.id);
+        inner.free_ids.push(handle.id.0);
+    }
+
+    /// Tear down a source cell: detach its dependents, clear the node, and
+    /// recycle its id.
+    ///
+    /// Cells are pure sources with no dependencies, so only downstream edges
+    /// need detaching. Same contract as [`Context::dispose_slot`].
+    pub fn dispose_cell<T>(&self, handle: &CellHandle<T>) {
+        let mut inner = self.inner.borrow_mut();
+        if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Cell(_))) {
+            return;
+        }
+        let Some(Node::Cell(cell)) = Self::take_node(&mut inner.nodes, handle.id) else {
+            return;
+        };
+        Self::remove_dependency_edges_locked(&mut inner, handle.id, &cell.dependents);
+        Self::drop_edge_index_entries(&mut inner, handle.id);
+        inner.free_ids.push(handle.id.0);
     }
 
     /// Check whether an effect is still registered.
@@ -1854,6 +1940,120 @@ mod tests {
     // has an entry exactly while its edge list is longer than the threshold.
     // Both fast paths assert on that, so a violation panics rather than
     // silently reading a stale position.
+
+    #[test]
+    fn dispose_slot_detaches_both_edge_directions_and_recycles_the_id() {
+        let ctx = Context::new();
+        let src = ctx.cell(1usize);
+        let mid = ctx.computed(move |ctx| ctx.get_cell(&src) + 1);
+        let sink = ctx.computed(move |ctx| ctx.get(&mid) * 10);
+        assert_eq!(ctx.get(&sink), 20);
+
+        let recycled = mid.id;
+        ctx.dispose_slot(&mid);
+
+        {
+            let inner = ctx.inner.borrow();
+            // upstream: the cell no longer lists the disposed slot
+            match Context::get_node(&inner.nodes, src.id) {
+                Some(Node::Cell(c)) => assert!(
+                    !c.dependents.contains(&recycled),
+                    "dependency must drop the disposed dependent"
+                ),
+                _ => panic!("expected cell"),
+            }
+            // downstream: the sink no longer lists the disposed slot
+            match Context::get_node(&inner.nodes, sink.id) {
+                Some(Node::Slot(s)) => assert!(
+                    !s.dependencies.contains(&recycled),
+                    "dependent must drop the disposed dependency"
+                ),
+                _ => panic!("expected slot"),
+            }
+            assert!(inner.free_ids.contains(&recycled.0), "id must be recycled");
+        }
+
+        // the recycled id is handed to the next node and behaves normally
+        let reused = ctx.computed(move |ctx| ctx.get_cell(&src) + 100);
+        assert_eq!(reused.id, recycled);
+        assert_eq!(ctx.get(&reused), 101);
+        ctx.set_cell(&src, 5);
+        assert_eq!(ctx.get(&reused), 105);
+    }
+
+    #[test]
+    fn dispose_cell_detaches_dependents_and_recycles_the_id() {
+        let ctx = Context::new();
+        let src = ctx.cell(2usize);
+        let derived = ctx.computed(move |ctx| ctx.get_cell(&src) * 3);
+        assert_eq!(ctx.get(&derived), 6);
+
+        let recycled = src.id;
+        ctx.dispose_cell(&src);
+
+        let inner = ctx.inner.borrow();
+        match Context::get_node(&inner.nodes, derived.id) {
+            Some(Node::Slot(s)) => assert!(
+                !s.dependencies.contains(&recycled),
+                "dependent must drop the disposed cell"
+            ),
+            _ => panic!("expected slot"),
+        }
+        assert!(inner.free_ids.contains(&recycled.0), "id must be recycled");
+    }
+
+    #[test]
+    fn dispose_slot_ignores_a_handle_naming_another_kind() {
+        // free_ids is LIFO, so a stale handle can name a live node of a
+        // different kind. Disposing through it must be a no-op, not a teardown.
+        let ctx = Context::new();
+        let cell = ctx.cell(1usize);
+        let stale: SlotHandle<usize> = SlotHandle {
+            id: cell.id,
+            _marker: std::marker::PhantomData,
+        };
+        ctx.dispose_slot(&stale);
+        assert_eq!(ctx.get_cell(&cell), 1, "the cell must survive");
+        assert!(
+            !ctx.inner.borrow().free_ids.contains(&cell.id.0),
+            "a live node's id must not be recycled"
+        );
+    }
+
+    #[test]
+    fn dispose_slot_returns_the_graph_to_its_prior_size() {
+        // The churn case: repeatedly subscribe and unsubscribe against one
+        // topic. Without disposal the dependent list grows without bound even
+        // though the live count is constant.
+        let ctx = Context::new();
+        let topic = ctx.cell(0usize);
+        let live_width = 8usize;
+        let mut live_a: Vec<_> = (0..live_width)
+            .map(|i| {
+                let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + i);
+                ctx.get(&slot);
+                slot
+            })
+            .collect();
+
+        for cycle in 0..500usize {
+            let victim = live_a.swap_remove(cycle % live_a.len());
+            ctx.dispose_slot(&victim);
+            let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + cycle);
+            ctx.get(&slot);
+            live_a.push(slot);
+        }
+
+        let inner = ctx.inner.borrow();
+        match Context::get_node(&inner.nodes, topic.id) {
+            Some(Node::Cell(c)) => assert_eq!(
+                c.dependents.len(),
+                live_width,
+                "dependent list must track live subscribers, not total ever created"
+            ),
+            _ => panic!("expected cell"),
+        }
+    }
 
     #[test]
     fn edge_index_promotes_past_the_threshold_and_still_dedups() {
