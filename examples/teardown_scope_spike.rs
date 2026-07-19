@@ -1,20 +1,20 @@
-//! Spike: nested context for group-scoped lifetime (task 12).
+//! Spike: teardown scope for scope-bound lifetime (task 12).
 //!
-//! `cargo run --release --example child_context_spike`
+//! `cargo run --release --example teardown_scope_spike`
 //!
-//! A third option alongside explicit disposal and Rc/Weak handles. A `Child`
+//! A third option alongside explicit disposal and Rc/Weak handles. A `Scope`
 //! borrows the context and records what it created; dropping it disposes that
-//! group. Crucially the child is never captured by a compute closure — only
+//! set. Crucially the scope is never captured by a compute closure — only
 //! plain `Copy` handles are — so it sidesteps the `'static` problem that made a
 //! borrowing per-node wrapper impossible (E0597, see 40b36c4).
 //!
 //! Claims under test:
 //!
-//! 1. Dropping a child disposes everything it created, with no per-node call.
+//! 1. Dropping a scope disposes everything it created, with no per-node call.
 //! 2. Handles stay `Copy`: a source is captured by two closures with no clone.
-//! 3. Nodes in a child may freely read nodes owned by the parent or another
-//!    child — grouping is about teardown, not visibility.
-//! 4. The known gap: dropping a child tears out nodes another child still
+//! 3. Nodes in a scope may freely read nodes owned by the parent or another
+//!    scope — scoping is about teardown, not visibility.
+//! 4. The known gap: dropping a scope tears out nodes another scope still
 //!    reads. Same contract as dispose_slot today; Rc/Weak is what fixes this.
 
 use std::time::Instant;
@@ -26,7 +26,7 @@ fn claim_1_group_disposes_on_drop() {
     let topic = ctx.cell(1u64);
     let probe;
     {
-        let conn = ctx.child();
+        let conn = ctx.scope();
         let a = conn.computed(move |c| c.get_cell(&topic) + 1);
         let _b = conn.computed(move |c| c.get(&a) * 10);
         assert_eq!(conn.len(), 2);
@@ -41,13 +41,13 @@ fn claim_1_group_disposes_on_drop() {
         !still_readable,
         "claim 1: the group's nodes were disposed on drop"
     );
-    println!("  claim 1 ok — dropping a child disposed its whole group");
+    println!("  claim 1 ok — dropping a scope disposed its whole group");
 }
 
 fn claim_2_handles_stay_copy() {
     let ctx = Context::new();
     let topic = ctx.cell(5u64);
-    let conn = ctx.child();
+    let conn = ctx.scope();
     // `topic` captured twice, no clone: still a Copy handle.
     let a = conn.computed(move |c| c.get_cell(&topic) + 1);
     let b = conn.computed(move |c| c.get_cell(&topic) + 2);
@@ -59,14 +59,14 @@ fn claim_3_cross_group_reads_work() {
     let ctx = Context::new();
     let topic = ctx.cell(2u64);
     let outer = ctx.computed(move |c| c.get_cell(&topic) * 3);
-    let conn = ctx.child();
+    let conn = ctx.scope();
     let inner = conn.computed(move |c| c.get(&outer) + 1);
-    assert_eq!(ctx.get(&inner), 7, "a child node reads a parent-owned node");
+    assert_eq!(ctx.get(&inner), 7, "a scope node reads a parent-owned node");
     println!("  claim 3 ok — grouping bounds teardown, not visibility");
 }
 
 fn cost_model(width: usize) {
-    // build + teardown through a child, against explicit per-node disposal
+    // build + teardown through a scope, against explicit per-node disposal
     let ctx = Context::new();
     let topic = ctx.cell(0u64);
 
@@ -87,20 +87,20 @@ fn cost_model(width: usize) {
     let plain_teardown = start.elapsed().as_nanos() as f64 / width as f64;
 
     let start = Instant::now();
-    let child = ctx.child();
+    let scope = ctx.scope();
     for i in 0..width {
-        let s = child.computed(move |c| c.get_cell(&topic) + i as u64);
+        let s = scope.computed(move |c| c.get_cell(&topic) + i as u64);
         ctx.get(&s);
     }
     let child_build = start.elapsed().as_nanos() as f64 / width as f64;
 
     let start = Instant::now();
-    drop(child);
+    drop(scope);
     let child_teardown = start.elapsed().as_nanos() as f64 / width as f64;
 
     println!(
         "\n  width {width}\n  {:<12}{:>14}{:>14}",
-        "path", "explicit (ns)", "child (ns)"
+        "path", "explicit (ns)", "scope (ns)"
     );
     println!("  {:<12}{plain_build:>14.1}{child_build:>14.1}", "build");
     println!(
@@ -110,7 +110,7 @@ fn cost_model(width: usize) {
 }
 
 fn main() {
-    println!("Nested-context spike — claims:");
+    println!("Teardown-scope spike — claims:");
     claim_1_group_disposes_on_drop();
     claim_2_handles_stay_copy();
     claim_3_cross_group_reads_work();
