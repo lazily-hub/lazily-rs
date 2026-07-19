@@ -57,11 +57,13 @@ type StateWriteGuard<'a> = parking_lot::RwLockWriteGuard<'a, ThreadSafeState>;
 use std::time::Instant;
 
 use crate::cell::CellHandle;
+use crate::context::GraphNode;
 use crate::context::SlotId;
 use crate::effect::EffectHandle;
 #[cfg(feature = "instrumentation")]
 use crate::instrumentation::ThreadSafeLockSite;
 use crate::slot::SlotHandle;
+use std::marker::PhantomData;
 
 type ThreadSafeAny = dyn Any + Send + Sync;
 type ThreadSafeComputeFn = dyn Fn(&ThreadSafeContext) -> Box<ThreadSafeAny> + Send + Sync;
@@ -280,12 +282,15 @@ impl HybridSet {
         }
     }
 
-    #[cfg(test)]
     fn len(&self) -> usize {
         match self {
             Self::Small(vec) => vec.len(),
             Self::Large(set) => set.len(),
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     fn to_vec(&self) -> Vec<SlotId> {
@@ -1377,6 +1382,18 @@ impl ThreadSafeInvalidationPlan {
         }
     }
 
+    /// Drop every effect this plan would have scheduled, keeping the slot
+    /// marks and clears.
+    ///
+    /// Disposal needs the dependent cone dirtied but must not *run* anything:
+    /// an effect scheduled here would re-enter a compute that reads the node
+    /// currently being torn down. See
+    /// [`ThreadSafeContext::invalidate_disposed_dependents_locked`].
+    fn without_effect_schedules(mut self) -> Self {
+        self.effect_schedules = HybridMap::default();
+        self
+    }
+
     fn add_slot_mark(&mut self, id: SlotId, force_recompute: bool) {
         if let Some(force) = self.slot_marks.get_mut(id) {
             if force_recompute {
@@ -1694,6 +1711,97 @@ impl<T> Copy for ThreadSafeSignalHandle<T> {}
 /// `Send + Sync + 'static` values and callbacks. The graph lock is released
 /// before user compute/effect/cleanup callbacks run, so callbacks may re-enter
 /// the same context without deadlocking.
+/// A teardown scope over a [`ThreadSafeContext`]: nodes created through it are
+/// disposed when it drops.
+///
+/// Holds an **owned** context handle rather than a borrow. `ThreadSafeContext`
+/// is already a cheap cloneable `Arc` handle over shared state, so owning one
+/// costs a single refcount bump and makes the scope `Send` and `'static`-able —
+/// which is what a per-connection scope on a worker thread needs. `Context`
+/// owns its state directly and so its scope must borrow; the two shapes differ
+/// because the ownership models differ, not by oversight.
+///
+/// Records only ids and reads each node's kind from the graph at teardown.
+pub struct ThreadSafeTeardownScope {
+    ctx: ThreadSafeContext,
+    owned: Mutex<Vec<SlotId>>,
+}
+
+impl ThreadSafeTeardownScope {
+    fn track<H>(&self, handle: H, id: SlotId) -> H {
+        self.owned.lock().push(id);
+        handle
+    }
+
+    /// Create a lazily-computed slot owned by this scope.
+    pub fn computed<T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        T: Send + Sync + 'static,
+        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
+    {
+        let handle = self.ctx.computed(compute);
+        self.track(handle, handle.id)
+    }
+
+    /// Create a memoized slot owned by this scope.
+    pub fn memo<T, F>(&self, compute: F) -> SlotHandle<T>
+    where
+        T: PartialEq + Send + Sync + 'static,
+        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
+    {
+        let handle = self.ctx.memo(compute);
+        self.track(handle, handle.id)
+    }
+
+    /// Create a source cell owned by this scope.
+    pub fn cell<T: PartialEq + Send + Sync + 'static>(&self, value: T) -> CellHandle<T> {
+        let handle = self.ctx.cell(value);
+        self.track(handle, handle.id)
+    }
+
+    /// Register an effect owned by this scope.
+    pub fn effect<F, R>(&self, run: F) -> EffectHandle
+    where
+        F: Fn(&ThreadSafeContext) -> R + Send + Sync + 'static,
+        R: ThreadSafeEffectCallbackResult + 'static,
+    {
+        let handle = self.ctx.effect(run);
+        self.track(handle, handle.id)
+    }
+
+    /// The context this scope belongs to.
+    pub fn context(&self) -> &ThreadSafeContext {
+        &self.ctx
+    }
+
+    /// How many nodes this scope owns.
+    pub fn len(&self) -> usize {
+        self.owned.lock().len()
+    }
+
+    /// Whether this scope owns nothing.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Disarm the scope: ending it afterwards disposes nothing, and its nodes
+    /// revert to plain context ownership. The nodes themselves are untouched.
+    pub fn disarm(self) {
+        self.owned.lock().clear();
+    }
+}
+
+impl Drop for ThreadSafeTeardownScope {
+    fn drop(&mut self) {
+        // Reverse creation order: dependents before what they read, so a scope
+        // never transiently dangles inside itself.
+        let owned = std::mem::take(&mut *self.owned.lock());
+        for id in owned.into_iter().rev() {
+            self.ctx.dispose_id(id);
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ThreadSafeContext {
     inner: Arc<ThreadSafeInner>,
@@ -2880,6 +2988,199 @@ impl ThreadSafeContext {
         }
     }
 
+    /// How many nodes currently depend on `node` — the size of its reverse edge
+    /// set (`#lzspecedgeindex`).
+    ///
+    /// [`Context::dependent_count`](crate::Context::dependent_count) for the
+    /// shared graph. Takes a read lock only.
+    pub fn dependent_count(&self, node: &impl GraphNode) -> usize {
+        let state = self.read_state();
+        match state.get_node(node.node_id()) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.len(),
+            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.len(),
+            // Effects are pure sinks: nothing can read one.
+            Some(ThreadSafeNode::Effect(_)) | None => 0,
+        }
+    }
+
+    /// How many nodes `node` currently depends on — the size of its forward
+    /// edge set (`#lzspecedgeindex`).
+    pub fn dependency_count(&self, node: &impl GraphNode) -> usize {
+        let state = self.read_state();
+        match state.get_node(node.node_id()) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependencies.len(),
+            Some(ThreadSafeNode::Effect(effect)) => effect.dependencies.len(),
+            // Cells are pure sources.
+            Some(ThreadSafeNode::Cell(_)) | None => 0,
+        }
+    }
+
+    /// Dirty the cone that read a node being disposed (`#lzspecedgeindex`).
+    ///
+    /// Mirrors [`Context`](crate::Context)'s disposal invalidation: detaching
+    /// the edges is not enough, because a dependent holding a cached value would
+    /// keep serving it forever once its dependency edge is gone. Effects reached
+    /// by the walk are deliberately not scheduled — disposal is not a publish,
+    /// and running one here would re-enter a compute that reads the node being
+    /// torn down.
+    fn invalidate_disposed_dependents_locked(state: &mut ThreadSafeState, dependents: &HybridSet) {
+        if dependents.is_empty() {
+            return;
+        }
+        let roots: Vec<ThreadSafeInvalidationRoot> = dependents
+            .iter()
+            .map(|id| ThreadSafeInvalidationRoot {
+                id,
+                force_recompute: true,
+            })
+            .collect();
+        ThreadSafeInvalidationPlan::from_roots_locked(state, roots)
+            .without_effect_schedules()
+            .apply_locked(state);
+    }
+
+    /// Tear down a derived slot on the shared graph: detach both edge
+    /// directions, dirty the surviving readers, drop the lock-free fast path,
+    /// and recycle the id.
+    ///
+    /// # Concurrency
+    ///
+    /// **Disposal is atomic with respect to any single read.** A concurrent
+    /// reader either acquires state before this call and returns a value
+    /// computed from a live node, or acquires it after and finds the node gone.
+    /// There is no window in which a reader observes a half-detached node,
+    /// because edge detach, invalidation, node removal, fast-path clearing, and
+    /// id recycling all happen while this call holds both locks.
+    ///
+    /// The registry write lock is taken **before** the state lock, matching the
+    /// order slot creation already uses. Taking them the other way round would
+    /// invert that order and can deadlock.
+    ///
+    /// Clearing the fast-path registry entry is load-bearing, not tidy-up: the
+    /// registry is an index-keyed side table, so a stale entry would alias onto
+    /// whatever node next claims the recycled id — exactly the owner-keyed
+    /// aliasing `recycled_id_inherits_nothing.json` pins.
+    ///
+    /// Same caveat as [`Context::dispose_slot`](crate::Context::dispose_slot):
+    /// callers must ensure nothing still reads the slot in a live compute.
+    pub fn dispose_slot<T>(&self, handle: &SlotHandle<T>) {
+        let torn_down = {
+            let mut registry = self.inner.slot_fast_paths.write();
+            let mut state = self.lock_state();
+            // Check the kind BEFORE removing: a stale handle whose id has been
+            // recycled must not tear down whatever now owns it.
+            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Slot(_))) {
+                return;
+            }
+            let Some(ThreadSafeNode::Slot(slot)) = state.remove_node(handle.id) else {
+                return;
+            };
+            for dependency_id in slot.dependencies.iter() {
+                Self::remove_dependent_edge_locked(&mut state, dependency_id, handle.id);
+            }
+            for dependent_id in slot.dependents.iter() {
+                Self::remove_parent_dependency_locked(&mut state, dependent_id, handle.id);
+            }
+            Self::invalidate_disposed_dependents_locked(&mut state, &slot.dependents);
+            if let Some(idx) = node_index(handle.id)
+                && idx < registry.len()
+            {
+                registry[idx] = None;
+            }
+            state.free_ids.push(handle.id.0);
+            slot
+        };
+        // Drop outside both locks: the node owns its compute closure and
+        // everything that closure captured, whose Drop may re-enter the context.
+        drop(torn_down);
+    }
+
+    /// Tear down a source cell on the shared graph: detach its dependents,
+    /// dirty them, drop the lock-free fast path, and recycle the id.
+    ///
+    /// Cells are pure sources with no dependencies, so only downstream edges
+    /// need detaching. Same concurrency guarantee and same lock order as
+    /// [`Self::dispose_slot`], against the cell registry.
+    pub fn dispose_cell<T>(&self, handle: &CellHandle<T>) {
+        let torn_down = {
+            let mut registry = self.inner.cell_fast_paths.write();
+            let mut state = self.lock_state();
+            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Cell(_))) {
+                return;
+            }
+            let Some(ThreadSafeNode::Cell(cell)) = state.remove_node(handle.id) else {
+                return;
+            };
+            for dependent_id in cell.dependents.iter() {
+                Self::remove_parent_dependency_locked(&mut state, dependent_id, handle.id);
+            }
+            Self::invalidate_disposed_dependents_locked(&mut state, &cell.dependents);
+            if let Some(idx) = node_index(handle.id)
+                && idx < registry.len()
+            {
+                registry[idx] = None;
+            }
+            state.free_ids.push(handle.id.0);
+            cell
+        };
+        drop(torn_down);
+    }
+
+    /// Open a teardown scope: nodes created through it are disposed when it
+    /// drops.
+    ///
+    /// ```
+    /// # use lazily::ThreadSafeContext;
+    /// let ctx = ThreadSafeContext::new();
+    /// let topic = ctx.cell(0u64);
+    /// {
+    ///     let conn = ctx.scope();
+    ///     let a = conn.computed(move |c| c.get_cell(&topic) + 1);
+    ///     assert_eq!(ctx.get(&a), 1);
+    /// } // disposed here
+    /// ```
+    ///
+    /// Unlike [`Context::scope`](crate::Context::scope), which borrows its
+    /// context, this holds an **owned** clone of the context handle. That is not
+    /// arbitrary divergence — it follows from the ownership model. `Context`
+    /// owns its state directly (`RefCell<ContextInner>`), so a borrow is the
+    /// only option there; `ThreadSafeContext` is *already* a cheap cloneable
+    /// `Arc` handle over shared state, so an owned scope costs one refcount bump
+    /// and buys a `'static`, `Send` scope. That is what the motivating case — a
+    /// per-connection scope living on a worker thread — actually needs. Please
+    /// do not "unify" the three scope types; each fits its context.
+    pub fn scope(&self) -> ThreadSafeTeardownScope {
+        ThreadSafeTeardownScope {
+            ctx: self.clone(),
+            owned: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Tear down whatever node `id` names, dispatching on its own kind.
+    fn dispose_id(&self, id: SlotId) {
+        let kind = match self.read_state().get_node(id) {
+            Some(ThreadSafeNode::Slot(_)) => 0u8,
+            Some(ThreadSafeNode::Cell(_)) => 1,
+            Some(ThreadSafeNode::Effect(_)) => 2,
+            None => return,
+        };
+        let marker = PhantomData;
+        match kind {
+            0 => self.dispose_slot(&SlotHandle::<()> {
+                id,
+                _marker: marker,
+            }),
+            1 => self.dispose_cell(&CellHandle::<()> {
+                id,
+                _marker: marker,
+            }),
+            _ => self.dispose_effect(&EffectHandle {
+                id,
+                _marker: marker,
+            }),
+        }
+    }
+
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
         let state = self.read_state();
@@ -3274,6 +3575,118 @@ impl ThreadSafeContext {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // -- #lzspecedgeindex disposal ----------------------------------------
+
+    #[test]
+    fn dispose_slot_detaches_both_directions_and_invalidates_readers() {
+        let ctx = ThreadSafeContext::new();
+        let src = ctx.cell(4i64);
+        let derived = ctx.computed(move |c| c.get_cell(&src));
+        let reader = ctx.computed(move |c| c.get(&derived) + 1);
+        assert_eq!(ctx.get(&reader), 5);
+        assert_eq!(ctx.dependent_count(&src), 1);
+        assert_eq!(ctx.dependency_count(&reader), 1);
+
+        ctx.dispose_slot(&derived);
+        // Both directions detached.
+        assert_eq!(ctx.dependent_count(&src), 0);
+        assert_eq!(ctx.dependency_count(&derived), 0);
+        // And the surviving reader must not serve its pre-disposal cache.
+        let after = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.get(&reader)));
+        assert!(
+            after.is_err(),
+            "reader must not serve its pre-disposal cache"
+        );
+    }
+
+    #[test]
+    fn dispose_clears_the_fast_path_registry_so_a_recycled_id_inherits_nothing() {
+        // The registry is an index-keyed side table; a stale entry would alias
+        // onto whatever next claims the recycled id.
+        let ctx = ThreadSafeContext::new();
+        let topic = ctx.cell(1i64);
+        let wide = ctx.computed(move |c| c.get_cell(&topic));
+        assert_eq!(ctx.get(&wide), 1);
+        let wide_idx = node_index(wide.id).unwrap();
+        assert!(ctx.inner.slot_fast_paths.read()[wide_idx].is_some());
+
+        ctx.dispose_slot(&wide);
+        assert!(
+            ctx.inner
+                .slot_fast_paths
+                .read()
+                .get(wide_idx)
+                .and_then(|o| o.as_ref())
+                .is_none(),
+            "disposal must drop the fast-path registry entry"
+        );
+
+        // A node minted after the disposal starts with an empty edge set.
+        let reused = ctx.computed(|_| 7i64);
+        assert_eq!(ctx.dependent_count(&reused), 0);
+        assert_eq!(ctx.dependency_count(&reused), 0);
+        assert_eq!(ctx.get(&reused), 7);
+    }
+
+    #[test]
+    fn dispose_cell_detaches_dependents_and_is_kind_checked() {
+        let ctx = ThreadSafeContext::new();
+        let topic = ctx.cell(1i64);
+        let reader = ctx.computed(move |c| c.get_cell(&topic) + 1);
+        assert_eq!(ctx.get(&reader), 2);
+        assert_eq!(ctx.dependent_count(&topic), 1);
+
+        ctx.dispose_cell(&topic);
+        assert_eq!(ctx.dependency_count(&reader), 0);
+        // Disposing twice is a no-op, not an error.
+        ctx.dispose_cell(&topic);
+        // A stale *slot* handle over the recycled id must not tear down a cell.
+        let stale = SlotHandle::<i64> {
+            id: topic.id,
+            _marker: PhantomData,
+        };
+        ctx.dispose_slot(&stale);
+    }
+
+    #[test]
+    fn teardown_scope_disposes_in_reverse_creation_order_and_disarm_cancels() {
+        let ctx = ThreadSafeContext::new();
+        let topic = ctx.cell(1i64);
+        {
+            let scope = ctx.scope();
+            let a = scope.computed(move |c| c.get_cell(&topic) + 1);
+            let _b = scope.computed(move |c| c.get(&a) + 1);
+            assert_eq!(scope.len(), 2);
+            assert_eq!(ctx.get(&a), 2);
+            assert_eq!(ctx.dependent_count(&topic), 1);
+        }
+        assert_eq!(ctx.dependent_count(&topic), 0);
+
+        // Disarmed: ending the scope disposes nothing.
+        let kept = {
+            let scope = ctx.scope();
+            let a = scope.computed(move |c| c.get_cell(&topic) + 5);
+            assert_eq!(ctx.get(&a), 6);
+            scope.disarm();
+            a
+        };
+        assert_eq!(ctx.get(&kept), 6);
+        assert_eq!(ctx.dependent_count(&topic), 1);
+    }
+
+    #[test]
+    fn teardown_scope_is_send_and_owns_its_context() {
+        // The owned-handle design exists so a scope can move to another thread;
+        // a borrow-based scope could not.
+        let ctx = ThreadSafeContext::new();
+        let topic = ctx.cell(1i64);
+        let scope = ctx.scope();
+        let a = scope.computed(move |c| c.get_cell(&topic) + 1);
+        assert_eq!(ctx.get(&a), 2);
+        std::thread::spawn(move || drop(scope)).join().unwrap();
+        assert_eq!(ctx.dependent_count(&topic), 0);
+    }
 
     #[test]
     fn read_strategy_defaults_to_low_concurrency() {

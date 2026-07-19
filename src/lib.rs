@@ -312,6 +312,7 @@ pub use text_crdt::{OpId, TextCrdt, TextOp, TextVersionVector, parse_blocks};
 #[cfg(feature = "thread-safe")]
 pub use thread_safe::{
     ReadStrategy, ThreadSafeContext, ThreadSafeEffectCallbackResult, ThreadSafeSignalHandle,
+    ThreadSafeTeardownScope,
 };
 #[cfg(feature = "thread-safe")]
 pub use thread_safe_reactive_family::{
