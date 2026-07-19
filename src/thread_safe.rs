@@ -1478,6 +1478,21 @@ impl ThreadSafeState {
         }
     }
 
+    /// Pop the next effect that is still actually scheduled, discarding
+    /// tombstones left behind by `dispose_effect`. Mirrors
+    /// `Context::pop_scheduled_effect`; see that doc comment for why an entry
+    /// whose flag is clear is safe to drop even across id recycling.
+    fn pop_scheduled_effect(&mut self) -> Option<SlotId> {
+        while let Some(id) = self.pending_effects.pop_front() {
+            let idx = node_index(id).expect("SlotId does not fit usize");
+            if idx < self.scheduled_effects.len() && self.scheduled_effects[idx] {
+                self.scheduled_effects[idx] = false;
+                return Some(id);
+            }
+        }
+        None
+    }
+
     #[cfg(test)]
     fn is_effect_scheduled(&self, id: SlotId) -> bool {
         let idx = node_index(id).expect("SlotId does not fit usize");
@@ -2841,8 +2856,15 @@ impl ThreadSafeContext {
     pub fn dispose_effect(&self, handle: &EffectHandle) {
         let (dependencies, cleanup) = {
             let mut state = self.lock_state();
-            state.deschedule_effect(handle.id);
+            // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
+            // a tombstone rather than scanning `pending_effects` for it. Mass
+            // teardown during a flush disposes W effects while the queue still
+            // holds W of them, making the scan O(W^2) overall.
+            // `pop_scheduled_effect` discards the tombstone, which is what
+            // keeps a recycled id from triggering a spurious run.
+            #[cfg(naive_dispose_scan)]
             state.pending_effects.retain(|queued| *queued != handle.id);
+            state.deschedule_effect(handle.id);
             let Some(ThreadSafeNode::Effect(effect)) = state.remove_node(handle.id) else {
                 return;
             };
@@ -2986,8 +3008,7 @@ impl ThreadSafeContext {
         loop {
             let id = {
                 let mut state = self.lock_state();
-                if let Some(id) = state.pending_effects.pop_front() {
-                    state.deschedule_effect(id);
+                if let Some(id) = state.pop_scheduled_effect() {
                     Some(id)
                 } else {
                     state.flushing_effects = false;

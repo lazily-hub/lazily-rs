@@ -1355,10 +1355,18 @@ impl Context {
     pub fn dispose_effect(&self, handle: &EffectHandle) {
         let torn_down = {
             let mut inner = self.inner.borrow_mut();
-            // Deschedule and drain any pending flush entry BEFORE recycling the
-            // id, mirroring ThreadSafeContext::dispose_effect. A stale
-            // pending_effects entry can alias a recycled id (free_ids is LIFO)
-            // and trigger a spurious run of a freshly allocated node.
+            // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
+            // a tombstone rather than scanning `pending_effects` for it. A mass
+            // teardown during a flush disposes W effects while the queue still
+            // holds W of them, so the scan was O(W) per disposal — 11491
+            // ns/effect at width 65536 against 34.2 at width 16, on identical
+            // total work. `pop_scheduled_effect` discards the tombstone, which
+            // is what keeps a recycled id from triggering a spurious run.
+            #[cfg(audit_probe)]
+            crate::context::audit_probe::record_dispose_queue_len(inner.pending_effects.len());
+            // Audit control: `--cfg naive_dispose_scan` restores the eager
+            // O(queue) scan, so the tombstone win can be measured as a delta.
+            #[cfg(naive_dispose_scan)]
             inner.pending_effects.retain(|queued| *queued != handle.id);
             Self::deschedule_effect(&mut inner, handle.id);
             let Some(Node::Effect(effect)) = Self::take_node(&mut inner.nodes, handle.id) else {
@@ -1576,6 +1584,34 @@ impl Context {
         }
     }
 
+    /// Pop the next effect that is still actually scheduled, discarding
+    /// tombstones.
+    ///
+    /// #lzspecedgeindex: `dispose_effect` cannot afford to scan the queue for
+    /// the id it is removing — during a mass teardown the queue holds every
+    /// sibling, so that scan is O(W) per disposal and O(W^2) overall. Instead
+    /// disposal clears the scheduled flag in O(1) and leaves the queue entry
+    /// behind as a tombstone, and this claims entries lazily: an entry whose
+    /// flag is clear was disposed (or already run) since it was pushed, so it
+    /// is dropped without running.
+    ///
+    /// This is what makes a stale entry safe against id recycling, which is the
+    /// hazard the old eager scan existed to prevent. If the id is recycled and
+    /// the new node scheduled, `schedule_effect` sets the flag and pushes
+    /// again; the tombstone then claims the flag and runs the new effect once,
+    /// and the second entry finds the flag clear and is discarded. Exactly one
+    /// run either way.
+    fn pop_scheduled_effect(inner: &mut ContextInner) -> Option<SlotId> {
+        while let Some(id) = inner.pending_effects.pop_front() {
+            let idx = Self::node_index(id).expect("SlotId does not fit usize");
+            if idx < inner.scheduled_effects.len() && inner.scheduled_effects[idx] {
+                inner.scheduled_effects[idx] = false;
+                return Some(id);
+            }
+        }
+        None
+    }
+
     pub(crate) fn flush_effects(&self) {
         {
             let mut inner = self.inner.borrow_mut();
@@ -1588,11 +1624,8 @@ impl Context {
         loop {
             let id = {
                 let mut inner = self.inner.borrow_mut();
-                match inner.pending_effects.pop_front() {
-                    Some(id) => {
-                        Self::deschedule_effect(&mut inner, id);
-                        id
-                    }
+                match Self::pop_scheduled_effect(&mut inner) {
+                    Some(id) => id,
                     None => {
                         inner.flushing_effects = false;
                         return;
@@ -2636,11 +2669,12 @@ mod tests {
     }
 
     #[test]
-    fn dispose_effect_drains_pending_effects_queue() {
-        // A disposed effect must not leave a stale entry in `pending_effects`.
-        // Such an entry can alias a recycled id (free_ids is LIFO) and trigger
-        // a spurious run of a freshly allocated node during a later flush.
-        // Mirrors ThreadSafeContext::dispose_effect (thread_safe.rs:2577-2578).
+    fn dispose_effect_deschedules_without_scanning_the_queue() {
+        // #lzspecedgeindex: dispose no longer drains the queue eagerly — that
+        // scan was O(queue) per disposal, and a mass teardown during a flush
+        // made it O(W^2). It clears the scheduled flag instead and leaves a
+        // tombstone, which `pop_scheduled_effect` discards. What must hold is
+        // the *flag*, not the queue entry.
         let ctx = Context::new();
         let cell = ctx.cell(0i32);
         let effect = ctx.effect(move |ctx| {
@@ -2660,11 +2694,60 @@ mod tests {
 
         let inner = ctx.inner.borrow();
         assert!(
-            !inner.pending_effects.contains(&effect.id),
-            "dispose must drain the pending_effects queue"
+            !ctx.is_effect_scheduled(effect.id),
+            "dispose must clear the scheduled flag"
         );
-        assert!(!ctx.is_effect_scheduled(effect.id));
         assert_eq!(inner.free_ids.as_slice(), &[effect.id.0]);
+    }
+
+    /// #lzspecedgeindex: the hazard the old eager queue scan existed to
+    /// prevent. Disposal leaves a tombstone and frees the id; `free_ids` is
+    /// LIFO, so the very next node allocated reuses it and now aliases that
+    /// tombstone. The recycled node must still run exactly once — never twice
+    /// (tombstone plus its own entry) and never zero times.
+    #[test]
+    fn a_tombstone_does_not_disturb_a_recycled_id() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let ctx = Context::new();
+        let cell = ctx.cell(0i32);
+
+        let doomed = ctx.effect(move |ctx| {
+            let _ = ctx.get_cell(&cell);
+        });
+        // Queue it, then dispose it: entry stays behind, id goes on free_ids.
+        ctx.schedule_effect(doomed.id, true);
+        doomed.dispose(&ctx);
+
+        // The next effect recycles that exact id, aliasing the tombstone.
+        let run_count = Rc::new(RefCell::new(0usize));
+        let recycled = {
+            let run_count = Rc::clone(&run_count);
+            ctx.effect(move |ctx| {
+                let _ = ctx.get_cell(&cell);
+                *run_count.borrow_mut() += 1;
+            })
+        };
+        assert_eq!(recycled.id, doomed.id, "id must actually be recycled");
+        assert_eq!(*run_count.borrow(), 1, "creation runs it once");
+
+        // A publish must run it exactly once despite the aliased tombstone.
+        ctx.set_cell(&cell, 1);
+        assert_eq!(
+            *run_count.borrow(),
+            2,
+            "recycled effect must run exactly once per publish"
+        );
+
+        // And the tombstone must not resurrect it after a real disposal.
+        recycled.dispose(&ctx);
+        ctx.set_cell(&cell, 2);
+        assert_eq!(
+            *run_count.borrow(),
+            2,
+            "a disposed effect must never run again"
+        );
     }
 
     // -- Cycle detection (#lzcycledetect) ----------------------------------
@@ -2768,5 +2851,35 @@ mod tests {
         });
         // After the batch flush, the dependent sees the latest coalesced values.
         assert_eq!(ctx.get(&total), 13);
+    }
+}
+
+#[cfg(audit_probe)]
+pub mod audit_probe {
+    use std::cell::Cell as StdCell;
+
+    thread_local! {
+        static MAX_LEN: StdCell<usize> = const { StdCell::new(0) };
+        static TOTAL_LEN: StdCell<u64> = const { StdCell::new(0) };
+        static CALLS: StdCell<u64> = const { StdCell::new(0) };
+    }
+
+    pub(crate) fn record_dispose_queue_len(len: usize) {
+        MAX_LEN.with(|m| m.set(m.get().max(len)));
+        TOTAL_LEN.with(|t| t.set(t.get() + len as u64));
+        CALLS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// (max queue len seen, mean queue len, dispose_effect calls)
+    pub fn take() -> (usize, f64, u64) {
+        let max = MAX_LEN.with(|m| m.replace(0));
+        let total = TOTAL_LEN.with(|t| t.replace(0));
+        let calls = CALLS.with(|c| c.replace(0));
+        let mean = if calls == 0 {
+            0.0
+        } else {
+            total as f64 / calls as f64
+        };
+        (max, mean, calls)
     }
 }

@@ -64,6 +64,13 @@ mod cell_tree;
 #[cfg(feature = "ipc")]
 mod command;
 mod context;
+/// #lzspecedgeindex audit probe (`--cfg audit_probe`): records the
+/// `pending_effects` depth seen by `dispose_effect`, so the audit harness can
+/// prove it actually exercises the dispose-during-flush path. An earlier
+/// harness reported a flat cost column while disposing against an *empty*
+/// queue; this exists so that false negative cannot recur silently.
+#[cfg(audit_probe)]
+pub use context::audit_probe;
 mod coordination;
 #[cfg(feature = "distributed")]
 mod crdt;

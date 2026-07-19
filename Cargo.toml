@@ -204,4 +204,13 @@ harness = false
 # harness can demonstrate that a flat teardown column reflects a real O(1)
 # removal rather than a harness that never exercises the path. Declared here so
 # the control is a supported build mode, not an unexpected cfg.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(naive_edge_remove)'] }
+# `naive_dispose_scan` restores the eager O(queue) `pending_effects` scan in
+# `dispose_effect`, and `audit_probe` records the queue depth that scan would
+# have walked — together they let the harness prove it exercises the
+# dispose-during-flush path rather than reporting a flat column while disposing
+# against an empty queue.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(naive_edge_remove)',
+    'cfg(naive_dispose_scan)',
+    'cfg(audit_probe)',
+] }

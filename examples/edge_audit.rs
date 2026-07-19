@@ -86,6 +86,72 @@ fn teardown_shape_rung(width: usize) -> f64 {
     elapsed / subscriber_a.len() as f64
 }
 
+/// Teardown-during-flush shape control: dispose many effects while the pending
+/// queue is *non-empty*.
+///
+/// `dispose_effect` scans `pending_effects` to drop the disposed id. With an
+/// empty queue that scan is free (`Vec::retain` walks `len`, not capacity), so
+/// disposing after a flush settles measures nothing. The shape that bites is
+/// mass teardown *during* a flush, which is what a teardown scope does.
+///
+/// Per topic: a disposer effect is created FIRST, so it is queued first and
+/// pops first, while the queue still holds all `width - 1` victims behind it.
+/// Its body then disposes every victim against that full queue.
+///
+/// Total disposals are held fixed at ~`TOTAL_NODES`; only fan-out width varies.
+fn dispose_during_flush_rung(width: usize) -> f64 {
+    use std::cell::{Cell as StdCell, RefCell};
+    use std::rc::Rc;
+
+    let topics = (TOTAL_NODES / width).max(1);
+    let ctx = Context::new();
+
+    let mut topic_a = Vec::with_capacity(topics);
+    for _ in 0..topics {
+        let topic = ctx.cell(0u64);
+        let all_a: Rc<RefCell<Vec<lazily::EffectHandle>>> = Rc::new(RefCell::new(Vec::new()));
+        let armed = Rc::new(StdCell::new(false));
+        let done = Rc::new(StdCell::new(false));
+
+        // Creation order does NOT determine flush order — the dependents list
+        // is swap-removed and reordered, so a "disposer created first" does not
+        // reliably pop first (an earlier version of this harness measured a
+        // queue depth of 0 at every rung for exactly that reason). Instead
+        // EVERY effect is a disposer, and whichever one the flush happens to
+        // pop first tears down all the others. That one runs with the full
+        // remaining queue behind it, which is the shape under test.
+        for i in 0..width {
+            let all_inner = Rc::clone(&all_a);
+            let armed_inner = Rc::clone(&armed);
+            let done_inner = Rc::clone(&done);
+            let handle = ctx.effect(move |ctx| {
+                std::hint::black_box(ctx.get_cell(&topic));
+                if armed_inner.get() && !done_inner.get() {
+                    done_inner.set(true);
+                    let victim_a: Vec<_> = all_inner.borrow().clone();
+                    for (j, victim) in victim_a.iter().enumerate() {
+                        if j != i {
+                            ctx.dispose_effect(victim);
+                        }
+                    }
+                }
+            });
+            all_a.borrow_mut().push(handle);
+        }
+        armed.set(true);
+        topic_a.push(topic);
+    }
+
+    let disposals = topics * width.saturating_sub(1).max(1);
+    let start = Instant::now();
+    for (revision, topic) in topic_a.iter().enumerate() {
+        ctx.set_cell(topic, revision as u64 + 1);
+    }
+    let elapsed = start.elapsed().as_nanos() as f64;
+
+    elapsed / disposals as f64
+}
+
 #[cfg(feature = "thread-safe")]
 mod thread_safe_audit {
     use super::{TOTAL_NODES, WIDTHS};
@@ -115,6 +181,56 @@ mod thread_safe_audit {
         elapsed / (topics * width) as f64
     }
 
+    /// Mirror of `dispose_during_flush_rung` over `ThreadSafeContext`, whose
+    /// `dispose_effect` carried the same unguarded queue scan behind the
+    /// non-default `thread-safe` feature.
+    fn dispose_during_flush_rung(width: usize) -> f64 {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let topics = (TOTAL_NODES / width).max(1);
+        let ctx = ThreadSafeContext::new();
+
+        let mut topic_a = Vec::with_capacity(topics);
+        for _ in 0..topics {
+            let topic = ctx.cell_copy(0u64);
+            let all_a: Arc<Mutex<Vec<lazily::EffectHandle>>> = Arc::new(Mutex::new(Vec::new()));
+            let armed = Arc::new(AtomicBool::new(false));
+            let done = Arc::new(AtomicBool::new(false));
+
+            for i in 0..width {
+                let all_inner = Arc::clone(&all_a);
+                let armed_inner = Arc::clone(&armed);
+                let done_inner = Arc::clone(&done);
+                let handle = ctx.effect(move |ctx| {
+                    std::hint::black_box(ctx.get_cell(&topic));
+                    if armed_inner.load(Ordering::Relaxed)
+                        && !done_inner.swap(true, Ordering::Relaxed)
+                    {
+                        let victim_a: Vec<_> = all_inner.lock().unwrap().clone();
+                        for (j, victim) in victim_a.iter().enumerate() {
+                            if j != i {
+                                ctx.dispose_effect(victim);
+                            }
+                        }
+                    }
+                });
+                all_a.lock().unwrap().push(handle);
+            }
+            armed.store(true, Ordering::Relaxed);
+            topic_a.push(topic);
+        }
+
+        let disposals = topics * width.saturating_sub(1).max(1);
+        let start = Instant::now();
+        for (revision, topic) in topic_a.iter().enumerate() {
+            ctx.set_cell(topic, revision as u64 + 1);
+        }
+        let elapsed = start.elapsed().as_nanos() as f64;
+
+        elapsed / disposals as f64
+    }
+
     pub fn run() {
         println!("ThreadSafeContext effect fan-out shape control");
         println!("(total effects fixed at {TOTAL_NODES}; only fan-out width varies)\n");
@@ -122,6 +238,15 @@ mod thread_safe_audit {
         effect_shape_rung(64);
         for width in WIDTHS {
             let ns = effect_shape_rung(width);
+            println!("{:>10}{:>10}{:>22.1}", width, TOTAL_NODES / width, ns);
+        }
+
+        println!("\nThreadSafeContext dispose-during-flush shape control");
+        println!("(total disposals fixed at ~{TOTAL_NODES}; only fan-out width varies)\n");
+        println!("{:>10}{:>10}{:>22}", "width", "topics", "dispose ns/effect");
+        dispose_during_flush_rung(64);
+        for width in WIDTHS {
+            let ns = dispose_during_flush_rung(width);
             println!("{:>10}{:>10}{:>22.1}", width, TOTAL_NODES / width, ns);
         }
     }
@@ -149,6 +274,26 @@ fn main() {
     effect_shape_rung(64); // warm up
     for width in WIDTHS {
         let ns = effect_shape_rung(width);
+        println!("{:>10}{:>10}{:>22.1}", width, TOTAL_NODES / width, ns);
+    }
+
+    println!("\nContext dispose-during-flush shape control");
+    println!("(total disposals fixed at ~{TOTAL_NODES}; only fan-out width varies)\n");
+    println!("{:>10}{:>10}{:>22}", "width", "topics", "dispose ns/effect");
+    dispose_during_flush_rung(64); // warm up
+    for width in WIDTHS {
+        let ns = dispose_during_flush_rung(width);
+        #[cfg(audit_probe)]
+        {
+            let (max, mean, calls) = lazily::audit_probe::take();
+            println!(
+                "{:>10}{:>10}{:>22.1}   [queue max {max}, mean {mean:.0}, {calls} disposes]",
+                width,
+                TOTAL_NODES / width,
+                ns
+            );
+        }
+        #[cfg(not(audit_probe))]
         println!("{:>10}{:>10}{:>22.1}", width, TOTAL_NODES / width, ns);
     }
 
