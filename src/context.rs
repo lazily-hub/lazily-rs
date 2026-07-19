@@ -49,129 +49,96 @@ fn node_type_tag<T: 'static>() -> TypeTag {
     }
 }
 
-/// Degree at which an edge set stops scanning and builds a hash index.
+/// Degree at which an edge list stops scanning and gains a hash index.
 ///
-/// #lzspecedgeindex. Dedup is a linear scan while the set is small — measurably
-/// faster than hashing at low degree, which is the overwhelmingly common case —
-/// and promotes to a hash index above this threshold so a wide-fanout node stays
-/// amortized O(1) per registration instead of degrading to O(n^2) per
-/// propagation. An unconditional hash set regresses the common case; an
+/// #lzspecedgeindex. Dedup is a linear scan while a node's degree is small —
+/// measurably faster than hashing at low degree, which is the overwhelmingly
+/// common case — and gains a hash index above this threshold so a wide-fanout
+/// node stays amortized O(1) per registration instead of degrading to O(n^2)
+/// per propagation. An unconditional hash set regresses the common case; an
 /// unconditional scan regresses wide fanout.
+///
+/// The index is held in a side table on `Inner`, not on the node, so a node
+/// below the threshold carries no extra bytes at all. See `EdgeIndex`.
 const EDGE_INDEX_THRESHOLD: usize = 32;
 
-/// A deduplicated set of edges, ordered, with position-stable removal.
+/// `owner -> (edge -> position in owner's edge list)`, for promoted nodes only.
 ///
-/// Derefs to `[SlotId]`, so reads (`iter`, `is_empty`, slicing) are unchanged
-/// from the plain-vector representation it replaces.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct EdgeSet {
-    edges: EdgeVec,
-    /// `id -> position in edges`. `None` below the threshold.
-    ///
-    /// Boxed deliberately: an inline `HashMap` is 48 bytes, which every
-    /// low-degree node would pay for an index it never builds. Boxed, the
-    /// unpromoted cost is one null pointer.
-    #[allow(
-        clippy::box_collection,
-        reason = "keeps the unpromoted field at 8 bytes"
-    )]
-    index: Option<Box<HashMap<SlotId, usize>>>,
-}
+/// Absent for every node below the threshold, which is why an unpromoted node
+/// pays nothing: no field, no branch on the node itself, no allocation.
+///
+/// Entries MUST be dropped whenever the edge list they describe is cleared or
+/// its owner is removed — `SlotId`s are recycled (`free_ids` is LIFO), so a
+/// stale entry would silently alias a different node's edges.
+type EdgeIndex = HashMap<SlotId, HashMap<SlotId, usize>>;
 
-impl EdgeSet {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert `id` if absent. Returns whether the edge was added.
-    #[inline]
-    fn insert(&mut self, id: SlotId) -> bool {
-        if let Some(index) = self.index.as_mut() {
-            if index.contains_key(&id) {
-                return false;
-            }
-            index.insert(id, self.edges.len());
-            self.edges.push(id);
-            return true;
-        }
-        if self.edges.contains(&id) {
+/// Insert `id` into `edges` if absent. Returns whether an edge was added.
+fn edge_insert(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeIndex) -> bool {
+    // Invariant: an owner has an index entry exactly while its edge list is
+    // longer than the threshold. Gating on the length keeps a low-degree node
+    // off the hash path entirely — hashing an absent key costs more than the
+    // short scan it would replace.
+    if edges.len() > EDGE_INDEX_THRESHOLD {
+        let owner_index = index
+            .get_mut(&owner)
+            .expect("edge list over threshold implies an index entry");
+        if owner_index.contains_key(&id) {
             return false;
         }
-        self.edges.push(id);
-        if self.edges.len() > EDGE_INDEX_THRESHOLD {
-            self.index = Some(Box::new(
-                self.edges
-                    .iter()
-                    .enumerate()
-                    .map(|(pos, edge)| (*edge, pos))
-                    .collect(),
-            ));
+        owner_index.insert(id, edges.len());
+        edges.push(id);
+        return true;
+    }
+    if edges.contains(&id) {
+        return false;
+    }
+    edges.push(id);
+    if edges.len() > EDGE_INDEX_THRESHOLD {
+        // crossed the threshold on this push: build the index once
+        index.insert(
+            owner,
+            edges
+                .iter()
+                .enumerate()
+                .map(|(pos, edge)| (*edge, pos))
+                .collect(),
+        );
+    }
+    true
+}
+
+/// Remove `id` from `edges` if present. Returns whether an edge was removed.
+///
+/// Swap-removes, so edge order is not preserved — matching the previous
+/// behaviour, which callers already tolerate.
+fn edge_remove(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeIndex) -> bool {
+    if edges.len() > EDGE_INDEX_THRESHOLD {
+        let owner_index = index
+            .get_mut(&owner)
+            .expect("edge list over threshold implies an index entry");
+        let Some(pos) = owner_index.remove(&id) else {
+            return false;
+        };
+        let last = edges
+            .pop()
+            .expect("index non-empty implies edges non-empty");
+        if pos < edges.len() {
+            edges[pos] = last;
+            owner_index.insert(last, pos);
         }
+        // Demote back to scanning once the list is short again, restoring the
+        // invariant this function's fast path relies on.
+        if edges.len() <= EDGE_INDEX_THRESHOLD {
+            index.remove(&owner);
+        }
+        return true;
+    }
+    if let Some(pos) = edges.iter().position(|edge| *edge == id) {
+        edges.swap_remove(pos);
         true
+    } else {
+        false
     }
-
-    /// Remove `id` if present. Returns whether an edge was removed.
-    ///
-    /// Swap-removes, so edge order is not preserved — matching the previous
-    /// behaviour, which callers already tolerate.
-    #[inline]
-    fn remove(&mut self, id: SlotId) -> bool {
-        if let Some(index) = self.index.as_mut() {
-            let Some(pos) = index.remove(&id) else {
-                return false;
-            };
-            let last = self
-                .edges
-                .pop()
-                .expect("index non-empty implies edges non-empty");
-            if pos < self.edges.len() {
-                self.edges[pos] = last;
-                index.insert(last, pos);
-            }
-            return true;
-        }
-        if let Some(pos) = self.edges.iter().position(|edge| *edge == id) {
-            self.edges.swap_remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-}
-
-impl std::ops::Deref for EdgeSet {
-    type Target = [SlotId];
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.edges
-    }
-}
-
-impl IntoIterator for EdgeSet {
-    type Item = SlotId;
-    type IntoIter = <EdgeVec as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.edges.into_iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a EdgeSet {
-    type Item = &'a SlotId;
-    type IntoIter = std::slice::Iter<'a, SlotId>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.edges.iter()
-    }
-}
-
-fn edge_insert(edges: &mut EdgeSet, id: SlotId) -> bool {
-    edges.insert(id)
-}
-
-fn edge_remove(edges: &mut EdgeSet, id: SlotId) -> bool {
-    edges.remove(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -297,8 +264,8 @@ pub(crate) struct SlotNode {
     pub(crate) type_id: TypeTag,
     pub(crate) compute: Rc<ComputeFn>,
     pub(crate) equals: Option<Box<EqualsFn>>,
-    pub(crate) dependencies: EdgeSet,
-    pub(crate) dependents: EdgeSet,
+    pub(crate) dependencies: EdgeVec,
+    pub(crate) dependents: EdgeVec,
     pub(crate) dirty: bool,
     pub(crate) force_recompute: bool,
     /// True while this slot is actively refreshing/recomputing. Used to detect
@@ -314,14 +281,14 @@ pub(crate) struct SlotNode {
 pub(crate) struct CellNode {
     pub(crate) value: AnyValue,
     pub(crate) type_id: TypeTag,
-    pub(crate) dependents: EdgeSet,
+    pub(crate) dependents: EdgeVec,
 }
 
 pub(crate) struct EffectNode {
     /// The effect callback.
     pub(crate) run: Rc<EffectFn>,
     /// Slots/cells that this effect depends on. Populated during each run.
-    pub(crate) dependencies: EdgeSet,
+    pub(crate) dependencies: EdgeVec,
     /// Cleanup returned by the latest effect run, if any.
     pub(crate) cleanup: Option<Box<dyn FnOnce()>>,
     /// Whether this scheduled effect must run without dependency freshness checks.
@@ -359,6 +326,10 @@ struct ContextInner {
     nodes: Vec<Option<Node>>,
     next_id: u64,
     free_ids: Vec<u64>,
+    /// #lzspecedgeindex. Hash indexes for promoted (wide) edge lists only; see
+    /// `EdgeIndex`. Kept off the nodes so low-degree nodes cost nothing.
+    dependents_index: EdgeIndex,
+    dependencies_index: EdgeIndex,
     pending_effects: VecDeque<SlotId>,
     /// Effect-schedule membership bitset, indexed by node slot. Mirrors the
     /// thread-safe variant (thread_safe.rs): a `Vec<bool>` beats `HashSet` for
@@ -449,6 +420,8 @@ impl Context {
                 nodes: Vec::new(),
                 next_id: 0,
                 free_ids: Vec::new(),
+                dependents_index: EdgeIndex::new(),
+                dependencies_index: EdgeIndex::new(),
                 pending_effects: VecDeque::new(),
                 scheduled_effects: Vec::new(),
                 flushing_effects: false,
@@ -471,7 +444,19 @@ impl Context {
     pub(crate) fn alloc_id(&self) -> SlotId {
         let mut inner = self.inner.borrow_mut();
         let slot_id = match inner.free_ids.pop() {
-            Some(id) => SlotId(id),
+            Some(id) => {
+                let id = SlotId(id);
+                // Belt and braces against id recycling: a fresh node must never
+                // inherit an index entry. Disposal already clears these; this
+                // makes any future removal path safe by construction.
+                if !inner.dependents_index.is_empty() {
+                    inner.dependents_index.remove(&id);
+                }
+                if !inner.dependencies_index.is_empty() {
+                    inner.dependencies_index.remove(&id);
+                }
+                id
+            }
             None => {
                 let id = SlotId(inner.next_id);
                 inner.next_id += 1;
@@ -518,38 +503,53 @@ impl Context {
         #[cfg(feature = "instrumentation")]
         let mut edge_added = false;
         let mut inner = self.inner.borrow_mut();
-        if let Some(node) = Self::get_node_mut(&mut inner.nodes, dependency_id) {
+        // Disjoint field borrows: the node comes from `nodes`, the index from
+        // its own field, so both can be held at once.
+        let inner_mut = &mut *inner;
+        if let Some(node) = Self::get_node_mut(&mut inner_mut.nodes, dependency_id) {
+            let index = &mut inner_mut.dependents_index;
             match node {
                 Node::Slot(s) => {
-                    edge_insert(&mut s.dependents, dependent_id);
+                    edge_insert(&mut s.dependents, dependent_id, dependency_id, index);
                 }
                 Node::Cell(c) => {
-                    edge_insert(&mut c.dependents, dependent_id);
+                    edge_insert(&mut c.dependents, dependent_id, dependency_id, index);
                 }
                 Node::Effect(_) => {}
             }
         }
 
-        if let Some(node) = Self::get_node_mut(&mut inner.nodes, dependent_id) {
+        if let Some(node) = Self::get_node_mut(&mut inner_mut.nodes, dependent_id) {
+            let index = &mut inner_mut.dependencies_index;
             match node {
                 Node::Slot(parent) => {
                     #[cfg(feature = "instrumentation")]
                     {
-                        edge_added = edge_insert(&mut parent.dependencies, dependency_id);
+                        edge_added = edge_insert(
+                            &mut parent.dependencies,
+                            dependency_id,
+                            dependent_id,
+                            index,
+                        );
                     }
                     #[cfg(not(feature = "instrumentation"))]
                     {
-                        edge_insert(&mut parent.dependencies, dependency_id);
+                        edge_insert(&mut parent.dependencies, dependency_id, dependent_id, index);
                     }
                 }
                 Node::Effect(parent) => {
                     #[cfg(feature = "instrumentation")]
                     {
-                        edge_added = edge_insert(&mut parent.dependencies, dependency_id);
+                        edge_added = edge_insert(
+                            &mut parent.dependencies,
+                            dependency_id,
+                            dependent_id,
+                            index,
+                        );
                     }
                     #[cfg(not(feature = "instrumentation"))]
                     {
-                        edge_insert(&mut parent.dependencies, dependency_id);
+                        edge_insert(&mut parent.dependencies, dependency_id, dependent_id, index);
                     }
                 }
                 Node::Cell(_) => {}
@@ -576,26 +576,30 @@ impl Context {
         for dependency_id in old_deps {
             #[cfg(feature = "instrumentation")]
             let mut edge_removed = false;
-            if let Some(dep_node) = Self::get_node_mut(&mut inner.nodes, *dependency_id) {
+            let inner_mut = &mut *inner;
+            if let Some(dep_node) = Self::get_node_mut(&mut inner_mut.nodes, *dependency_id) {
+                let index = &mut inner_mut.dependents_index;
                 match dep_node {
                     Node::Slot(s) => {
                         #[cfg(feature = "instrumentation")]
                         {
-                            edge_removed = edge_remove(&mut s.dependents, dependent_id);
+                            edge_removed =
+                                edge_remove(&mut s.dependents, dependent_id, *dependency_id, index);
                         }
                         #[cfg(not(feature = "instrumentation"))]
                         {
-                            edge_remove(&mut s.dependents, dependent_id);
+                            edge_remove(&mut s.dependents, dependent_id, *dependency_id, index);
                         }
                     }
                     Node::Cell(c) => {
                         #[cfg(feature = "instrumentation")]
                         {
-                            edge_removed = edge_remove(&mut c.dependents, dependent_id);
+                            edge_removed =
+                                edge_remove(&mut c.dependents, dependent_id, *dependency_id, index);
                         }
                         #[cfg(not(feature = "instrumentation"))]
                         {
-                            edge_remove(&mut c.dependents, dependent_id);
+                            edge_remove(&mut c.dependents, dependent_id, *dependency_id, index);
                         }
                     }
                     Node::Effect(_) => {}
@@ -683,8 +687,8 @@ impl Context {
             type_id: node_type_tag::<T>(),
             compute: Rc::new(move |ctx| AnyValue::from_value(compute(ctx))),
             equals,
-            dependencies: EdgeSet::new(),
-            dependents: EdgeSet::new(),
+            dependencies: EdgeVec::new(),
+            dependents: EdgeVec::new(),
             dirty: false,
             force_recompute: false,
             in_progress: false,
@@ -890,6 +894,12 @@ impl Context {
             };
             old_deps = std::mem::take(&mut slot.dependencies);
             compute = Rc::clone(&slot.compute);
+            // The list this described is gone; its index must go with it.
+            // `is_empty` first: with no promoted node anywhere this is a
+            // pointer compare, where `remove` would hash on every recompute.
+            if !inner.dependencies_index.is_empty() {
+                inner.dependencies_index.remove(&id);
+            }
             Self::remove_dependent_edges_locked(&mut inner, id, &old_deps);
         }
 
@@ -967,7 +977,7 @@ impl Context {
         let node = CellNode {
             value: AnyValue::from_value(value),
             type_id: node_type_tag::<T>(),
-            dependents: EdgeSet::new(),
+            dependents: EdgeVec::new(),
         };
         self.insert_node(id, Node::Cell(node));
         CellHandle::new(id)
@@ -1202,7 +1212,7 @@ impl Context {
         let id = self.alloc_id();
         let node = EffectNode {
             run: Rc::new(move |ctx| run(ctx).into_cleanup()),
-            dependencies: EdgeSet::new(),
+            dependencies: EdgeVec::new(),
             cleanup: None,
             force_run: true,
         };
@@ -1228,6 +1238,14 @@ impl Context {
                 return;
             };
             Self::remove_dependent_edges_locked(&mut inner, handle.id, &effect.dependencies);
+            // The id is about to be recycled, so drop both index entries — a
+            // stale one would alias the next node allocated with this id.
+            if !inner.dependencies_index.is_empty() {
+                inner.dependencies_index.remove(&handle.id);
+            }
+            if !inner.dependents_index.is_empty() {
+                inner.dependents_index.remove(&handle.id);
+            }
             inner.free_ids.push(handle.id.0);
             effect.cleanup
         };
@@ -1372,6 +1390,9 @@ impl Context {
             cleanup = effect.cleanup.take();
             effect.force_run = false;
             run = Rc::clone(&effect.run);
+            if !inner.dependencies_index.is_empty() {
+                inner.dependencies_index.remove(&id);
+            }
             Self::remove_dependent_edges_locked(&mut inner, id, &old_deps);
         }
 
@@ -1737,6 +1758,134 @@ impl Default for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- #lzspecedgeindex --------------------------------------------------
+    //
+    // The index side table is only correct while its invariant holds: an owner
+    // has an entry exactly while its edge list is longer than the threshold.
+    // Both fast paths assert on that, so a violation panics rather than
+    // silently reading a stale position.
+
+    #[test]
+    fn edge_index_promotes_past_the_threshold_and_still_dedups() {
+        let ctx = Context::new();
+        let src = ctx.cell(0usize);
+        // comfortably past EDGE_INDEX_THRESHOLD so the index is built
+        let width = EDGE_INDEX_THRESHOLD * 4;
+        let dep_a: Vec<_> = (0..width)
+            .map(|i| ctx.computed(move |ctx| ctx.get_cell(&src) + i))
+            .collect();
+        for slot in &dep_a {
+            ctx.get(slot);
+        }
+
+        {
+            let inner = ctx.inner.borrow();
+            let index = inner
+                .dependents_index
+                .get(&src.id)
+                .expect("wide cell must be indexed");
+            assert_eq!(index.len(), width, "one index entry per dependent");
+        }
+
+        // re-reading must not duplicate edges
+        for slot in &dep_a {
+            ctx.get(slot);
+        }
+        {
+            let inner = ctx.inner.borrow();
+            match Context::get_node(&inner.nodes, src.id) {
+                Some(Node::Cell(c)) => assert_eq!(c.dependents.len(), width, "no duplicate edges"),
+                _ => panic!("expected cell"),
+            }
+        }
+
+        ctx.set_cell(&src, 7);
+        for (i, slot) in dep_a.iter().enumerate() {
+            assert_eq!(ctx.get(slot), 7 + i, "every dependent recomputed");
+        }
+    }
+
+    #[test]
+    fn edge_index_demotes_when_the_list_shrinks_below_the_threshold() {
+        let ctx = Context::new();
+        let src = ctx.cell(0usize);
+        let toggle = ctx.cell(true);
+        // each slot reads src only while `toggle` is set, so flipping it drops
+        // every dependent edge and must demote the index
+        let width = EDGE_INDEX_THRESHOLD * 2;
+        let dep_a: Vec<_> = (0..width)
+            .map(|i| {
+                ctx.computed(move |ctx| {
+                    if ctx.get_cell(&toggle) {
+                        ctx.get_cell(&src) + i
+                    } else {
+                        i
+                    }
+                })
+            })
+            .collect();
+        for slot in &dep_a {
+            ctx.get(slot);
+        }
+        assert!(
+            ctx.inner.borrow().dependents_index.contains_key(&src.id),
+            "wide list must be indexed"
+        );
+
+        ctx.set_cell(&toggle, false);
+        for slot in &dep_a {
+            ctx.get(slot);
+        }
+        assert!(
+            !ctx.inner.borrow().dependents_index.contains_key(&src.id),
+            "index entry must be dropped once the list is short again"
+        );
+
+        // and the graph still behaves
+        ctx.set_cell(&src, 99);
+        for (i, slot) in dep_a.iter().enumerate() {
+            assert_eq!(ctx.get(slot), i, "src is no longer a dependency");
+        }
+    }
+
+    #[test]
+    fn edge_index_does_not_survive_id_recycling() {
+        // free_ids is LIFO, so a disposed effect's id is handed straight to the
+        // next node. A leftover index entry would alias it.
+        let ctx = Context::new();
+        let src = ctx.cell(0usize);
+        let width = EDGE_INDEX_THRESHOLD * 2;
+        let cell_a: Vec<_> = (0..width).map(|i| ctx.cell(i)).collect();
+        let effect = ctx.effect(move |ctx| {
+            for cell in &cell_a {
+                let _ = ctx.get_cell(cell);
+            }
+        });
+        assert!(
+            ctx.inner
+                .borrow()
+                .dependencies_index
+                .contains_key(&effect.id),
+            "wide effect must be indexed"
+        );
+
+        let recycled = effect.id;
+        ctx.dispose_effect(&effect);
+        assert!(
+            !ctx.inner
+                .borrow()
+                .dependencies_index
+                .contains_key(&recycled),
+            "disposal must drop the index entry before the id is recycled"
+        );
+
+        let reused = ctx.computed(move |ctx| ctx.get_cell(&src) + 1);
+        assert_eq!(reused.id, recycled, "id was recycled as expected");
+        assert_eq!(ctx.get(&reused), 1, "recycled node computes normally");
+        ctx.set_cell(&src, 41);
+        assert_eq!(ctx.get(&reused), 42, "recycled node propagates normally");
+    }
 
     #[test]
     fn context_nodes_are_vec_indexed_by_sequential_slot_ids_and_reuse_effect_ids() {
