@@ -22,10 +22,15 @@ use std::time::Instant;
 
 use lazily::{Context, SlotHandle};
 
+/// How this spike remembers to tear a node down. A real implementation would
+/// store `(SlotId, kind)` instead of boxing a closure per node — see the
+/// teardown column in the cost model.
+type DisposeFn = Box<dyn FnOnce(&Context)>;
+
 /// A teardown group. Nodes created through it are disposed when it drops.
 struct Child<'ctx> {
     ctx: &'ctx Context,
-    owned: RefCell<Vec<Box<dyn FnOnce(&Context)>>>,
+    owned: RefCell<Vec<DisposeFn>>,
 }
 
 impl<'ctx> Child<'ctx> {
@@ -45,7 +50,7 @@ impl<'ctx> Child<'ctx> {
         let handle = self.ctx.computed(compute);
         self.owned
             .borrow_mut()
-            .push(Box::new(move |ctx: &Context| ctx.dispose_slot(&handle)));
+            .push(Box::new(move |ctx: &Context| ctx.dispose_slot(&handle)) as DisposeFn);
         handle
     }
 
