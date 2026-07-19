@@ -1336,7 +1336,7 @@ impl Context {
 
     /// Dispose an effect by handle.
     pub fn dispose_effect(&self, handle: &EffectHandle) {
-        let cleanup = {
+        let torn_down = {
             let mut inner = self.inner.borrow_mut();
             // Deschedule and drain any pending flush entry BEFORE recycling the
             // id, mirroring ThreadSafeContext::dispose_effect. A stale
@@ -1352,8 +1352,13 @@ impl Context {
             // stale one would alias the next node allocated with this id.
             Self::drop_edge_index_entries(&mut inner, handle.id);
             inner.free_ids.push(handle.id.0);
-            effect.cleanup
+            effect
         };
+        // Outside the borrow: the effect owns its run closure and everything it
+        // captured, whose Drop may re-enter the context.
+        let mut torn_down = torn_down;
+        let cleanup = torn_down.cleanup.take();
+        drop(torn_down);
 
         if let Some(cleanup) = cleanup {
             cleanup();
@@ -1374,19 +1379,27 @@ impl Context {
     /// Reading a disposed node throws on the next recompute — the same contract
     /// as [`Context::dispose_effect`] and the JS binding's `disposeSlot`.
     pub fn dispose_slot<T>(&self, handle: &SlotHandle<T>) {
-        let mut inner = self.inner.borrow_mut();
-        // Check the kind BEFORE taking: a stale handle whose id has been
-        // recycled must not tear down whatever now owns it.
-        if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Slot(_))) {
-            return;
-        }
-        let Some(Node::Slot(slot)) = Self::take_node(&mut inner.nodes, handle.id) else {
-            return;
+        let torn_down = {
+            let mut inner = self.inner.borrow_mut();
+            // Check the kind BEFORE taking: a stale handle whose id has been
+            // recycled must not tear down whatever now owns it.
+            if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Slot(_))) {
+                return;
+            }
+            let Some(Node::Slot(slot)) = Self::take_node(&mut inner.nodes, handle.id) else {
+                return;
+            };
+            Self::remove_dependent_edges_locked(&mut inner, handle.id, &slot.dependencies);
+            Self::remove_dependency_edges_locked(&mut inner, handle.id, &slot.dependents);
+            Self::drop_edge_index_entries(&mut inner, handle.id);
+            inner.free_ids.push(handle.id.0);
+            slot
         };
-        Self::remove_dependent_edges_locked(&mut inner, handle.id, &slot.dependencies);
-        Self::remove_dependency_edges_locked(&mut inner, handle.id, &slot.dependents);
-        Self::drop_edge_index_entries(&mut inner, handle.id);
-        inner.free_ids.push(handle.id.0);
+        // Drop the node outside the borrow. It owns the compute closure and
+        // everything that closure captured, so dropping it under the borrow
+        // panics if any capture's Drop re-enters the context — which a
+        // self-disposing handle type does by construction.
+        drop(torn_down);
     }
 
     /// Tear down a source cell: detach its dependents, clear the node, and
@@ -1405,6 +1418,10 @@ impl Context {
         Self::remove_dependency_edges_locked(&mut inner, handle.id, &cell.dependents);
         Self::drop_edge_index_entries(&mut inner, handle.id);
         inner.free_ids.push(handle.id.0);
+        drop(inner);
+        // Same reason as dispose_slot: the cell owns its value, whose Drop may
+        // re-enter.
+        drop(cell);
     }
 
     /// Check whether an effect is still registered.
@@ -1940,6 +1957,52 @@ mod tests {
     // has an entry exactly while its edge list is longer than the threshold.
     // Both fast paths assert on that, so a violation panics rather than
     // silently reading a stale position.
+
+    #[test]
+    fn disposal_tolerates_a_capture_whose_drop_reenters() {
+        // A node owns its compute closure and everything that closure captured.
+        // If the node is dropped while the RefCell borrow is held, any capture
+        // whose Drop touches the context panics with "already borrowed" — which
+        // a self-disposing handle type does by construction.
+        struct ReentersOnDrop {
+            ctx: std::rc::Weak<Context>,
+            victim: SlotId,
+        }
+        impl Drop for ReentersOnDrop {
+            fn drop(&mut self) {
+                if let Some(ctx) = self.ctx.upgrade() {
+                    // any context call that borrows would do
+                    ctx.dispose_slot(&SlotHandle::<u64> {
+                        id: self.victim,
+                        _marker: std::marker::PhantomData,
+                    });
+                }
+            }
+        }
+
+        let ctx = std::rc::Rc::new(Context::new());
+        let base = ctx.cell(1u64);
+        let victim = ctx.computed(move |c| c.get_cell(&base) + 1);
+        assert_eq!(ctx.get(&victim), 2);
+
+        let reentrant = ReentersOnDrop {
+            ctx: std::rc::Rc::downgrade(&ctx),
+            victim: victim.id,
+        };
+        let holder = ctx.computed(move |c| {
+            let _ = &reentrant;
+            c.get_cell(&base) + 100
+        });
+        assert_eq!(ctx.get(&holder), 101);
+
+        // Disposing `holder` drops its closure, dropping `reentrant`, whose Drop
+        // disposes `victim`. Must not panic.
+        ctx.dispose_slot(&holder);
+        assert!(
+            ctx.inner.borrow().free_ids.contains(&victim.id.0),
+            "the re-entrant disposal must have completed"
+        );
+    }
 
     #[test]
     fn dispose_slot_detaches_both_edge_directions_and_recycles_the_id() {
