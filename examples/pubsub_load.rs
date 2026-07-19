@@ -116,6 +116,13 @@ fn env_usize(key: &str, default: usize) -> usize {
 struct Rung {
     build_ns_each: f64,
     notify_ns_each: f64,
+    /// Cost of a publish nobody reads, per publish (not per subscriber).
+    ///
+    /// Once the graph is dirty, marking early-outs per node, so repeated
+    /// unread publishes isolate the O(N) work `set_cell` does regardless of
+    /// whether anyone is listening — currently a full clone of the dependent
+    /// list. If this column grows with width, that clone is real.
+    unread_publish_ns: f64,
     bytes_each: f64,
 }
 
@@ -148,9 +155,21 @@ fn sweep_width(width: usize) -> Rung {
     }
     let notify_ns_each = notify_start.elapsed().as_nanos() as f64 / (publishes * width) as f64;
 
+    // Unread publishes: the graph is already dirty from here on, so per-node
+    // marking early-outs and what remains is the fixed O(N) work set_cell does
+    // whether or not anyone is listening.
+    const UNREAD_PUBLISHES: usize = 200;
+    ctx.set_cell(&topic, 0);
+    let unread_start = Instant::now();
+    for publish in 1..=UNREAD_PUBLISHES {
+        ctx.set_cell(&topic, (publish + 1_000_000) as u64);
+    }
+    let unread_publish_ns = unread_start.elapsed().as_nanos() as f64 / UNREAD_PUBLISHES as f64;
+
     Rung {
         build_ns_each,
         notify_ns_each,
+        unread_publish_ns,
         bytes_each: (rss_after_build.saturating_sub(rss_before)) as f64 * 1024.0 / width as f64,
     }
 }
@@ -231,8 +250,8 @@ fn main() {
     );
     println!("EDGE_INDEX_THRESHOLD is 32; per-subscriber cost should stay flat across it\n");
     println!(
-        "{:>12}{:>14}{:>14}{:>14}{:>12}",
-        "width", "build ns/sub", "notify ns/sub", "bytes/sub", "est total"
+        "{:>12}{:>14}{:>14}{:>18}{:>12}{:>12}",
+        "width", "build ns/sub", "notify ns/sub", "unread pub ns", "bytes/sub", "est total"
     );
 
     sweep_width(8); // warm up: don't charge the first rung for lazy init
@@ -265,8 +284,13 @@ fn main() {
         let rung = sweep_width(width);
         let total_mib = rung.bytes_each * width as f64 / 1024.0 / 1024.0;
         println!(
-            "{:>12}{:>14.1}{:>14.1}{:>14.0}{:>10.0} MiB",
-            width, rung.build_ns_each, rung.notify_ns_each, rung.bytes_each, total_mib
+            "{:>12}{:>14.1}{:>14.1}{:>18.0}{:>12.0}{:>10.0} MiB",
+            width,
+            rung.build_ns_each,
+            rung.notify_ns_each,
+            rung.unread_publish_ns,
+            rung.bytes_each,
+            total_mib
         );
         bytes_each_last = Some(rung.bytes_each.max(1.0));
     }
