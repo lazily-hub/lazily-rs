@@ -1407,31 +1407,6 @@ impl Context {
         inner.free_ids.push(handle.id.0);
     }
 
-    /// Bind a node's lifetime to a scope: dispose it when the binding drops.
-    ///
-    /// ```
-    /// # use lazily::Context;
-    /// let ctx = Context::new();
-    /// let topic = ctx.cell(0u64);
-    /// {
-    ///     let subscriber = ctx.raii(ctx.computed(move |ctx| ctx.get_cell(&topic) + 1));
-    ///     assert_eq!(ctx.get(&subscriber), 1);
-    /// } // unsubscribed here — node torn down, edge dropped from `topic`
-    /// ```
-    ///
-    /// Handles themselves are deliberately not RAII. `SlotHandle`/`CellHandle`
-    /// are `Copy` — ids into the arena, free to pass into closures — and Rust
-    /// forbids a type from being both `Copy` and `Drop`. Making them RAII would
-    /// mean refcounting every handle and breaking every call site that captures
-    /// one by copy. A guard is the opt-in version: zero cost unless used, and it
-    /// makes the churn leak hard to write by accident.
-    pub fn raii<H: Disposable>(&self, handle: H) -> ReactiveRaii<'_, H> {
-        ReactiveRaii {
-            ctx: self,
-            handle: Some(handle),
-        }
-    }
-
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
         let inner = self.inner.borrow();
@@ -1955,82 +1930,6 @@ impl Default for Context {
     }
 }
 
-/// A handle a [`ReactiveRaii`] knows how to tear down.
-///
-/// Implemented for `SlotHandle` and `CellHandle`; effects already own their
-/// lifetime through [`Context::dispose_effect`].
-pub trait Disposable {
-    /// Tear down the node this handle names.
-    fn dispose_in(&self, ctx: &Context);
-}
-
-impl<T> Disposable for SlotHandle<T> {
-    fn dispose_in(&self, ctx: &Context) {
-        ctx.dispose_slot(self);
-    }
-}
-
-impl<T> Disposable for CellHandle<T> {
-    fn dispose_in(&self, ctx: &Context) {
-        ctx.dispose_cell(self);
-    }
-}
-
-/// RAII for a reactive node: holding the node is the invariant, and it is
-/// released when this value is dropped.
-///
-/// The counterpart to `SlotHandle`/`CellHandle`, which are `Copy` ids that hold
-/// nothing. A node outlives every handle naming it, so dropping the last handle
-/// releases no resource — the classic RAII failure it names: an object leak and
-/// a resource leak are different events unless something ties them together.
-/// Measured, before this existed: 200k subscribe/unsubscribe cycles at a live
-/// width of 64 grew RSS by 60 MiB and left 200,064 edges on a topic with 64 live
-/// subscribers.
-///
-/// Named for the idiom rather than a role because `Guard` is taken twice over
-/// here — the `*Guard` types in this crate are private scoped-bookkeeping
-/// markers, and a guard conventionally implies held access, which this has no
-/// notion of. Nor is it a [`Reactive`](crate::Reactive); it owns one.
-///
-/// Derefs to the wrapped handle, so it is usable anywhere the handle is. Call
-/// [`ReactiveRaii::leak`] to take the handle back and keep the node alive past
-/// the scope. See [`Context::raii`].
-pub struct ReactiveRaii<'ctx, H: Disposable> {
-    ctx: &'ctx Context,
-    /// `None` only after `leak`, which is also what suppresses the drop.
-    handle: Option<H>,
-}
-
-impl<H: Disposable> ReactiveRaii<'_, H> {
-    /// Release the binding and return the handle, leaving the node alive.
-    ///
-    /// For a node that must outlive the scope that created it. The caller takes
-    /// on disposing it.
-    pub fn leak(mut self) -> H {
-        self.handle
-            .take()
-            .expect("the binding holds its handle until leaked, and leak consumes it")
-    }
-}
-
-impl<H: Disposable> std::ops::Deref for ReactiveRaii<'_, H> {
-    type Target = H;
-
-    fn deref(&self) -> &H {
-        self.handle
-            .as_ref()
-            .expect("the binding holds its handle until leaked, and leak consumes it")
-    }
-}
-
-impl<H: Disposable> Drop for ReactiveRaii<'_, H> {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.as_ref() {
-            handle.dispose_in(self.ctx);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2041,76 +1940,6 @@ mod tests {
     // has an entry exactly while its edge list is longer than the threshold.
     // Both fast paths assert on that, so a violation panics rather than
     // silently reading a stale position.
-
-    #[test]
-    fn reactive_raii_disposes_a_slot_at_end_of_scope() {
-        let ctx = Context::new();
-        let topic = ctx.cell(0usize);
-        let recycled;
-        {
-            let subscriber = ctx.raii(ctx.computed(move |ctx| ctx.get_cell(&topic) + 1));
-            recycled = subscriber.id;
-            assert_eq!(ctx.get(&subscriber), 1, "guard derefs to the handle");
-            match Context::get_node(&ctx.inner.borrow().nodes, topic.id) {
-                Some(Node::Cell(c)) => assert!(c.dependents.contains(&recycled)),
-                _ => panic!("expected cell"),
-            }
-        }
-        let inner = ctx.inner.borrow();
-        match Context::get_node(&inner.nodes, topic.id) {
-            Some(Node::Cell(c)) => assert!(
-                !c.dependents.contains(&recycled),
-                "leaving scope must drop the edge"
-            ),
-            _ => panic!("expected cell"),
-        }
-        assert!(inner.free_ids.contains(&recycled.0), "id must be recycled");
-    }
-
-    #[test]
-    fn reactive_raii_disposes_a_cell_at_end_of_scope() {
-        let ctx = Context::new();
-        let recycled;
-        {
-            let cell = ctx.raii(ctx.cell(7usize));
-            recycled = cell.id;
-            assert_eq!(ctx.get_cell(&cell), 7);
-        }
-        assert!(ctx.inner.borrow().free_ids.contains(&recycled.0));
-    }
-
-    #[test]
-    fn reactive_raii_leak_keeps_the_node_alive() {
-        let ctx = Context::new();
-        let topic = ctx.cell(1usize);
-        let escaped = {
-            let subscriber = ctx.raii(ctx.computed(move |ctx| ctx.get_cell(&topic) * 10));
-            subscriber.leak()
-        };
-        assert_eq!(ctx.get(&escaped), 10, "a leaked node survives its scope");
-        ctx.set_cell(&topic, 4);
-        assert_eq!(ctx.get(&escaped), 40, "and still propagates");
-        assert!(!ctx.inner.borrow().free_ids.contains(&escaped.id.0));
-    }
-
-    #[test]
-    fn reactive_raii_keeps_churn_flat() {
-        // The leak this exists to prevent, written the natural way: each
-        // subscriber is scoped, so nothing has to remember to dispose.
-        let ctx = Context::new();
-        let topic = ctx.cell(0usize);
-        for cycle in 0..500usize {
-            let subscriber = ctx.raii(ctx.computed(move |ctx| ctx.get_cell(&topic) + cycle));
-            assert_eq!(ctx.get(&subscriber), cycle);
-        }
-        match Context::get_node(&ctx.inner.borrow().nodes, topic.id) {
-            Some(Node::Cell(c)) => assert!(
-                c.dependents.is_empty(),
-                "every scoped subscriber must have unsubscribed itself"
-            ),
-            _ => panic!("expected cell"),
-        }
-    }
 
     #[test]
     fn dispose_slot_detaches_both_edge_directions_and_recycles_the_id() {
