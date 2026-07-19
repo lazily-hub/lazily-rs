@@ -204,3 +204,78 @@ async fn effect_cleanup_runs_before_each_replacement_body() {
         );
     }
 }
+
+// A cyclic async dependency graph must not hang `invalidate_frontier_async`.
+//
+// `AsyncComputeContext::get_async` registers the dependency edge SYNCHRONOUSLY,
+// in the non-async prelude, before the returned future is ever awaited. That
+// decouples edge registration from resolution: a compute can declare a
+// dependency it never awaits, so `A -> B -> A` is constructible without either
+// compute diverging. The invalidation walk then has a genuine cycle to traverse.
+//
+// The walk runs entirely inside `self.inner.lock()`, so a non-terminating walk
+// wedges the whole context rather than merely spinning a task. The repro
+// therefore runs on a dedicated OS thread and is judged by a channel timeout --
+// a tokio timeout cannot preempt a sync spin that holds the mutex.
+#[test]
+fn cyclic_async_dependency_invalidation_terminates() {
+    use std::sync::OnceLock;
+    use std::sync::mpsc as std_mpsc;
+
+    let (done_tx, done_rx) = std_mpsc::channel::<()>();
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let ctx = AsyncContext::new();
+            let cell = ctx.cell(1i32);
+
+            // `b`'s handle is not known when `a` is created; publish it through a
+            // OnceLock so `a`'s compute can close over it.
+            static B_HANDLE: OnceLock<lazily::AsyncSlotHandle<i32>> = OnceLock::new();
+
+            let a = ctx.computed_async(move |cx| {
+                let v = cx.get_cell(&cell);
+                if let Some(b) = B_HANDLE.get() {
+                    // Register the edge a -> b without awaiting it. The edge is
+                    // recorded by `get_async` itself; dropping the future avoids
+                    // the recursive resolve that would otherwise deadlock.
+                    drop(cx.get_async(b));
+                }
+                async move { v + 1 }
+            });
+
+            let b = ctx.computed_async(move |cx| {
+                drop(cx.get_async(&a));
+                async move { 0i32 }
+            });
+            assert!(B_HANDLE.set(b).is_ok(), "B_HANDLE set once");
+
+            // Resolve both so their computes run and both edges are registered.
+            let _ = ctx.get_async(&b).await;
+            let _ = ctx.get_async(&a).await;
+
+            // Force `a` to recompute so it observes B_HANDLE and registers a -> b.
+            ctx.set_cell(&cell, 2);
+            let _ = ctx.get_async(&a).await;
+
+            // Both directions are now present: the walk has a real cycle.
+            assert_eq!(ctx.dependent_count(&a), 1, "b must depend on a");
+            assert_eq!(ctx.dependent_count(&b), 1, "a must depend on b");
+
+            // Pre-fix this never returns -- it spins forever holding inner.lock().
+            ctx.set_cell(&cell, 3);
+        });
+        let _ = done_tx.send(());
+    });
+
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_ok(),
+        "cyclic async invalidation did not terminate within 10s: the frontier \
+         walk pushed dependents unconditionally with no visited set"
+    );
+}

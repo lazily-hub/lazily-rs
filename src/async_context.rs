@@ -940,7 +940,31 @@ impl AsyncContext {
                 smallvec::SmallVec::new();
             let mut notifiers: smallvec::SmallVec<[watch::Sender<AsyncCompletion>; 4]> =
                 smallvec::SmallVec::new();
+            // Visited set (`#lzasynccycle`). The async graph has no
+            // edge-registration cycle guard: `AsyncComputeContext::get_async`
+            // records the dependency edge synchronously, in its non-async
+            // prelude, before the returned future is awaited. A compute can
+            // therefore declare a dependency it never awaits, making `A -> B ->
+            // A` constructible without either compute diverging — and this walk
+            // would then push dependents forever WHILE HOLDING `inner.lock()`,
+            // wedging the whole context rather than merely spinning a task.
+            //
+            // Draining each `dependents` set on visit (the lazily-dart / -go
+            // pattern) does not fit here: rs exposes `dependent_count` on the
+            // `ReactiveGraph` trait and the three-context conformance runner
+            // compares it across basic/thread_safe/async. The sync walk
+            // (`mark_frontier_locked`) leaves reverse edges intact and
+            // terminates on saturated state instead, so draining would make
+            // async's reverse-edge degree diverge from its siblings after any
+            // invalidation.
+            //
+            // Marking on visit is monotone: an id is traversed at most once, so
+            // the walk is bounded by the number of live nodes.
+            let mut visited: EdgeVec = EdgeVec::new();
             while let Some(id) = stack.pop() {
+                if !edge_insert(&mut visited, id) {
+                    continue;
+                }
                 match inner.get_node_mut(id) {
                     Some(AsyncNode::Slot(slot)) => {
                         if let InvalidationResult::HadInFlight(handle) = slot.invalidate() {
@@ -1317,7 +1341,15 @@ impl AsyncContext {
                 smallvec::SmallVec::new();
             let mut notifiers: smallvec::SmallVec<[watch::Sender<AsyncCompletion>; 4]> =
                 smallvec::SmallVec::new();
+            // Same cycle exposure as `invalidate_frontier_async` — a disposal
+            // cone is walked with the identical unconditional push
+            // (`#lzasynccycle`). See that function for why a visited set rather
+            // than draining the reverse edges.
+            let mut visited: EdgeVec = EdgeVec::new();
             while let Some(id) = stack.pop() {
+                if !edge_insert(&mut visited, id) {
+                    continue;
+                }
                 if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(id) {
                     if let InvalidationResult::HadInFlight(handle) = slot.invalidate() {
                         in_flight_handles.push(handle);

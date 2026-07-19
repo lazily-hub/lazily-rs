@@ -52,7 +52,7 @@ const SPEC_DIR: &str = "../lazily-spec/conformance/reactive-graph";
 
 /// The canonical fixture set. Asserted against the directory listing so a
 /// fixture added or renamed upstream fails loudly instead of going unrun.
-const FIXTURES: [&str; 8] = [
+const FIXTURES: [&str; 9] = [
     "churn_returns_to_baseline.json",
     "cross_scope_teardown_hazard.json",
     "disarm_disposes_nothing.json",
@@ -61,6 +61,7 @@ const FIXTURES: [&str; 8] = [
     "recycled_id_inherits_nothing.json",
     "scope_teardown_equals_fold_of_disposals.json",
     "scoping_bounds_teardown_not_visibility.json",
+    "transitive_invalidation_reaches_depth.json",
 ];
 
 /// Fixture assertions an execution model does not satisfy today, as
