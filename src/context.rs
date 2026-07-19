@@ -78,14 +78,17 @@ fn edge_insert(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeI
     // longer than the threshold. Gating on the length keeps a low-degree node
     // off the hash path entirely — hashing an absent key costs more than the
     // short scan it would replace.
-    if edges.len() > EDGE_INDEX_THRESHOLD {
+    // `SmallVec::len` branches on inline-vs-spilled, so read it once: the
+    // common path is then one compare on top of the scan it already did.
+    let len = edges.len();
+    if len > EDGE_INDEX_THRESHOLD {
         let owner_index = index
             .get_mut(&owner)
             .expect("edge list over threshold implies an index entry");
         if owner_index.contains_key(&id) {
             return false;
         }
-        owner_index.insert(id, edges.len());
+        owner_index.insert(id, len);
         edges.push(id);
         return true;
     }
@@ -93,7 +96,7 @@ fn edge_insert(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeI
         return false;
     }
     edges.push(id);
-    if edges.len() > EDGE_INDEX_THRESHOLD {
+    if len + 1 > EDGE_INDEX_THRESHOLD {
         // crossed the threshold on this push: build the index once
         index.insert(
             owner,
