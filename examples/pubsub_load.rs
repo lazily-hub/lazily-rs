@@ -158,13 +158,15 @@ fn sweep_width(width: usize) -> Rung {
     // Unread publishes: the graph is already dirty from here on, so per-node
     // marking early-outs and what remains is the fixed O(N) work set_cell does
     // whether or not anyone is listening.
-    const UNREAD_PUBLISHES: usize = 200;
+    // Scale down at huge widths: an unread publish is O(N), so 200 of them at
+    // width 100M would dominate the whole run.
+    let unread_publishes = if width > 1_000_000 { 5 } else { 200 };
     ctx.set_cell(&topic, 0);
     let unread_start = Instant::now();
-    for publish in 1..=UNREAD_PUBLISHES {
+    for publish in 1..=unread_publishes {
         ctx.set_cell(&topic, (publish + 1_000_000) as u64);
     }
-    let unread_publish_ns = unread_start.elapsed().as_nanos() as f64 / UNREAD_PUBLISHES as f64;
+    let unread_publish_ns = unread_start.elapsed().as_nanos() as f64 / unread_publishes as f64;
 
     Rung {
         build_ns_each,
