@@ -197,3 +197,11 @@ required-features = ["json-base64"]
 [[bench]]
 name = "revision_engine"
 harness = false
+
+[lints.rust]
+# `naive_edge_remove` (#lzspecedgeindex) forces `context::edge_remove` to locate
+# an edge by linear scan instead of by its stored index position, so the audit
+# harness can demonstrate that a flat teardown column reflects a real O(1)
+# removal rather than a harness that never exercises the path. Declared here so
+# the control is a supported build mode, not an unexpected cfg.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(naive_edge_remove)'] }

@@ -3009,8 +3009,19 @@ impl ThreadSafeContext {
 
         let (run, old_dependencies, cleanup) = {
             let mut state = self.lock_state();
-            state.pending_effects.retain(|queued| *queued != id);
-            state.deschedule_effect(id);
+            // #lzspecedgeindex: the scheduled-effects bitset is authoritative —
+            // an id is queued only if `schedule_effect` pushed it, and that
+            // push is gated on (and sets) the flag. `flush_effects` pops and
+            // deschedules before calling here, so the id is provably absent
+            // and the O(queue) scan can be skipped. Scanning anyway cost O(W)
+            // per effect, i.e. O(W^2) per publish.
+            let scheduled = node_index(id).is_some_and(|idx| {
+                idx < state.scheduled_effects.len() && state.scheduled_effects[idx]
+            });
+            if scheduled {
+                state.pending_effects.retain(|queued| *queued != id);
+                state.deschedule_effect(id);
+            }
             let effect = match state.get_node_mut(id) {
                 Some(ThreadSafeNode::Effect(effect)) => effect,
                 _ => return,
