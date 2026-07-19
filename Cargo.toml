@@ -134,6 +134,10 @@ name = "tokio_sync"
 required-features = ["tokio"]
 
 [[example]]
+name = "pubsub_load_thread_safe"
+required-features = ["thread-safe"]
+
+[[example]]
 name = "instrumentation_profile"
 required-features = ["instrumentation", "thread-safe"]
 

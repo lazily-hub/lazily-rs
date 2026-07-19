@@ -76,24 +76,27 @@ type EdgeVec = SmallVec<[SlotId; 4]>;
 type EdgeVec = Vec<SlotId>;
 
 #[cfg(not(feature = "vec_edges"))]
-type DependentEdgeVec = SmallVec<[(SlotId, ThreadSafeDependentKind); 4]>;
-#[cfg(feature = "vec_edges")]
-type DependentEdgeVec = Vec<(SlotId, ThreadSafeDependentKind)>;
-
-#[cfg(not(feature = "vec_edges"))]
 type RootVec = SmallVec<[ThreadSafeInvalidationRoot; 4]>;
 #[cfg(feature = "vec_edges")]
 type RootVec = Vec<ThreadSafeInvalidationRoot>;
 
 const HYBRID_THRESHOLD: usize = 16;
 
-#[cfg(test)]
+/// Promotion threshold for dependency-edge lists (#lzspecedgeindex).
+///
+/// Higher than `HYBRID_THRESHOLD`, which governs short-lived propagation
+/// scratch structures. Edge lists are scanned on every registration, and a
+/// linear scan over a contiguous `SlotId` vector beats hashing well past the
+/// scratch threshold — measured crossover in the single-threaded context is
+/// near width 170. `HybridSet` never demotes, so there is no boundary
+/// oscillation to absorb.
+const EDGE_HYBRID_THRESHOLD: usize = 128;
+
 enum Either<L, R> {
     Left(L),
     Right(R),
 }
 
-#[cfg(test)]
 impl<L, R> Iterator for Either<L, R>
 where
     L: Iterator,
@@ -134,6 +137,38 @@ impl<V> HybridMap<V> {
         }
     }
 
+    /// Insert or overwrite, promoting above `threshold`.
+    fn upsert_at(&mut self, id: SlotId, value: V, threshold: usize) {
+        match self {
+            Self::Small(vec) => {
+                if let Some(entry) = vec.iter_mut().find(|(sid, _)| *sid == id) {
+                    entry.1 = value;
+                    return;
+                }
+                vec.push((id, value));
+                if vec.len() > threshold {
+                    *self = Self::Large(std::mem::take(vec).into_iter().collect());
+                }
+            }
+            Self::Large(map) => {
+                map.insert(id, value);
+            }
+        }
+    }
+
+    fn remove(&mut self, id: SlotId) {
+        match self {
+            Self::Small(vec) => {
+                if let Some(pos) = vec.iter().position(|(sid, _)| *sid == id) {
+                    vec.swap_remove(pos);
+                }
+            }
+            Self::Large(map) => {
+                map.remove(&id);
+            }
+        }
+    }
+
     fn push(&mut self, id: SlotId, value: V) {
         match self {
             Self::Small(vec) => {
@@ -164,6 +199,7 @@ impl<V> HybridMap<V> {
     }
 }
 
+#[derive(Clone)]
 enum HybridSet {
     Small(Vec<SlotId>),
     Large(HashSet<SlotId>),
@@ -176,6 +212,14 @@ impl Default for HybridSet {
 }
 
 impl HybridSet {
+    fn from_vec(entries: Vec<SlotId>) -> Self {
+        let mut set = Self::default();
+        for id in entries {
+            set.insert_at(id, EDGE_HYBRID_THRESHOLD);
+        }
+        set
+    }
+
     fn contains(&self, id: SlotId) -> bool {
         match self {
             Self::Small(vec) => vec.contains(&id),
@@ -184,13 +228,18 @@ impl HybridSet {
     }
 
     fn insert(&mut self, id: SlotId) -> bool {
+        self.insert_at(id, HYBRID_THRESHOLD)
+    }
+
+    /// Insert, promoting to a hash set above `threshold`.
+    fn insert_at(&mut self, id: SlotId, threshold: usize) -> bool {
         match self {
             Self::Small(vec) => {
                 if vec.contains(&id) {
                     return false;
                 }
                 vec.push(id);
-                if vec.len() > HYBRID_THRESHOLD {
+                if vec.len() > threshold {
                     *self = Self::Large(vec.drain(..).collect());
                 }
                 true
@@ -199,12 +248,40 @@ impl HybridSet {
         }
     }
 
-    #[cfg(test)]
-    fn iter(&self) -> impl Iterator<Item = SlotId> {
+    /// Remove, returning whether an entry was present. Swap-removes in the
+    /// small representation, so order is not preserved — callers already
+    /// tolerate that.
+    fn remove(&mut self, id: SlotId) -> bool {
+        match self {
+            Self::Small(vec) => {
+                if let Some(pos) = vec.iter().position(|eid| *eid == id) {
+                    vec.swap_remove(pos);
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::Large(set) => set.remove(&id),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = SlotId> + '_ {
         match self {
             Self::Small(vec) => Either::Left(vec.iter().copied()),
             Self::Large(set) => Either::Right(set.iter().copied()),
         }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        match self {
+            Self::Small(vec) => vec.len(),
+            Self::Large(set) => set.len(),
+        }
+    }
+
+    fn to_vec(&self) -> Vec<SlotId> {
+        self.iter().collect()
     }
 
     fn into_entries(self) -> Vec<SlotId> {
@@ -214,36 +291,24 @@ impl HybridSet {
         }
     }
 }
-fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
-    if edges.contains(&id) {
-        false
-    } else {
-        edges.push(id);
-        true
-    }
+fn edge_insert(edges: &mut HybridSet, id: SlotId) -> bool {
+    edges.insert_at(id, EDGE_HYBRID_THRESHOLD)
 }
 
-fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
-    if let Some(pos) = edges.iter().position(|eid| *eid == id) {
-        edges.swap_remove(pos);
-        true
-    } else {
-        false
-    }
+fn edge_remove(edges: &mut HybridSet, id: SlotId) -> bool {
+    edges.remove(id)
 }
 
-fn dependent_edge_insert(edges: &mut DependentEdgeVec, id: SlotId, kind: ThreadSafeDependentKind) {
-    if let Some(entry) = edges.iter_mut().find(|(eid, _)| *eid == id) {
-        entry.1 = kind;
-    } else {
-        edges.push((id, kind));
-    }
+fn dependent_edge_insert(
+    edges: &mut HybridMap<ThreadSafeDependentKind>,
+    id: SlotId,
+    kind: ThreadSafeDependentKind,
+) {
+    edges.upsert_at(id, kind, EDGE_HYBRID_THRESHOLD);
 }
 
-fn dependent_edge_remove(edges: &mut DependentEdgeVec, id: SlotId) {
-    if let Some(pos) = edges.iter().position(|(eid, _)| *eid == id) {
-        edges.swap_remove(pos);
-    }
+fn dependent_edge_remove(edges: &mut HybridMap<ThreadSafeDependentKind>, id: SlotId) {
+    edges.remove(id);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -418,8 +483,8 @@ fn current_thread_safe_lock_site() -> ThreadSafeLockSite {
 struct ThreadSafeSlotNode {
     value: Option<Arc<ThreadSafeAny>>,
     equals: Option<Arc<ThreadSafeEqualsFn>>,
-    dependencies: EdgeVec,
-    dependents: EdgeVec,
+    dependencies: HybridSet,
+    dependents: HybridSet,
     fast_path: Arc<ThreadSafeSlotFastPath>,
     dirty: bool,
     force_recompute: bool,
@@ -788,11 +853,11 @@ struct ThreadSafeSlotFastPath {
     /// `mark_dirty` is Mutex-free).
     invalidation_revision: AtomicU64,
     compute: Arc<ThreadSafeComputeFn>,
-    dependencies: Mutex<EdgeVec>,
+    dependencies: Mutex<HybridSet>,
     slot_dependency_count: AtomicUsize,
     recompute: Mutex<ThreadSafeSlotRecomputeState>,
     recompute_condvar: Condvar,
-    dependents: Mutex<DependentEdgeVec>,
+    dependents: Mutex<HybridMap<ThreadSafeDependentKind>>,
 }
 
 impl ThreadSafeSlotFastPath {
@@ -812,11 +877,13 @@ impl ThreadSafeSlotFastPath {
             force_recompute: AtomicBool::default(),
             invalidation_revision: AtomicU64::default(),
             compute,
-            dependencies: Mutex::new(initial_dependencies),
+            dependencies: Mutex::new(HybridSet::from_vec(
+                initial_dependencies.into_iter().collect(),
+            )),
             slot_dependency_count: AtomicUsize::new(slot_dependency_count),
             recompute: Mutex::new(ThreadSafeSlotRecomputeState::default()),
             recompute_condvar: Condvar::new(),
-            dependents: Mutex::new(DependentEdgeVec::new()),
+            dependents: Mutex::new(HybridMap::default()),
         }
     }
 
@@ -1032,7 +1099,7 @@ impl ThreadSafeSlotFastPath {
     }
 
     fn dependencies_snapshot(&self) -> EdgeVec {
-        self.dependencies.lock().clone()
+        self.dependencies.lock().iter().collect()
     }
 
     fn insert_dependency(&self, dependency_id: SlotId, dependency_is_slot: bool) {
@@ -1071,14 +1138,14 @@ struct ThreadSafeRecomputeStart {
 }
 
 struct ThreadSafeCellNode {
-    dependents: EdgeVec,
+    dependents: HybridSet,
     fast_path: Arc<ThreadSafeCellFastPath>,
 }
 
 struct ThreadSafeCellFastPath {
     value: CellCachedReadStorage,
     type_id: TypeId,
-    dependents: Mutex<DependentEdgeVec>,
+    dependents: Mutex<HybridMap<ThreadSafeDependentKind>>,
 }
 
 impl ThreadSafeCellFastPath {
@@ -1089,7 +1156,7 @@ impl ThreadSafeCellFastPath {
         Self {
             value: CellCachedReadStorage::new(strategy, inline, Arc::new(value)),
             type_id: TypeId::of::<T>(),
-            dependents: Mutex::new(DependentEdgeVec::new()),
+            dependents: Mutex::new(HybridMap::default()),
         }
     }
 
@@ -1123,7 +1190,7 @@ impl ThreadSafeCellFastPath {
 
 struct ThreadSafeEffectNode {
     run: Arc<ThreadSafeEffectFn>,
-    dependencies: EdgeVec,
+    dependencies: HybridSet,
     cleanup: Option<Box<ThreadSafeCleanup>>,
     force_run: bool,
 }
@@ -1193,7 +1260,7 @@ impl ThreadSafeInvalidationPlan {
                     plan.add_slot_mark(root.id, force_recompute);
 
                     if should_propagate {
-                        sorted_slot_ids(slot.dependents.iter().copied())
+                        sorted_slot_ids(slot.dependents.iter())
                     } else {
                         Vec::new()
                     }
@@ -1239,7 +1306,7 @@ impl ThreadSafeInvalidationPlan {
                         continue;
                     }
                     plan.add_slot_clear(id);
-                    for dependent_id in sorted_slot_ids(slot.dependents.iter().copied()) {
+                    for dependent_id in sorted_slot_ids(slot.dependents.iter()) {
                         queue.push_back(dependent_id);
                     }
                 }
@@ -1412,12 +1479,14 @@ impl ThreadSafeState {
     fn fill_dependent_scratch(&mut self, id: SlotId) {
         self.dependent_scratch.clear();
         let idx = node_index(id).expect("SlotId does not fit usize");
-        let deps: &[SlotId] = match self.nodes.get(idx).and_then(|opt| opt.as_ref()) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.as_slice(),
-            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.as_slice(),
+        // A promoted edge list is not contiguous, so materialise rather than
+        // borrow a slice.
+        let deps: Vec<SlotId> = match self.nodes.get(idx).and_then(|opt| opt.as_ref()) {
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.to_vec(),
+            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.to_vec(),
             _ => return,
         };
-        self.dependent_scratch.extend_from_slice(deps);
+        self.dependent_scratch.extend_from_slice(&deps);
     }
 }
 
@@ -2112,8 +2181,8 @@ impl ThreadSafeContext {
         let node = ThreadSafeSlotNode {
             value: None,
             equals,
-            dependencies: EdgeVec::new(),
-            dependents: EdgeVec::new(),
+            dependencies: HybridSet::default(),
+            dependents: HybridSet::default(),
             fast_path: Arc::clone(&fast_path),
             dirty: false,
             force_recompute: false,
@@ -2220,11 +2289,10 @@ impl ThreadSafeContext {
                             .iter()
                             .filter(|dependency_id| {
                                 matches!(
-                                    state.get_node(**dependency_id),
+                                    state.get_node(*dependency_id),
                                     Some(ThreadSafeNode::Slot(_))
                                 )
                             })
-                            .copied()
                             .collect(),
                     )
                 }
@@ -2291,11 +2359,10 @@ impl ThreadSafeContext {
                             .iter()
                             .filter(|dependency_id| {
                                 matches!(
-                                    state.get_node(**dependency_id),
+                                    state.get_node(*dependency_id),
                                     Some(ThreadSafeNode::Slot(_))
                                 )
                             })
-                            .copied()
                             .collect(),
                     )
                 }
@@ -2329,11 +2396,10 @@ impl ThreadSafeContext {
                     .iter()
                     .filter(|dependency_id| {
                         matches!(
-                            state.get_node(**dependency_id),
+                            state.get_node(*dependency_id),
                             Some(ThreadSafeNode::Slot(_))
                         )
                     })
-                    .copied()
                     .collect(),
                 _ => return false,
             }
@@ -2344,7 +2410,7 @@ impl ThreadSafeContext {
 
     fn refresh_slot_with_dependencies(&self, id: SlotId, dependencies: EdgeVec) -> bool {
         let mut dependency_changed = false;
-        for dependency_id in dependencies {
+        for dependency_id in dependencies.iter().copied() {
             if self.refresh_slot(dependency_id) {
                 dependency_changed = true;
             }
@@ -2527,7 +2593,7 @@ impl ThreadSafeContext {
             None,
         ));
         let node = ThreadSafeCellNode {
-            dependents: EdgeVec::new(),
+            dependents: HybridSet::default(),
             fast_path: Arc::clone(&fast_path),
         };
         let mut cell_fast_paths = self.inner.cell_fast_paths.write();
@@ -2564,7 +2630,7 @@ impl ThreadSafeContext {
             inline_spec_for::<T>(),
         ));
         let node = ThreadSafeCellNode {
-            dependents: EdgeVec::new(),
+            dependents: HybridSet::default(),
             fast_path: Arc::clone(&fast_path),
         };
         let mut cell_fast_paths = self.inner.cell_fast_paths.write();
@@ -2751,7 +2817,7 @@ impl ThreadSafeContext {
         let id = self.alloc_id();
         let node = ThreadSafeEffectNode {
             run: Arc::new(move |ctx| run(ctx).into_thread_safe_cleanup()),
-            dependencies: EdgeVec::new(),
+            dependencies: HybridSet::default(),
             cleanup: None,
             force_run: true,
         };
@@ -2776,7 +2842,7 @@ impl ThreadSafeContext {
             (effect.dependencies, effect.cleanup)
         };
 
-        for dependency_id in dependencies {
+        for dependency_id in dependencies.iter() {
             self.remove_dependent_edge(dependency_id, handle.id);
         }
         if let Some(cleanup) = cleanup {
@@ -2941,7 +3007,7 @@ impl ThreadSafeContext {
                 Some(ThreadSafeNode::Effect(effect)) => effect,
                 _ => return,
             };
-            let old_dependencies = effect.dependencies.clone();
+            let old_dependencies: EdgeVec = effect.dependencies.iter().collect();
             let cleanup = effect.cleanup.take();
             effect.force_run = false;
             (Arc::clone(&effect.run), old_dependencies, cleanup)
@@ -2991,7 +3057,7 @@ impl ThreadSafeContext {
         }
 
         dependencies
-            .into_iter()
+            .iter()
             .any(|dependency_id| self.refresh_slot(dependency_id))
     }
 
@@ -3093,8 +3159,8 @@ impl ThreadSafeContext {
     #[cfg(test)]
     fn dependents_locked(state: &ThreadSafeState, id: SlotId) -> EdgeVec {
         match state.get_node(id) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.clone(),
-            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.clone(),
+            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.iter().collect(),
+            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.iter().collect(),
             Some(ThreadSafeNode::Effect(_)) | None => EdgeVec::new(),
         }
     }
