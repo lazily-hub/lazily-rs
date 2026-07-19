@@ -60,7 +60,15 @@ fn node_type_tag<T: 'static>() -> TypeTag {
 ///
 /// The index is held in a side table on `Inner`, not on the node, so a node
 /// below the threshold carries no extra bytes at all. See `EdgeIndex`.
-const EDGE_INDEX_THRESHOLD: usize = 32;
+const EDGE_INDEX_THRESHOLD: usize = 128;
+
+/// Hysteresis: demote only well below the promote threshold.
+///
+/// A dependent list oscillates by one on every recompute — edges are removed
+/// and re-registered — so a single shared boundary makes a list sitting exactly
+/// at the threshold demote and rebuild its index on every recompute. Measured
+/// at ~4x the steady-state cost. The gap absorbs that oscillation.
+const EDGE_INDEX_DEMOTE_THRESHOLD: usize = 96;
 
 /// `owner -> (edge -> position in owner's edge list)`, for promoted nodes only.
 ///
@@ -81,10 +89,11 @@ fn edge_insert(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeI
     // `SmallVec::len` branches on inline-vs-spilled, so read it once: the
     // common path is then one compare on top of the scan it already did.
     let len = edges.len();
-    if len > EDGE_INDEX_THRESHOLD {
-        let owner_index = index
-            .get_mut(&owner)
-            .expect("edge list over threshold implies an index entry");
+    // Below the demote threshold there is provably no index, so a short list
+    // never touches the map. Between the thresholds one may or may not exist.
+    if len > EDGE_INDEX_DEMOTE_THRESHOLD
+        && let Some(owner_index) = index.get_mut(&owner)
+    {
         if owner_index.contains_key(&id) {
             return false;
         }
@@ -96,7 +105,7 @@ fn edge_insert(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeI
         return false;
     }
     edges.push(id);
-    if len + 1 > EDGE_INDEX_THRESHOLD {
+    if len + 1 > EDGE_INDEX_THRESHOLD && !index.contains_key(&owner) {
         // crossed the threshold on this push: build the index once
         index.insert(
             owner,
@@ -115,10 +124,9 @@ fn edge_insert(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeI
 /// Swap-removes, so edge order is not preserved — matching the previous
 /// behaviour, which callers already tolerate.
 fn edge_remove(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeIndex) -> bool {
-    if edges.len() > EDGE_INDEX_THRESHOLD {
-        let owner_index = index
-            .get_mut(&owner)
-            .expect("edge list over threshold implies an index entry");
+    if edges.len() > EDGE_INDEX_DEMOTE_THRESHOLD
+        && let Some(owner_index) = index.get_mut(&owner)
+    {
         let Some(pos) = owner_index.remove(&id) else {
             return false;
         };
@@ -129,9 +137,9 @@ fn edge_remove(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeI
             edges[pos] = last;
             owner_index.insert(last, pos);
         }
-        // Demote back to scanning once the list is short again, restoring the
-        // invariant this function's fast path relies on.
-        if edges.len() <= EDGE_INDEX_THRESHOLD {
+        // Demote only well below the promote threshold, so a list hovering at
+        // the boundary does not rebuild its index on every recompute.
+        if edges.len() <= EDGE_INDEX_DEMOTE_THRESHOLD {
             index.remove(&owner);
         }
         return true;
