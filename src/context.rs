@@ -1509,6 +1509,50 @@ impl Context {
         }
     }
 
+    /// How many nodes currently depend on `node` — the size of its reverse edge
+    /// set (`#lzspecedgeindex`).
+    ///
+    /// This is the observable the disposal contract is written against: a
+    /// subscribe/unsubscribe cycle that disposes what it creates must leave this
+    /// at its starting value, no matter how many cycles run. A binding that
+    /// leaks shows total-ever-created here instead of live-subscriber count.
+    ///
+    /// Read-only and allocation-free. Returns 0 for a disposed or unknown node,
+    /// and for kinds that cannot have dependents.
+    ///
+    /// The count is deliberately the only thing exposed — not the edge list, not
+    /// the arena. Callers can assert on graph shape without being able to reach
+    /// in and mutate it, and no storage strategy (linear scan, promoted index,
+    /// arena layout) is pinned by the contract.
+    pub fn dependent_count(&self, node: &impl GraphNode) -> usize {
+        let inner = self.inner.borrow();
+        match Self::get_node(&inner.nodes, node.node_id()) {
+            Some(Node::Slot(slot)) => slot.dependents.len(),
+            Some(Node::Cell(cell)) => cell.dependents.len(),
+            // Effects are pure sinks: nothing can read one.
+            Some(Node::Effect(_)) | None => 0,
+        }
+    }
+
+    /// How many nodes `node` currently depends on — the size of its forward edge
+    /// set (`#lzspecedgeindex`).
+    ///
+    /// Counterpart to [`Context::dependent_count`]; disposal must detach both
+    /// directions, and a binding that detaches only one leaves a dangling
+    /// half-edge visible here.
+    ///
+    /// Returns 0 for a disposed or unknown node, and for source cells, which
+    /// have no dependencies by construction.
+    pub fn dependency_count(&self, node: &impl GraphNode) -> usize {
+        let inner = self.inner.borrow();
+        match Self::get_node(&inner.nodes, node.node_id()) {
+            Some(Node::Slot(slot)) => slot.dependencies.len(),
+            Some(Node::Effect(effect)) => effect.dependencies.len(),
+            // Cells are pure sources.
+            Some(Node::Cell(_)) | None => 0,
+        }
+    }
+
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
         let inner = self.inner.borrow();
@@ -2072,6 +2116,41 @@ impl Default for Context {
     }
 }
 
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A node in a [`Context`]'s reactive graph, addressed by one of its handles.
+///
+/// Sealed: implemented for [`SlotHandle`], [`CellHandle`], and [`EffectHandle`]
+/// only. It exists so the graph-shape accessors take any handle kind without
+/// exposing the internal node id, and cannot be implemented downstream.
+pub trait GraphNode: sealed::Sealed {
+    #[doc(hidden)]
+    fn node_id(&self) -> SlotId;
+}
+
+impl<T> sealed::Sealed for SlotHandle<T> {}
+impl<T> GraphNode for SlotHandle<T> {
+    fn node_id(&self) -> SlotId {
+        self.id
+    }
+}
+
+impl<T> sealed::Sealed for CellHandle<T> {}
+impl<T> GraphNode for CellHandle<T> {
+    fn node_id(&self) -> SlotId {
+        self.id
+    }
+}
+
+impl sealed::Sealed for EffectHandle {}
+impl GraphNode for EffectHandle {
+    fn node_id(&self) -> SlotId {
+        self.id
+    }
+}
+
 /// A teardown scope over a [`Context`]: nodes created through it are disposed
 /// when it drops. See [`Context::child`].
 ///
@@ -2172,6 +2251,47 @@ mod tests {
     // has an entry exactly while its edge list is longer than the threshold.
     // Both fast paths assert on that, so a violation panics rather than
     // silently reading a stale position.
+
+    #[test]
+    fn degree_accessors_report_live_edge_set_sizes() {
+        let ctx = Context::new();
+        let topic = ctx.cell(1usize);
+        let a = ctx.computed(move |c| c.get_cell(&topic) + 1);
+        let b = ctx.computed(move |c| c.get(&a) + 1);
+        // Lazy: no edge is registered until the slot is pulled.
+        assert_eq!(ctx.dependent_count(&topic), 0);
+        assert_eq!(ctx.dependency_count(&b), 0);
+
+        assert_eq!(ctx.get(&b), 3);
+        assert_eq!(ctx.dependent_count(&topic), 1);
+        assert_eq!(ctx.dependent_count(&a), 1);
+        assert_eq!(ctx.dependency_count(&a), 1);
+        assert_eq!(ctx.dependency_count(&b), 1);
+        // Cells are pure sources; effects are pure sinks.
+        assert_eq!(ctx.dependency_count(&topic), 0);
+        assert_eq!(ctx.dependent_count(&b), 0);
+
+        // Disposal detaches both directions, and a disposed node reports zero.
+        ctx.dispose_slot(&b);
+        assert_eq!(ctx.dependent_count(&a), 0);
+        assert_eq!(ctx.dependency_count(&b), 0);
+    }
+
+    #[test]
+    fn degree_accessors_cover_effects() {
+        let ctx = Context::new();
+        let topic = ctx.cell(1usize);
+        let watch = ctx.effect(move |c| {
+            let _ = c.get_cell(&topic);
+        });
+        assert_eq!(ctx.dependency_count(&watch), 1);
+        assert_eq!(ctx.dependent_count(&topic), 1);
+        assert_eq!(ctx.dependent_count(&watch), 0);
+
+        ctx.dispose_effect(&watch);
+        assert_eq!(ctx.dependency_count(&watch), 0);
+        assert_eq!(ctx.dependent_count(&topic), 0);
+    }
 
     #[test]
     fn teardown_scope_disposes_its_nodes_on_drop() {

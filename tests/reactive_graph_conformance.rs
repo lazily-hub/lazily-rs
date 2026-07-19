@@ -6,19 +6,14 @@
 //! `Context::dispose_{slot,cell,effect}`, and `Context::scope()` /
 //! `TeardownScope::disarm()`.
 //!
-//! ## What is asserted, and what is not
+//! ## What is asserted
 //!
-//! Assertable against the public API today: `value`, `read`, `error`
+//! Every assertion kind in the corpus: `value`, `read`, `error`
 //! (`read_after_dispose`), `readable`, `observed_by`, `observed_count`,
 //! `cleanup_order` (effect entries only — derived slots run no cleanup callback
-//! in rs), and `scope_owned_count`.
-//!
-//! NOT assertable: `dependents_of` and `dependencies_of`. `Context` exposes no
-//! public dependent/dependency degree introspection — the in-crate unit tests
-//! reach into `inner.nodes` directly, which an integration test cannot do.
-//! Rather than widen the library's public surface to satisfy a test, every such
-//! assertion is counted as unsupported and reported to stderr, so the gap is
-//! loud instead of silent. See the `unsupported` tally printed by the test.
+//! in rs), `scope_owned_count`, and — via `Context::dependent_count` /
+//! `Context::dependency_count` — `dependents_of` and `dependencies_of`. An
+//! unrecognised assertion key panics rather than being skipped.
 //!
 //! ## Divergences found
 //!
@@ -30,14 +25,14 @@
 //!
 //! ## Fixture shape
 //!
-//! `scope_teardown_equals_fold_of_disposals.json` is `scenarios`-shaped, not
-//! `steps`-shaped, and carries a trailing `expected` block. That is intentional,
-//! not a defect: the fixture's claim is a *relation between two op streams*
-//! (`observationally_equal`), which a single `steps` array cannot express. The
-//! runner replays each scenario in its own `Context` and compares the resulting
-//! observations. `cleanup_order` is read cumulatively rather than per-step,
-//! since the individual-disposal scenario spreads three disposals over three
-//! steps and pins the whole order on the last one.
+//! Every fixture declares a top-level `shape`, `steps` or `scenarios`, and the
+//! runner dispatches on it. `scenarios` exists because a claim like
+//! `observationally_equal` is a *relation between two op streams*, which a
+//! single `steps` array cannot express; each scenario is replayed in its own
+//! `Context` and the resulting observations compared. `cleanup_order` is
+//! cumulative across a scenario rather than per-step — the individual-disposal
+//! scenario spreads three disposals over three steps and pins the whole order
+//! on the last one.
 //!
 //! ## Positive assertion (`#lzspecconf`)
 //!
@@ -52,7 +47,7 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
 
-use lazily::{CellHandle, Context, EffectHandle, SlotHandle};
+use lazily::{CellHandle, Context, EffectHandle, SlotHandle, TeardownScope};
 use serde_json::Value;
 
 const SPEC_DIR: &str = "../lazily-spec/conformance/reactive-graph";
@@ -85,10 +80,18 @@ const KNOWN_DIVERGENCES: &[&str] = &[
     "cross_scope_teardown_hazard.json#7:error",
     "cross_scope_teardown_hazard.json#13:error",
     "read_after_dispose_is_an_error.json#6:error",
+    // (iii) fixture defect: the assertion is ordered before the pull that
+    // registers the edge it counts. `outside` is created reading `topic` but is
+    // not read until the *next* step, and in a lazy binding an unpulled slot has
+    // registered no dependency yet — so `topic` has 1 dependent here, not 2.
+    // The corpus states this rule itself, in churn_returns_to_baseline.json's
+    // `why_read_each` note ("a lazy binding that never pulls the slot registers
+    // no dependency"), so this fixture contradicts its own sibling. Moving the
+    // `read outside` step ahead of the `read b` step would make both binding
+    // classes agree; not edited here.
+    "scope_teardown_equals_fold_of_disposals.json[0]#6:dependents_of.topic",
+    "scope_teardown_equals_fold_of_disposals.json[1]#5:dependents_of.topic",
 ];
-
-/// The one fixture that is `scenarios`-shaped rather than `steps`-shaped.
-const SCENARIOS_FIXTURE: &str = "scope_teardown_equals_fold_of_disposals.json";
 
 // -- panic-as-error plumbing -------------------------------------------------
 
@@ -157,6 +160,7 @@ struct Observation {
     reads: BTreeMap<String, i64>,
     after_publish_observed: Vec<String>,
     after_publish_reads: BTreeMap<String, i64>,
+    degrees: BTreeMap<String, usize>,
 }
 
 /// A fixture assertion rs does not currently satisfy.
@@ -171,7 +175,6 @@ struct Report {
     failures: Vec<Divergence>,
     ops: usize,
     checks: usize,
-    unsupported: BTreeMap<String, usize>,
     observation: Observation,
 }
 
@@ -193,14 +196,10 @@ fn replay(ctx: &Context, fixture: &str, steps: &[Value], tail: Option<&Value>) -
     // Handles are kept forever so `dispose_stale_handle` can dispose through an
     // id that has since been recycled.
     let mut stale: HashMap<String, NodeRef> = HashMap::new();
-    // `TeardownScope` is not re-exported from the crate root, so its type is
-    // unnameable here. Seed the map with an unused, unnamed scope so inference
-    // fixes the value type before the first indexing use.
-    let mut scopes = HashMap::from([(String::from("\0seed"), ctx.scope())]);
+    let mut scopes: HashMap<String, TeardownScope<'_>> = HashMap::new();
     let mut poisoned: BTreeSet<String> = BTreeSet::new();
     let runs: Log = Log::default();
     let cleanups: Log = Log::default();
-    let mut unsupported: BTreeMap<String, usize> = BTreeMap::new();
     let mut ops = 0usize;
     let mut checks = 0usize;
     let mut failures: Vec<Divergence> = Vec::new();
@@ -296,6 +295,20 @@ fn replay(ctx: &Context, fixture: &str, steps: &[Value], tail: Option<&Value>) -
                     key: $key.to_string(),
                     detail: format!("got {got:?}, want {want:?}"),
                 });
+            }
+        }};
+    }
+
+    macro_rules! degree {
+        ($id:expr, $method:ident) => {{
+            let id: &str = $id;
+            match nodes
+                .get(id)
+                .unwrap_or_else(|| panic!("{fixture}: degree of unknown node {id}"))
+            {
+                NodeRef::Cell(h) => ctx.$method(h),
+                NodeRef::Slot(h) => ctx.$method(h),
+                NodeRef::Effect(h) => ctx.$method(h),
             }
         }};
     }
@@ -473,9 +486,23 @@ fn replay(ctx: &Context, fixture: &str, steps: &[Value], tail: Option<&Value>) -
         for (key, want) in expect {
             match key.as_str() {
                 "note" => {}
-                // No public dependent/dependency degree introspection.
-                "dependents_of" | "dependencies_of" => {
-                    *unsupported.entry(key.clone()).or_default() += 1;
+                "dependents_of" => {
+                    for (id, v) in want.as_object().unwrap() {
+                        check!(
+                            format!("dependents_of.{id}"),
+                            degree!(id.as_str(), dependent_count),
+                            v.as_u64().unwrap() as usize
+                        );
+                    }
+                }
+                "dependencies_of" => {
+                    for (id, v) in want.as_object().unwrap() {
+                        check!(
+                            format!("dependencies_of.{id}"),
+                            degree!(id.as_str(), dependency_count),
+                            v.as_u64().unwrap() as usize
+                        );
+                    }
                 }
                 "error" => match want.as_str() {
                     Some("read_after_dispose") => check!("error", op_error, true),
@@ -546,8 +573,15 @@ fn replay(ctx: &Context, fixture: &str, steps: &[Value], tail: Option<&Value>) -
     if let Some(tail) = tail {
         step_idx = usize::MAX; // the `expected` tail is not a numbered step
         let fin = &tail["final_state"];
-        if let Some(m) = fin["dependents_of"].as_object() {
-            *unsupported.entry("dependents_of".into()).or_default() += m.len().max(1);
+        for (id, v) in fin["dependents_of"].as_object().into_iter().flatten() {
+            check!(
+                format!("final.dependents_of.{id}"),
+                degree!(id.as_str(), dependent_count),
+                v.as_u64().unwrap() as usize
+            );
+            observation
+                .degrees
+                .insert(id.clone(), degree!(id.as_str(), dependent_count));
         }
         for (id, v) in fin["readable"].as_object().into_iter().flatten() {
             let alive = match nodes.get(id.as_str()) {
@@ -591,8 +625,12 @@ fn replay(ctx: &Context, fixture: &str, steps: &[Value], tail: Option<&Value>) -
                     .after_publish_reads
                     .insert(rid.clone(), got.unwrap_or_default());
             }
-            if pub_["dependents_of"].is_object() {
-                *unsupported.entry("dependents_of".into()).or_default() += 1;
+            for (id, v) in pub_["dependents_of"].as_object().into_iter().flatten() {
+                check!(
+                    format!("after_publish.dependents_of.{id}"),
+                    degree!(id.as_str(), dependent_count),
+                    v.as_u64().unwrap() as usize
+                );
             }
         }
     }
@@ -601,7 +639,6 @@ fn replay(ctx: &Context, fixture: &str, steps: &[Value], tail: Option<&Value>) -
         failures,
         ops,
         checks,
-        unsupported,
         observation,
     }
 }
@@ -644,31 +681,31 @@ fn reactive_graph_conformance() {
     let mut replayed = 0usize;
     let mut total_ops = 0usize;
     let mut total_checks = 0usize;
-    let mut unsupported: BTreeMap<String, usize> = BTreeMap::new();
     let mut divergences = 0usize;
     let mut observed_divergences: BTreeSet<String> = BTreeSet::new();
 
     for name in FIXTURES {
         let fx = load(name);
-        let reports: Vec<Report> = if name == SCENARIOS_FIXTURE {
-            // Shape hazard: this fixture carries `scenarios` instead of `steps`.
-            let scenarios = fx["scenarios"].as_array().unwrap_or_else(|| {
-                panic!("{name}: expected a `scenarios` array (this fixture has no `steps`)")
-            });
-            assert!(
-                fx.get("steps").is_none(),
-                "{name}: gained a `steps` key — the scenarios special case may be obsolete"
-            );
-            scenarios
+        // Dispatch on the fixture's declared `shape` (lazily-spec 60f62aa), not
+        // on its filename: a filename special case goes stale silently the
+        // moment a second scenarios-shaped fixture is added. An unrecognised
+        // shape is a hard error rather than a fallback to `steps`.
+        let reports: Vec<Report> = match fx["shape"].as_str() {
+            Some("steps") => {
+                let ctx = Context::new();
+                vec![replay(&ctx, name, arr(&fx["steps"]), None)]
+            }
+            Some("scenarios") => fx["scenarios"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: shape is `scenarios` but no scenarios array"))
                 .iter()
                 .map(|s| {
                     let ctx = Context::new();
                     replay(&ctx, name, arr(&s["steps"]), Some(&fx["expected"]))
                 })
-                .collect()
-        } else {
-            let ctx = Context::new();
-            vec![replay(&ctx, name, arr(&fx["steps"]), None)]
+                .collect(),
+            Some(other) => panic!("{name}: unknown fixture shape {other}"),
+            None => panic!("{name}: fixture declares no `shape`"),
         };
 
         // `observationally_equal`: the named scenarios must agree on every
@@ -702,11 +739,6 @@ fn reactive_graph_conformance() {
         let checks: usize = reports.iter().map(|r| r.checks).sum();
         assert!(ops > 0, "{name}: replayed zero ops");
         assert!(checks > 0, "{name}: replayed zero assertions");
-        for r in &reports {
-            for (k, v) in &r.unsupported {
-                *unsupported.entry(k.clone()).or_default() += v;
-            }
-        }
 
         // Divergence ledger: the recorded set must equal the documented one, so
         // a new divergence fails the build and a fixed one forces the entry to
@@ -742,8 +774,7 @@ fn reactive_graph_conformance() {
 
     eprintln!(
         "reactive-graph conformance: {replayed} fixtures, {total_ops} ops, \
-         {total_checks} assertions, {divergences} documented divergences; \
-         unsupported (no public introspection): {unsupported:?}"
+         {total_checks} assertions, {divergences} documented divergences"
     );
 
     // Divergence ledger: the observed set must equal the documented one, so a
