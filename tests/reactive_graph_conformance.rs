@@ -70,16 +70,6 @@ const FIXTURES: [&str; 8] = [
 /// fixture: the runner asserts this list matches the observed set exactly, so
 /// fixing rs fails the test until the entry is removed.
 const KNOWN_DIVERGENCES: &[&str] = &[
-    // (i) rs does not invalidate a disposed node's dependents, so a live reader
-    // that still names a disposed node keeps serving the value it computed
-    // before the disposal instead of erroring on its next recompute. The
-    // fixtures call this out explicitly: "it MUST NOT return the value it
-    // computed before the disposal", and "a binding that returns 3 here ... is
-    // non-conforming". `dispose_slot`/`dispose_cell` detach both edge
-    // directions but never mark the surviving dependents dirty.
-    "cross_scope_teardown_hazard.json#7:error",
-    "cross_scope_teardown_hazard.json#13:error",
-    "read_after_dispose_is_an_error.json#6:error",
     // (iii) fixture defect: the assertion is ordered before the pull that
     // registers the edge it counts. `outside` is created reading `topic` but is
     // not read until the *next* step, and in a lazy binding an unpulled slot has

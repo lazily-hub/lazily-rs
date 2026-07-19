@@ -1416,6 +1416,7 @@ impl Context {
             };
             Self::remove_dependent_edges_locked(&mut inner, handle.id, &slot.dependencies);
             Self::remove_dependency_edges_locked(&mut inner, handle.id, &slot.dependents);
+            Self::invalidate_disposed_dependents_locked(&mut inner, &slot.dependents);
             Self::drop_edge_index_entries(&mut inner, handle.id);
             inner.free_ids.push(handle.id.0);
             slot
@@ -1441,6 +1442,7 @@ impl Context {
             return;
         };
         Self::remove_dependency_edges_locked(&mut inner, handle.id, &cell.dependents);
+        Self::invalidate_disposed_dependents_locked(&mut inner, &cell.dependents);
         Self::drop_edge_index_entries(&mut inner, handle.id);
         inner.free_ids.push(handle.id.0);
         drop(inner);
@@ -1983,6 +1985,29 @@ impl Context {
     /// allocates a DFS stack + force stack per call: the former separate
     /// `stack` and `force_stack` collapse into one `Vec<(SlotId, bool)>` with
     /// better pop locality (#lzbatchborrow).
+    /// Dirty the cone that read a node being disposed (`#lzspecedgeindex`).
+    ///
+    /// Detaching the edges is not enough on its own: a dependent that already
+    /// has a cached value would keep serving it forever, since with its
+    /// dependency edge gone nothing will ever invalidate it again — not even a
+    /// later publish on the disposed node's own source. The spec requires that
+    /// reader to error on its next recompute, so the cone must be marked dirty
+    /// and recompute rather than answer from cache.
+    ///
+    /// Effects reached by the walk are deliberately NOT scheduled. Disposal is
+    /// not a publish: an effect's next recompute is driven by a real write, and
+    /// running one here would re-enter a compute that reads the node currently
+    /// being torn down, turning `dispose` itself into a panic and breaking
+    /// teardown idempotence.
+    fn invalidate_disposed_dependents_locked(inner: &mut ContextInner, dependents: &[SlotId]) {
+        if dependents.is_empty() {
+            return;
+        }
+        inner.effects_scratch.clear();
+        Self::mark_frontier_locked(inner, dependents);
+        inner.effects_scratch.clear();
+    }
+
     fn mark_frontier_locked(inner: &mut ContextInner, roots: &[SlotId]) {
         let nodes = &mut inner.nodes;
         let stack = &mut inner.mark_scratch;
@@ -2251,6 +2276,31 @@ mod tests {
     // has an entry exactly while its edge list is longer than the threshold.
     // Both fast paths assert on that, so a violation panics rather than
     // silently reading a stale position.
+
+    #[test]
+    fn disposal_invalidates_surviving_readers() {
+        // #lzspecedgeindex: detaching the edge is not enough — a reader that
+        // still names a disposed node must recompute (and error) rather than
+        // serve the value it cached before the disposal, forever.
+        let ctx = Context::new();
+        let src = ctx.cell(4i64);
+        let derived = ctx.computed(move |c| c.get_cell(&src));
+        let reader = ctx.computed(move |c| c.get(&derived) + 1);
+        assert_eq!(ctx.get(&reader), 5);
+
+        ctx.dispose_slot(&derived);
+        let after = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.get(&reader)));
+        assert!(
+            after.is_err(),
+            "reader must not serve its pre-disposal cache"
+        );
+
+        // ... and a later publish on the surviving source must not revive it.
+        ctx.set_cell(&src, 99);
+        let after_publish =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.get(&reader)));
+        assert!(after_publish.is_err());
+    }
 
     #[test]
     fn degree_accessors_report_live_edge_set_sizes() {
