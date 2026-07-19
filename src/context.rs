@@ -2266,6 +2266,90 @@ impl Drop for TeardownScope<'_> {
     }
 }
 
+// -- Capability trait impls (#lzspecedgeindex) -------------------------------
+//
+// These land after the inherent methods they forward to: the per-context
+// disposal work predates the abstraction it now satisfies.
+
+impl crate::reactive_graph::Teardown for TeardownScope<'_> {
+    fn len(&self) -> usize {
+        TeardownScope::len(self)
+    }
+    fn disarm(self) {
+        TeardownScope::disarm(self);
+    }
+}
+
+impl crate::reactive_graph::ReactiveGraph for Context {
+    type SlotHandle<T> = crate::slot::SlotHandle<T>;
+    type CellHandle<T> = crate::cell::CellHandle<T>;
+    type EffectHandle = crate::effect::EffectHandle;
+    type Scope<'a> = TeardownScope<'a>;
+
+    fn dispose_slot<T: 'static>(&self, handle: &Self::SlotHandle<T>) {
+        Context::dispose_slot(self, handle);
+    }
+    fn dispose_cell<T: 'static>(&self, handle: &Self::CellHandle<T>) {
+        Context::dispose_cell(self, handle);
+    }
+    fn dispose_effect(&self, handle: &Self::EffectHandle) {
+        Context::dispose_effect(self, handle);
+    }
+    fn scope(&self) -> Self::Scope<'_> {
+        Context::scope(self)
+    }
+    fn batch<R>(&self, run: impl FnOnce(&Self) -> R) -> R {
+        Context::batch(self, run)
+    }
+    fn dependent_count(&self, node: &impl GraphNode) -> usize {
+        Context::dependent_count(self, node)
+    }
+    fn dependency_count(&self, node: &impl GraphNode) -> usize {
+        Context::dependency_count(self, node)
+    }
+}
+
+impl crate::reactive_graph::SyncReactiveGraph for Context {
+    fn cell<T>(&self, value: T) -> Self::CellHandle<T>
+    where
+        T: PartialEq + Send + Sync + 'static,
+    {
+        Context::cell(self, value)
+    }
+    fn get_cell<T>(&self, handle: &Self::CellHandle<T>) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        Context::get_cell(self, handle)
+    }
+    fn set_cell<T>(&self, handle: &Self::CellHandle<T>, value: T)
+    where
+        T: PartialEq + Send + Sync + 'static,
+    {
+        Context::set_cell(self, handle, value);
+    }
+    fn computed<T, F>(&self, compute: F) -> Self::SlotHandle<T>
+    where
+        T: Send + Sync + 'static,
+        F: Fn(&Self) -> T + Send + Sync + 'static,
+    {
+        Context::computed(self, compute)
+    }
+    fn get<T>(&self, handle: &Self::SlotHandle<T>) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        Context::get(self, handle)
+    }
+    fn effect<F, C>(&self, run: F) -> Self::EffectHandle
+    where
+        F: Fn(&Self) -> C + Send + Sync + 'static,
+        C: FnOnce() + Send + Sync + 'static,
+    {
+        Context::effect(self, run)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

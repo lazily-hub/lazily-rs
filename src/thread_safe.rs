@@ -3571,6 +3571,89 @@ impl ThreadSafeContext {
     }
 }
 
+// -- Capability trait impls (#lzspecedgeindex) -------------------------------
+
+impl crate::reactive_graph::Teardown for ThreadSafeTeardownScope {
+    fn len(&self) -> usize {
+        ThreadSafeTeardownScope::len(self)
+    }
+    fn disarm(self) {
+        ThreadSafeTeardownScope::disarm(self);
+    }
+}
+
+impl crate::reactive_graph::ReactiveGraph for ThreadSafeContext {
+    type SlotHandle<T> = crate::slot::SlotHandle<T>;
+    type CellHandle<T> = crate::cell::CellHandle<T>;
+    type EffectHandle = crate::effect::EffectHandle;
+    // Owned, so the GAT lifetime is unused: the scope outlives the borrow that
+    // produced it and is `Send`.
+    type Scope<'a> = ThreadSafeTeardownScope;
+
+    fn dispose_slot<T: 'static>(&self, handle: &Self::SlotHandle<T>) {
+        ThreadSafeContext::dispose_slot(self, handle);
+    }
+    fn dispose_cell<T: 'static>(&self, handle: &Self::CellHandle<T>) {
+        ThreadSafeContext::dispose_cell(self, handle);
+    }
+    fn dispose_effect(&self, handle: &Self::EffectHandle) {
+        ThreadSafeContext::dispose_effect(self, handle);
+    }
+    fn scope(&self) -> Self::Scope<'_> {
+        ThreadSafeContext::scope(self)
+    }
+    fn batch<R>(&self, run: impl FnOnce(&Self) -> R) -> R {
+        ThreadSafeContext::batch(self, run)
+    }
+    fn dependent_count(&self, node: &impl GraphNode) -> usize {
+        ThreadSafeContext::dependent_count(self, node)
+    }
+    fn dependency_count(&self, node: &impl GraphNode) -> usize {
+        ThreadSafeContext::dependency_count(self, node)
+    }
+}
+
+impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
+    fn cell<T>(&self, value: T) -> Self::CellHandle<T>
+    where
+        T: PartialEq + Send + Sync + 'static,
+    {
+        ThreadSafeContext::cell(self, value)
+    }
+    fn get_cell<T>(&self, handle: &Self::CellHandle<T>) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        ThreadSafeContext::get_cell(self, handle)
+    }
+    fn set_cell<T>(&self, handle: &Self::CellHandle<T>, value: T)
+    where
+        T: PartialEq + Send + Sync + 'static,
+    {
+        ThreadSafeContext::set_cell(self, handle, value);
+    }
+    fn computed<T, F>(&self, compute: F) -> Self::SlotHandle<T>
+    where
+        T: Send + Sync + 'static,
+        F: Fn(&Self) -> T + Send + Sync + 'static,
+    {
+        ThreadSafeContext::computed(self, compute)
+    }
+    fn get<T>(&self, handle: &Self::SlotHandle<T>) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        ThreadSafeContext::get(self, handle)
+    }
+    fn effect<F, C>(&self, run: F) -> Self::EffectHandle
+    where
+        F: Fn(&Self) -> C + Send + Sync + 'static,
+        C: FnOnce() + Send + Sync + 'static,
+    {
+        ThreadSafeContext::effect(self, run)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

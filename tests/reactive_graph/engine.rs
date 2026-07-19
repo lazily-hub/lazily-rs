@@ -10,7 +10,9 @@ use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
-use super::model::{GraphModel, Ref, ScopeModel, log_snapshot};
+use super::model::{
+    GraphModel, Ref, ScopeModel, dependencies_of, dependents_of, dispose, log_snapshot,
+};
 
 /// A fixture assertion the implementation does not currently satisfy.
 #[derive(Debug)]
@@ -57,10 +59,10 @@ pub fn replay<'a, M: GraphModel>(
     steps: &[Value],
     tail: Option<&Value>,
 ) -> Report {
-    let mut nodes: HashMap<String, Ref<M>> = HashMap::new();
+    let mut nodes: HashMap<String, Ref<M::Graph>> = HashMap::new();
     // Handles are kept forever so `dispose_stale_handle` can dispose through an
     // id that has since been recycled.
-    let mut stale: HashMap<String, Ref<M>> = HashMap::new();
+    let mut stale: HashMap<String, Ref<M::Graph>> = HashMap::new();
     let mut scopes: HashMap<String, M::Scope<'a>> = HashMap::new();
     let mut poisoned: BTreeSet<String> = BTreeSet::new();
     let mut failures: Vec<Divergence> = Vec::new();
@@ -77,7 +79,7 @@ pub fn replay<'a, M: GraphModel>(
                         .get(&r)
                         .unwrap_or_else(|| panic!("{fixture}: op reads unknown node {r}"))
                 })
-                .collect::<Vec<Ref<M>>>()
+                .collect::<Vec<Ref<M::Graph>>>()
         };
     }
 
@@ -119,7 +121,7 @@ pub fn replay<'a, M: GraphModel>(
             let node = *nodes
                 .get(id)
                 .unwrap_or_else(|| panic!("{fixture}: degree of unknown node {id}"));
-            model.$method(node)
+            $method(model.graph(), node)
         }};
     }
 
@@ -162,7 +164,7 @@ pub fn replay<'a, M: GraphModel>(
             }
             "computed" => {
                 let id = op["id"].as_str().unwrap().to_owned();
-                let reads: Vec<Ref<M>> = reads_of!(op);
+                let reads: Vec<Ref<M::Graph>> = reads_of!(op);
                 let offset = op["offset"].as_i64().unwrap_or(0);
                 let h = match op["scope"].as_str() {
                     Some(s) => Ref::Slot(scopes[s].computed(&reads, offset)),
@@ -174,7 +176,7 @@ pub fn replay<'a, M: GraphModel>(
             }
             "effect" => {
                 let id = op["id"].as_str().unwrap().to_owned();
-                let reads: Vec<Ref<M>> = reads_of!(op);
+                let reads: Vec<Ref<M::Graph>> = reads_of!(op);
                 let h = match op["scope"].as_str() {
                     Some(s) => Ref::Effect(scopes[s].effect(&id, &reads)),
                     None => Ref::Effect(model.effect(&id, &reads)),
@@ -197,12 +199,12 @@ pub fn replay<'a, M: GraphModel>(
             "dispose" => {
                 // The entry stays in the map: a disposed id remains readable-as-
                 // an-error, and disposing it again must be a no-op.
-                model.dispose(nodes[op["id"].as_str().unwrap()]);
+                dispose(model.graph(), nodes[op["id"].as_str().unwrap()]);
             }
             "fanout" => {
                 let prefix = op["id_prefix"].as_str().unwrap();
                 let count = op["count"].as_u64().unwrap();
-                let base: Vec<Ref<M>> = reads_of!(op);
+                let base: Vec<Ref<M::Graph>> = reads_of!(op);
                 for i in 0..count {
                     let id = format!("{prefix}_{i}");
                     // Subscribers are effects, not derived slots: the corpus
@@ -219,7 +221,7 @@ pub fn replay<'a, M: GraphModel>(
                 for i in 0..op["count"].as_u64().unwrap() {
                     let id = format!("{prefix}_{i}");
                     if let Some(n) = nodes.get(&id) {
-                        model.dispose(*n);
+                        dispose(model.graph(), *n);
                     }
                 }
             }
@@ -235,7 +237,7 @@ pub fn replay<'a, M: GraphModel>(
                         for c in 0..cycles {
                             let id = format!("{prefix}_{}", c % width);
                             if let Some(n) = nodes.get(&id) {
-                                model.dispose(*n);
+                                dispose(model.graph(), *n);
                             }
                             let h = Ref::Effect(model.effect(&id, &[source]));
                             nodes.insert(id, h);
@@ -283,7 +285,7 @@ pub fn replay<'a, M: GraphModel>(
                     matches,
                     "{fixture}: handle_kind {want} does not match recorded handle"
                 );
-                model.dispose(h);
+                dispose(model.graph(), h);
             }
             other => panic!("{fixture}: unknown op {other}"),
         }
@@ -306,7 +308,7 @@ pub fn replay<'a, M: GraphModel>(
                     for (id, v) in want.as_object().unwrap() {
                         check!(
                             format!("dependents_of.{id}"),
-                            degree!(id.as_str(), dependent_count),
+                            degree!(id.as_str(), dependents_of),
                             v.as_u64().unwrap() as usize
                         );
                     }
@@ -315,7 +317,7 @@ pub fn replay<'a, M: GraphModel>(
                     for (id, v) in want.as_object().unwrap() {
                         check!(
                             format!("dependencies_of.{id}"),
-                            degree!(id.as_str(), dependency_count),
+                            degree!(id.as_str(), dependencies_of),
                             v.as_u64().unwrap() as usize
                         );
                     }
@@ -389,7 +391,7 @@ pub fn replay<'a, M: GraphModel>(
         step_idx = usize::MAX; // the `expected` tail is not a numbered step
         let fin = &tail["final_state"];
         for (id, v) in fin["dependents_of"].as_object().into_iter().flatten() {
-            let got = degree!(id.as_str(), dependent_count);
+            let got = degree!(id.as_str(), dependents_of);
             check!(
                 format!("final.dependents_of.{id}"),
                 got,
@@ -443,7 +445,7 @@ pub fn replay<'a, M: GraphModel>(
             for (id, v) in publish["dependents_of"].as_object().into_iter().flatten() {
                 check!(
                     format!("after_publish.dependents_of.{id}"),
-                    degree!(id.as_str(), dependent_count),
+                    degree!(id.as_str(), dependents_of),
                     v.as_u64().unwrap() as usize
                 );
             }

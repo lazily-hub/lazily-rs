@@ -64,6 +64,7 @@ mod cell_tree;
 #[cfg(feature = "ipc")]
 mod command;
 mod context;
+pub mod reactive_graph;
 /// #lzspecedgeindex audit probe (`--cfg audit_probe`): records the
 /// `pending_effects` depth seen by `dispose_effect`, so the audit harness can
 /// prove it actually exercises the dispose-during-flush path. An earlier
@@ -257,6 +258,9 @@ pub use rateshape::{
     DebounceCell, DebounceCore, ExpiryPolicy, Lcg, ProbabilisticSampleCell,
     ProbabilisticSampleCore, RatePolicy, SampleCell, SampleCore, SampleMode, SampleRng,
     ThrottleCell, ThrottleCore, ThrottleEdge, WindowPolicy,
+};
+pub use reactive_graph::{
+    AsyncReactiveGraph, ReactiveGraph, SyncReactiveGraph, Teardown, ThreadSafeReactiveGraph,
 };
 pub use receipt::{
     CausalReceipt, CausalReceipts, ReceiptApplyStatus, ReceiptMessage, ReceiptOutcome,

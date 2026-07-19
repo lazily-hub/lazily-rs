@@ -1755,6 +1755,73 @@ impl AsyncContext {
     }
 }
 
+// -- Capability trait impls (#lzspecedgeindex) -------------------------------
+
+impl crate::reactive_graph::Teardown for AsyncTeardownScope {
+    fn len(&self) -> usize {
+        AsyncTeardownScope::len(self)
+    }
+    fn disarm(self) {
+        AsyncTeardownScope::disarm(self);
+    }
+}
+
+impl crate::reactive_graph::ReactiveGraph for AsyncContext {
+    type SlotHandle<T> = AsyncSlotHandle<T>;
+    type CellHandle<T> = AsyncCellHandle<T>;
+    type EffectHandle = AsyncEffectHandle;
+    type Scope<'a> = AsyncTeardownScope;
+
+    fn dispose_slot<T: 'static>(&self, handle: &Self::SlotHandle<T>) {
+        AsyncContext::dispose_slot(self, handle);
+    }
+    fn dispose_cell<T: 'static>(&self, handle: &Self::CellHandle<T>) {
+        AsyncContext::dispose_cell(self, handle);
+    }
+    fn dispose_effect(&self, handle: &Self::EffectHandle) {
+        AsyncContext::dispose_async_effect(self, handle);
+    }
+    fn scope(&self) -> Self::Scope<'_> {
+        AsyncContext::scope(self)
+    }
+    fn batch<R>(&self, run: impl FnOnce(&Self) -> R) -> R {
+        AsyncContext::batch(self, run)
+    }
+    fn dependent_count(&self, node: &impl GraphNode) -> usize {
+        AsyncContext::dependent_count(self, node)
+    }
+    fn dependency_count(&self, node: &impl GraphNode) -> usize {
+        AsyncContext::dependency_count(self, node)
+    }
+}
+
+impl crate::reactive_graph::AsyncReactiveGraph for AsyncContext {
+    fn cell<T>(&self, value: T) -> Self::CellHandle<T>
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+    {
+        AsyncContext::cell(self, value)
+    }
+    fn get_cell<T>(&self, handle: &Self::CellHandle<T>) -> T
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        AsyncContext::get_cell(self, handle)
+    }
+    fn set_cell<T>(&self, handle: &Self::CellHandle<T>, value: T)
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+    {
+        AsyncContext::set_cell(self, handle, value);
+    }
+    fn get<T>(&self, handle: &Self::SlotHandle<T>) -> impl Future<Output = T> + Send
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        AsyncContext::get_async(self, handle)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

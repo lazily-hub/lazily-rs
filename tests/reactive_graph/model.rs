@@ -29,6 +29,8 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use lazily::ReactiveGraph;
+
 /// Shared effect run / cleanup log. `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>`
 /// because thread-safe compute closures must be `Send + Sync`.
 pub type Log = Arc<Mutex<Vec<String>>>;
@@ -51,28 +53,70 @@ pub fn log_snapshot(log: &Log) -> Vec<String> {
 /// top-level read surface `read_after_dispose`.
 pub type Poison = Arc<AtomicBool>;
 
-/// A handle to a node in whichever execution model is under test.
-pub enum Ref<M: GraphModel> {
-    Cell(M::Cell),
-    Slot(M::Slot),
-    Effect(M::Effect),
+/// A handle to a node in whichever graph is under test.
+///
+/// Parameterised by the *library* trait, not by the test model, so the generic
+/// helpers below are ordinary `ReactiveGraph` code rather than test-only code.
+pub enum Ref<G: ReactiveGraph> {
+    Cell(G::CellHandle<i64>),
+    Slot(G::SlotHandle<i64>),
+    Effect(G::EffectHandle),
 }
 
-// Derived impls would demand `M: Clone + Copy`, which is not what is wanted:
-// the *handles* are Copy, the model is not.
-impl<M: GraphModel> Clone for Ref<M> {
+// Derived impls would demand `G: Clone + Copy`, which is not what is wanted:
+// the *handles* are Copy, the graph is not.
+impl<G: ReactiveGraph> Clone for Ref<G> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<M: GraphModel> Copy for Ref<M> {}
+impl<G: ReactiveGraph> Copy for Ref<G> {}
+
+/// Tear down whatever node a `Ref` names.
+///
+/// Written once, against `ReactiveGraph`, and used for all three execution
+/// models. This is the point of the bound-free base trait: teardown code needs
+/// nothing about the value type.
+pub fn dispose<G: ReactiveGraph>(graph: &G, node: Ref<G>) {
+    match node {
+        Ref::Cell(h) => graph.dispose_cell(&h),
+        Ref::Slot(h) => graph.dispose_slot(&h),
+        Ref::Effect(h) => graph.dispose_effect(&h),
+    }
+}
+
+/// Size of a node's reverse edge set, for any handle kind.
+pub fn dependents_of<G: ReactiveGraph>(graph: &G, node: Ref<G>) -> usize {
+    match node {
+        Ref::Cell(h) => graph.dependent_count(&h),
+        Ref::Slot(h) => graph.dependent_count(&h),
+        Ref::Effect(h) => graph.dependent_count(&h),
+    }
+}
+
+/// Size of a node's forward edge set, for any handle kind.
+pub fn dependencies_of<G: ReactiveGraph>(graph: &G, node: Ref<G>) -> usize {
+    match node {
+        Ref::Cell(h) => graph.dependency_count(&h),
+        Ref::Slot(h) => graph.dependency_count(&h),
+        Ref::Effect(h) => graph.dependency_count(&h),
+    }
+}
 
 /// Nodes owned by a teardown scope, created through it rather than through the
 /// context directly.
 pub trait ScopeModel<M: GraphModel> {
-    fn cell(&self, value: i64) -> M::Cell;
-    fn computed(&self, reads: &[Ref<M>], offset: i64) -> M::Slot;
-    fn effect(&self, name: &str, reads: &[Ref<M>]) -> M::Effect;
+    fn cell(&self, value: i64) -> <M::Graph as ReactiveGraph>::CellHandle<i64>;
+    fn computed(
+        &self,
+        reads: &[Ref<M::Graph>],
+        offset: i64,
+    ) -> <M::Graph as ReactiveGraph>::SlotHandle<i64>;
+    fn effect(
+        &self,
+        name: &str,
+        reads: &[Ref<M::Graph>],
+    ) -> <M::Graph as ReactiveGraph>::EffectHandle;
     /// How many nodes the scope currently owns.
     fn owned(&self) -> usize;
     /// Cancel the scope's teardown; ending it afterwards disposes nothing.
@@ -81,10 +125,21 @@ pub trait ScopeModel<M: GraphModel> {
 
 /// One of `lazily`'s execution models, as the conformance corpus needs to drive
 /// it.
+/// The test-side adapter over one execution model.
+///
+/// Everything *structural* — disposal, degree counts, scope teardown — is
+/// delegated to the library's [`ReactiveGraph`] via `graph()` and the free
+/// functions above, which is the acceptance test for that trait: the engine's
+/// teardown and introspection paths are ordinary generic library code.
+///
+/// What stays here is the read discipline, which the library deliberately
+/// splits across `SyncReactiveGraph` / `AsyncReactiveGraph`. A single engine
+/// cannot be generic over both — one returns values and the other futures — so
+/// this adapter bridges them by blocking inside the async model, and that
+/// bridge is a test concern rather than a library one.
 pub trait GraphModel: Sized {
-    type Slot: Copy;
-    type Cell: Copy;
-    type Effect: Copy;
+    /// The library graph this model drives.
+    type Graph: ReactiveGraph;
     type Scope<'a>: ScopeModel<Self>
     where
         Self: 'a;
@@ -94,18 +149,26 @@ pub trait GraphModel: Sized {
 
     fn create() -> Self;
 
-    fn cell(&self, value: i64) -> Self::Cell;
-    fn computed(&self, reads: &[Ref<Self>], offset: i64) -> Self::Slot;
-    fn effect(&self, name: &str, reads: &[Ref<Self>]) -> Self::Effect;
+    /// The underlying graph, for the trait-generic structural operations.
+    fn graph(&self) -> &Self::Graph;
+
+    fn cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::CellHandle<i64>;
+    fn computed(
+        &self,
+        reads: &[Ref<Self::Graph>],
+        offset: i64,
+    ) -> <Self::Graph as ReactiveGraph>::SlotHandle<i64>;
+    fn effect(
+        &self,
+        name: &str,
+        reads: &[Ref<Self::Graph>],
+    ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
 
     /// Read a node's value. `Err` is the corpus's `read_after_dispose`.
-    fn read(&self, node: Ref<Self>) -> Result<i64, ()>;
-    fn set_cell(&self, cell: Self::Cell, value: i64);
+    fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()>;
+    fn set_cell(&self, cell: <Self::Graph as ReactiveGraph>::CellHandle<i64>, value: i64);
 
-    fn dispose(&self, node: Ref<Self>);
-    fn dependent_count(&self, node: Ref<Self>) -> usize;
-    fn dependency_count(&self, node: Ref<Self>) -> usize;
-    fn is_effect_active(&self, effect: Self::Effect) -> bool;
+    fn is_effect_active(&self, effect: <Self::Graph as ReactiveGraph>::EffectHandle) -> bool;
 
     fn scope(&self) -> Self::Scope<'_>;
 

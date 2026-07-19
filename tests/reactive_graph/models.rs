@@ -34,7 +34,7 @@ mod basic {
         poison: Poison,
     }
 
-    fn read_ref(ctx: &Context, node: Ref<BasicModel>) -> Result<i64, ()> {
+    fn read_ref(ctx: &Context, node: Ref<Context>) -> Result<i64, ()> {
         match node {
             Ref::Cell(h) => quiet(|| ctx.get_cell(&h)),
             Ref::Slot(h) => quiet(|| ctx.get(&h)),
@@ -43,7 +43,7 @@ mod basic {
     }
 
     /// A read from inside a callback: never unwinds, records the failure.
-    fn tracked(ctx: &Context, node: Ref<BasicModel>, poison: &Poison) -> i64 {
+    fn tracked(ctx: &Context, node: Ref<Context>, poison: &Poison) -> i64 {
         match read_ref(ctx, node) {
             Ok(v) => v,
             Err(()) => {
@@ -54,7 +54,7 @@ mod basic {
     }
 
     fn compute(
-        reads: &[Ref<BasicModel>],
+        reads: &[Ref<Context>],
         offset: i64,
         poison: &Poison,
     ) -> impl Fn(&Context) -> i64 + 'static {
@@ -71,7 +71,7 @@ mod basic {
 
     fn effect_body(
         name: &str,
-        reads: &[Ref<BasicModel>],
+        reads: &[Ref<Context>],
         runs: &Log,
         cleanups: &Log,
         poison: &Poison,
@@ -98,10 +98,10 @@ mod basic {
         fn cell(&self, value: i64) -> CellHandle<i64> {
             self.0.cell(value)
         }
-        fn computed(&self, reads: &[Ref<BasicModel>], offset: i64) -> SlotHandle<i64> {
+        fn computed(&self, reads: &[Ref<Context>], offset: i64) -> SlotHandle<i64> {
             self.0.computed(compute(reads, offset, &self.3))
         }
-        fn effect(&self, name: &str, reads: &[Ref<BasicModel>]) -> EffectHandle {
+        fn effect(&self, name: &str, reads: &[Ref<Context>]) -> EffectHandle {
             self.0
                 .effect(effect_body(name, reads, &self.1, &self.2, &self.3))
         }
@@ -114,9 +114,7 @@ mod basic {
     }
 
     impl GraphModel for BasicModel {
-        type Slot = SlotHandle<i64>;
-        type Cell = CellHandle<i64>;
-        type Effect = EffectHandle;
+        type Graph = Context;
         type Scope<'a> = BasicScope<'a>;
 
         const NAME: &'static str = "Context";
@@ -130,13 +128,17 @@ mod basic {
             }
         }
 
-        fn cell(&self, value: i64) -> Self::Cell {
+        fn graph(&self) -> &Self::Graph {
+            &self.ctx
+        }
+
+        fn cell(&self, value: i64) -> CellHandle<i64> {
             self.ctx.cell(value)
         }
-        fn computed(&self, reads: &[Ref<Self>], offset: i64) -> Self::Slot {
+        fn computed(&self, reads: &[Ref<Self::Graph>], offset: i64) -> SlotHandle<i64> {
             self.ctx.computed(compute(reads, offset, &self.poison))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Self>]) -> Self::Effect {
+        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> EffectHandle {
             self.ctx.effect(effect_body(
                 name,
                 reads,
@@ -145,34 +147,13 @@ mod basic {
                 &self.poison,
             ))
         }
-        fn read(&self, node: Ref<Self>) -> Result<i64, ()> {
+        fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
         }
-        fn set_cell(&self, cell: Self::Cell, value: i64) {
+        fn set_cell(&self, cell: CellHandle<i64>, value: i64) {
             self.ctx.set_cell(&cell, value);
         }
-        fn dispose(&self, node: Ref<Self>) {
-            match node {
-                Ref::Cell(h) => self.ctx.dispose_cell(&h),
-                Ref::Slot(h) => self.ctx.dispose_slot(&h),
-                Ref::Effect(h) => self.ctx.dispose_effect(&h),
-            }
-        }
-        fn dependent_count(&self, node: Ref<Self>) -> usize {
-            match node {
-                Ref::Cell(h) => self.ctx.dependent_count(&h),
-                Ref::Slot(h) => self.ctx.dependent_count(&h),
-                Ref::Effect(h) => self.ctx.dependent_count(&h),
-            }
-        }
-        fn dependency_count(&self, node: Ref<Self>) -> usize {
-            match node {
-                Ref::Cell(h) => self.ctx.dependency_count(&h),
-                Ref::Slot(h) => self.ctx.dependency_count(&h),
-                Ref::Effect(h) => self.ctx.dependency_count(&h),
-            }
-        }
-        fn is_effect_active(&self, effect: Self::Effect) -> bool {
+        fn is_effect_active(&self, effect: EffectHandle) -> bool {
             self.ctx.is_effect_active(&effect)
         }
         fn scope(&self) -> Self::Scope<'_> {
@@ -213,7 +194,7 @@ mod threadsafe {
         poison: Poison,
     }
 
-    fn read_ref(ctx: &ThreadSafeContext, node: Ref<ThreadSafeModel>) -> Result<i64, ()> {
+    fn read_ref(ctx: &ThreadSafeContext, node: Ref<ThreadSafeContext>) -> Result<i64, ()> {
         match node {
             Ref::Cell(h) => quiet(|| ctx.get_cell(&h)),
             Ref::Slot(h) => quiet(|| ctx.get(&h)),
@@ -221,7 +202,7 @@ mod threadsafe {
         }
     }
 
-    fn tracked(ctx: &ThreadSafeContext, node: Ref<ThreadSafeModel>, poison: &Poison) -> i64 {
+    fn tracked(ctx: &ThreadSafeContext, node: Ref<ThreadSafeContext>, poison: &Poison) -> i64 {
         match read_ref(ctx, node) {
             Ok(v) => v,
             Err(()) => {
@@ -232,7 +213,7 @@ mod threadsafe {
     }
 
     fn compute(
-        reads: &[Ref<ThreadSafeModel>],
+        reads: &[Ref<ThreadSafeContext>],
         offset: i64,
         poison: &Poison,
     ) -> impl Fn(&ThreadSafeContext) -> i64 + Send + Sync + 'static {
@@ -249,7 +230,7 @@ mod threadsafe {
 
     fn effect_body(
         name: &str,
-        reads: &[Ref<ThreadSafeModel>],
+        reads: &[Ref<ThreadSafeContext>],
         runs: &Log,
         cleanups: &Log,
         poison: &Poison,
@@ -280,10 +261,10 @@ mod threadsafe {
         fn cell(&self, value: i64) -> CellHandle<i64> {
             self.0.cell(value)
         }
-        fn computed(&self, reads: &[Ref<ThreadSafeModel>], offset: i64) -> SlotHandle<i64> {
+        fn computed(&self, reads: &[Ref<ThreadSafeContext>], offset: i64) -> SlotHandle<i64> {
             self.0.computed(compute(reads, offset, &self.3))
         }
-        fn effect(&self, name: &str, reads: &[Ref<ThreadSafeModel>]) -> EffectHandle {
+        fn effect(&self, name: &str, reads: &[Ref<ThreadSafeContext>]) -> EffectHandle {
             self.0
                 .effect(effect_body(name, reads, &self.1, &self.2, &self.3))
         }
@@ -296,9 +277,7 @@ mod threadsafe {
     }
 
     impl GraphModel for ThreadSafeModel {
-        type Slot = SlotHandle<i64>;
-        type Cell = CellHandle<i64>;
-        type Effect = EffectHandle;
+        type Graph = ThreadSafeContext;
         type Scope<'a> = ThreadSafeScope;
 
         const NAME: &'static str = "ThreadSafeContext";
@@ -312,13 +291,17 @@ mod threadsafe {
             }
         }
 
-        fn cell(&self, value: i64) -> Self::Cell {
+        fn graph(&self) -> &Self::Graph {
+            &self.ctx
+        }
+
+        fn cell(&self, value: i64) -> CellHandle<i64> {
             self.ctx.cell(value)
         }
-        fn computed(&self, reads: &[Ref<Self>], offset: i64) -> Self::Slot {
+        fn computed(&self, reads: &[Ref<Self::Graph>], offset: i64) -> SlotHandle<i64> {
             self.ctx.computed(compute(reads, offset, &self.poison))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Self>]) -> Self::Effect {
+        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> EffectHandle {
             self.ctx.effect(effect_body(
                 name,
                 reads,
@@ -327,34 +310,13 @@ mod threadsafe {
                 &self.poison,
             ))
         }
-        fn read(&self, node: Ref<Self>) -> Result<i64, ()> {
+        fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
         }
-        fn set_cell(&self, cell: Self::Cell, value: i64) {
+        fn set_cell(&self, cell: CellHandle<i64>, value: i64) {
             self.ctx.set_cell(&cell, value);
         }
-        fn dispose(&self, node: Ref<Self>) {
-            match node {
-                Ref::Cell(h) => self.ctx.dispose_cell(&h),
-                Ref::Slot(h) => self.ctx.dispose_slot(&h),
-                Ref::Effect(h) => self.ctx.dispose_effect(&h),
-            }
-        }
-        fn dependent_count(&self, node: Ref<Self>) -> usize {
-            match node {
-                Ref::Cell(h) => self.ctx.dependent_count(&h),
-                Ref::Slot(h) => self.ctx.dependent_count(&h),
-                Ref::Effect(h) => self.ctx.dependent_count(&h),
-            }
-        }
-        fn dependency_count(&self, node: Ref<Self>) -> usize {
-            match node {
-                Ref::Cell(h) => self.ctx.dependency_count(&h),
-                Ref::Slot(h) => self.ctx.dependency_count(&h),
-                Ref::Effect(h) => self.ctx.dependency_count(&h),
-            }
-        }
-        fn is_effect_active(&self, effect: Self::Effect) -> bool {
+        fn is_effect_active(&self, effect: EffectHandle) -> bool {
             self.ctx.is_effect_active(&effect)
         }
         fn scope(&self) -> Self::Scope<'_> {
@@ -405,7 +367,7 @@ mod asynchronous {
     /// it carries the node id and the generation captured at spawn, which is
     /// what makes dependency registration safe across an await.
     fn compute(
-        reads: &[Ref<AsyncModel>],
+        reads: &[Ref<AsyncContext>],
         offset: i64,
         poison: &Poison,
     ) -> impl Fn(AsyncComputeContext) -> BoxFuture + Send + Sync + 'static {
@@ -432,7 +394,7 @@ mod asynchronous {
     /// A read from inside a compute. Reading a disposed node panics, and
     /// `catch_unwind` cannot span an await point, so the panic is caught around
     /// the two halves separately: building the future, and driving it.
-    async fn read_in_compute(c: &AsyncComputeContext, node: Ref<AsyncModel>) -> Result<i64, ()> {
+    async fn read_in_compute(c: &AsyncComputeContext, node: Ref<AsyncContext>) -> Result<i64, ()> {
         match node {
             Ref::Cell(h) => quiet(|| c.get_cell(&h)),
             Ref::Slot(h) => match quiet(|| c.get_async(&h)) {
@@ -451,7 +413,7 @@ mod asynchronous {
 
     fn effect_body(
         name: &str,
-        reads: &[Ref<AsyncModel>],
+        reads: &[Ref<AsyncContext>],
         runs: &Log,
         cleanups: &Log,
         poison: &Poison,
@@ -489,11 +451,11 @@ mod asynchronous {
             let _guard = self.4.enter();
             self.0.cell(value)
         }
-        fn computed(&self, reads: &[Ref<AsyncModel>], offset: i64) -> AsyncSlotHandle<i64> {
+        fn computed(&self, reads: &[Ref<AsyncContext>], offset: i64) -> AsyncSlotHandle<i64> {
             let _guard = self.4.enter();
             self.0.computed_async(compute(reads, offset, &self.3))
         }
-        fn effect(&self, name: &str, reads: &[Ref<AsyncModel>]) -> AsyncEffectHandle {
+        fn effect(&self, name: &str, reads: &[Ref<AsyncContext>]) -> AsyncEffectHandle {
             let _guard = self.4.enter();
             self.0
                 .effect_async(effect_body(name, reads, &self.1, &self.2, &self.3))
@@ -507,9 +469,7 @@ mod asynchronous {
     }
 
     impl GraphModel for AsyncModel {
-        type Slot = AsyncSlotHandle<i64>;
-        type Cell = AsyncCellHandle<i64>;
-        type Effect = AsyncEffectHandle;
+        type Graph = AsyncContext;
         type Scope<'a> = AsyncScope;
 
         const NAME: &'static str = "AsyncContext";
@@ -528,16 +488,20 @@ mod asynchronous {
             }
         }
 
-        fn cell(&self, value: i64) -> Self::Cell {
+        fn graph(&self) -> &Self::Graph {
+            &self.ctx
+        }
+
+        fn cell(&self, value: i64) -> AsyncCellHandle<i64> {
             let _guard = self.rt.enter();
             self.ctx.cell(value)
         }
-        fn computed(&self, reads: &[Ref<Self>], offset: i64) -> Self::Slot {
+        fn computed(&self, reads: &[Ref<Self::Graph>], offset: i64) -> AsyncSlotHandle<i64> {
             let _guard = self.rt.enter();
             self.ctx
                 .computed_async(compute(reads, offset, &self.poison))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Self>]) -> Self::Effect {
+        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> AsyncEffectHandle {
             let _guard = self.rt.enter();
             self.ctx.effect_async(effect_body(
                 name,
@@ -547,40 +511,18 @@ mod asynchronous {
                 &self.poison,
             ))
         }
-        fn read(&self, node: Ref<Self>) -> Result<i64, ()> {
+        fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             match node {
                 Ref::Cell(h) => quiet(|| self.ctx.get_cell(&h)),
                 Ref::Slot(h) => quiet(|| self.rt.block_on(self.ctx.get_async(&h))),
                 Ref::Effect(_) => Err(()),
             }
         }
-        fn set_cell(&self, cell: Self::Cell, value: i64) {
+        fn set_cell(&self, cell: AsyncCellHandle<i64>, value: i64) {
             let _guard = self.rt.enter();
             self.ctx.set_cell(&cell, value);
         }
-        fn dispose(&self, node: Ref<Self>) {
-            let _guard = self.rt.enter();
-            match node {
-                Ref::Cell(h) => self.ctx.dispose_cell(&h),
-                Ref::Slot(h) => self.ctx.dispose_slot(&h),
-                Ref::Effect(h) => self.ctx.dispose_async_effect(&h),
-            }
-        }
-        fn dependent_count(&self, node: Ref<Self>) -> usize {
-            match node {
-                Ref::Cell(h) => self.ctx.dependent_count(&h),
-                Ref::Slot(h) => self.ctx.dependent_count(&h),
-                Ref::Effect(h) => self.ctx.dependent_count(&h),
-            }
-        }
-        fn dependency_count(&self, node: Ref<Self>) -> usize {
-            match node {
-                Ref::Cell(h) => self.ctx.dependency_count(&h),
-                Ref::Slot(h) => self.ctx.dependency_count(&h),
-                Ref::Effect(h) => self.ctx.dependency_count(&h),
-            }
-        }
-        fn is_effect_active(&self, effect: Self::Effect) -> bool {
+        fn is_effect_active(&self, effect: AsyncEffectHandle) -> bool {
             self.ctx.is_async_effect_active(&effect)
         }
         fn scope(&self) -> Self::Scope<'_> {

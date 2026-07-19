@@ -15,6 +15,7 @@ this repo.
 
 ## Architecture
 
+- `src/reactive_graph.rs` — capability traits over the three execution models (`#lzspecedgeindex`): bound-free `ReactiveGraph` (disposal, scopes, batch, degree introspection, associated `SlotHandle`/`CellHandle`/`EffectHandle`/`Scope` types), `Teardown` (scope contract), `SyncReactiveGraph`/`AsyncReactiveGraph` (construction + reads, split by read discipline), and the blanket-implemented `ThreadSafeReactiveGraph` marker. Read discipline and thread-safety are orthogonal axes, hence four traits
 - `src/context.rs` — `Context` struct, dependency graph, thread-local tracking stack
 - `src/slot.rs` — `SlotHandle<T>` (lightweight `Copy` id into Context)
 - `src/cell.rs` — `CellHandle<T>` (lightweight `Copy` id into Context)
