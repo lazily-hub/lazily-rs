@@ -91,7 +91,18 @@ jobs:
       - name: Test reactive-graph disposal/teardown conformance against canonical spec fixtures (#lzspecedgeindex)
         run: |
           test -d ../lazily-spec/conformance/reactive-graph || { echo "::error::../lazily-spec/conformance/reactive-graph missing — reactive_graph_conformance.rs would silently skip all 8 disposal/teardown fixtures"; exit 1; }
+          # The corpus is parameterised over the execution model, and the
+          # ThreadSafeContext / AsyncContext models are feature-gated. Running
+          # only the default-feature test would silently drop two thirds of the
+          # coverage, which is the exact failure mode this corpus exists to kill.
           cargo +stable test --locked --test reactive_graph_conformance
+          cargo +stable test --locked --features thread-safe --test reactive_graph_conformance
+          cargo +stable test --locked --features async --test reactive_graph_conformance
+          # Assert all three models actually ran, rather than trusting a green tick.
+          cargo +stable test --locked --features "thread-safe async" --test reactive_graph_conformance -- --nocapture 2>&1 | tee /tmp/rg.log
+          for model in Context ThreadSafeContext AsyncContext; do
+            grep -q "reactive-graph\[$model\]: 8 fixtures" /tmp/rg.log || { echo "::error::reactive-graph corpus did not replay against $model"; exit 1; }
+          done
 
       - name: Test SeqCrdt conformance against canonical spec fixtures (#lzseqcrdt)
         run: |

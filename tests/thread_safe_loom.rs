@@ -1832,3 +1832,187 @@ fn invalidation_frontier_cached_arc_falls_back_when_recompute_in_flight() {
         let _ = (dirty, computing);
     });
 }
+
+// -- #lzspecedgeindex disposal ---------------------------------------------
+//
+// Disposal on the shared graph has two invariants worth modelling, both of
+// which are about a *pair* of pieces of state going away together rather than
+// about any single atomic.
+
+/// Models `ThreadSafeContext::dispose_slot` against a concurrent reader.
+///
+/// The node lives in the state lock; the lock-free read path additionally
+/// mirrors it in an index-keyed fast-path registry. The hazard is a reader that
+/// hits a fast-path entry whose node is already gone — a stale entry would, once
+/// the id is recycled, answer about a completely unrelated node.
+#[derive(Default)]
+struct DisposalReadGraph {
+    /// `Some` while the node is live.
+    node: RwLock<Option<u64>>,
+    /// The lock-free mirror. Must never outlive its node.
+    fast_path: RwLock<Option<u64>>,
+    /// Set if a reader ever saw a fast-path hit without a live node.
+    observed_stale_fast_path: AtomicBool,
+    /// Set if a reader ever saw a live node with no fast-path entry *and* a
+    /// value, i.e. the two halves disagreed in the other direction.
+    observed_torn: AtomicBool,
+}
+
+impl DisposalReadGraph {
+    fn live(value: u64) -> Self {
+        Self {
+            node: RwLock::new(Some(value)),
+            fast_path: RwLock::new(Some(value)),
+            observed_stale_fast_path: AtomicBool::new(false),
+            observed_torn: AtomicBool::new(false),
+        }
+    }
+
+    /// Lock order: fast-path registry, then state — the order slot creation
+    /// already uses. Both guards are held across the whole teardown, which is
+    /// what makes disposal atomic with respect to any single read.
+    fn dispose(&self) {
+        let mut fast_path = self.fast_path.write().unwrap();
+        let mut node = self.node.write().unwrap();
+        *node = None;
+        *fast_path = None;
+    }
+
+    fn read(&self) -> Option<u64> {
+        let fast_path = self.fast_path.read().unwrap();
+        if let Some(value) = *fast_path {
+            // Same order as `dispose`, so this nesting cannot deadlock.
+            if self.node.read().unwrap().is_none() {
+                self.observed_stale_fast_path.store(true, Ordering::Release);
+            }
+            return Some(value);
+        }
+        drop(fast_path);
+        let node = *self.node.read().unwrap();
+        if node.is_some() && self.fast_path.read().unwrap().is_none() {
+            self.observed_torn.store(true, Ordering::Release);
+        }
+        node
+    }
+}
+
+#[test]
+fn disposal_is_atomic_with_respect_to_a_concurrent_read() {
+    loom::model(|| {
+        let graph = Arc::new(DisposalReadGraph::live(7));
+
+        let disposer = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || graph.dispose())
+        };
+        let reader = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || graph.read())
+        };
+
+        disposer.join().expect("disposer should finish");
+        let observed = reader.join().expect("reader should finish");
+
+        assert!(
+            !graph.observed_stale_fast_path.load(Ordering::Acquire),
+            "a reader must never hit a fast-path entry whose node is gone; a stale \
+             entry aliases onto whatever next claims the recycled id"
+        );
+        assert!(
+            !graph.observed_torn.load(Ordering::Acquire),
+            "a reader must never observe the two halves disagreeing"
+        );
+        // Either ordering is legal, but only these two.
+        assert!(
+            observed == Some(7) || observed.is_none(),
+            "a read is either fully before or fully after the disposal"
+        );
+        assert!(graph.node.read().unwrap().is_none());
+        assert!(graph.fast_path.read().unwrap().is_none());
+    });
+}
+
+/// Models disposal racing a recompute that is already in flight.
+///
+/// Mirrors the generation re-check `AsyncContext` uses (`#lzasyncdispose2`) and
+/// the kind check the sync contexts use: a recompute that started before the
+/// disposal must not publish its result into a node that is gone, because the
+/// id may already have been handed to an unrelated node.
+#[derive(Default)]
+struct DisposalRecomputeGraph {
+    /// `(live, generation, value)` — all under one lock, exactly as the real
+    /// implementations keep the node and its generation under one acquisition.
+    state: Mutex<(bool, u64, u64)>,
+    published_into_disposed: AtomicBool,
+}
+
+impl DisposalRecomputeGraph {
+    /// A recompute only ever starts for a *live* node — the real
+    /// implementations resolve the node before spawning the computation — so
+    /// this returns `None` once the node is gone. Modelling it as always
+    /// starting let loom find an interleaving the real system cannot reach.
+    fn begin_recompute(&self) -> Option<u64> {
+        let (live, generation, _) = *self.state.lock().unwrap();
+        live.then_some(generation)
+    }
+
+    /// Publish only if the node is still live *and* still the same generation.
+    fn finish_recompute(&self, captured_generation: u64, value: u64) {
+        let mut state = self.state.lock().unwrap();
+        let (live, generation, _) = *state;
+        if generation != captured_generation {
+            return; // disposed (and possibly recycled) mid-flight
+        }
+        if !live {
+            self.published_into_disposed.store(true, Ordering::Release);
+            return;
+        }
+        state.2 = value;
+    }
+
+    fn dispose(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = false;
+        // Bump BEFORE the id would be recycled, so an in-flight run fails its
+        // re-check rather than writing into the node that reuses the id.
+        state.1 += 1;
+    }
+}
+
+#[test]
+fn disposal_racing_an_in_flight_recompute_never_publishes_into_a_disposed_node() {
+    loom::model(|| {
+        let graph = Arc::new(DisposalRecomputeGraph {
+            state: Mutex::new((true, 0, 0)),
+            published_into_disposed: AtomicBool::new(false),
+        });
+
+        let recomputer = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || {
+                if let Some(generation) = graph.begin_recompute() {
+                    thread::yield_now();
+                    graph.finish_recompute(generation, 42);
+                }
+            })
+        };
+        let disposer = {
+            let graph = Arc::clone(&graph);
+            thread::spawn(move || graph.dispose())
+        };
+
+        recomputer.join().expect("recomputer should finish");
+        disposer.join().expect("disposer should finish");
+
+        assert!(
+            !graph.published_into_disposed.load(Ordering::Acquire),
+            "an in-flight recompute must never publish into a disposed node"
+        );
+        let (live, generation, _) = *graph.state.lock().unwrap();
+        assert!(!live, "the node is disposed once both threads have run");
+        assert_eq!(
+            generation, 1,
+            "disposal advances the generation exactly once"
+        );
+    });
+}
