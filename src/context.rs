@@ -2141,7 +2141,7 @@ impl Default for Context {
     }
 }
 
-mod sealed {
+pub(crate) mod sealed {
     pub trait Sealed {}
 }
 

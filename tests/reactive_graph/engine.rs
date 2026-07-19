@@ -288,6 +288,7 @@ pub fn replay<'a, M: GraphModel>(
             other => panic!("{fixture}: unknown op {other}"),
         }
 
+        model.settle();
         let observed: Vec<String> = log_snapshot(model.run_log())[runs_before..].to_vec();
         // `cleanup_order` is cumulative, not per-step: the individual-disposal
         // scenario spreads three disposals over three steps and pins the whole
@@ -421,6 +422,7 @@ pub fn replay<'a, M: GraphModel>(
                 Ref::Cell(h) => model.set_cell(h, pop["value"].as_i64().unwrap()),
                 _ => panic!("{fixture}: after_publish set_cell on non-cell"),
             }
+            model.settle();
             observation.after_publish_observed = log_snapshot(model.run_log())[before..].to_vec();
             check!(
                 "after_publish.observed_by",

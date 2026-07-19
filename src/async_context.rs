@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::context::SlotId;
+use crate::context::{GraphNode, SlotId};
 
 #[cfg(not(feature = "vec_edges"))]
 type EdgeVec = smallvec::SmallVec<[SlotId; 4]>;
@@ -371,6 +371,119 @@ fn register_dependency_locked(
 /// check and the re-lock). Compiled out of default/release builds.
 #[cfg(feature = "instrumentation")]
 pub type Window1Hook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+// The async handles address nodes in the same way the sync ones do, so they join
+// the same sealed `GraphNode` trait rather than growing a parallel accessor set.
+impl<T> crate::context::sealed::Sealed for AsyncSlotHandle<T> {}
+impl<T> GraphNode for AsyncSlotHandle<T> {
+    fn node_id(&self) -> SlotId {
+        self.id
+    }
+}
+
+impl<T> crate::context::sealed::Sealed for AsyncCellHandle<T> {}
+impl<T> GraphNode for AsyncCellHandle<T> {
+    fn node_id(&self) -> SlotId {
+        self.id
+    }
+}
+
+impl crate::context::sealed::Sealed for AsyncEffectHandle {}
+impl GraphNode for AsyncEffectHandle {
+    fn node_id(&self) -> SlotId {
+        self.id
+    }
+}
+
+/// A teardown scope over an [`AsyncContext`]: nodes created through it are
+/// disposed when it drops.
+///
+/// Holds an owned handle rather than a borrow, for the same reason
+/// [`ThreadSafeTeardownScope`](crate::ThreadSafeTeardownScope) does: the context
+/// is already an `Arc` over shared state, so owning one is cheap and makes the
+/// scope `Send` and `'static`-able.
+pub struct AsyncTeardownScope {
+    ctx: AsyncContext,
+    owned: Mutex<Vec<SlotId>>,
+}
+
+impl AsyncTeardownScope {
+    /// Create an async derived slot owned by this scope.
+    pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let handle = self.ctx.computed_async(compute);
+        self.owned.lock().push(handle.id);
+        handle
+    }
+
+    /// Create a memoized async slot owned by this scope.
+    pub fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let handle = self.ctx.memo_async(compute);
+        self.owned.lock().push(handle.id);
+        handle
+    }
+
+    /// Create a source cell owned by this scope.
+    pub fn cell<T>(&self, value: T) -> AsyncCellHandle<T>
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+    {
+        let handle = self.ctx.cell(value);
+        self.owned.lock().push(handle.id);
+        handle
+    }
+
+    /// Register an async effect owned by this scope.
+    pub fn effect_async<F, Fut, C>(&self, effect: F) -> AsyncEffectHandle
+    where
+        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<C>> + Send + 'static,
+        C: FnOnce() + Send + 'static,
+    {
+        let handle = self.ctx.effect_async(effect);
+        self.owned.lock().push(handle.id);
+        handle
+    }
+
+    /// The context this scope belongs to.
+    pub fn context(&self) -> &AsyncContext {
+        &self.ctx
+    }
+
+    /// How many nodes this scope owns.
+    pub fn len(&self) -> usize {
+        self.owned.lock().len()
+    }
+
+    /// Whether this scope owns nothing.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Disarm the scope: ending it afterwards disposes nothing.
+    pub fn disarm(self) {
+        self.owned.lock().clear();
+    }
+}
+
+impl Drop for AsyncTeardownScope {
+    fn drop(&mut self) {
+        // Reverse creation order: dependents before what they read.
+        let owned = std::mem::take(&mut *self.owned.lock());
+        for id in owned.into_iter().rev() {
+            self.ctx.dispose_id(id);
+        }
+    }
+}
 
 pub struct AsyncContext {
     inner: Arc<Mutex<AsyncContextInner>>,
@@ -1101,6 +1214,263 @@ impl AsyncContext {
         handle
     }
 
+    /// How many nodes currently depend on `node` — the size of its reverse edge
+    /// set (`#lzspecedgeindex`).
+    pub fn dependent_count(&self, node: &impl GraphNode) -> usize {
+        let inner = self.inner.lock();
+        match inner.get_node(node.node_id()) {
+            Some(AsyncNode::Slot(slot)) => slot.dependents.len(),
+            Some(AsyncNode::Cell(cell)) => cell.dependents.len(),
+            // Effects are pure sinks: nothing can read one.
+            Some(AsyncNode::Effect(_)) | None => 0,
+        }
+    }
+
+    /// How many nodes `node` currently depends on — the size of its forward edge
+    /// set (`#lzspecedgeindex`).
+    pub fn dependency_count(&self, node: &impl GraphNode) -> usize {
+        let inner = self.inner.lock();
+        match inner.get_node(node.node_id()) {
+            Some(AsyncNode::Slot(slot)) => slot.dependencies.len(),
+            Some(AsyncNode::Effect(effect)) => effect.dependencies.len(),
+            // Cells are pure sources.
+            Some(AsyncNode::Cell(_)) | None => 0,
+        }
+    }
+
+    /// Check whether an async effect is still registered.
+    pub fn is_async_effect_active(&self, handle: &AsyncEffectHandle) -> bool {
+        let inner = self.inner.lock();
+        matches!(inner.get_node(handle.id), Some(AsyncNode::Effect(_)))
+    }
+
+    /// Detach `id` from both edge directions of everything it touches.
+    fn detach_edges_locked(inner: &mut AsyncContextInner, id: SlotId, node: &AsyncNode) {
+        let (dependencies, dependents) = match node {
+            AsyncNode::Slot(s) => (s.dependencies.clone(), s.dependents.clone()),
+            AsyncNode::Cell(c) => (EdgeVec::new(), c.dependents.clone()),
+            AsyncNode::Effect(e) => (e.dependencies.clone(), EdgeVec::new()),
+        };
+        // Upstream: the sources no longer list this node as a dependent.
+        for dep_id in &dependencies {
+            match inner.get_node_mut(*dep_id) {
+                Some(AsyncNode::Slot(s)) => {
+                    edge_remove(&mut s.dependents, id);
+                }
+                Some(AsyncNode::Cell(c)) => {
+                    edge_remove(&mut c.dependents, id);
+                }
+                _ => {}
+            }
+        }
+        // Downstream: the readers no longer list this node as a dependency.
+        for dependent_id in &dependents {
+            match inner.get_node_mut(*dependent_id) {
+                Some(AsyncNode::Slot(s)) => {
+                    edge_remove(&mut s.dependencies, id);
+                }
+                Some(AsyncNode::Effect(e)) => {
+                    edge_remove(&mut e.dependencies, id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Bump the generation for `id` and recycle it (`#lzasyncdispose2`).
+    ///
+    /// The bump must happen BEFORE the id enters the free list, so a task still
+    /// in-flight for the disposed node fails its generation re-check and cannot
+    /// write into whatever node a later `alloc_id` puts at this index.
+    fn retire_id_locked(inner: &mut AsyncContextInner, id: SlotId) {
+        let Some(idx) = AsyncContextInner::node_index(id) else {
+            return;
+        };
+        if idx < inner.nodes.len() {
+            inner.nodes[idx] = None;
+        }
+        if idx < inner.generations.len() {
+            inner.generations[idx] += 1;
+        }
+        inner.free_ids.push(id.0);
+    }
+
+    /// Invalidate the cone that read a node being disposed, without scheduling
+    /// anything (`#lzspecedgeindex`).
+    ///
+    /// The same reasoning as the sync contexts: detaching the edges is not
+    /// enough, because a dependent holding a resolved value would keep serving
+    /// it once its dependency edge is gone. In-flight recomputes in the cone are
+    /// aborted — a computation reading a node that is being torn down has no
+    /// result worth keeping. Effects are deliberately NOT scheduled: disposal is
+    /// not a publish, and running one here would re-enter a compute over a node
+    /// currently being disposed.
+    fn invalidate_disposed_dependents(&self, roots: &[SlotId]) {
+        if roots.is_empty() {
+            return;
+        }
+        let (in_flight_handles, notifiers) = {
+            let mut inner = self.inner.lock();
+            let mut stack: smallvec::SmallVec<[SlotId; 16]> = smallvec::SmallVec::new();
+            stack.extend_from_slice(roots);
+            let mut in_flight_handles: smallvec::SmallVec<[JoinHandle<()>; 4]> =
+                smallvec::SmallVec::new();
+            let mut notifiers: smallvec::SmallVec<[watch::Sender<AsyncCompletion>; 4]> =
+                smallvec::SmallVec::new();
+            while let Some(id) = stack.pop() {
+                if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(id) {
+                    if let InvalidationResult::HadInFlight(handle) = slot.invalidate() {
+                        in_flight_handles.push(handle);
+                    }
+                    if let Some(notifier) = slot.notifier.take() {
+                        notifiers.push(notifier);
+                    }
+                    let dependents = slot.dependents.clone();
+                    for dep_id in &dependents {
+                        // Effects in the cone are left unscheduled on purpose.
+                        if !matches!(inner.get_node(*dep_id), Some(AsyncNode::Effect(_))) {
+                            stack.push(*dep_id);
+                        }
+                    }
+                }
+            }
+            (in_flight_handles, notifiers)
+        };
+        for handle in in_flight_handles {
+            handle.abort();
+        }
+        drop(notifiers);
+    }
+
+    /// Tear down an async derived slot: cancel any in-flight recompute, detach
+    /// both edge directions, invalidate the surviving readers, and recycle the
+    /// id behind a generation bump.
+    ///
+    /// # In-flight computations
+    ///
+    /// A slot disposed mid-`await` has its computation **cancelled, not allowed
+    /// to finish**: the `JoinHandle` is aborted and any result it would have
+    /// produced is discarded. This follows
+    /// [`Self::dispose_async_effect`]'s established precedent
+    /// (`#lzasyncdispose2`) rather than inventing a second convention — the
+    /// generation counter is bumped before the id is recycled, so even a task
+    /// that wins the race against `abort` fails its generation re-check and
+    /// cannot write into whatever node later reuses the id.
+    pub fn dispose_slot<T>(&self, handle: &AsyncSlotHandle<T>) {
+        let (in_flight, notifier, stale) = {
+            let mut inner = self.inner.lock();
+            // Check the kind BEFORE removing: a stale handle whose id has been
+            // recycled must not tear down whatever now owns it.
+            if !matches!(inner.get_node(handle.id), Some(AsyncNode::Slot(_))) {
+                return;
+            }
+            let Some(idx) = AsyncContextInner::node_index(handle.id) else {
+                return;
+            };
+            let Some(node) = inner.nodes[idx].take() else {
+                return;
+            };
+            Self::detach_edges_locked(&mut inner, handle.id, &node);
+            let AsyncNode::Slot(mut slot) = node else {
+                return;
+            };
+            let stale = slot.dependents.clone();
+            let in_flight = slot.clear();
+            let notifier = slot.notifier.take();
+            Self::retire_id_locked(&mut inner, handle.id);
+            (in_flight, notifier, stale)
+        };
+        if let Some(in_flight) = in_flight {
+            in_flight.abort();
+        }
+        drop(notifier);
+        self.invalidate_disposed_dependents(&stale);
+    }
+
+    /// Tear down an async source cell: detach its dependents, invalidate them,
+    /// and recycle the id behind a generation bump.
+    ///
+    /// Cells are pure sources with no dependencies and no in-flight state, so
+    /// only downstream edges need detaching.
+    pub fn dispose_cell<T>(&self, handle: &AsyncCellHandle<T>) {
+        let stale = {
+            let mut inner = self.inner.lock();
+            if !matches!(inner.get_node(handle.id), Some(AsyncNode::Cell(_))) {
+                return;
+            }
+            let Some(idx) = AsyncContextInner::node_index(handle.id) else {
+                return;
+            };
+            let Some(node) = inner.nodes[idx].take() else {
+                return;
+            };
+            Self::detach_edges_locked(&mut inner, handle.id, &node);
+            let AsyncNode::Cell(cell) = node else {
+                return;
+            };
+            let stale = cell.dependents.clone();
+            Self::retire_id_locked(&mut inner, handle.id);
+            stale
+        };
+        self.invalidate_disposed_dependents(&stale);
+    }
+
+    /// Tear down whatever node `id` names, dispatching on its own kind.
+    fn dispose_id(&self, id: SlotId) {
+        let kind = match self.inner.lock().get_node(id) {
+            Some(AsyncNode::Slot(_)) => 0u8,
+            Some(AsyncNode::Cell(_)) => 1,
+            Some(AsyncNode::Effect(_)) => 2,
+            None => return,
+        };
+        let marker = std::marker::PhantomData;
+        match kind {
+            0 => self.dispose_slot(&AsyncSlotHandle::<()> {
+                id,
+                _marker: marker,
+            }),
+            1 => self.dispose_cell(&AsyncCellHandle::<()> {
+                id,
+                _marker: marker,
+            }),
+            _ => self.dispose_async_effect(&AsyncEffectHandle { id }),
+        }
+    }
+
+    /// A second handle onto the same graph.
+    ///
+    /// Deliberately not a `Clone` impl: under `instrumentation` an
+    /// `AsyncContext` also carries a one-shot test seam (`window1_hook`) that is
+    /// *not* shared, so `clone()` would silently mean two different things
+    /// depending on the feature set. This says exactly what it does — same
+    /// graph, fresh seam.
+    pub(crate) fn handle(&self) -> AsyncContext {
+        AsyncContext {
+            inner: Arc::clone(&self.inner),
+            #[cfg(feature = "instrumentation")]
+            window1_hook: Mutex::new(None),
+            #[cfg(feature = "instrumentation")]
+            window1_resolved_hits: AtomicU64::new(0),
+        }
+    }
+
+    /// Open a teardown scope: nodes created through it are disposed when it
+    /// drops.
+    ///
+    /// Like [`ThreadSafeContext::scope`](crate::ThreadSafeContext::scope) and
+    /// unlike [`Context::scope`](crate::Context::scope), the scope holds an
+    /// owned handle rather than a borrow: `AsyncContext` is already an `Arc`
+    /// over shared state, so owning one costs a refcount bump and gives the
+    /// scope a `'static`, `Send` life — which is what a per-request scope on a
+    /// spawned task needs. The three scope types differ because the ownership
+    /// models differ; please do not unify them.
+    pub fn scope(&self) -> AsyncTeardownScope {
+        AsyncTeardownScope {
+            ctx: self.handle(),
+            owned: Mutex::new(Vec::new()),
+        }
+    }
+
     pub fn dispose_async_effect(&self, handle: &AsyncEffectHandle) {
         let (cleanup, in_flight) = {
             let mut inner = self.inner.lock();
@@ -1391,6 +1761,117 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     use tokio::runtime::Runtime;
+
+    // -- #lzspecedgeindex disposal --------------------------------------
+
+    #[test]
+    fn dispose_slot_cancels_an_in_flight_recompute_and_discards_its_result() {
+        // The semantic decision: a slot disposed mid-await has its computation
+        // cancelled, not allowed to finish. Follows dispose_async_effect's
+        // precedent (#lzasyncdispose2).
+        let rt = Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let ctx = AsyncContext::new();
+        let ran = Arc::new(AtomicU64::new(0));
+        let finished = Arc::new(AtomicU64::new(0));
+
+        let r = Arc::clone(&ran);
+        let f = Arc::clone(&finished);
+        let slow = ctx.computed_async(move |_c| {
+            let r = Arc::clone(&r);
+            let f = Arc::clone(&f);
+            Box::pin(async move {
+                r.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                f.fetch_add(1, Ordering::SeqCst);
+                1i64
+            }) as std::pin::Pin<Box<dyn Future<Output = i64> + Send>>
+        });
+
+        // Start the computation, then dispose while it is still awaiting.
+        rt.block_on(async {
+            let handle = {
+                let ctx = ctx.handle();
+                tokio::spawn(async move { ctx.get_async(&slow).await })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            ctx.dispose_slot(&slow);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            handle.abort();
+        });
+
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the compute did start");
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            0,
+            "an in-flight compute must be cancelled by disposal, not allowed to finish"
+        );
+    }
+
+    #[test]
+    fn dispose_bumps_the_generation_before_recycling_the_id() {
+        // The generation bump is what stops a surviving in-flight task from
+        // writing into whatever node later reuses the id.
+        let rt = Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let ctx = AsyncContext::new();
+        let cell = ctx.cell(1i64);
+        let id = cell.id;
+        let before = ctx.inner.lock().generation(id);
+
+        ctx.dispose_cell(&cell);
+        let after = ctx.inner.lock().generation(id);
+        assert_eq!(after, before + 1, "generation must advance on disposal");
+        assert!(
+            ctx.inner.lock().free_ids.contains(&id.0),
+            "the id must be recycled after the bump, not before"
+        );
+    }
+
+    #[test]
+    fn dispose_detaches_both_directions_and_is_kind_checked() {
+        let rt = Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let ctx = AsyncContext::new();
+        let src = ctx.cell(4i64);
+        let derived = ctx.computed_async(move |c| {
+            Box::pin(async move { c.get_cell(&src) })
+                as std::pin::Pin<Box<dyn Future<Output = i64> + Send>>
+        });
+        rt.block_on(ctx.get_async(&derived));
+        assert_eq!(ctx.dependent_count(&src), 1);
+        assert_eq!(ctx.dependency_count(&derived), 1);
+
+        ctx.dispose_slot(&derived);
+        assert_eq!(ctx.dependent_count(&src), 0);
+        assert_eq!(ctx.dependency_count(&derived), 0);
+        // Idempotent, and kind-checked against a recycled id.
+        ctx.dispose_slot(&derived);
+        let stale = AsyncCellHandle::<i64> {
+            id: derived.id,
+            _marker: std::marker::PhantomData,
+        };
+        ctx.dispose_cell(&stale);
+    }
+
+    #[test]
+    fn teardown_scope_disposes_on_drop_and_disarm_cancels() {
+        let rt = Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let ctx = AsyncContext::new();
+        let topic = ctx.cell(1i64);
+        {
+            let scope = ctx.scope();
+            let a = scope.computed_async(move |c| {
+                Box::pin(async move { c.get_cell(&topic) + 1 })
+                    as std::pin::Pin<Box<dyn Future<Output = i64> + Send>>
+            });
+            assert_eq!(scope.len(), 1);
+            assert_eq!(rt.block_on(ctx.get_async(&a)), 2);
+            assert_eq!(ctx.dependent_count(&topic), 1);
+        }
+        assert_eq!(ctx.dependent_count(&topic), 0);
+    }
 
     fn stub_compute(_ctx: AsyncComputeContext) -> BoxedAsyncFuture {
         Box::pin(async { Arc::new(()) as Arc<AsyncAny> })

@@ -115,4 +115,15 @@ pub trait GraphModel: Sized {
     fn cleanup_log(&self) -> &Log;
     /// Whether a nested read hit a disposed node since the flag was last reset.
     fn poison(&self) -> &Poison;
+
+    /// Drive the model to quiescence before assertions are evaluated.
+    ///
+    /// Synchronous models are already quiescent when an op returns, so this
+    /// defaults to a no-op. Async effects are *spawned*, so the async model must
+    /// let the runtime run them before `observed_by`, `observed_count`, or any
+    /// degree assertion can mean anything.
+    ///
+    /// This changes *when* the corpus's assertions are evaluated, never *what*
+    /// they assert: an effect that never runs still fails.
+    fn settle(&self) {}
 }

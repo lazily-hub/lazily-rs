@@ -242,8 +242,11 @@ fn reactive_graph_conformance_thread_safe() {
     run_corpus::<models::ThreadSafeModel>();
 }
 
-// `reactive_graph_conformance_async` is added alongside the `AsyncContext`
-// disposal implementation it exercises.
+#[cfg(feature = "async")]
+#[test]
+fn reactive_graph_conformance_async() {
+    run_corpus::<models::AsyncModel>();
+}
 
 /// The ledger must not name a model that no longer runs, and every model that
 /// runs must be reachable from a test above. Guards against a `#[cfg]` quietly

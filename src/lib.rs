@@ -142,7 +142,7 @@ mod ws_backend;
 #[cfg(feature = "async")]
 pub use async_context::{
     AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncContextId, AsyncEffectHandle,
-    AsyncSignalHandle, AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView,
+    AsyncSignalHandle, AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView, AsyncTeardownScope,
 };
 #[cfg(feature = "async")]
 pub use async_reactive_family::{AsyncCellMap, AsyncMapHandle, AsyncReactiveMap, AsyncSlotMap};
