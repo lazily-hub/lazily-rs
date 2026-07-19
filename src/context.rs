@@ -58,9 +58,14 @@ fn node_type_tag<T: 'static>() -> TypeTag {
 /// per propagation. An unconditional hash set regresses the common case; an
 /// unconditional scan regresses wide fanout.
 ///
+/// Measured crossover with `SlotIdHasher`: the indexed path costs ~45 ns per
+/// registration flat, and a linear scan passes that near width 40. With `std`'s
+/// SipHash the indexed path cost ~83 ns and the crossover sat near 170 — the
+/// hasher, not the scan, was what made a low threshold look wrong here.
+///
 /// The index is held in a side table on `Inner`, not on the node, so a node
 /// below the threshold carries no extra bytes at all. See `EdgeIndex`.
-const EDGE_INDEX_THRESHOLD: usize = 128;
+const EDGE_INDEX_THRESHOLD: usize = 32;
 
 /// Hysteresis: demote only well below the promote threshold.
 ///
@@ -68,7 +73,7 @@ const EDGE_INDEX_THRESHOLD: usize = 128;
 /// and re-registered — so a single shared boundary makes a list sitting exactly
 /// at the threshold demote and rebuild its index on every recompute. Measured
 /// at ~4x the steady-state cost. The gap absorbs that oscillation.
-const EDGE_INDEX_DEMOTE_THRESHOLD: usize = 96;
+const EDGE_INDEX_DEMOTE_THRESHOLD: usize = 24;
 
 /// `owner -> (edge -> position in owner's edge list)`, for promoted nodes only.
 ///
@@ -78,7 +83,53 @@ const EDGE_INDEX_DEMOTE_THRESHOLD: usize = 96;
 /// Entries MUST be dropped whenever the edge list they describe is cleared or
 /// its owner is removed — `SlotId`s are recycled (`free_ids` is LIFO), so a
 /// stale entry would silently alias a different node's edges.
-type EdgeIndex = HashMap<SlotId, HashMap<SlotId, usize>>;
+/// Hasher for `SlotId` keys (#lzspecedgeindex).
+///
+/// `std`'s default is SipHash, chosen to resist collision attacks on
+/// attacker-controlled keys. `SlotId`s are internally allocated sequential
+/// integers that never come from outside the process, so that resistance buys
+/// nothing here and is paid on every index lookup — twice per wide
+/// registration, once for the owner and once for the edge.
+///
+/// This is the splitmix64 finalizer: full avalanche in a handful of
+/// multiply-xor-shift ops. Sequential ids land in well-separated buckets.
+#[derive(Default, Clone, Copy)]
+struct SlotIdHasher(u64);
+
+impl std::hash::Hasher for SlotIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, byte_a: &[u8]) {
+        // SlotId hashes through write_u64; this exists only to satisfy the
+        // trait, and is deliberately not tuned.
+        for byte in byte_a {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        let mut mixed = value.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        self.0 = mixed ^ (mixed >> 31);
+    }
+}
+
+#[derive(Default, Clone)]
+struct SlotIdHashBuilder;
+
+impl std::hash::BuildHasher for SlotIdHashBuilder {
+    type Hasher = SlotIdHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        SlotIdHasher(0)
+    }
+}
+
+type OwnerEdgeIndex = HashMap<SlotId, usize, SlotIdHashBuilder>;
+type EdgeIndex = HashMap<SlotId, OwnerEdgeIndex, SlotIdHashBuilder>;
 
 /// Insert `id` into `edges` if absent. Returns whether an edge was added.
 fn edge_insert(edges: &mut EdgeVec, id: SlotId, owner: SlotId, index: &mut EdgeIndex) -> bool {
@@ -434,8 +485,8 @@ impl Context {
                 nodes: Vec::new(),
                 next_id: 0,
                 free_ids: Vec::new(),
-                dependents_index: EdgeIndex::new(),
-                dependencies_index: EdgeIndex::new(),
+                dependents_index: EdgeIndex::default(),
+                dependencies_index: EdgeIndex::default(),
                 roots_scratch: EdgeVec::new(),
                 pending_effects: VecDeque::new(),
                 scheduled_effects: Vec::new(),
