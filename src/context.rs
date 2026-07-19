@@ -49,22 +49,129 @@ fn node_type_tag<T: 'static>() -> TypeTag {
     }
 }
 
-fn edge_insert(edges: &mut EdgeVec, id: SlotId) -> bool {
-    if edges.contains(&id) {
-        false
-    } else {
-        edges.push(id);
+/// Degree at which an edge set stops scanning and builds a hash index.
+///
+/// #lzspecedgeindex. Dedup is a linear scan while the set is small — measurably
+/// faster than hashing at low degree, which is the overwhelmingly common case —
+/// and promotes to a hash index above this threshold so a wide-fanout node stays
+/// amortized O(1) per registration instead of degrading to O(n^2) per
+/// propagation. An unconditional hash set regresses the common case; an
+/// unconditional scan regresses wide fanout.
+const EDGE_INDEX_THRESHOLD: usize = 32;
+
+/// A deduplicated set of edges, ordered, with position-stable removal.
+///
+/// Derefs to `[SlotId]`, so reads (`iter`, `is_empty`, slicing) are unchanged
+/// from the plain-vector representation it replaces.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EdgeSet {
+    edges: EdgeVec,
+    /// `id -> position in edges`. `None` below the threshold.
+    ///
+    /// Boxed deliberately: an inline `HashMap` is 48 bytes, which every
+    /// low-degree node would pay for an index it never builds. Boxed, the
+    /// unpromoted cost is one null pointer.
+    #[allow(
+        clippy::box_collection,
+        reason = "keeps the unpromoted field at 8 bytes"
+    )]
+    index: Option<Box<HashMap<SlotId, usize>>>,
+}
+
+impl EdgeSet {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert `id` if absent. Returns whether the edge was added.
+    #[inline]
+    fn insert(&mut self, id: SlotId) -> bool {
+        if let Some(index) = self.index.as_mut() {
+            if index.contains_key(&id) {
+                return false;
+            }
+            index.insert(id, self.edges.len());
+            self.edges.push(id);
+            return true;
+        }
+        if self.edges.contains(&id) {
+            return false;
+        }
+        self.edges.push(id);
+        if self.edges.len() > EDGE_INDEX_THRESHOLD {
+            self.index = Some(Box::new(
+                self.edges
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, edge)| (*edge, pos))
+                    .collect(),
+            ));
+        }
         true
+    }
+
+    /// Remove `id` if present. Returns whether an edge was removed.
+    ///
+    /// Swap-removes, so edge order is not preserved — matching the previous
+    /// behaviour, which callers already tolerate.
+    #[inline]
+    fn remove(&mut self, id: SlotId) -> bool {
+        if let Some(index) = self.index.as_mut() {
+            let Some(pos) = index.remove(&id) else {
+                return false;
+            };
+            let last = self
+                .edges
+                .pop()
+                .expect("index non-empty implies edges non-empty");
+            if pos < self.edges.len() {
+                self.edges[pos] = last;
+                index.insert(last, pos);
+            }
+            return true;
+        }
+        if let Some(pos) = self.edges.iter().position(|edge| *edge == id) {
+            self.edges.swap_remove(pos);
+            true
+        } else {
+            false
+        }
     }
 }
 
-fn edge_remove(edges: &mut EdgeVec, id: SlotId) -> bool {
-    if let Some(pos) = edges.iter().position(|x| *x == id) {
-        edges.swap_remove(pos);
-        true
-    } else {
-        false
+impl std::ops::Deref for EdgeSet {
+    type Target = [SlotId];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.edges
     }
+}
+
+impl IntoIterator for EdgeSet {
+    type Item = SlotId;
+    type IntoIter = <EdgeVec as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.edges.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a EdgeSet {
+    type Item = &'a SlotId;
+    type IntoIter = std::slice::Iter<'a, SlotId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.edges.iter()
+    }
+}
+
+fn edge_insert(edges: &mut EdgeSet, id: SlotId) -> bool {
+    edges.insert(id)
+}
+
+fn edge_remove(edges: &mut EdgeSet, id: SlotId) -> bool {
+    edges.remove(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -190,8 +297,8 @@ pub(crate) struct SlotNode {
     pub(crate) type_id: TypeTag,
     pub(crate) compute: Rc<ComputeFn>,
     pub(crate) equals: Option<Box<EqualsFn>>,
-    pub(crate) dependencies: EdgeVec,
-    pub(crate) dependents: EdgeVec,
+    pub(crate) dependencies: EdgeSet,
+    pub(crate) dependents: EdgeSet,
     pub(crate) dirty: bool,
     pub(crate) force_recompute: bool,
     /// True while this slot is actively refreshing/recomputing. Used to detect
@@ -207,14 +314,14 @@ pub(crate) struct SlotNode {
 pub(crate) struct CellNode {
     pub(crate) value: AnyValue,
     pub(crate) type_id: TypeTag,
-    pub(crate) dependents: EdgeVec,
+    pub(crate) dependents: EdgeSet,
 }
 
 pub(crate) struct EffectNode {
     /// The effect callback.
     pub(crate) run: Rc<EffectFn>,
     /// Slots/cells that this effect depends on. Populated during each run.
-    pub(crate) dependencies: EdgeVec,
+    pub(crate) dependencies: EdgeSet,
     /// Cleanup returned by the latest effect run, if any.
     pub(crate) cleanup: Option<Box<dyn FnOnce()>>,
     /// Whether this scheduled effect must run without dependency freshness checks.
@@ -576,8 +683,8 @@ impl Context {
             type_id: node_type_tag::<T>(),
             compute: Rc::new(move |ctx| AnyValue::from_value(compute(ctx))),
             equals,
-            dependencies: EdgeVec::new(),
-            dependents: EdgeVec::new(),
+            dependencies: EdgeSet::new(),
+            dependents: EdgeSet::new(),
             dirty: false,
             force_recompute: false,
             in_progress: false,
@@ -860,7 +967,7 @@ impl Context {
         let node = CellNode {
             value: AnyValue::from_value(value),
             type_id: node_type_tag::<T>(),
-            dependents: EdgeVec::new(),
+            dependents: EdgeSet::new(),
         };
         self.insert_node(id, Node::Cell(node));
         CellHandle::new(id)
@@ -1095,7 +1202,7 @@ impl Context {
         let id = self.alloc_id();
         let node = EffectNode {
             run: Rc::new(move |ctx| run(ctx).into_cleanup()),
-            dependencies: EdgeVec::new(),
+            dependencies: EdgeSet::new(),
             cleanup: None,
             force_run: true,
         };
