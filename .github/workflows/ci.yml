@@ -88,6 +88,11 @@ jobs:
           test -d ../lazily-spec/conformance/collections || { echo "::error::../lazily-spec/conformance/collections missing — collections_conformance.rs would silently fall back to local fixtures"; exit 1; }
           cargo +stable test --locked --test collections_conformance
 
+      - name: Test reactive-graph disposal/teardown conformance against canonical spec fixtures (#lzspecedgeindex)
+        run: |
+          test -d ../lazily-spec/conformance/reactive-graph || { echo "::error::../lazily-spec/conformance/reactive-graph missing — reactive_graph_conformance.rs would silently skip all 8 disposal/teardown fixtures"; exit 1; }
+          cargo +stable test --locked --test reactive_graph_conformance
+
       - name: Test SeqCrdt conformance against canonical spec fixtures (#lzseqcrdt)
         run: |
           test -f ../lazily-spec/conformance/collections/seqcrdt_convergence.json || { echo "::error::seqcrdt_convergence.json missing — seqcrdt_conformance.rs cannot run"; exit 1; }
