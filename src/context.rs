@@ -2870,6 +2870,59 @@ pub mod audit_probe {
         CALLS.with(|c| c.set(c.get() + 1));
     }
 
+    /// Static layout of every type that participates in one reactive node
+    /// (#lzspecedgeindex, step 1 of the per-subscriber memory audit).
+    ///
+    /// Returns `(name, size_of, align_of)`. These are the load-immune half of
+    /// the per-node memory question: what the arena costs before a single byte
+    /// is allocated. `examples/node_memory_audit.rs` pairs them with counted
+    /// allocations so the two halves can be summed against a measured total.
+    pub fn layout_rows() -> Vec<(&'static str, usize, usize)> {
+        use core::mem::{align_of, size_of};
+        macro_rules! row {
+            ($t:ty) => {
+                (stringify!($t), size_of::<$t>(), align_of::<$t>())
+            };
+        }
+        vec![
+            row!(super::SlotId),
+            row!(super::TypeTag),
+            row!(super::InlineBuf),
+            row!(super::AnyValue),
+            row!(super::EdgeVec),
+            row!(std::rc::Rc<super::ComputeFn>),
+            row!(Option<Box<super::EqualsFn>>),
+            row!(std::rc::Rc<super::EffectFn>),
+            row!(Option<Box<dyn FnOnce()>>),
+            row!(super::SlotNode),
+            row!(super::CellNode),
+            row!(super::EffectNode),
+            row!(super::Node),
+            row!(Option<super::Node>),
+        ]
+    }
+
+    /// Byte offset of each `SlotNode` field, so the padding and the
+    /// largest-variant tax in `Node` can be attributed rather than guessed.
+    pub fn slot_node_field_offsets() -> Vec<(&'static str, usize)> {
+        use core::mem::offset_of;
+        vec![
+            ("value", offset_of!(super::SlotNode, value)),
+            ("type_id", offset_of!(super::SlotNode, type_id)),
+            ("compute", offset_of!(super::SlotNode, compute)),
+            ("equals", offset_of!(super::SlotNode, equals)),
+            ("dependencies", offset_of!(super::SlotNode, dependencies)),
+            ("dependents", offset_of!(super::SlotNode, dependents)),
+            ("dirty", offset_of!(super::SlotNode, dirty)),
+            (
+                "force_recompute",
+                offset_of!(super::SlotNode, force_recompute),
+            ),
+            ("in_progress", offset_of!(super::SlotNode, in_progress)),
+            ("verified_at", offset_of!(super::SlotNode, verified_at)),
+        ]
+    }
+
     /// (max queue len seen, mean queue len, dispose_effect calls)
     pub fn take() -> (usize, f64, u64) {
         let max = MAX_LEN.with(|m| m.replace(0));
