@@ -82,6 +82,14 @@ type RootVec = Vec<ThreadSafeInvalidationRoot>;
 
 const HYBRID_THRESHOLD: usize = 16;
 
+/// `SlotId`-keyed collections hashed with `SlotIdHasher` rather than SipHash
+/// (#lzspecedgeindex). Same reasoning as `Context`: these keys are internally
+/// allocated sequential integers, so collision resistance buys nothing and is
+/// paid on every lookup. Measured 33% on wide fan-out in the single-threaded
+/// context.
+type SlotIdSet = HashSet<SlotId, crate::context::SlotIdHashBuilder>;
+type SlotIdMap<V> = HashMap<SlotId, V, crate::context::SlotIdHashBuilder>;
+
 /// Promotion threshold for dependency-edge lists (#lzspecedgeindex).
 ///
 /// Higher than `HYBRID_THRESHOLD`, which governs short-lived propagation
@@ -113,7 +121,7 @@ where
 
 enum HybridMap<V> {
     Small(Vec<(SlotId, V)>),
-    Large(HashMap<SlotId, V>),
+    Large(SlotIdMap<V>),
 }
 
 impl<V> Default for HybridMap<V> {
@@ -202,7 +210,7 @@ impl<V> HybridMap<V> {
 #[derive(Clone)]
 enum HybridSet {
     Small(Vec<SlotId>),
-    Large(HashSet<SlotId>),
+    Large(SlotIdSet),
 }
 
 impl Default for HybridSet {
@@ -318,7 +326,7 @@ struct ThreadSafeTrackingFrame {
     context_id: ThreadSafeContextId,
     node_id: SlotId,
     known_dependencies: EdgeVec,
-    dependencies: HashSet<SlotId>,
+    dependencies: SlotIdSet,
 }
 
 #[derive(Default)]
@@ -354,7 +362,7 @@ struct TrackingGuard {
 }
 
 impl TrackingGuard {
-    fn finish(mut self) -> HashSet<SlotId> {
+    fn finish(mut self) -> SlotIdSet {
         self.active = false;
         THREAD_SAFE_TRACKING_STACK.with(|stack| {
             stack
@@ -386,7 +394,7 @@ fn push_tracking_frame_with_known_dependencies(
             context_id,
             node_id,
             known_dependencies,
-            dependencies: HashSet::new(),
+            dependencies: SlotIdSet::default(),
         });
     });
     TrackingGuard { active: true }
@@ -1324,7 +1332,7 @@ impl ThreadSafeInvalidationPlan {
         let slot_clears = self.slot_clears.into_entries();
         let slot_marks = self.slot_marks.into_entries();
         let effect_schedules = self.effect_schedules.into_entries();
-        let clear_set: HashSet<SlotId> = slot_clears.iter().copied().collect();
+        let clear_set: SlotIdSet = slot_clears.iter().copied().collect();
 
         for id in &slot_clears {
             let Some(ThreadSafeNode::Slot(slot)) = state.get_node_mut(*id) else {
@@ -2011,7 +2019,7 @@ impl ThreadSafeContext {
         state: &mut ThreadSafeState,
         dependent_id: SlotId,
         old_dependencies: &EdgeVec,
-        new_dependencies: &HashSet<SlotId>,
+        new_dependencies: &SlotIdSet,
     ) {
         for dependency_id in old_dependencies.iter() {
             if !new_dependencies.contains(dependency_id) {

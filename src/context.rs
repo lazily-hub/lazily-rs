@@ -94,7 +94,7 @@ const EDGE_INDEX_DEMOTE_THRESHOLD: usize = 24;
 /// This is the splitmix64 finalizer: full avalanche in a handful of
 /// multiply-xor-shift ops. Sequential ids land in well-separated buckets.
 #[derive(Default, Clone, Copy)]
-struct SlotIdHasher(u64);
+pub(crate) struct SlotIdHasher(u64);
 
 impl std::hash::Hasher for SlotIdHasher {
     fn finish(&self) -> u64 {
@@ -118,7 +118,7 @@ impl std::hash::Hasher for SlotIdHasher {
 }
 
 #[derive(Default, Clone)]
-struct SlotIdHashBuilder;
+pub(crate) struct SlotIdHashBuilder;
 
 impl std::hash::BuildHasher for SlotIdHashBuilder {
     type Hasher = SlotIdHasher;
