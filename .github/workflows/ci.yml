@@ -90,7 +90,7 @@ jobs:
 
       - name: Test reactive-graph disposal/teardown conformance against canonical spec fixtures (#lzspecedgeindex)
         run: |
-          test -d ../lazily-spec/conformance/reactive-graph || { echo "::error::../lazily-spec/conformance/reactive-graph missing — reactive_graph_conformance.rs would silently skip all 8 disposal/teardown fixtures"; exit 1; }
+          test -d ../lazily-spec/conformance/reactive-graph || { echo "::error::../lazily-spec/conformance/reactive-graph missing — reactive_graph_conformance.rs would silently skip the whole disposal/teardown corpus"; exit 1; }
           # The corpus is parameterised over the execution model, and the
           # ThreadSafeContext / AsyncContext models are feature-gated. Running
           # only the default-feature test would silently drop two thirds of the
@@ -100,8 +100,16 @@ jobs:
           cargo +stable test --locked --features async --test reactive_graph_conformance
           # Assert all three models actually ran, rather than trusting a green tick.
           cargo +stable test --locked --features "thread-safe async" --test reactive_graph_conformance -- --nocapture 2>&1 | tee /tmp/rg.log
+          # Derive the expected count from the corpus rather than hardcoding it.
+          # A literal went stale the moment lazily-spec grew a fixture, and the
+          # failure reads as "the corpus did not replay" — which points at the
+          # runner rather than at this guard. Deriving keeps the assertion exact
+          # (not a >=N floor, which would let a silently-skipped fixture pass)
+          # while surviving upstream additions.
+          expected=$(ls ../lazily-spec/conformance/reactive-graph/*.json | wc -l)
+          test "$expected" -gt 0 || { echo "::error::no reactive-graph fixtures found — the corpus is empty or the path is wrong"; exit 1; }
           for model in Context ThreadSafeContext AsyncContext; do
-            grep -q "reactive-graph\[$model\]: 8 fixtures" /tmp/rg.log || { echo "::error::reactive-graph corpus did not replay against $model"; exit 1; }
+            grep -q "reactive-graph\[$model\]: $expected fixtures" /tmp/rg.log || { echo "::error::reactive-graph corpus replayed fewer than $expected fixtures against $model"; exit 1; }
           done
 
       - name: Test SeqCrdt conformance against canonical spec fixtures (#lzseqcrdt)
