@@ -26,7 +26,7 @@
 //! tokio dependency; pushing the blocking into the one model that needs it
 //! keeps the engine executor-free.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use lazily::ReactiveGraph;
@@ -52,6 +52,31 @@ pub fn log_snapshot(log: &Log) -> Vec<String> {
 /// callback and recording here keeps the stack balanced while still letting the
 /// top-level read surface `read_after_dispose`.
 pub type Poison = Arc<AtomicBool>;
+
+/// Cumulative compute-invocation counter for one derived node, backing the
+/// corpus's `computes_of` assertion (`#lzsignaleager`).
+///
+/// The engine owns one of these per node id and hands it to the model, which
+/// increments it *inside* the compute closure it synthesizes. That placement is
+/// the whole point: the counter can only move when the runtime actually invokes
+/// compute, so a binding that defers materialization cannot make the count move
+/// by merely creating the node, and one that recomputes on every read cannot
+/// hide the extra work. Counting anywhere on the outside — at the call site, at
+/// creation, per `set_cell` — would measure the runner's intent rather than the
+/// runtime's behaviour, which is exactly the difference an eager signal and the
+/// lazy memo it is built on are distinguished by.
+///
+/// `Arc<AtomicUsize>` rather than `Rc<Cell<usize>>` because thread-safe and
+/// async compute closures must be `Send + Sync`.
+pub type Computes = Arc<AtomicUsize>;
+
+pub fn count_computes(computes: &Computes) {
+    computes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn computes_seen(computes: &Computes) -> usize {
+    computes.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// A handle to a node in whichever graph is under test.
 ///
@@ -111,6 +136,7 @@ pub trait ScopeModel<M: GraphModel> {
         &self,
         reads: &[Ref<M::Graph>],
         offset: i64,
+        computes: &Computes,
     ) -> <M::Graph as ReactiveGraph>::SlotHandle<i64>;
     fn effect(
         &self,
@@ -118,6 +144,13 @@ pub trait ScopeModel<M: GraphModel> {
         reads: &[Ref<M::Graph>],
     ) -> <M::Graph as ReactiveGraph>::EffectHandle;
     /// How many nodes the scope currently owns.
+    ///
+    /// There is deliberately no scoped `signal` here: `TeardownScope` and its
+    /// thread-safe/async counterparts expose no signal constructor, and the
+    /// `#lzsignaleager` fixtures create every signal through the context. A
+    /// trait method no impl could honour would have to be synthesized out of a
+    /// scoped memo plus a scoped effect, which would test the runner's
+    /// reconstruction of a signal rather than the library's.
     fn owned(&self) -> usize;
     /// Cancel the scope's teardown; ending it afterwards disposes nothing.
     fn disarm(self);
@@ -143,6 +176,16 @@ pub trait GraphModel: Sized {
     type Scope<'a>: ScopeModel<Self>
     where
         Self: 'a;
+    /// This model's signal handle.
+    ///
+    /// An associated type rather than a variant of [`Ref`] because a signal is
+    /// not a graph node: it is a memoized slot *plus* a puller effect, and the
+    /// pair is what `dispose_signal` needs. `Ref` is parameterised by
+    /// `ReactiveGraph`, which has no signal associated type precisely because
+    /// `Signal` is a derived construct rather than a primitive. Keeping signals
+    /// out of `Ref` also keeps the structural operations (`dispose`,
+    /// `dependents_of`) honest — they operate on nodes, and a signal is two.
+    type Signal;
 
     /// Name used in assertion messages and the per-model divergence ledger.
     const NAME: &'static str;
@@ -157,12 +200,32 @@ pub trait GraphModel: Sized {
         &self,
         reads: &[Ref<Self::Graph>],
         offset: i64,
+        computes: &Computes,
     ) -> <Self::Graph as ReactiveGraph>::SlotHandle<i64>;
     fn effect(
         &self,
         name: &str,
         reads: &[Ref<Self::Graph>],
     ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
+
+    /// Create an eager signal over `reads`, computing `sum(reads) + offset` —
+    /// the same compute convention as [`computed`](Self::computed), so the two
+    /// are directly comparable and the only difference the corpus can observe
+    /// is *when* compute ran.
+    fn signal(&self, reads: &[Ref<Self::Graph>], offset: i64, computes: &Computes) -> Self::Signal;
+
+    /// Read a signal's materialized value.
+    fn read_signal(&self, signal: &Self::Signal) -> Result<i64, ()>;
+
+    /// Dispose a signal's eager puller ONLY. The backing slot survives and
+    /// reverts to lazy recompute-on-read (`#lzsignaleager` clause 4).
+    fn dispose_signal(&self, signal: &Self::Signal);
+
+    /// Apply every write inside ONE batch.
+    ///
+    /// The corpus's `batch` op carries its whole write list, so no nesting
+    /// state is needed and the outermost-exit flush is the only flush.
+    fn batch(&self, writes: &[(<Self::Graph as ReactiveGraph>::CellHandle<i64>, i64)]);
 
     /// Read a node's value. `Err` is the corpus's `read_after_dispose`.
     fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()>;

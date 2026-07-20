@@ -7,7 +7,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::model::{GraphModel, Log, Poison, Ref, ScopeModel, log_push};
+use super::model::{Computes, GraphModel, Log, Poison, Ref, ScopeModel, count_computes, log_push};
 
 /// Run `f`, converting a panic into `Err(())` with the message suppressed.
 ///
@@ -25,7 +25,7 @@ pub fn quiet<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
 
 mod basic {
     use super::*;
-    use lazily::{CellHandle, Context, EffectHandle, SlotHandle, TeardownScope};
+    use lazily::{CellHandle, Context, EffectHandle, SignalHandle, SlotHandle, TeardownScope};
 
     pub struct BasicModel {
         pub ctx: Context,
@@ -57,10 +57,16 @@ mod basic {
         reads: &[Ref<Context>],
         offset: i64,
         poison: &Poison,
+        computes: &Computes,
     ) -> impl Fn(&Context) -> i64 + 'static {
         let reads = reads.to_vec();
         let poison = poison.clone();
+        let computes = computes.clone();
         move |c: &Context| {
+            // Counted here, inside the body the runtime invokes — see
+            // `Computes`. Counting at the construction site instead would make
+            // a lazy memo indistinguishable from an eager signal.
+            count_computes(&computes);
             let mut acc = offset;
             for r in &reads {
                 acc += tracked(c, *r, &poison);
@@ -98,8 +104,13 @@ mod basic {
         fn cell(&self, value: i64) -> CellHandle<i64> {
             self.0.cell(value)
         }
-        fn computed(&self, reads: &[Ref<Context>], offset: i64) -> SlotHandle<i64> {
-            self.0.computed(compute(reads, offset, &self.3))
+        fn computed(
+            &self,
+            reads: &[Ref<Context>],
+            offset: i64,
+            computes: &Computes,
+        ) -> SlotHandle<i64> {
+            self.0.computed(compute(reads, offset, &self.3, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<Context>]) -> EffectHandle {
             self.0
@@ -116,6 +127,7 @@ mod basic {
     impl GraphModel for BasicModel {
         type Graph = Context;
         type Scope<'a> = BasicScope<'a>;
+        type Signal = SignalHandle<i64>;
 
         const NAME: &'static str = "Context";
 
@@ -135,8 +147,14 @@ mod basic {
         fn cell(&self, value: i64) -> CellHandle<i64> {
             self.ctx.cell(value)
         }
-        fn computed(&self, reads: &[Ref<Self::Graph>], offset: i64) -> SlotHandle<i64> {
-            self.ctx.computed(compute(reads, offset, &self.poison))
+        fn computed(
+            &self,
+            reads: &[Ref<Self::Graph>],
+            offset: i64,
+            computes: &Computes,
+        ) -> SlotHandle<i64> {
+            self.ctx
+                .computed(compute(reads, offset, &self.poison, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> EffectHandle {
             self.ctx.effect(effect_body(
@@ -146,6 +164,28 @@ mod basic {
                 &self.cleanups,
                 &self.poison,
             ))
+        }
+        fn signal(
+            &self,
+            reads: &[Ref<Self::Graph>],
+            offset: i64,
+            computes: &Computes,
+        ) -> SignalHandle<i64> {
+            self.ctx
+                .signal(compute(reads, offset, &self.poison, computes))
+        }
+        fn read_signal(&self, signal: &Self::Signal) -> Result<i64, ()> {
+            quiet(|| self.ctx.get_signal(signal))
+        }
+        fn dispose_signal(&self, signal: &Self::Signal) {
+            self.ctx.dispose_signal(signal);
+        }
+        fn batch(&self, writes: &[(CellHandle<i64>, i64)]) {
+            self.ctx.batch(|c| {
+                for (h, v) in writes {
+                    c.set_cell(h, *v);
+                }
+            });
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
@@ -184,7 +224,8 @@ pub use basic::BasicModel;
 mod threadsafe {
     use super::*;
     use lazily::{
-        CellHandle, EffectHandle, SlotHandle, ThreadSafeContext, ThreadSafeTeardownScope,
+        CellHandle, EffectHandle, SlotHandle, ThreadSafeContext, ThreadSafeSignalHandle,
+        ThreadSafeTeardownScope,
     };
 
     pub struct ThreadSafeModel {
@@ -216,10 +257,13 @@ mod threadsafe {
         reads: &[Ref<ThreadSafeContext>],
         offset: i64,
         poison: &Poison,
+        computes: &Computes,
     ) -> impl Fn(&ThreadSafeContext) -> i64 + Send + Sync + 'static {
         let reads = reads.to_vec();
         let poison = poison.clone();
+        let computes = computes.clone();
         move |c: &ThreadSafeContext| {
+            count_computes(&computes);
             let mut acc = offset;
             for r in &reads {
                 acc += tracked(c, *r, &poison);
@@ -261,8 +305,13 @@ mod threadsafe {
         fn cell(&self, value: i64) -> CellHandle<i64> {
             self.0.cell(value)
         }
-        fn computed(&self, reads: &[Ref<ThreadSafeContext>], offset: i64) -> SlotHandle<i64> {
-            self.0.computed(compute(reads, offset, &self.3))
+        fn computed(
+            &self,
+            reads: &[Ref<ThreadSafeContext>],
+            offset: i64,
+            computes: &Computes,
+        ) -> SlotHandle<i64> {
+            self.0.computed(compute(reads, offset, &self.3, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<ThreadSafeContext>]) -> EffectHandle {
             self.0
@@ -279,6 +328,7 @@ mod threadsafe {
     impl GraphModel for ThreadSafeModel {
         type Graph = ThreadSafeContext;
         type Scope<'a> = ThreadSafeScope;
+        type Signal = ThreadSafeSignalHandle<i64>;
 
         const NAME: &'static str = "ThreadSafeContext";
 
@@ -298,8 +348,14 @@ mod threadsafe {
         fn cell(&self, value: i64) -> CellHandle<i64> {
             self.ctx.cell(value)
         }
-        fn computed(&self, reads: &[Ref<Self::Graph>], offset: i64) -> SlotHandle<i64> {
-            self.ctx.computed(compute(reads, offset, &self.poison))
+        fn computed(
+            &self,
+            reads: &[Ref<Self::Graph>],
+            offset: i64,
+            computes: &Computes,
+        ) -> SlotHandle<i64> {
+            self.ctx
+                .computed(compute(reads, offset, &self.poison, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> EffectHandle {
             self.ctx.effect(effect_body(
@@ -309,6 +365,28 @@ mod threadsafe {
                 &self.cleanups,
                 &self.poison,
             ))
+        }
+        fn signal(
+            &self,
+            reads: &[Ref<Self::Graph>],
+            offset: i64,
+            computes: &Computes,
+        ) -> ThreadSafeSignalHandle<i64> {
+            self.ctx
+                .signal(compute(reads, offset, &self.poison, computes))
+        }
+        fn read_signal(&self, signal: &Self::Signal) -> Result<i64, ()> {
+            quiet(|| self.ctx.get_signal(signal))
+        }
+        fn dispose_signal(&self, signal: &Self::Signal) {
+            self.ctx.dispose_signal(signal);
+        }
+        fn batch(&self, writes: &[(CellHandle<i64>, i64)]) {
+            self.ctx.batch(|c| {
+                for (h, v) in writes {
+                    c.set_cell(h, *v);
+                }
+            });
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
@@ -348,8 +426,8 @@ pub use threadsafe::ThreadSafeModel;
 mod asynchronous {
     use super::*;
     use lazily::{
-        AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncEffectHandle, AsyncSlotHandle,
-        AsyncTeardownScope,
+        AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncEffectHandle, AsyncSignalHandle,
+        AsyncSlotHandle, AsyncTeardownScope,
     };
 
     /// The async model owns its runtime and blocks on it inside `read`, so the
@@ -366,17 +444,26 @@ mod asynchronous {
     /// Computes receive an `AsyncComputeContext`, not an owned `AsyncContext` —
     /// it carries the node id and the generation captured at spawn, which is
     /// what makes dependency registration safe across an await.
+    ///
+    /// The `use<>` on the return type says the closure captures no lifetime: it
+    /// clones everything it needs out of the arguments. Without it Rust 2024
+    /// infers a capture of `&Computes` and rejects the temporary counter that
+    /// `effect_body` passes.
     fn compute(
         reads: &[Ref<AsyncContext>],
         offset: i64,
         poison: &Poison,
-    ) -> impl Fn(AsyncComputeContext) -> BoxFuture + Send + Sync + 'static {
+        computes: &Computes,
+    ) -> impl Fn(AsyncComputeContext) -> BoxFuture + Send + Sync + 'static + use<> {
         let reads = reads.to_vec();
         let poison = poison.clone();
+        let computes = computes.clone();
         move |c: AsyncComputeContext| {
             let reads = reads.clone();
             let poison = poison.clone();
+            let computes = computes.clone();
             Box::pin(async move {
+                count_computes(&computes);
                 let mut acc = offset;
                 for r in &reads {
                     match read_in_compute(&c, *r).await {
@@ -418,7 +505,10 @@ mod asynchronous {
         cleanups: &Log,
         poison: &Poison,
     ) -> impl Fn(AsyncComputeContext) -> EffectFuture + Send + Sync + 'static {
-        let body = compute(reads, 0, poison);
+        // A private counter: an effect body is not a node the corpus can name in
+        // `computes_of`, so its runs must not land on any node's count.
+        let uncounted = Computes::default();
+        let body = compute(reads, 0, poison, &uncounted);
         let name = name.to_owned();
         let runs = runs.clone();
         let cleanups = cleanups.clone();
@@ -451,9 +541,15 @@ mod asynchronous {
             let _guard = self.4.enter();
             self.0.cell(value)
         }
-        fn computed(&self, reads: &[Ref<AsyncContext>], offset: i64) -> AsyncSlotHandle<i64> {
+        fn computed(
+            &self,
+            reads: &[Ref<AsyncContext>],
+            offset: i64,
+            computes: &Computes,
+        ) -> AsyncSlotHandle<i64> {
             let _guard = self.4.enter();
-            self.0.computed_async(compute(reads, offset, &self.3))
+            self.0
+                .computed_async(compute(reads, offset, &self.3, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<AsyncContext>]) -> AsyncEffectHandle {
             let _guard = self.4.enter();
@@ -471,6 +567,7 @@ mod asynchronous {
     impl GraphModel for AsyncModel {
         type Graph = AsyncContext;
         type Scope<'a> = AsyncScope;
+        type Signal = AsyncSignalHandle<i64>;
 
         const NAME: &'static str = "AsyncContext";
 
@@ -496,10 +593,15 @@ mod asynchronous {
             let _guard = self.rt.enter();
             self.ctx.cell(value)
         }
-        fn computed(&self, reads: &[Ref<Self::Graph>], offset: i64) -> AsyncSlotHandle<i64> {
+        fn computed(
+            &self,
+            reads: &[Ref<Self::Graph>],
+            offset: i64,
+            computes: &Computes,
+        ) -> AsyncSlotHandle<i64> {
             let _guard = self.rt.enter();
             self.ctx
-                .computed_async(compute(reads, offset, &self.poison))
+                .computed_async(compute(reads, offset, &self.poison, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> AsyncEffectHandle {
             let _guard = self.rt.enter();
@@ -510,6 +612,33 @@ mod asynchronous {
                 &self.cleanups,
                 &self.poison,
             ))
+        }
+        fn signal(
+            &self,
+            reads: &[Ref<Self::Graph>],
+            offset: i64,
+            computes: &Computes,
+        ) -> AsyncSignalHandle<i64> {
+            let _guard = self.rt.enter();
+            self.ctx
+                .signal_async(compute(reads, offset, &self.poison, computes))
+        }
+        /// Awaits rather than snapshotting: `get_signal` returns `Option`, and
+        /// treating an unresolved snapshot as a read would let a signal that
+        /// never materialized pass as readable.
+        fn read_signal(&self, signal: &Self::Signal) -> Result<i64, ()> {
+            quiet(|| self.rt.block_on(self.ctx.get_signal_async(signal)))
+        }
+        fn dispose_signal(&self, signal: &Self::Signal) {
+            self.ctx.dispose_signal(signal);
+        }
+        fn batch(&self, writes: &[(AsyncCellHandle<i64>, i64)]) {
+            let _guard = self.rt.enter();
+            self.ctx.batch(|c| {
+                for (h, v) in writes {
+                    c.set_cell(h, *v);
+                }
+            });
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             match node {

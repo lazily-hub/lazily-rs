@@ -15,8 +15,14 @@
 //! Every assertion kind in the corpus: `value`, `read`, `error`
 //! (`read_after_dispose`), `readable`, `observed_by`, `observed_count`,
 //! `cleanup_order` (effect entries only — derived slots run no cleanup
-//! callback), `scope_owned_count`, `dependents_of`, and `dependencies_of`. An
-//! unrecognised assertion key panics rather than being skipped.
+//! callback), `scope_owned_count`, `dependents_of`, `dependencies_of`, and
+//! `computes_of`. An unrecognised assertion key panics rather than being
+//! skipped.
+//!
+//! `computes_of` (`#lzsignaleager`) is the cumulative count of compute
+//! invocations per node, counted inside the compute closure itself, and it is
+//! the only observable that separates an eager signal from the lazy memo it is
+//! built on — every value in the three signal fixtures is identical either way.
 //!
 //! ## Fixture shape
 //!
@@ -52,13 +58,16 @@ const SPEC_DIR: &str = "../lazily-spec/conformance/reactive-graph";
 
 /// The canonical fixture set. Asserted against the directory listing so a
 /// fixture added or renamed upstream fails loudly instead of going unrun.
-const FIXTURES: [&str; 11] = [
+const FIXTURES: [&str; 14] = [
     "churn_returns_to_baseline.json",
     "cross_scope_teardown_hazard.json",
     "disarm_disposes_nothing.json",
     "disposal_does_not_run_surviving_effects.json",
     "dispose_detaches_edges_both_directions.json",
+    "dispose_signal_reverts_to_lazy.json",
     "read_after_dispose_is_an_error.json",
+    "signal_materializes_once_per_batch.json",
+    "signal_materializes_without_a_read.json",
     "recycled_id_inherits_nothing.json",
     "scope_teardown_equals_fold_of_disposals.json",
     "scoping_bounds_teardown_not_visibility.json",

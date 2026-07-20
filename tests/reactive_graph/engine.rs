@@ -11,7 +11,8 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 
 use super::model::{
-    GraphModel, Ref, ScopeModel, dependencies_of, dependents_of, dispose, log_snapshot,
+    Computes, GraphModel, Ref, ScopeModel, computes_seen, dependencies_of, dependents_of, dispose,
+    log_snapshot,
 };
 
 /// A fixture assertion the implementation does not currently satisfy.
@@ -64,6 +65,13 @@ pub fn replay<'a, M: GraphModel>(
     // id that has since been recycled.
     let mut stale: HashMap<String, Ref<M::Graph>> = HashMap::new();
     let mut scopes: HashMap<String, M::Scope<'a>> = HashMap::new();
+    // Signals live outside `nodes` because a signal is a slot *plus* a puller
+    // effect, and `dispose_signal` needs the pair. See `GraphModel::Signal`.
+    let mut signals: HashMap<String, M::Signal> = HashMap::new();
+    // Cumulative per-node compute counters, never reset: `computes_of` is a
+    // running total from scenario start, so a fixture can assert that a step
+    // did NOT compute by repeating the previous step's number.
+    let mut computes: HashMap<String, Computes> = HashMap::new();
     let mut poisoned: BTreeSet<String> = BTreeSet::new();
     let mut failures: Vec<Divergence> = Vec::new();
     let mut ops = 0usize;
@@ -90,11 +98,17 @@ pub fn replay<'a, M: GraphModel>(
             if poisoned.contains(id) {
                 Err(())
             } else {
-                let node = *nodes
-                    .get(id)
-                    .unwrap_or_else(|| panic!("{fixture}: read of unknown node {id}"));
                 model.poison().store(false, Ordering::SeqCst);
-                match model.read(node) {
+                let raw = match signals.get(id) {
+                    Some(sig) => model.read_signal(sig),
+                    None => {
+                        let node = *nodes
+                            .get(id)
+                            .unwrap_or_else(|| panic!("{fixture}: read of unknown node {id}"));
+                        model.read(node)
+                    }
+                };
+                match raw {
                     Err(()) => {
                         poisoned.insert(id.to_owned());
                         Err(())
@@ -166,13 +180,45 @@ pub fn replay<'a, M: GraphModel>(
                 let id = op["id"].as_str().unwrap().to_owned();
                 let reads: Vec<Ref<M::Graph>> = reads_of!(op);
                 let offset = op["offset"].as_i64().unwrap_or(0);
+                let counter = computes.entry(id.clone()).or_default().clone();
                 let h = match op["scope"].as_str() {
-                    Some(s) => Ref::Slot(scopes[s].computed(&reads, offset)),
-                    None => Ref::Slot(model.computed(&reads, offset)),
+                    Some(s) => Ref::Slot(scopes[s].computed(&reads, offset, &counter)),
+                    None => Ref::Slot(model.computed(&reads, offset, &counter)),
                 };
                 nodes.insert(id.clone(), h);
                 stale.insert(id.clone(), h);
                 poisoned.remove(&id);
+            }
+            "signal" => {
+                let id = op["id"].as_str().unwrap().to_owned();
+                let reads: Vec<Ref<M::Graph>> = reads_of!(op);
+                let offset = op["offset"].as_i64().unwrap_or(0);
+                let counter = computes.entry(id.clone()).or_default().clone();
+                signals.insert(id.clone(), model.signal(&reads, offset, &counter));
+                poisoned.remove(&id);
+            }
+            "dispose_signal" => {
+                let id = op["id"].as_str().unwrap();
+                let sig = signals
+                    .get(id)
+                    .unwrap_or_else(|| panic!("{fixture}: dispose_signal of unknown signal {id}"));
+                // Only the puller goes. The backing slot stays in `signals` so
+                // it remains readable — clause 4 is precisely that the value
+                // survives and reverts to lazy.
+                model.dispose_signal(sig);
+            }
+            "batch" => {
+                let writes: Vec<_> = arr(&op["writes"])
+                    .iter()
+                    .map(|w| {
+                        let id = w["id"].as_str().unwrap();
+                        match nodes[id] {
+                            Ref::Cell(h) => (h, w["value"].as_i64().unwrap()),
+                            _ => panic!("{fixture}: batch write to non-cell {id}"),
+                        }
+                    })
+                    .collect();
+                model.batch(&writes);
             }
             "effect" => {
                 let id = op["id"].as_str().unwrap().to_owned();
@@ -301,9 +347,41 @@ pub fn replay<'a, M: GraphModel>(
             continue;
         };
 
+        // `computes_of` is evaluated BEFORE every other key, and deliberately.
+        //
+        // A step that asserts `computes_of` alongside `value`/`read`/`readable`
+        // is asserting a count that a read would change: on a de-eagered signal
+        // the read triggers the lazy recompute, so evaluating the read first
+        // would raise the count to the number a *conforming* binding shows and
+        // make a non-conforming one agree with it.
+        // `dispose_signal_reverts_to_lazy` step 3 is exactly that pairing, and
+        // it is the only step that separates a real `dispose_signal` from a
+        // no-op. Relying on the map's key order for this would be a silent
+        // dependency on serde_json's `preserve_order` feature.
+        //
+        // On `lazily` itself the order happens not to matter — the steps that
+        // pair `computes_of` with a read are steps where the read recomputes
+        // nothing either way, and the discriminating steps carry no read at
+        // all. That is a property of a *conforming* binding, not of the corpus:
+        // it is exactly the binding whose `dispose_signal` leaves a live puller
+        // behind that a read-first ordering would let through, so the guard
+        // stays.
+        if let Some(want) = expect.get("computes_of") {
+            for (id, v) in want.as_object().unwrap() {
+                let counter = computes
+                    .get(id.as_str())
+                    .unwrap_or_else(|| panic!("{fixture}: computes_of unknown node {id}"));
+                check!(
+                    format!("computes_of.{id}"),
+                    computes_seen(counter) as u64,
+                    v.as_u64().unwrap()
+                );
+            }
+        }
+
         for (key, want) in expect {
             match key.as_str() {
-                "note" => {}
+                "note" | "computes_of" => {}
                 "dependents_of" => {
                     for (id, v) in want.as_object().unwrap() {
                         check!(
@@ -329,7 +407,20 @@ pub fn replay<'a, M: GraphModel>(
                 },
                 "value" => {
                     if expect.get("error").and_then(Value::as_str).is_none() {
-                        check!("value", op_value, want.as_i64());
+                        // The signal fixtures assert `value` on the `signal`
+                        // CREATION op, not only on `read` ops. Only `read` sets
+                        // `op_value`, so without this fallback the assertion
+                        // would compare `None` against the expected number —
+                        // which fails loudly here, but in a runner that treated
+                        // a missing value as "nothing to check" would silently
+                        // assert nothing. The read is issued lazily, *after*
+                        // `computes_of` has already been evaluated above, so it
+                        // cannot mask a deferred materialization.
+                        let got = match op_value {
+                            Some(v) => Some(v),
+                            None => op["id"].as_str().and_then(|id| read_id!(id).ok()),
+                        };
+                        check!("value", got, want.as_i64());
                     }
                 }
                 "read" => {
@@ -343,10 +434,17 @@ pub fn replay<'a, M: GraphModel>(
                 }
                 "readable" => {
                     for (id, v) in want.as_object().unwrap() {
-                        let alive = match nodes.get(id.as_str()) {
-                            None => false,
-                            Some(Ref::Effect(h)) => model.is_effect_active(*h),
-                            Some(_) => read_id!(id.as_str()).is_ok(),
+                        // A signal is readable iff its backing slot is: clause 4
+                        // says disposing the puller leaves the value live, so
+                        // this must NOT consult the puller's active flag.
+                        let alive = if signals.contains_key(id.as_str()) {
+                            read_id!(id.as_str()).is_ok()
+                        } else {
+                            match nodes.get(id.as_str()) {
+                                None => false,
+                                Some(Ref::Effect(h)) => model.is_effect_active(*h),
+                                Some(_) => read_id!(id.as_str()).is_ok(),
+                            }
                         };
                         check!(format!("readable.{id}"), alive, v.as_bool().unwrap());
                     }
