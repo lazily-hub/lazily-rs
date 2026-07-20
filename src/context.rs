@@ -327,6 +327,31 @@ pub(crate) fn pop_tracking_frame() {
     TRACKING_STACK.with(|stack| stack.borrow_mut().pop());
 }
 
+/// RAII guard around a tracking frame.
+///
+/// The pop MUST run on the unwind path as well as the normal one. Reading a
+/// disposed node panics — that is this library's expression of the spec's
+/// `read_after_dispose` — and such a read happens *inside* a compute closure
+/// whenever a surviving dependent is recomputed after its dependency was
+/// disposed. With a bare `push` / `pop` pair the unwind skips the pop, leaving
+/// the dead slot as the current frame, so every later top-level read registers
+/// a spurious dependency edge against it (`#lzspecedgeindex`). Caught by
+/// `tests/tracking_frame.rs`.
+pub(crate) struct TrackingFrame;
+
+impl TrackingFrame {
+    pub(crate) fn push(id: SlotId) -> Self {
+        push_tracking_frame(id);
+        Self
+    }
+}
+
+impl Drop for TrackingFrame {
+    fn drop(&mut self) {
+        pop_tracking_frame();
+    }
+}
+
 /// If there is an active tracking frame, return the id of the slot currently
 /// being computed (i.e. the dependent that should subscribe to whatever is
 /// being accessed).
@@ -1030,9 +1055,10 @@ impl Context {
             Self::remove_dependent_edges_locked(&mut inner, id, &old_deps);
         }
 
-        push_tracking_frame(id);
-        let result = (compute.as_ref())(self);
-        pop_tracking_frame();
+        let result = {
+            let _frame = TrackingFrame::push(id);
+            (compute.as_ref())(self)
+        };
 
         let changed = {
             let mut inner = self.inner.borrow_mut();
@@ -1740,9 +1766,10 @@ impl Context {
             cleanup();
         }
 
-        push_tracking_frame(id);
-        let next_cleanup = (run.as_ref())(self);
-        pop_tracking_frame();
+        let next_cleanup = {
+            let _frame = TrackingFrame::push(id);
+            (run.as_ref())(self)
+        };
 
         let mut inner = self.inner.borrow_mut();
         if let Some(Node::Effect(effect)) = Self::get_node_mut(&mut inner.nodes, id) {
