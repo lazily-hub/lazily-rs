@@ -159,7 +159,7 @@ pub use command::{
     CommandProjectionImage, CommandRpcClient, CommandStatus, CommandSubmit, CommandTransport,
     DedupePolicy, applied_receipt, rejected_receipt,
 };
-pub use context::{Context, GraphNode, TeardownScope};
+pub use context::{Context, DrainExhaustion, GraphNode, TeardownScope};
 pub use coordination::{
     BarrierCell, BarrierCore, LeaderCell, LeaderRole, LeaseCell, LeaseCore, LockCell,
     SemaphoreCell, SemaphoreCore,

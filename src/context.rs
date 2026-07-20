@@ -67,6 +67,42 @@ fn node_type_tag<T: 'static>() -> TypeTag {
 /// below the threshold carries no extra bytes at all. See `EdgeIndex`.
 const EDGE_INDEX_THRESHOLD: usize = 32;
 
+/// Default bound on effect-drain iterations within a single flush.
+///
+/// A scheduler-closed feedback loop — an effect that writes into its own
+/// dependency cone — reschedules itself indefinitely. The write calls
+/// `set_cell` -> `flush_effects`, which hits the re-entrancy guard and returns
+/// immediately, appending the newly scheduled effect to the worklist for the
+/// *outer* drain to pick up. So the loop runs flat, at constant stack depth: a
+/// recursion-depth bound could never fire, and the drain's only exit is an
+/// empty worklist. Without this budget a divergent loop hangs the process
+/// rather than failing.
+///
+/// The value is deliberately large enough that a long-but-terminating cascade
+/// does not trip it. Per-effect attribution (`DrainExhaustion::top_effects`) is
+/// what distinguishes divergence from depth, so the budget does not have to be
+/// tuned to tell them apart.
+const DEFAULT_DRAIN_BUDGET: usize = 100_000;
+
+/// Report produced when an effect drain exhausts its iteration budget.
+///
+/// Exhaustion is *not* convergence, and this deliberately does not pretend
+/// otherwise: it reports that the drain was cut short, plus the effects that
+/// ran most, so a diverging loop names itself instead of surfacing as "the
+/// drain hit a counter".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrainExhaustion {
+    /// Effect runs performed before the budget was reached.
+    pub iterations: usize,
+    /// The budget that was hit.
+    pub budget: usize,
+    /// `(effect id, run count)` for the busiest effects in the exhausted
+    /// drain, descending by run count. A scheduler-closed loop puts its own
+    /// effect at the head with a count proportional to `iterations`, which is
+    /// what separates it from a wide cascade where runs are spread thin.
+    pub top_effects: Vec<(u64, u32)>,
+}
+
 /// Hysteresis: demote only well below the promote threshold.
 ///
 /// A dependent list oscillates by one on every recompute — edges are removed
@@ -443,6 +479,16 @@ struct ContextInner {
     /// the bounded, dense node-id space and avoids per-schedule hashing.
     scheduled_effects: Vec<bool>,
     flushing_effects: bool,
+    /// Bound on effect runs within one drain. See `DEFAULT_DRAIN_BUDGET`.
+    drain_budget: usize,
+    /// Per-effect run counts for the drain currently in progress, indexed by
+    /// node slot. Cleared lazily at the start of each outer drain so a
+    /// terminating flush pays no scan.
+    drain_runs: Vec<u32>,
+    /// Set when a drain exhausts `drain_budget`. Observable rather than a
+    /// panic so a conformance fixture can assert that a divergent loop reports
+    /// exhaustion instead of hanging the runner.
+    last_drain_exhaustion: Option<DrainExhaustion>,
     batch_depth: usize,
     batched_cells: EdgeVec,
     batched_cell_clears: EdgeVec,
@@ -531,6 +577,9 @@ impl Context {
                 dependencies_index: EdgeIndex::default(),
                 roots_scratch: EdgeVec::new(),
                 pending_effects: VecDeque::new(),
+                drain_budget: DEFAULT_DRAIN_BUDGET,
+                drain_runs: Vec::new(),
+                last_drain_exhaustion: None,
                 scheduled_effects: Vec::new(),
                 flushing_effects: false,
                 batch_depth: 0,
@@ -1684,6 +1733,18 @@ impl Context {
         None
     }
 
+    /// Drain the scheduled-effect worklist, bounded by `drain_budget`.
+    ///
+    /// The bound is on **iterations, not re-entry depth**. A nested
+    /// `flush_effects` returns immediately at the guard below, so depth is
+    /// pinned at 1 by construction and a depth bound would never fire; a
+    /// scheduler-closed feedback loop is a flat unbounded drain. See
+    /// `DEFAULT_DRAIN_BUDGET`.
+    ///
+    /// On exhaustion the drain stops and records a `DrainExhaustion` rather
+    /// than panicking or spinning. Exhaustion is not convergence — the
+    /// worklist is left as-is, and the report names the effects that were
+    /// cycling.
     pub(crate) fn flush_effects(&self) {
         {
             let mut inner = self.inner.borrow_mut();
@@ -1691,8 +1752,12 @@ impl Context {
                 return;
             }
             inner.flushing_effects = true;
+            // Only the outer drain owns the attribution buffer; clearing here
+            // (not per iteration) keeps a terminating flush free of scans.
+            inner.drain_runs.clear();
         }
 
+        let mut iterations: usize = 0;
         loop {
             let id = {
                 let mut inner = self.inner.borrow_mut();
@@ -1704,8 +1769,86 @@ impl Context {
                     }
                 }
             };
+
+            {
+                let mut inner = self.inner.borrow_mut();
+                if let Some(idx) = Self::node_index(id) {
+                    if idx >= inner.drain_runs.len() {
+                        inner.drain_runs.resize(idx + 1, 0);
+                    }
+                    inner.drain_runs[idx] = inner.drain_runs[idx].saturating_add(1);
+                }
+
+                iterations += 1;
+                if iterations >= inner.drain_budget {
+                    let report = Self::drain_exhaustion_report(&inner, iterations);
+                    inner.last_drain_exhaustion = Some(report);
+                    inner.flushing_effects = false;
+                    return;
+                }
+            }
+
             self.run_effect(id);
         }
+    }
+
+    /// Build the exhaustion report: the busiest effects in the current drain,
+    /// descending. Capped at a handful of entries — the head is what
+    /// identifies a scheduler-closed loop, and a full histogram over a wide
+    /// graph would bury it.
+    fn drain_exhaustion_report(inner: &ContextInner, iterations: usize) -> DrainExhaustion {
+        const TOP_N: usize = 8;
+        let mut top: Vec<(u64, u32)> = inner
+            .drain_runs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &runs)| runs > 0)
+            .map(|(idx, &runs)| (idx as u64, runs))
+            .collect();
+        top.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        top.truncate(TOP_N);
+        DrainExhaustion {
+            iterations,
+            budget: inner.drain_budget,
+            top_effects: top,
+        }
+    }
+
+    /// The most recent drain exhaustion, if any drain has been cut short.
+    ///
+    /// `None` means every drain so far ended with an empty worklist. This is
+    /// the observable a conformance fixture asserts on: a divergent
+    /// scheduler-closed loop must surface here rather than hang.
+    pub fn last_drain_exhaustion(&self) -> Option<DrainExhaustion> {
+        self.inner.borrow().last_drain_exhaustion.clone()
+    }
+
+    /// Clear the recorded exhaustion, so a later drain can be observed
+    /// independently.
+    pub fn clear_drain_exhaustion(&self) {
+        self.inner.borrow_mut().last_drain_exhaustion = None;
+    }
+
+    /// Current effect-drain iteration budget.
+    pub fn drain_budget(&self) -> usize {
+        self.inner.borrow().drain_budget
+    }
+
+    /// Override the effect-drain iteration budget.
+    ///
+    /// Lowering it is how a test exercises divergence without waiting for
+    /// `DEFAULT_DRAIN_BUDGET` iterations. Raising it is a blunt instrument: if
+    /// a legitimate cascade trips the default, prefer reading
+    /// `DrainExhaustion::top_effects` to confirm the runs are spread across
+    /// effects rather than concentrated in one, because a concentrated head is
+    /// divergence and a larger budget only delays it.
+    ///
+    /// # Panics
+    /// If `budget` is zero — a zero budget would abort every drain before it
+    /// ran a single effect.
+    pub fn set_drain_budget(&self, budget: usize) {
+        assert!(budget > 0, "drain budget must be non-zero");
+        self.inner.borrow_mut().drain_budget = budget;
     }
 
     /// #lzspecrevisionengine: revision-mode effect flush. Scans all registered
