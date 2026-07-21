@@ -78,6 +78,27 @@ pub fn computes_seen(computes: &Computes) -> usize {
     computes.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Cumulative merge-fold counter for one merge cell, backing the corpus's
+/// `merges_of` assertion (`#lzmergefeed`).
+///
+/// Like [`Computes`], this is the runner's own instrument: the library folds a
+/// value but does not count folds, so the runner increments this once per
+/// *observable fold* — at the explicit `merge()` call site, and inside the feed
+/// effect body each time it runs. That placement is the point: a binding that
+/// deferred the fold, or unified the exact and flush-granular paths, moves the
+/// count away from the fixture's expectation while every value assertion under
+/// an idempotent policy still passes. `merges_of` is what separates "folded
+/// three times" from "folded once", which value alone cannot under `KeepLatest`.
+pub type Merges = Arc<AtomicUsize>;
+
+pub fn count_merge(merges: &Merges) {
+    merges.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn merges_seen(merges: &Merges) -> usize {
+    merges.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// A handle to a node in whichever graph is under test.
 ///
 /// Parameterised by the *library* trait, not by the test model, so the generic
@@ -221,11 +242,64 @@ pub trait GraphModel: Sized {
     /// reverts to lazy recompute-on-read (`#lzsignaleager` clause 4).
     fn dispose_signal(&self, signal: &Self::Signal);
 
-    /// Apply every write inside ONE batch.
+    /// Create a merge cell (`#lzmergefeed`): a `SourceCell` whose write folds
+    /// under a `MergePolicy` rather than replaces. A merge cell is an ordinary
+    /// cell node — the policy lives in how it is written, not in the node — so
+    /// this returns the same `SourceCell<i64>` handle a plain `cell` does, and
+    /// [`merge`](Self::merge) / [`feed_effect`](Self::feed_effect) fold into it
+    /// under `Sum`. The corpus only ever uses the `Sum` policy here.
+    fn merge_cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::SourceCell<i64> {
+        self.cell(value)
+    }
+
+    /// Fold `op` into a merge cell under `Sum` (an explicit `merge()` call), then
+    /// settle. Exact: one fold per call, the caller counting the ops.
+    fn merge(&self, cell: <Self::Graph as ReactiveGraph>::SourceCell<i64>, op: i64);
+
+    /// An effect that reads `reads` and folds their sum into `target` under
+    /// `Sum` — the feed construction (§9.2.3). The edge belongs to the effect
+    /// (it reads `reads`); the merge cell acquires none. `merges` is incremented
+    /// once per run, inside the effect body, so the count moves only when the
+    /// runtime actually folds.
+    fn feed_effect(
+        &self,
+        name: &str,
+        reads: &[Ref<Self::Graph>],
+        target: <Self::Graph as ReactiveGraph>::SourceCell<i64>,
+        merges: &Merges,
+    ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
+
+    /// An effect that reads `own` and writes `own + 1` back into it — a
+    /// scheduler-closed feedback loop that diverges under `KeepLatest`
+    /// (`#lzfeedbackdrain`). The loop closes through the scheduler, not the
+    /// graph, so a bounded drain is the only structural exit; a model without
+    /// one builds a non-writing stand-in and reports `drain_exhausted = false`.
+    fn diverge_effect(
+        &self,
+        name: &str,
+        own: <Self::Graph as ReactiveGraph>::SourceCell<i64>,
+    ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
+
+    /// Whether the most recent settle exhausted its effect-drain budget
+    /// (`#lzfeedbackdrain`). `false` for a model with no drain bound.
+    fn drain_exhausted(&self) -> bool {
+        false
+    }
+
+    /// Reset the drain-exhaustion observable so the next op is measured alone.
+    fn clear_drain(&self) {}
+
+    /// Apply every write and merge inside ONE batch.
     ///
-    /// The corpus's `batch` op carries its whole write list, so no nesting
-    /// state is needed and the outermost-exit flush is the only flush.
-    fn batch(&self, writes: &[(<Self::Graph as ReactiveGraph>::SourceCell<i64>, i64)]);
+    /// The corpus's `batch` op carries its whole write and merge lists, so no
+    /// nesting state is needed and the outermost-exit flush is the only flush.
+    /// Writes and merges both fold synchronously inside the batch; only the
+    /// downstream cascade (and any feed effect's rerun) defers to batch exit.
+    fn batch(
+        &self,
+        writes: &[(<Self::Graph as ReactiveGraph>::SourceCell<i64>, i64)],
+        merges: &[(<Self::Graph as ReactiveGraph>::SourceCell<i64>, i64)],
+    );
 
     /// Read a node's value. `Err` is the corpus's `read_after_dispose`.
     fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()>;

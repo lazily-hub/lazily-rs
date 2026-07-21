@@ -58,7 +58,7 @@ const SPEC_DIR: &str = "../lazily-spec/conformance/reactive-graph";
 
 /// The canonical fixture set. Asserted against the directory listing so a
 /// fixture added or renamed upstream fails loudly instead of going unrun.
-const FIXTURES: [&str; 14] = [
+const FIXTURES: [&str; 20] = [
     "churn_returns_to_baseline.json",
     "cross_scope_teardown_hazard.json",
     "disarm_disposes_nothing.json",
@@ -73,6 +73,17 @@ const FIXTURES: [&str; 14] = [
     "scoping_bounds_teardown_not_visibility.json",
     "teardown_runs_members_in_reverse_creation_order.json",
     "transitive_invalidation_reaches_depth.json",
+    // `#lzmergefeed` (design §9.1 / §8): the merge algebra + feedback-drain
+    // fixtures, replayed against all three execution models.
+    "exact_fold_paths_stay_exact.json",
+    "feedback_drain_bound_reports_exhaustion.json",
+    "merge_cell_acquires_no_dependency_edge.json",
+    "merge_folds_synchronously_in_batch.json",
+    "merge_per_settled_cone_not_per_write.json",
+    // Additive async-scheduler fixture (design §9.1): the feed reads a formula,
+    // so on the async model the effect awaits before folding, exercising the
+    // per-cone coalescing the four plain-cell feeds never reach.
+    "merge_feed_through_a_formula_coalesces.json",
 ];
 
 /// Fixture assertions an execution model does not satisfy today, as
@@ -83,10 +94,22 @@ const FIXTURES: [&str; 14] = [
 /// new divergence fails the build and a fixed one fails it until the entry is
 /// removed.
 const KNOWN_DIVERGENCES: &[&str] = &[
-    // Empty, and it must stay empty unless a real divergence is found. The one
-    // entry this ledger ever held was a fixture defect — `scope_teardown_...`
-    // asserted `dependents_of` one step before the read that registers the edge
-    // it counts — reported upstream and fixed in lazily-spec f9f93d5.
+    // `#lzfeedbackdrain` (design §9.1 / §8): the bounded effect drain lands on
+    // `Context` and `ThreadSafeContext`, so both report exhaustion for the
+    // divergent scheduler-closed loop. `AsyncContext` has no drain bound — a
+    // real self-writing async effect would spawn reruns unboundedly (the async
+    // scheduler coalesces per revision, but a self-write advances the revision
+    // every time), so the async model runs a NON-writing stand-in and never
+    // exhausts. The `set_cell` kick therefore reports `drain_exhausted = false`
+    // where the fixture wants `true`. Bounding divergent async feedback is
+    // future work beyond the merge algebra this fixture set brought in; the gap
+    // is ledgered here rather than papered over.
+    //
+    // The other ledger entry this file ever held was a fixture defect —
+    // `scope_teardown_...` asserted `dependents_of` one step before the read
+    // that registers the edge it counts — reported upstream and fixed in
+    // lazily-spec f9f93d5.
+    "AsyncContext/feedback_drain_bound_reports_exhaustion.json#2:drain_exhausted",
 ];
 
 fn load(name: &str) -> Value {

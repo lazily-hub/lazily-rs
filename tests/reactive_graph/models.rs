@@ -7,7 +7,11 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::model::{Computes, GraphModel, Log, Poison, Ref, ScopeModel, count_computes, log_push};
+use super::model::{
+    Computes, GraphModel, Log, Merges, Poison, Ref, ScopeModel, count_computes, count_merge,
+    log_push,
+};
+use lazily::Sum;
 
 /// Run `f`, converting a panic into `Err(())` with the message suppressed.
 ///
@@ -98,6 +102,57 @@ mod basic {
         }
     }
 
+    /// The feed effect (`#lzmergefeed`): read `reads` (tracked, so the effect —
+    /// not the merge cell — owns the edge), fold their sum into `target` under
+    /// `Sum`, and count the fold. The write acquires no dependency edge to
+    /// `target`; it is an argument, not a dependency (§9.2.3).
+    fn feed_body(
+        reads: &[Ref<Context>],
+        target: SourceCell<i64>,
+        poison: &Poison,
+        merges: &Merges,
+    ) -> impl Fn(&Context) + 'static {
+        let reads = reads.to_vec();
+        let poison = poison.clone();
+        let merges = merges.clone();
+        move |c: &Context| {
+            let mut acc = 0i64;
+            for r in &reads {
+                acc += tracked(c, *r, &poison);
+            }
+            count_merge(&merges);
+            c.apply_merge::<i64, Sum>(&target, acc);
+        }
+    }
+
+    /// The divergent effect (`#lzfeedbackdrain`): read `own` (tracked, so it is
+    /// a dependency) and write an incremented value back into it. The write
+    /// reschedules the effect through the scheduler — a scheduler-closed loop,
+    /// not a graph cycle — which the bounded drain cuts short.
+    ///
+    /// Two wrinkles make this faithful to the fixture on `lazily`:
+    ///
+    /// - `0` is held as a fixed point (`v == 0` writes `0`), so at creation the
+    ///   effect reads `counter = 0`, writes `0`, the `PartialEq` store guard
+    ///   skips the invalidation, and the loop is *not* kicked yet (step-1
+    ///   `drain_exhausted = false`). `lazily` registers the dependency edge the
+    ///   instant `get_cell` runs, so a plain `n + 1` body would reschedule
+    ///   itself mid-creation and exhaust before the external kick ever landed.
+    /// - `wrapping_add` rather than `+`: the divergent loop runs to the drain
+    ///   budget, and a checked `+` would panic on i64 overflow before the bound
+    ///   fires. Divergence here means *never converging* (every step changes the
+    ///   value and reschedules), not the value growing without bound.
+    ///
+    /// The external `set_cell(counter, 1)` moves off the fixed point and the
+    /// loop diverges under `KeepLatest` — the step-2 exhaustion.
+    fn diverge_body(own: SourceCell<i64>) -> impl Fn(&Context) + 'static {
+        move |c: &Context| {
+            let v = c.get_cell(&own);
+            let next = if v == 0 { 0 } else { v.wrapping_add(1) };
+            c.set_cell(&own, next);
+        }
+    }
+
     pub struct BasicScope<'a>(TeardownScope<'a>, Log, Log, Poison);
 
     impl ScopeModel<BasicModel> for BasicScope<'_> {
@@ -180,12 +235,41 @@ mod basic {
         fn dispose_signal(&self, signal: &Self::Signal) {
             self.ctx.dispose_signal(signal);
         }
-        fn batch(&self, writes: &[(SourceCell<i64>, i64)]) {
+        fn batch(&self, writes: &[(SourceCell<i64>, i64)], merges: &[(SourceCell<i64>, i64)]) {
             self.ctx.batch(|c| {
                 for (h, v) in writes {
                     c.set_cell(h, *v);
                 }
+                for (h, v) in merges {
+                    c.apply_merge::<i64, Sum>(h, *v);
+                }
             });
+        }
+        fn merge(&self, cell: SourceCell<i64>, op: i64) {
+            self.ctx.apply_merge::<i64, Sum>(&cell, op);
+        }
+        fn feed_effect(
+            &self,
+            _name: &str,
+            reads: &[Ref<Self::Graph>],
+            target: SourceCell<i64>,
+            merges: &Merges,
+        ) -> EffectHandle {
+            self.ctx
+                .effect(feed_body(reads, target, &self.poison, merges))
+        }
+        fn diverge_effect(&self, _name: &str, own: SourceCell<i64>) -> EffectHandle {
+            // Only the divergent fixture builds this, so lowering the drain
+            // budget here keeps the exhausting loop fast without affecting any
+            // other fixture's model.
+            self.ctx.set_drain_budget(256);
+            self.ctx.effect(diverge_body(own))
+        }
+        fn drain_exhausted(&self) -> bool {
+            self.ctx.last_drain_exhaustion().is_some()
+        }
+        fn clear_drain(&self) {
+            self.ctx.clear_drain_exhaustion();
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
@@ -296,6 +380,39 @@ mod threadsafe {
         }
     }
 
+    /// Feed effect (`#lzmergefeed`), thread-safe flavour. See the basic module's
+    /// `feed_body`; the only difference is the `Send + Sync` closure bound.
+    fn feed_body(
+        reads: &[Ref<ThreadSafeContext>],
+        target: SourceCell<i64>,
+        poison: &Poison,
+        merges: &Merges,
+    ) -> impl Fn(&ThreadSafeContext) + Send + Sync + 'static {
+        let reads = reads.to_vec();
+        let poison = poison.clone();
+        let merges = merges.clone();
+        move |c: &ThreadSafeContext| {
+            let mut acc = 0i64;
+            for r in &reads {
+                acc += tracked(c, *r, &poison);
+            }
+            count_merge(&merges);
+            c.apply_merge::<i64, Sum>(&target, acc);
+        }
+    }
+
+    /// Divergent effect (`#lzfeedbackdrain`), thread-safe flavour. The write
+    /// reschedules the effect onto the outer drain, which the bounded
+    /// `flush_effects` cuts short. Holds `0` as a fixed point and uses
+    /// `wrapping_add` — see the basic module's `diverge_body` for why.
+    fn diverge_body(own: SourceCell<i64>) -> impl Fn(&ThreadSafeContext) + Send + Sync + 'static {
+        move |c: &ThreadSafeContext| {
+            let v = c.get_cell(&own);
+            let next = if v == 0 { 0 } else { v.wrapping_add(1) };
+            c.set_cell(&own, next);
+        }
+    }
+
     /// Owned, not borrowed — see `ThreadSafeContext::scope`. The GAT lifetime is
     /// simply unused here, which is the point: this scope is `Send` and can
     /// outlive the borrow that produced it.
@@ -381,12 +498,38 @@ mod threadsafe {
         fn dispose_signal(&self, signal: &Self::Signal) {
             self.ctx.dispose_signal(signal);
         }
-        fn batch(&self, writes: &[(SourceCell<i64>, i64)]) {
+        fn batch(&self, writes: &[(SourceCell<i64>, i64)], merges: &[(SourceCell<i64>, i64)]) {
             self.ctx.batch(|c| {
                 for (h, v) in writes {
                     c.set_cell(h, *v);
                 }
+                for (h, v) in merges {
+                    c.apply_merge::<i64, Sum>(h, *v);
+                }
             });
+        }
+        fn merge(&self, cell: SourceCell<i64>, op: i64) {
+            self.ctx.apply_merge::<i64, Sum>(&cell, op);
+        }
+        fn feed_effect(
+            &self,
+            _name: &str,
+            reads: &[Ref<Self::Graph>],
+            target: SourceCell<i64>,
+            merges: &Merges,
+        ) -> EffectHandle {
+            self.ctx
+                .effect(feed_body(reads, target, &self.poison, merges))
+        }
+        fn diverge_effect(&self, _name: &str, own: SourceCell<i64>) -> EffectHandle {
+            self.ctx.set_drain_budget(256);
+            self.ctx.effect(diverge_body(own))
+        }
+        fn drain_exhausted(&self) -> bool {
+            self.ctx.last_drain_exhaustion().is_some()
+        }
+        fn clear_drain(&self) {
+            self.ctx.clear_drain_exhaustion();
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
@@ -531,6 +674,40 @@ mod asynchronous {
         Box<dyn std::future::Future<Output = Option<Box<dyn FnOnce() + Send>>> + Send>,
     >;
 
+    /// The feed effect (`#lzmergefeed`), async flavour. Reads `reads` through the
+    /// tracking compute context (so the effect owns the edge), then folds their
+    /// sum into `target` under `Sum` **synchronously** via
+    /// [`AsyncComputeContext::apply_merge`] — the fold is a cell op, so it is
+    /// synchronous even here (§9.1); only the effect's *rerun* is scheduled on
+    /// the executor. The merge cell acquires no dependency edge.
+    fn async_feed_body(
+        reads: &[Ref<AsyncContext>],
+        target: AsyncCellHandle<i64>,
+        poison: &Poison,
+        merges: &Merges,
+    ) -> impl Fn(AsyncComputeContext) -> EffectFuture + Send + Sync + 'static {
+        let reads = reads.to_vec();
+        let poison = poison.clone();
+        let merges = merges.clone();
+        move |c: AsyncComputeContext| {
+            let reads = reads.clone();
+            let poison = poison.clone();
+            let merges = merges.clone();
+            Box::pin(async move {
+                let mut acc = 0i64;
+                for r in &reads {
+                    match read_in_compute(&c, *r).await {
+                        Ok(v) => acc += v,
+                        Err(()) => poison.store(true, Ordering::SeqCst),
+                    }
+                }
+                count_merge(&merges);
+                c.apply_merge::<i64, Sum>(&target, acc);
+                None
+            })
+        }
+    }
+
     /// Carries a runtime `Handle` because effect registration spawns a task, and
     /// `tokio::spawn` panics outside a runtime context. Disposal only calls
     /// `JoinHandle::abort`, which does not need one.
@@ -632,13 +809,47 @@ mod asynchronous {
         fn dispose_signal(&self, signal: &Self::Signal) {
             self.ctx.dispose_signal(signal);
         }
-        fn batch(&self, writes: &[(AsyncCellHandle<i64>, i64)]) {
+        fn batch(
+            &self,
+            writes: &[(AsyncCellHandle<i64>, i64)],
+            merges: &[(AsyncCellHandle<i64>, i64)],
+        ) {
             let _guard = self.rt.enter();
             self.ctx.batch(|c| {
                 for (h, v) in writes {
                     c.set_cell(h, *v);
                 }
+                for (h, v) in merges {
+                    c.apply_merge::<i64, Sum>(h, *v);
+                }
             });
+        }
+        fn merge(&self, cell: AsyncCellHandle<i64>, op: i64) {
+            let _guard = self.rt.enter();
+            self.ctx.apply_merge::<i64, Sum>(&cell, op);
+        }
+        fn feed_effect(
+            &self,
+            _name: &str,
+            reads: &[Ref<Self::Graph>],
+            target: AsyncCellHandle<i64>,
+            merges: &Merges,
+        ) -> AsyncEffectHandle {
+            let _guard = self.rt.enter();
+            self.ctx
+                .effect_async(async_feed_body(reads, target, &self.poison, merges))
+        }
+        /// A NON-writing stand-in (`#lzfeedbackdrain`). `AsyncContext` has no
+        /// bounded effect drain, and a real self-writing async effect would
+        /// spawn reruns unboundedly (one per revision — the async scheduler
+        /// coalesces per revision, but a self-write advances the revision every
+        /// time), which would exhaust memory rather than fail an assertion. So
+        /// the async model reads `own` without writing it: no loop, and
+        /// `drain_exhausted` stays `false`. That gap is recorded in the runner's
+        /// per-model divergence ledger rather than papered over — bounding
+        /// divergent async feedback is future work beyond the merge algebra.
+        fn diverge_effect(&self, name: &str, own: AsyncCellHandle<i64>) -> AsyncEffectHandle {
+            self.effect(name, &[Ref::Cell(own)])
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             match node {

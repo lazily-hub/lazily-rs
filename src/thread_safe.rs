@@ -57,11 +57,13 @@ type StateWriteGuard<'a> = parking_lot::RwLockWriteGuard<'a, ThreadSafeState>;
 use std::time::Instant;
 
 use crate::cell::{FormulaCell, SourceCell};
+use crate::context::DrainExhaustion;
 use crate::context::GraphNode;
 use crate::context::SlotId;
 use crate::effect::EffectHandle;
 #[cfg(feature = "instrumentation")]
 use crate::instrumentation::ThreadSafeLockSite;
+use crate::merge::MergePolicy;
 
 type ThreadSafeAny = dyn Any + Send + Sync;
 type ThreadSafeComputeFn = dyn Fn(&ThreadSafeContext) -> Box<ThreadSafeAny> + Send + Sync;
@@ -1454,9 +1456,24 @@ struct ThreadSafeState {
     batched_cell_clears: EdgeVec,
     batched_slots: EdgeVec,
     dependent_scratch: Vec<SlotId>,
+    /// Effect-drain iteration budget (`#lzfeedbackdrain`). Zero means "use
+    /// `DEFAULT_DRAIN_BUDGET`", so `#[derive(Default)]` need not name the
+    /// constant. See [`ThreadSafeContext::flush_effects`].
+    drain_budget: usize,
+    /// The most recent exhausted drain, or `None` if every drain so far ended
+    /// with an empty worklist. The observable `feedback_drain_bound_...` asserts.
+    last_drain_exhaustion: Option<DrainExhaustion>,
+    /// Per-effect run counts for the current drain, indexed by node index —
+    /// attribution for the exhaustion report, mirroring `Context::drain_runs`.
+    drain_runs: Vec<u32>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
+
+/// Effect-drain iteration budget for `ThreadSafeContext` (`#lzfeedbackdrain`).
+/// Mirrors `Context`'s `DEFAULT_DRAIN_BUDGET`: a scheduler-closed feedback loop
+/// runs flat at re-entry depth 1, so the only structural exit is this bound.
+const DEFAULT_DRAIN_BUDGET: usize = 100_000;
 
 fn node_index(id: SlotId) -> Option<usize> {
     usize::try_from(id.0).ok()
@@ -2816,6 +2833,30 @@ impl ThreadSafeContext {
         }
     }
 
+    /// Fold `op` into a cell's value under policy `M` (the merge write), the
+    /// thread-safe port of [`Context::apply_merge`] (design §9.1).
+    ///
+    /// Reads the current value **untracked** (through the cell fast path, not
+    /// [`get_cell`](Self::get_cell), so no dependency edge is registered),
+    /// computes `M::merge(old, op)` synchronously, then routes through
+    /// [`set_cell`](Self::set_cell) so the `PartialEq` store-guard, batching, and
+    /// store-without-cascade all apply unchanged. The fold runs on the caller's
+    /// stack; per §9.2.1 a `MergePolicy::merge` MUST be cheap and non-blocking
+    /// because — unlike the single-threaded `Context` — here it may run while a
+    /// writer holds the state lock.
+    pub fn apply_merge<T, M>(&self, handle: &SourceCell<T>, op: T)
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+        M: MergePolicy<T>,
+    {
+        let old: T = self
+            .cell_fast_path(handle.id)
+            .map(|fast_path| fast_path.get::<T>())
+            .unwrap_or_else(|| panic!("apply_merge on non-cell id"));
+        let merged = M::merge(&old, op);
+        self.set_cell(handle, merged);
+    }
+
     fn invalidate_changed_cell_locked(&self, id: SlotId) -> bool {
         #[cfg(feature = "instrumentation")]
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::SetCellInvalidation);
@@ -3282,23 +3323,52 @@ impl ThreadSafeContext {
     }
 
     fn flush_effects(&self) {
-        {
+        let budget = {
             let mut state = self.lock_state();
             if state.flushing_effects {
                 return;
             }
             state.flushing_effects = true;
-        }
+            // Only the outer drain owns the attribution buffer; clearing here
+            // (not per iteration) keeps a terminating flush free of scans.
+            state.drain_runs.clear();
+            if state.drain_budget == 0 {
+                DEFAULT_DRAIN_BUDGET
+            } else {
+                state.drain_budget
+            }
+        };
         let mut guard = FlushGuard {
             ctx: self.clone(),
             active: true,
         };
 
+        // `#lzfeedbackdrain`: the bound is on iterations, not re-entry depth. A
+        // nested `flush_effects` returns immediately at the guard above, so a
+        // scheduler-closed feedback loop is a flat unbounded drain here, and the
+        // only structural exit is this budget. On exhaustion the drain stops and
+        // records a `DrainExhaustion` rather than spinning forever.
+        let mut iterations: usize = 0;
         loop {
             let id = {
                 let mut state = self.lock_state();
                 if let Some(id) = state.pop_scheduled_effect() {
-                    Some(id)
+                    if let Some(idx) = node_index(id) {
+                        if idx >= state.drain_runs.len() {
+                            state.drain_runs.resize(idx + 1, 0);
+                        }
+                        state.drain_runs[idx] = state.drain_runs[idx].saturating_add(1);
+                    }
+                    iterations += 1;
+                    if iterations >= budget {
+                        let report = Self::drain_exhaustion_report(&state, iterations, budget);
+                        state.last_drain_exhaustion = Some(report);
+                        state.flushing_effects = false;
+                        guard.active = false;
+                        None
+                    } else {
+                        Some(id)
+                    }
                 } else {
                     state.flushing_effects = false;
                     guard.active = false;
@@ -3310,6 +3380,64 @@ impl ThreadSafeContext {
             };
             self.run_effect(id);
         }
+    }
+
+    /// Build the exhaustion report: the busiest effects in the current drain,
+    /// descending. Mirrors [`Context::drain_exhaustion_report`].
+    fn drain_exhaustion_report(
+        state: &ThreadSafeState,
+        iterations: usize,
+        budget: usize,
+    ) -> DrainExhaustion {
+        const TOP_N: usize = 8;
+        let mut top: Vec<(u64, u32)> = state
+            .drain_runs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &runs)| runs > 0)
+            .map(|(idx, &runs)| (idx as u64, runs))
+            .collect();
+        top.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        top.truncate(TOP_N);
+        DrainExhaustion {
+            iterations,
+            budget,
+            top_effects: top,
+        }
+    }
+
+    /// The most recent drain exhaustion, if any drain has been cut short
+    /// (`#lzfeedbackdrain`). `None` means every drain so far ended with an empty
+    /// worklist. A divergent scheduler-closed loop surfaces here rather than
+    /// hanging. Mirrors [`Context::last_drain_exhaustion`].
+    pub fn last_drain_exhaustion(&self) -> Option<DrainExhaustion> {
+        self.read_state().last_drain_exhaustion.clone()
+    }
+
+    /// Clear the recorded exhaustion so a later drain can be observed
+    /// independently. Mirrors [`Context::clear_drain_exhaustion`].
+    pub fn clear_drain_exhaustion(&self) {
+        self.lock_state().last_drain_exhaustion = None;
+    }
+
+    /// Current effect-drain iteration budget (`#lzfeedbackdrain`).
+    pub fn drain_budget(&self) -> usize {
+        let budget = self.read_state().drain_budget;
+        if budget == 0 {
+            DEFAULT_DRAIN_BUDGET
+        } else {
+            budget
+        }
+    }
+
+    /// Override the effect-drain iteration budget. Lowering it is how a test
+    /// exercises divergence without waiting for the full default.
+    ///
+    /// # Panics
+    /// If `budget` is zero.
+    pub fn set_drain_budget(&self, budget: usize) {
+        assert!(budget > 0, "drain budget must be non-zero");
+        self.lock_state().drain_budget = budget;
     }
 
     fn run_effect(&self, id: SlotId) {

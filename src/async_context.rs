@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::context::{GraphNode, SlotId};
+use crate::merge::MergePolicy;
 
 #[cfg(not(feature = "vec_edges"))]
 type EdgeVec = smallvec::SmallVec<[SlotId; 4]>;
@@ -621,6 +622,44 @@ impl AsyncComputeContext {
         }
     }
 
+    /// Reconstruct an owning [`AsyncContext`] over the same graph.
+    ///
+    /// A write from inside an effect is not a dependency — it creates no edge
+    /// (§9.2.3) — so it goes through the plain [`AsyncContext`] write path rather
+    /// than this tracking compute context. Mirrors how [`get_async`] builds an
+    /// `AsyncContext` from `self.inner` to drive a downstream slot.
+    fn owning_context(&self) -> AsyncContext {
+        AsyncContext {
+            inner: self.inner.clone(),
+            #[cfg(feature = "instrumentation")]
+            window1_hook: Mutex::new(None),
+            #[cfg(feature = "instrumentation")]
+            window1_resolved_hits: AtomicU64::new(0),
+        }
+    }
+
+    /// Write a cell from inside a compute/effect callback (untracked — a write
+    /// is an argument, never a dependency, §9.2.3).
+    pub fn set_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+    {
+        self.owning_context().set_cell(handle, value);
+    }
+
+    /// Fold `op` into a cell under policy `M` from inside a callback — the
+    /// in-effect counterpart of [`AsyncContext::apply_merge`]. This is the
+    /// supported shape for feeding a merge cell from an async effect (§9.1): the
+    /// effect reads its upstream through the tracking context, then folds the
+    /// result in synchronously here, and the merge cell acquires no edge.
+    pub fn apply_merge<T, M>(&self, handle: &AsyncCellHandle<T>, op: T)
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+        M: MergePolicy<T>,
+    {
+        self.owning_context().apply_merge::<T, M>(handle, op);
+    }
+
     pub fn get_async<T>(
         &self,
         handle: &AsyncSlotHandle<T>,
@@ -854,6 +893,26 @@ impl AsyncContext {
             }
         }
         self.invalidate_frontier_async(&dependents);
+    }
+
+    /// Fold `op` into a cell's value under policy `M` (the merge write), the
+    /// async port of [`Context::apply_merge`] (design §9.1).
+    ///
+    /// **Merge is synchronous even here.** Cells are the synchronous input layer
+    /// (`cell` / `get_cell` / `set_cell` are sync; only computed slots and
+    /// effects are async), so `apply_merge` is entirely synchronous cell ops:
+    /// read the current value untracked, fold `M::merge(old, op)`, then route
+    /// through [`set_cell`](Self::set_cell). §7's "merge folds synchronously
+    /// inside a batch" holds verbatim; only the timing of a *feeding effect*
+    /// differs, and that lives in the effect, not the fold.
+    pub fn apply_merge<T, M>(&self, handle: &AsyncCellHandle<T>, op: T)
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+        M: MergePolicy<T>,
+    {
+        let old = self.get_cell(handle);
+        let merged = M::merge(&old, op);
+        self.set_cell(handle, merged);
     }
 
     pub(crate) fn get_slot_state(&self, id: SlotId) -> AsyncSlotStateView {

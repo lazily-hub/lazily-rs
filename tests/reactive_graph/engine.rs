@@ -11,8 +11,8 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 
 use super::model::{
-    Computes, GraphModel, Ref, ScopeModel, computes_seen, dependencies_of, dependents_of, dispose,
-    log_snapshot,
+    Computes, GraphModel, Merges, Ref, ScopeModel, computes_seen, count_merge, dependencies_of,
+    dependents_of, dispose, log_snapshot, merges_seen,
 };
 
 /// A fixture assertion the implementation does not currently satisfy.
@@ -72,6 +72,9 @@ pub fn replay<'a, M: GraphModel>(
     // running total from scenario start, so a fixture can assert that a step
     // did NOT compute by repeating the previous step's number.
     let mut computes: HashMap<String, Computes> = HashMap::new();
+    // Cumulative per-cell merge-fold counters (`#lzmergefeed`), never reset:
+    // `merges_of` is a running total from scenario start, mirroring `computes`.
+    let mut merges: HashMap<String, Merges> = HashMap::new();
     let mut poisoned: BTreeSet<String> = BTreeSet::new();
     let mut failures: Vec<Divergence> = Vec::new();
     let mut ops = 0usize;
@@ -89,6 +92,34 @@ pub fn replay<'a, M: GraphModel>(
                 })
                 .collect::<Vec<Ref<M::Graph>>>()
         };
+    }
+
+    // Extract the `SourceCell` handle for a merge target / write target by id.
+    macro_rules! cell_of {
+        ($id:expr) => {{
+            let id: &str = $id;
+            match nodes
+                .get(id)
+                .unwrap_or_else(|| panic!("{fixture}: unknown cell {id}"))
+            {
+                Ref::Cell(h) => *h,
+                _ => panic!("{fixture}: {id} is not a cell"),
+            }
+        }};
+    }
+
+    // The corpus only ever merges under `Sum`; a fold under any other policy
+    // would need a distinct model method, so reject it loudly rather than
+    // silently folding under the wrong algebra.
+    macro_rules! assert_sum {
+        ($op:expr) => {{
+            if let Some(policy) = $op["policy"].as_str() {
+                assert_eq!(
+                    policy, "Sum",
+                    "{fixture}: unsupported merge policy {policy}"
+                );
+            }
+        }};
     }
 
     // Top-level read: an `Err` here is the corpus's `read_after_dispose`.
@@ -163,6 +194,9 @@ pub fn replay<'a, M: GraphModel>(
         let mut op_error = false;
         let mut op_value: Option<i64> = None;
         ops += 1;
+        // Measure this op's drain in isolation: `drain_exhausted` is a
+        // cumulative observable on the model, so clear it before every op.
+        model.clear_drain();
 
         match kind {
             "cell" => {
@@ -175,6 +209,31 @@ pub fn replay<'a, M: GraphModel>(
                 nodes.insert(id.clone(), h);
                 stale.insert(id.clone(), h);
                 poisoned.remove(&id);
+            }
+            // `#lzmergefeed`: a merge cell is an ordinary cell node whose write
+            // folds under a policy (only `Sum` in the corpus). It registers a
+            // merge-fold counter so `merges_of` is observable; the node itself
+            // is a `Ref::Cell`, so degree/read/dispose all work unchanged.
+            "merge_cell" => {
+                let id = op["id"].as_str().unwrap().to_owned();
+                let value = op["value"].as_i64().unwrap();
+                assert_sum!(op);
+                let h = Ref::Cell(model.merge_cell(value));
+                merges.entry(id.clone()).or_default();
+                nodes.insert(id.clone(), h);
+                stale.insert(id.clone(), h);
+                poisoned.remove(&id);
+            }
+            // `#lzmergefeed`: an explicit `merge()` call — exact, one fold per
+            // call. Not emitted by the five landed fixtures (which merge only
+            // inside a batch or via a feed effect), but accepted so a future
+            // single-fold fixture is not an unknown op.
+            "merge" => {
+                let id = op["id"].as_str().unwrap();
+                assert_sum!(op);
+                let value = op["value"].as_i64().unwrap();
+                count_merge(merges.entry(id.to_owned()).or_default());
+                model.merge(cell_of!(id), value);
             }
             "computed" => {
                 let id = op["id"].as_str().unwrap().to_owned();
@@ -224,14 +283,41 @@ pub fn replay<'a, M: GraphModel>(
                         }
                     })
                     .collect();
-                model.batch(&writes);
+                // `#lzmergefeed`: explicit `merge()` calls inside a batch fold
+                // synchronously (exact — one per call), while only the cascade
+                // defers to batch exit. Counting here is exact for the same
+                // reason: the caller decides how many ops exist.
+                let merge_writes: Vec<_> = arr(&op["merges"])
+                    .iter()
+                    .map(|m| {
+                        let id = m["id"].as_str().unwrap();
+                        count_merge(merges.entry(id.to_owned()).or_default());
+                        (cell_of!(id), m["value"].as_i64().unwrap())
+                    })
+                    .collect();
+                model.batch(&writes, &merge_writes);
             }
             "effect" => {
                 let id = op["id"].as_str().unwrap().to_owned();
                 let reads: Vec<Ref<M::Graph>> = reads_of!(op);
-                let h = match op["scope"].as_str() {
-                    Some(s) => Ref::Effect(scopes[s].effect(&id, &reads)),
-                    None => Ref::Effect(model.effect(&id, &reads)),
+                // `#lzmergefeed`: three effect flavours, chosen by the op's
+                // extra field. A `merges_into` effect feeds a merge cell (reads
+                // upstream, folds the sum in); a `writes_own_cone` effect closes
+                // a scheduler feedback loop by writing its own dependency; a
+                // plain effect is a pure sink. Scoped effects are always plain —
+                // the corpus never scopes a feed or a divergent loop.
+                let h = if let Some(target_id) = op["merges_into"].as_str() {
+                    let target = cell_of!(target_id);
+                    let counter = merges.entry(target_id.to_owned()).or_default().clone();
+                    Ref::Effect(model.feed_effect(&id, &reads, target, &counter))
+                } else if let Some(own_id) = op["writes_own_cone"].as_str() {
+                    let own = cell_of!(own_id);
+                    Ref::Effect(model.diverge_effect(&id, own))
+                } else {
+                    match op["scope"].as_str() {
+                        Some(s) => Ref::Effect(scopes[s].effect(&id, &reads)),
+                        None => Ref::Effect(model.effect(&id, &reads)),
+                    }
                 };
                 nodes.insert(id.clone(), h);
                 stale.insert(id.clone(), h);
@@ -374,20 +460,54 @@ pub fn replay<'a, M: GraphModel>(
         // stays.
         if let Some(want) = expect.get("computes_of") {
             for (id, v) in want.as_object().unwrap() {
-                let counter = computes
-                    .get(id.as_str())
-                    .unwrap_or_else(|| panic!("{fixture}: computes_of unknown node {id}"));
-                check!(
-                    format!("computes_of.{id}"),
-                    computes_seen(counter) as u64,
-                    v.as_u64().unwrap()
-                );
+                // `computes_of` on a derived node reads its compute counter; on
+                // an *effect* (e.g. `merge_folds`'s `watch`, an observer of the
+                // accumulator) the "computes" are its runs, already recorded in
+                // the run log by name. Counting there needs no extra counter and
+                // no change to how effects are built.
+                let got = match computes.get(id.as_str()) {
+                    Some(counter) => computes_seen(counter) as u64,
+                    None => match nodes.get(id.as_str()) {
+                        Some(Ref::Effect(_)) => log_snapshot(model.run_log())
+                            .iter()
+                            .filter(|n| n.as_str() == id.as_str())
+                            .count() as u64,
+                        _ => panic!("{fixture}: computes_of unknown node {id}"),
+                    },
+                };
+                check!(format!("computes_of.{id}"), got, v.as_u64().unwrap());
             }
         }
 
         for (key, want) in expect {
             match key.as_str() {
                 "note" | "computes_of" => {}
+                // `#lzmergefeed`: cumulative fold count for a merge cell. Not
+                // ordering-sensitive against reads (a read never folds), so it
+                // is checked here in step order rather than pre-evaluated like
+                // `computes_of`.
+                "merges_of" => {
+                    for (id, v) in want.as_object().unwrap() {
+                        let counter = merges
+                            .get(id.as_str())
+                            .unwrap_or_else(|| panic!("{fixture}: merges_of unknown cell {id}"));
+                        check!(
+                            format!("merges_of.{id}"),
+                            merges_seen(counter) as u64,
+                            v.as_u64().unwrap()
+                        );
+                    }
+                }
+                // `#lzfeedbackdrain`: did the op's settle exhaust the effect
+                // drain? A divergent scheduler-closed loop must report `true`
+                // rather than hang; a converging op reports `false`.
+                "drain_exhausted" => {
+                    check!(
+                        "drain_exhausted",
+                        model.drain_exhausted(),
+                        want.as_bool().unwrap()
+                    );
+                }
                 "dependents_of" => {
                     for (id, v) in want.as_object().unwrap() {
                         check!(
@@ -422,9 +542,15 @@ pub fn replay<'a, M: GraphModel>(
                         // assert nothing. The read is issued lazily, *after*
                         // `computes_of` has already been evaluated above, so it
                         // cannot mask a deferred materialization.
+                        // `#lzmergefeed`: a feed effect's op id is the effect
+                        // (unreadable), so its `value` assertion targets the
+                        // merge cell it feeds — the accumulator whose baseline
+                        // fold the step is pinning. Otherwise (signal creation)
+                        // the op id is itself the readable node.
+                        let read_target = op["merges_into"].as_str().or_else(|| op["id"].as_str());
                         let got = match op_value {
                             Some(v) => Some(v),
-                            None => op["id"].as_str().and_then(|id| read_id!(id).ok()),
+                            None => read_target.and_then(|id| read_id!(id).ok()),
                         };
                         check!("value", got, want.as_i64());
                     }
