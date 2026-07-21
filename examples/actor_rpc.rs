@@ -29,7 +29,7 @@
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
 
-use lazily::{Context, EffectHandle, QueueCell};
+use lazily::{Context, Effect, QueueCell};
 
 /// A message addressed to the counter actor. `id` correlates an RPC request
 /// with its reply; fire-and-forget requests carry an id too (unused on the
@@ -58,7 +58,7 @@ struct CounterActor {
     outbox: QueueCell<Reply>,
     // Keeping the effect handle alive keeps the actor draining. `Rc` so the
     // handle survives every `CounterActor` clone.
-    _drain: Rc<EffectHandle>,
+    _drain: Rc<Effect>,
 }
 
 impl CounterActor {

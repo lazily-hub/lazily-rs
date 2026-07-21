@@ -31,12 +31,12 @@ where
 ///
 /// Effects run immediately when created, automatically track any slots/cells
 /// read during the run, and rerun after those dependencies are invalidated.
-pub struct EffectHandle {
+pub struct Effect {
     pub(crate) id: SlotId,
     pub(crate) _marker: PhantomData<()>,
 }
 
-impl EffectHandle {
+impl Effect {
     pub(crate) fn new(id: SlotId) -> Self {
         Self {
             id,
@@ -58,10 +58,10 @@ impl EffectHandle {
     }
 }
 
-impl Clone for EffectHandle {
+impl Clone for Effect {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl Copy for EffectHandle {}
+impl Copy for Effect {}

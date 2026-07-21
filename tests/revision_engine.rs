@@ -39,7 +39,7 @@ fn revision_diamond_dependency() {
 fn revision_memo_guard() {
     let ctx = Context::with_revision_engine();
     let a = ctx.cell(5);
-    let slot = ctx.memo(move |ctx| {
+    let slot = ctx.computed(move |ctx| {
         let _ = ctx.get_cell(&a);
         42
     });

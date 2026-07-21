@@ -60,7 +60,7 @@ use crate::cell::{Computed, Source};
 use crate::context::DrainExhaustion;
 use crate::context::GraphNode;
 use crate::context::SlotId;
-use crate::effect::EffectHandle;
+use crate::effect::Effect;
 #[cfg(feature = "instrumentation")]
 use crate::instrumentation::ThreadSafeLockSite;
 use crate::merge::MergePolicy;
@@ -1677,11 +1677,11 @@ pub struct ThreadSafeSignalHandle<T> {
     /// Memoized backing slot that holds the derived value.
     pub(crate) slot: Computed<T>,
     /// Puller effect that keeps `slot` eagerly materialized.
-    pub(crate) effect: EffectHandle,
+    pub(crate) effect: Effect,
 }
 
 impl<T> ThreadSafeSignalHandle<T> {
-    pub(crate) fn new(slot: Computed<T>, effect: EffectHandle) -> Self {
+    pub(crate) fn new(slot: Computed<T>, effect: Effect) -> Self {
         Self { slot, effect }
     }
 
@@ -1748,23 +1748,13 @@ impl ThreadSafeTeardownScope {
         handle
     }
 
-    /// Create a lazily-computed slot owned by this scope.
+    /// Create a guarded computed cell owned by this scope.
     pub fn computed<T, F>(&self, compute: F) -> Computed<T>
-    where
-        T: Send + Sync + 'static,
-        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
-    {
-        let handle = self.ctx.computed(compute);
-        self.track(handle, handle.id)
-    }
-
-    /// Create a memoized slot owned by this scope.
-    pub fn memo<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
     {
-        let handle = self.ctx.memo(compute);
+        let handle = self.ctx.computed(compute);
         self.track(handle, handle.id)
     }
 
@@ -1775,7 +1765,7 @@ impl ThreadSafeTeardownScope {
     }
 
     /// Register an effect owned by this scope.
-    pub fn effect<F, R>(&self, run: F) -> EffectHandle
+    pub fn effect<F, R>(&self, run: F) -> Effect
     where
         F: Fn(&ThreadSafeContext) -> R + Send + Sync + 'static,
         R: ThreadSafeEffectCallbackResult + 'static,
@@ -2223,19 +2213,11 @@ impl ThreadSafeContext {
         self.slot_with_equals(compute, None)
     }
 
-    /// Create a derived lazily-computed thread-safe value.
-    ///
-    /// This is an ergonomic alias for [`ThreadSafeContext::slot`].
+    /// Create a **guarded computed cell** (`#lzcellkernel`): an equal recompute
+    /// suppresses downstream invalidation, so `T: PartialEq`. This is the
+    /// primary derived constructor; the former `memo` constructor is retired
+    /// because `computed` now *is* the guarded form.
     pub fn computed<T, F>(&self, compute: F) -> Computed<T>
-    where
-        T: Send + Sync + 'static,
-        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
-    {
-        self.slot(compute)
-    }
-
-    /// Create a lazily-computed thread-safe slot with a `PartialEq` guard.
-    pub fn memo<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2269,18 +2251,10 @@ impl ThreadSafeContext {
         self.slot_with_equals_inline(compute, None, inline_spec_for::<T>())
     }
 
-    /// Ergonomic alias for [`slot_copy`](Self::slot_copy).
+    /// Like [`computed`](Self::computed) (guarded, `#lzcellkernel`), but opts
+    /// into the inline small-`Copy` seqlock fast path (#rdstrat2). See
+    /// [`slot_copy`](Self::slot_copy).
     pub fn computed_copy<T, F>(&self, compute: F) -> Computed<T>
-    where
-        T: Copy + Send + Sync + 'static,
-        F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
-    {
-        self.slot_copy(compute)
-    }
-
-    /// Like [`memo`](Self::memo), but opts into the inline small-`Copy` seqlock
-    /// fast path (#rdstrat2). See [`slot_copy`](Self::slot_copy).
-    pub fn memo_copy<T, F>(&self, compute: F) -> Computed<T>
     where
         T: Copy + PartialEq + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2983,7 +2957,7 @@ impl ThreadSafeContext {
 
     /// Create an effect, run it immediately, and rerun it after tracked
     /// dependencies invalidate.
-    pub fn effect<F, R>(&self, run: F) -> EffectHandle
+    pub fn effect<F, R>(&self, run: F) -> Effect
     where
         F: Fn(&ThreadSafeContext) -> R + Send + Sync + 'static,
         R: ThreadSafeEffectCallbackResult + 'static,
@@ -2997,14 +2971,14 @@ impl ThreadSafeContext {
         };
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Effect(node));
-        let handle = EffectHandle::new(id);
+        let handle = Effect::new(id);
         self.schedule_effect(id, false);
         self.flush_effects();
         handle
     }
 
     /// Dispose an effect by handle.
-    pub fn dispose_effect(&self, handle: &EffectHandle) {
+    pub fn dispose_effect(&self, handle: &Effect) {
         let (dependencies, cleanup) = {
             let mut state = self.lock_state();
             // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
@@ -3210,12 +3184,12 @@ impl ThreadSafeContext {
         match kind {
             0 => self.dispose_slot(&Computed::<()>::from_id(id)),
             1 => self.dispose_cell(&Source::<()>::from_id(id)),
-            _ => self.dispose_effect(&EffectHandle::new(id)),
+            _ => self.dispose_effect(&Effect::new(id)),
         }
     }
 
     /// Check whether an effect is still registered.
-    pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
+    pub fn is_effect_active(&self, handle: &Effect) -> bool {
         let state = self.read_state();
         matches!(state.get_node(handle.id), Some(ThreadSafeNode::Effect(_)))
     }
@@ -3226,10 +3200,10 @@ impl ThreadSafeContext {
     /// immediately whenever one of its dependencies is invalidated.
     ///
     /// This is the [`ThreadSafeContext`] counterpart to [`Context::signal`]. A
-    /// signal sits one step beyond [`computed`](Self::computed)/[`memo`](Self::memo)
+    /// signal sits one step beyond [`computed`](Self::computed)
     /// on the `Slot -> Cell -> Signal` progression:
     ///
-    /// - A [`computed`](Self::computed)/[`memo`](Self::memo) slot is **lazy**:
+    /// - A [`computed`](Self::computed) slot is **lazy**:
     ///   invalidation only marks it dirty, and the value is not recomputed until
     ///   the next read.
     /// - A `Signal` is **eager**: it recomputes the instant any of its
@@ -3250,7 +3224,7 @@ impl ThreadSafeContext {
         T: PartialEq + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
     {
-        let slot = self.memo(compute);
+        let slot = self.computed(compute);
         let slot_id = slot.id;
         // Eager puller: re-materializes the slot after every invalidation and
         // registers the slot as a dependency so future invalidations reschedule
@@ -3705,7 +3679,7 @@ impl crate::reactive_graph::Teardown for ThreadSafeTeardownScope {
 impl crate::reactive_graph::ReactiveGraph for ThreadSafeContext {
     type Computed<T> = crate::cell::Computed<T>;
     type Source<T> = crate::cell::Source<T>;
-    type EffectHandle = crate::effect::EffectHandle;
+    type Effect = crate::effect::Effect;
     // Owned, so the GAT lifetime is unused: the scope outlives the borrow that
     // produced it and is `Send`.
     type Scope<'a> = ThreadSafeTeardownScope;
@@ -3716,7 +3690,7 @@ impl crate::reactive_graph::ReactiveGraph for ThreadSafeContext {
     fn dispose_cell<T: 'static>(&self, handle: &Self::Source<T>) {
         ThreadSafeContext::dispose_cell(self, handle);
     }
-    fn dispose_effect(&self, handle: &Self::EffectHandle) {
+    fn dispose_effect(&self, handle: &Self::Effect) {
         ThreadSafeContext::dispose_effect(self, handle);
     }
     fn scope(&self) -> Self::Scope<'_> {
@@ -3754,7 +3728,7 @@ impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
     }
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
-        T: Send + Sync + 'static,
+        T: PartialEq + Send + Sync + 'static,
         F: Fn(&Self) -> T + Send + Sync + 'static,
     {
         ThreadSafeContext::computed(self, compute)
@@ -3765,7 +3739,7 @@ impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
     {
         ThreadSafeContext::get(self, handle)
     }
-    fn effect<F, C>(&self, run: F) -> Self::EffectHandle
+    fn effect<F, C>(&self, run: F) -> Self::Effect
     where
         F: Fn(&Self) -> C + Send + Sync + 'static,
         C: FnOnce() + Send + Sync + 'static,
@@ -4031,7 +4005,7 @@ mod tests {
         }
         let ctx = ThreadSafeContext::new();
         let cell = ctx.cell(1_i32);
-        let p = ctx.memo_copy(move |c| {
+        let p = ctx.computed_copy(move |c| {
             let v = c.get_cell(&cell);
             Point {
                 x: v,
@@ -4276,7 +4250,7 @@ mod tests {
         }
     }
 
-    fn effect_is_scheduled(ctx: &ThreadSafeContext, handle: &EffectHandle) -> bool {
+    fn effect_is_scheduled(ctx: &ThreadSafeContext, handle: &Effect) -> bool {
         let state = ctx.lock_state();
         state.is_effect_scheduled(handle.id)
     }

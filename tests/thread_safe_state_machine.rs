@@ -106,7 +106,7 @@ fn thread_safe_machine_self_transition_is_accepted_but_no_invalidation() {
     let state = m.state_handle();
     let recomputes = Arc::new(Mutex::new(0usize));
     let recomputes_inner = recomputes.clone();
-    let _watch = ctx.memo(move |ctx| {
+    let _watch = ctx.computed(move |ctx| {
         *recomputes_inner.lock().unwrap() += 1;
         ctx.get_cell(&state)
     });
@@ -126,7 +126,7 @@ fn thread_safe_derived_slot_updates_on_transition() {
     let m = garage_door(&ctx);
     let state = m.state_handle();
 
-    let label = ctx.memo(move |ctx| match ctx.get_cell(&state) {
+    let label = ctx.computed(move |ctx| match ctx.get_cell(&state) {
         Door::Closed => "closed",
         Door::Opening => "opening",
         Door::Open => "open",
@@ -168,7 +168,7 @@ fn thread_safe_derived_slot_drops_stale_machine_dependency_after_branch_switch()
 
     let recomputes = Arc::new(Mutex::new(0usize));
     let recomputes_inner = recomputes.clone();
-    let selected_label = ctx.memo(move |ctx| {
+    let selected_label = ctx.computed(move |ctx| {
         *recomputes_inner.lock().unwrap() += 1;
         match ctx.get_cell(&active_state) {
             ActiveDoor::Primary => match ctx.get_cell(&primary_state) {

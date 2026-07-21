@@ -106,7 +106,7 @@ pub fn merges_seen(merges: &Merges) -> usize {
 pub enum Ref<G: ReactiveGraph> {
     Cell(G::Source<i64>),
     Slot(G::Computed<i64>),
-    Effect(G::EffectHandle),
+    Effect(G::Effect),
 }
 
 // Derived impls would demand `G: Clone + Copy`, which is not what is wanted:
@@ -159,11 +159,7 @@ pub trait ScopeModel<M: GraphModel> {
         offset: i64,
         computes: &Computes,
     ) -> <M::Graph as ReactiveGraph>::Computed<i64>;
-    fn effect(
-        &self,
-        name: &str,
-        reads: &[Ref<M::Graph>],
-    ) -> <M::Graph as ReactiveGraph>::EffectHandle;
+    fn effect(&self, name: &str, reads: &[Ref<M::Graph>]) -> <M::Graph as ReactiveGraph>::Effect;
     /// How many nodes the scope currently owns.
     ///
     /// There is deliberately no scoped `signal` here: `TeardownScope` and its
@@ -227,7 +223,7 @@ pub trait GraphModel: Sized {
         &self,
         name: &str,
         reads: &[Ref<Self::Graph>],
-    ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
+    ) -> <Self::Graph as ReactiveGraph>::Effect;
 
     /// Create an eager signal over `reads`, computing `sum(reads) + offset` —
     /// the same compute convention as [`computed`](Self::computed), so the two
@@ -267,7 +263,7 @@ pub trait GraphModel: Sized {
         reads: &[Ref<Self::Graph>],
         target: <Self::Graph as ReactiveGraph>::Source<i64>,
         merges: &Merges,
-    ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
+    ) -> <Self::Graph as ReactiveGraph>::Effect;
 
     /// An effect that reads `own` and writes `own + 1` back into it — a
     /// scheduler-closed feedback loop that diverges under `KeepLatest`
@@ -278,7 +274,7 @@ pub trait GraphModel: Sized {
         &self,
         name: &str,
         own: <Self::Graph as ReactiveGraph>::Source<i64>,
-    ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
+    ) -> <Self::Graph as ReactiveGraph>::Effect;
 
     /// Whether the most recent settle exhausted its effect-drain budget
     /// (`#lzfeedbackdrain`). `false` for a model with no drain bound.
@@ -305,7 +301,7 @@ pub trait GraphModel: Sized {
     fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()>;
     fn set_cell(&self, cell: <Self::Graph as ReactiveGraph>::Source<i64>, value: i64);
 
-    fn is_effect_active(&self, effect: <Self::Graph as ReactiveGraph>::EffectHandle) -> bool;
+    fn is_effect_active(&self, effect: <Self::Graph as ReactiveGraph>::Effect) -> bool;
 
     fn scope(&self) -> Self::Scope<'_>;
 

@@ -5,7 +5,7 @@
 //! layer of **memoized `computed` nodes** derived from it. [`SemTree`] builds one
 //! memoized slot per node that folds `(node value, child derived values) -> D`.
 //!
-//! Because each node has its own [`memo`](crate::Context::memo) slot and a parent
+//! Because each node has its own guarded [`computed`](crate::Context::computed) slot and a parent
 //! reads its *children's* derived slots (not their raw cells), the derivation is
 //! **incremental and glitch-free**: editing one node recomputes only that node's
 //! **ancestor chain** — a sibling subtree's derived value stays cached. And the
@@ -122,7 +122,7 @@ where
 
     let node = node.clone();
     let fold = Rc::clone(fold);
-    ctx.memo(move |ctx| {
+    ctx.computed(move |ctx| {
         let v = node.get(ctx); // subscribe to this node's value cell
         // Subscribe to child order/membership and fold children in current order.
         let ids = node.child_ids(ctx);

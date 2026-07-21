@@ -15,7 +15,7 @@ Lazy reactive primitives for Rust — Context, Slots, Cells with automatic depen
 - **Effect** — a side-effect callback that automatically reruns after tracked dependencies invalidate
 
 Values are **lazy by default**: dependents are marked dirty on invalidation but only validated or recomputed when accessed. When you need eager push-style semantics — recompute immediately, observe `v1 -> v2` with no unset window — reach for **`Signal`**, which layers a puller effect over a memoized slot. The `Slot -> Cell -> Signal` progression lets you choose lazy or eager per derived value within one graph.
-`ctx.memo()` Slots use a memo guard: if recomputation produces the same value, downstream dirty caches and effects are left alone.
+`ctx.computed()` cells are **guarded** (`T: PartialEq`): if recomputation produces the same value, downstream dirty caches and effects are left alone. There is no unguarded mode.
 Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect reruns happen once after the outermost batch exits.
 
 ## Feature Set
@@ -28,7 +28,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 <!-- coverage-table:start -->
 | Feature | Rust | Python | Kotlin | JS | Dart | Zig | Go | C++ |
 | --------- | :----: | :------: | :------: | :--: | :----: | :---: | :--: | :---: |
-| Reactive graph — kernel handles `Source` / `Computed` / `Effect` + eager `Computed` (`computed().eager()`) / guarded computed cells / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Reactive graph — two cell kinds (nodes `SourceCell` / `ComputedCell`; handles `Source<T, M>` / `Computed<T>`) + `Effect` sink + eager `Computed` (`computed().eager()`) / all cells guarded / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Keyed-map materialization (`SlotMap`) — mint-on-access derived slots: transparency + deferral (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Thread-safe keyed map (`ThreadSafeSlotMap`) — `Send + Sync` + materialization confluence (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Async keyed map (`AsyncSlotMap`) — eventual transparency (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -43,7 +43,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 | Reactive queue (`QueueCell` SPSC/MPSC + `QueueStorage` adapter) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Broadcast topic (`TopicCell`) — independent cursors + durable replay + safe GC (`#lztopiccell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Competing-consumer work queue (`WorkQueueCell`) — exclusive leases + ack/nack + redelivery + DLQ (`#lzworkqueue`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Merge algebra + `Source<T, M>` — associative `MergePolicy` (`KeepLatest`/`Sum`/`Max`/`SetUnion`/`RawFifo`), `Source ≡ Source<T, KeepLatest>`, source/computed read-write split (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Merge algebra + `Source<T, M>` — associative `MergePolicy` (`KeepLatest`/`Sum`/`Max`/`SetUnion`/`RawFifo`), `Cell ≡ Source<KeepLatest>`, read-any-cell/write-`Source` split (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | RelayCell — conflating relay + `BackpressurePolicy` + `SpillStore` + `Transport` + Inbox/Outbox + Rate/Window/Expiry/Priority/keyed policies (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Free-text character CRDT (`TextCrdt`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `TextCrdt` delta sync (`version_vector` / `delta_since` / `apply_delta`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -282,7 +282,7 @@ provide cross-process consensus.
 
 In a web server handling requests, you might have 50 computed values available but any given request only uses 5. With eager reactivity, all 50 recompute on every change. With lazy, only the 5 actually accessed compute.
 
-`lazily` defaults to lazy but does not force the choice on you: derive with `ctx.computed()`/`ctx.memo()` for pull-based laziness, or `ctx.signal()` for the eager column above (UI rendering, real-time mirrors, always-materialized values). Both share the same context, dependency graph, glitch-freedom, and memo guard — pick per value.
+`lazily` defaults to lazy but does not force the choice on you: derive with `ctx.computed()` for pull-based laziness, or `ctx.signal()` for the eager column above (UI rendering, real-time mirrors, always-materialized values). Both share the same context, dependency graph, glitch-freedom, and equality guard — pick per value.
 
 ## Core Concepts
 
@@ -297,10 +297,10 @@ Create independent contexts per OS thread for local graphs, or use
 
 ### Slot
 
-A `SlotHandle<T>` wraps a compute function `Fn(&Context) -> T`. The result is cached after first access. Dependencies are discovered automatically via a thread-local tracking stack — any Slot or Cell accessed during computation becomes a dependency. `ctx.computed()` is the ergonomic name for a derived value; `ctx.slot()` is the same primitive. Use `ctx.memo()` when `T: PartialEq` and equal recomputations should suppress downstream work.
+A `Computed<T>` wraps a compute function `Fn(&Context) -> T`. The result is cached after first access. Dependencies are discovered automatically via a thread-local tracking stack — any Slot or Cell accessed during computation becomes a dependency. `ctx.computed()` is the derived-value constructor and is **guarded** (`T: PartialEq`): equal recomputations suppress downstream work. `ctx.slot()` is the bound-free storage-sense primitive (no guard, holds non-`PartialEq` values).
 
 When a dependency is invalidated, the Slot marks its cached value dirty. It does **not** validate or recompute until `ctx.get()` is called again.
-For `ctx.memo()` slots, if recomputation returns a value equal to the previous cache, downstream dirty Slots become fresh without recomputing, and scheduled effects that only depended on unchanged Slots skip cleanup/rerun.
+For `ctx.computed()` cells, if recomputation returns a value equal to the previous cache, downstream dirty Slots become fresh without recomputing, and scheduled effects that only depended on unchanged Slots skip cleanup/rerun.
 
 **Dependencies are dynamic.** Every time a Slot recomputes, it re-discovers its dependencies from scratch. If your compute function has conditional branches that access different Cells depending on state, the dependency graph updates automatically. No stale subscriptions, no manual cleanup.
 
@@ -310,7 +310,7 @@ A `CellHandle<T>` holds a mutable value. `cell.set(&ctx, value)` and `ctx.set_ce
 
 ### Signal
 
-A `SignalHandle<T>` is an **eager** derived value — a *derived construct, not a core primitive* (`Signal ≡ Slot.eager`: a memo Slot plus a puller Effect). Where a Slot only marks itself dirty on invalidation and recomputes on the next read, a Signal recomputes *the instant a dependency is invalidated*, before the invalidating `set`/`set_cell`/`batch` call returns. The value is always materialized, so observers never see an intermediate unset value — a dependency change drives the value directly from `v1` to `v2`.
+A `SignalHandle<T>` is an **eager** derived value — a *derived construct, not a core primitive* (`Signal ≡ Computed.eager`: a guarded computed cell plus a puller Effect). Where a Slot only marks itself dirty on invalidation and recomputes on the next read, a Signal recomputes *the instant a dependency is invalidated*, before the invalidating `set`/`set_cell`/`batch` call returns. The value is always materialized, so observers never see an intermediate unset value — a dependency change drives the value directly from `v1` to `v2`.
 
 ```rust
 let n = ctx.cell(1);
@@ -319,9 +319,9 @@ n.set(&ctx, 5);                                  // doubled is already 10 — ea
 assert_eq!(doubled.get(&ctx), 10);
 ```
 
-A Signal is **composed from existing primitives**, not a parallel engine: a memoized Slot (`ctx.memo`) supplies glitch-free, pull-based, memo-guarded recomputation, and a small puller `Effect` re-materializes that slot after every invalidation to supply the eagerness. Consequently a Signal inherits the memo guard (an equal recompute suppresses downstream work) and diamond glitch-freedom (`D = f(A, g(A))` never surfaces a mixed new-`A`/old-`g(A)` intermediate), and batched writes settle to one consistent recomputation at batch exit.
+A Signal is **composed from existing primitives**, not a parallel engine: a guarded computed cell (`ctx.computed`) supplies glitch-free, pull-based, equality-guarded recomputation, and a small puller `Effect` re-materializes that slot after every invalidation to supply the eagerness. Consequently a Signal inherits the equality guard (an equal recompute suppresses downstream work) and diamond glitch-freedom (`D = f(A, g(A))` never surfaces a mixed new-`A`/old-`g(A)` intermediate), and batched writes settle to one consistent recomputation at batch exit.
 
-`ctx.signal()` requires `T: PartialEq + 'static` (the memo guard); `get_signal` additionally requires `T: Clone`. `signal.dispose(&ctx)` removes the eager puller — the value stays readable but reverts to lazy (recompute-on-read) behavior. The same primitive is available on `ThreadSafeContext` (`signal`, returning a `Send + Sync` `ThreadSafeSignalHandle<T>`) and `AsyncContext` (`signal_async`, with a non-blocking `get_signal` snapshot and an awaiting `get_signal_async`); see `SPEC.md` for the per-context type bounds and the async eagerness caveat.
+`ctx.signal()` requires `T: PartialEq + 'static` (the equality guard); `get_signal` additionally requires `T: Clone`. `signal.dispose(&ctx)` removes the eager puller — the value stays readable but reverts to lazy (recompute-on-read) behavior. The same primitive is available on `ThreadSafeContext` (`signal`, returning a `Send + Sync` `ThreadSafeSignalHandle<T>`) and `AsyncContext` (`signal_async`, with a non-blocking `get_signal` snapshot and an awaiting `get_signal_async`); see `SPEC.md` for the per-context type bounds and the async eagerness caveat.
 
 ### Batch Updates
 
@@ -329,7 +329,7 @@ A Signal is **composed from existing primitives**, not a parallel engine: a memo
 
 ### Effect
 
-An `EffectHandle` represents a side-effect callback registered with `ctx.effect()`. Effects run immediately, track any Slots or Cells read during that run, and rerun after those dependencies invalidate. Scheduled effect reruns are flushed after the invalidation pass, so diamond dependency paths coalesce to one rerun. Effects scheduled only by dirty Slot dependencies first validate those Slots and skip cleanup/rerun when values are unchanged.
+An `Effect` represents a side-effect callback registered with `ctx.effect()`. Effects run immediately, track any Slots or Cells read during that run, and rerun after those dependencies invalidate. Scheduled effect reruns are flushed after the invalidation pass, so diamond dependency paths coalesce to one rerun. Effects scheduled only by dirty Slot dependencies first validate those Slots and skip cleanup/rerun when values are unchanged.
 
 Effects can return a cleanup closure. Cleanup runs before the next rerun and when the handle is disposed:
 
@@ -405,10 +405,10 @@ fan-out workloads.
 
 ## Design
 
-- **Lazy by default, eager on demand:** Slots mark dirty on invalidation and validate/recompute on access; `ctx.signal()` opts a value into eager recomputation (a memo-slot + puller-effect composition) with no intermediate unset state
-- **Ergonomic aliases:** `ctx.computed()` names derived values while preserving `ctx.slot()` for low-level terminology
-- **PartialEq guard:** `CellHandle::set()` only invalidates when value actually changes
-- **Memo guard:** Dirty `ctx.memo()` Slots compare recomputed values and suppress downstream recomputation/effect reruns when values are equal
+- **Lazy by default, eager on demand:** Slots mark dirty on invalidation and validate/recompute on access; `ctx.signal()` opts a value into eager recomputation (a guarded computed cell + puller-effect composition) with no intermediate unset state
+- **Derived constructor:** `ctx.computed()` names guarded derived values while preserving `ctx.slot()` as the bound-free storage-sense primitive
+- **PartialEq guard:** `Source::set()` only invalidates when value actually changes
+- **Guarded computed:** every `ctx.computed()` cell (`T: PartialEq`) compares recomputed values and suppresses downstream recomputation/effect reruns when values are equal — there is no unguarded mode
 - **Dynamic dependencies:** Edges re-discovered on each recomputation (no stale subscriptions)
 - **Batching:** Multiple writes share one invalidation/effect flush boundary
 - **Effect scheduling:** Effects rerun after dependency invalidation and coalesce duplicate schedules
@@ -421,8 +421,8 @@ fan-out workloads.
 ## Threading Roadmap
 
 `lazily-rs` guarantees local, single-threaded `Context` graphs plus an explicit
-`ThreadSafeContext` for shared graphs. `SlotHandle<T>` and `CellHandle<T>` are
-`Send + Sync` when `T` is `Send + Sync`, and `EffectHandle` is also `Send + Sync`,
+`ThreadSafeContext` for shared graphs. `Computed<T>` and `Source<T>` are
+`Send + Sync` when `T` is `Send + Sync`, and `Effect` is also `Send + Sync`,
 but handles must be used with their owning context.
 
 Enable the optional `loom` feature to run the thread-safe synchronization model:

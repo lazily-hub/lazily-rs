@@ -67,7 +67,7 @@ impl<T> RcSlot<T> {
 
 fn rc_slot<T, F>(ctx: &Rc<Context>, compute: F) -> RcSlot<T>
 where
-    T: Clone + 'static,
+    T: Clone + PartialEq + 'static,
     F: Fn(&Context) -> T + 'static,
 {
     RcSlot {

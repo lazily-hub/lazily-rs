@@ -155,7 +155,7 @@ fn setup_thread_safe_fan_out(
 fn setup_context_memo_chain(depth: usize) -> (Context, Source<usize>, Computed<usize>) {
     let ctx = Context::new();
     let root = ctx.cell(0usize);
-    let mut tail = ctx.memo(move |ctx| ctx.get_cell(&root) % 2);
+    let mut tail = ctx.computed(move |ctx| ctx.get_cell(&root) % 2);
 
     for _ in 0..depth {
         let previous = tail;
@@ -171,7 +171,7 @@ fn setup_thread_safe_memo_chain(
 ) -> (ThreadSafeContext, Source<usize>, Computed<usize>) {
     let ctx = ThreadSafeContext::new();
     let root = ctx.cell(0usize);
-    let mut tail = ctx.memo(move |ctx| ctx.get_cell(&root) % 2);
+    let mut tail = ctx.computed(move |ctx| ctx.get_cell(&root) % 2);
 
     for _ in 0..depth {
         let previous = tail;

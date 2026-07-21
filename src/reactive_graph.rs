@@ -110,7 +110,7 @@ pub trait ReactiveGraph {
     /// This graph's source-cell handle.
     type Source<T>: GraphNode + Copy;
     /// This graph's effect handle.
-    type EffectHandle: GraphNode + Copy;
+    type Effect: GraphNode + Copy;
     /// This graph's teardown scope.
     type Scope<'a>: Teardown
     where
@@ -125,7 +125,7 @@ pub trait ReactiveGraph {
     fn dispose_cell<T: 'static>(&self, handle: &Self::Source<T>);
 
     /// Tear down an effect, running its cleanup.
-    fn dispose_effect(&self, handle: &Self::EffectHandle);
+    fn dispose_effect(&self, handle: &Self::Effect);
 
     /// Open a teardown scope: nodes created through it are disposed when it
     /// ends, in reverse creation order.
@@ -185,10 +185,11 @@ pub trait SyncReactiveGraph: ReactiveGraph {
     where
         T: PartialEq + Send + Sync + 'static;
 
-    /// Create a lazily-computed derived slot.
+    /// Create a lazily-computed derived slot. Guarded (`#lzcellkernel`): an
+    /// equal recompute suppresses downstream invalidation, so `T: PartialEq`.
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
-        T: Send + Sync + 'static,
+        T: PartialEq + Send + Sync + 'static,
         F: Fn(&Self) -> T + Send + Sync + 'static;
 
     /// Read a derived slot, computing it if needed.
@@ -202,7 +203,7 @@ pub trait SyncReactiveGraph: ReactiveGraph {
     /// `C` is a bare closure rather than either context's callback-result
     /// trait: both of those are blanket-implemented for
     /// `FnOnce() + ... + 'static`, so one bound satisfies both.
-    fn effect<F, C>(&self, run: F) -> Self::EffectHandle
+    fn effect<F, C>(&self, run: F) -> Self::Effect
     where
         F: Fn(&Self) -> C + Send + Sync + 'static,
         C: FnOnce() + Send + Sync + 'static;

@@ -409,26 +409,14 @@ pub struct AsyncTeardownScope {
 }
 
 impl AsyncTeardownScope {
-    /// Create an async derived slot owned by this scope.
+    /// Create a guarded async computed cell owned by this scope.
     pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
-    where
-        T: Clone + Send + Sync + 'static,
-        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-    {
-        let handle = self.ctx.computed_async(compute);
-        self.owned.lock().push(handle.id);
-        handle
-    }
-
-    /// Create a memoized async slot owned by this scope.
-    pub fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
         F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
-        let handle = self.ctx.memo_async(compute);
+        let handle = self.ctx.computed_async(compute);
         self.owned.lock().push(handle.id);
         handle
     }
@@ -536,8 +524,8 @@ impl Copy for AsyncEffectHandle {}
 
 /// A typed handle to an **eager** derived value within an [`AsyncContext`].
 ///
-/// This is the async counterpart to [`crate::Computed`]. It is a memoized
-/// backing slot ([`AsyncContext::memo_async`]) plus a small puller effect
+/// This is the async counterpart to [`crate::Computed`]. It is a guarded
+/// backing slot ([`AsyncContext::computed_async`]) plus a small puller effect
 /// ([`AsyncContext::effect_async`]) that awaits the slot after every
 /// invalidation, so an upstream change eagerly drives the async recompute to
 /// completion instead of waiting for the next read. See
@@ -1064,16 +1052,11 @@ impl AsyncContext {
         }
     }
 
+    /// Create a **guarded async computed cell** (`#lzcellkernel`): an equal
+    /// recompute suppresses downstream invalidation, so `T: PartialEq`. This is
+    /// the primary async derived constructor; the former `memo_async`
+    /// constructor is retired because `computed_async` now *is* the guarded form.
     pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
-    where
-        T: Clone + Send + Sync + 'static,
-        F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-    {
-        self.slot_async_with_equals(compute, None)
-    }
-
-    pub fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
         F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
@@ -1617,8 +1600,8 @@ impl AsyncContext {
     /// completion the instant one of its dependencies is invalidated.
     ///
     /// This is the [`AsyncContext`] counterpart to [`Context::signal`]. Where
-    /// [`computed_async`](Self::computed_async)/[`memo_async`](Self::memo_async)
-    /// is lazy (re-resolved on the next `get_async`), a signal is eager: a
+    /// [`computed_async`](Self::computed_async) is lazy (re-resolved on the next
+    /// `get_async`), a signal is eager: a
     /// puller effect awaits the backing slot after every invalidation, so by the
     /// time the spawned recompute finishes the signal already holds its new
     /// value without anyone reading it.
@@ -1638,7 +1621,7 @@ impl AsyncContext {
         F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
-        let slot = self.memo_async(compute);
+        let slot = self.computed_async(compute);
         // Eager puller: awaits the backing slot after every invalidation. The
         // synchronous part of `get_async` registers the slot as a dependency of
         // this effect, so a later invalidation reschedules the puller.
@@ -1860,7 +1843,7 @@ impl crate::reactive_graph::Teardown for AsyncTeardownScope {
 impl crate::reactive_graph::ReactiveGraph for AsyncContext {
     type Computed<T> = AsyncSlotHandle<T>;
     type Source<T> = AsyncCellHandle<T>;
-    type EffectHandle = AsyncEffectHandle;
+    type Effect = AsyncEffectHandle;
     type Scope<'a> = AsyncTeardownScope;
 
     fn dispose_slot<T: 'static>(&self, handle: &Self::Computed<T>) {
@@ -1869,7 +1852,7 @@ impl crate::reactive_graph::ReactiveGraph for AsyncContext {
     fn dispose_cell<T: 'static>(&self, handle: &Self::Source<T>) {
         AsyncContext::dispose_cell(self, handle);
     }
-    fn dispose_effect(&self, handle: &Self::EffectHandle) {
+    fn dispose_effect(&self, handle: &Self::Effect) {
         AsyncContext::dispose_async_effect(self, handle);
     }
     fn scope(&self) -> Self::Scope<'_> {
@@ -2293,7 +2276,7 @@ mod tests {
         let cell = ctx.cell(1i32);
         let count = Arc::new(AtomicU64::new(0));
         let count_clone = count.clone();
-        let slot = ctx.memo_async(move |ctx| {
+        let slot = ctx.computed_async(move |ctx| {
             let val = ctx.get_cell(&cell);
             let c = count_clone.clone();
             async move {
@@ -2893,7 +2876,7 @@ mod tests {
     async fn sync_get_with_memo_returns_cached() {
         let ctx = AsyncContext::new();
         let cell = ctx.cell(3i32);
-        let slot = ctx.memo_async(move |ctx| {
+        let slot = ctx.computed_async(move |ctx| {
             let v = ctx.get_cell(&cell);
             async move { v.abs() }
         });

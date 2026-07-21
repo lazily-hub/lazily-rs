@@ -30,7 +30,7 @@ async fn async_context_memo_async_deduplicates_equal() {
     let cell = ctx.cell(5i32);
     let invocations = Arc::new(AtomicU64::new(0));
     let inv_clone = invocations.clone();
-    let slot = ctx.memo_async(move |ctx| {
+    let slot = ctx.computed_async(move |ctx| {
         let v = ctx.get_cell(&cell);
         let c = inv_clone.clone();
         async move {
@@ -265,7 +265,7 @@ async fn async_context_memo_blocks_downstream_on_equal() {
     let cell = ctx.cell(2i32);
     let inner_invocations = Arc::new(AtomicU64::new(0));
     let inner_clone = inner_invocations.clone();
-    let memo_slot = ctx.memo_async(move |ctx| {
+    let memo_slot = ctx.computed_async(move |ctx| {
         let v = ctx.get_cell(&cell);
         let c = inner_clone.clone();
         async move {

@@ -106,7 +106,7 @@ async fn async_machine_self_transition_is_accepted_but_no_invalidation() {
     let state = m.state_handle();
     let recomputes = Arc::new(Mutex::new(0usize));
     let recomputes_inner = recomputes.clone();
-    let _watch = ctx.memo_async(move |cctx| {
+    let _watch = ctx.computed_async(move |cctx| {
         let r = recomputes_inner.clone();
         async move {
             *r.lock().unwrap() += 1;
@@ -132,7 +132,7 @@ async fn async_derived_slot_updates_on_transition() {
     let m = garage_door(&ctx);
     let state = m.state_handle();
 
-    let label = ctx.memo_async(move |cctx| {
+    let label = ctx.computed_async(move |cctx| {
         let s = state;
         async move {
             match cctx.get_cell(&s) {
@@ -179,7 +179,7 @@ async fn async_derived_slot_drops_stale_machine_dependency_after_branch_switch()
 
     let recomputes = Arc::new(Mutex::new(0usize));
     let recomputes_inner = recomputes.clone();
-    let selected_label = ctx.memo_async(move |cctx| {
+    let selected_label = ctx.computed_async(move |cctx| {
         let recomputes = recomputes_inner.clone();
         async move {
             *recomputes.lock().unwrap() += 1;

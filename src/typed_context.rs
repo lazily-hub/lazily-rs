@@ -165,18 +165,10 @@ impl<Schema> TypedContext<Schema> {
 
     pub fn computed<T, F>(&self, compute: F) -> TypedSlotHandle<Schema, T>
     where
-        T: 'static,
-        F: for<'a> Fn(&TypedContextRef<'a, Schema>) -> T + 'static,
-    {
-        self.slot(compute)
-    }
-
-    pub fn memo<T, F>(&self, compute: F) -> TypedSlotHandle<Schema, T>
-    where
         T: PartialEq + 'static,
         F: for<'a> Fn(&TypedContextRef<'a, Schema>) -> T + 'static,
     {
-        let raw = self.inner.memo(move |ctx| {
+        let raw = self.inner.computed(move |ctx| {
             let typed = TypedContextRef::new(ctx);
             compute(&typed)
         });
@@ -681,18 +673,10 @@ impl<Schema> TypedThreadSafeContext<Schema> {
 
     pub fn computed<T, F>(&self, compute: F) -> TypedThreadSafeSlotHandle<Schema, T>
     where
-        T: Send + Sync + 'static,
-        F: for<'a> Fn(&TypedThreadSafeContextRef<'a, Schema>) -> T + Send + Sync + 'static,
-    {
-        self.slot(compute)
-    }
-
-    pub fn memo<T, F>(&self, compute: F) -> TypedThreadSafeSlotHandle<Schema, T>
-    where
         T: PartialEq + Send + Sync + 'static,
         F: for<'a> Fn(&TypedThreadSafeContextRef<'a, Schema>) -> T + Send + Sync + 'static,
     {
-        let raw = self.inner.memo(move |ctx| {
+        let raw = self.inner.computed(move |ctx| {
             let typed = TypedThreadSafeContextRef::new(ctx);
             compute(&typed)
         });

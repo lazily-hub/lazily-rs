@@ -109,7 +109,7 @@ fn dispose_during_flush_rung(width: usize) -> f64 {
     let mut topic_a = Vec::with_capacity(topics);
     for _ in 0..topics {
         let topic = ctx.cell(0u64);
-        let all_a: Rc<RefCell<Vec<lazily::EffectHandle>>> = Rc::new(RefCell::new(Vec::new()));
+        let all_a: Rc<RefCell<Vec<lazily::Effect>>> = Rc::new(RefCell::new(Vec::new()));
         let armed = Rc::new(StdCell::new(false));
         let done = Rc::new(StdCell::new(false));
 
@@ -194,7 +194,7 @@ mod thread_safe_audit {
         let mut topic_a = Vec::with_capacity(topics);
         for _ in 0..topics {
             let topic = ctx.cell_copy(0u64);
-            let all_a: Arc<Mutex<Vec<lazily::EffectHandle>>> = Arc::new(Mutex::new(Vec::new()));
+            let all_a: Arc<Mutex<Vec<lazily::Effect>>> = Arc::new(Mutex::new(Vec::new()));
             let armed = Arc::new(AtomicBool::new(false));
             let done = Arc::new(AtomicBool::new(false));
 

@@ -52,7 +52,7 @@ use std::rc::Rc;
 use crate::Context;
 use crate::KeepLatest;
 use crate::context::SlotId;
-use crate::effect::EffectHandle;
+use crate::effect::Effect;
 use crate::merge::MergePolicy;
 
 // ---------------------------------------------------------------------------
@@ -102,12 +102,8 @@ impl<T, M> Source<T, M> {
     }
 
     /// Run `on_change` now and again on every change to this value. Returns the
-    /// backing [`EffectHandle`]; dispose it to unsubscribe.
-    pub fn subscribe(
-        &self,
-        ctx: &Context,
-        on_change: impl FnMut(&Context, &T) + 'static,
-    ) -> EffectHandle
+    /// backing [`Effect`]; dispose it to unsubscribe.
+    pub fn subscribe(&self, ctx: &Context, on_change: impl FnMut(&Context, &T) + 'static) -> Effect
     where
         T: Clone + 'static,
         M: 'static,
@@ -228,12 +224,8 @@ impl<T> Computed<T> {
     }
 
     /// Run `on_change` now and again on every change to this value. Returns the
-    /// backing [`EffectHandle`]; dispose it to unsubscribe.
-    pub fn subscribe(
-        &self,
-        ctx: &Context,
-        on_change: impl FnMut(&Context, &T) + 'static,
-    ) -> EffectHandle
+    /// backing [`Effect`]; dispose it to unsubscribe.
+    pub fn subscribe(&self, ctx: &Context, on_change: impl FnMut(&Context, &T) + 'static) -> Effect
     where
         T: Clone + 'static,
     {
@@ -262,7 +254,7 @@ impl<T> Computed<T> {
     /// former `Signal`; the coalescing comes from the scheduler (effects are
     /// scheduled, not inline), so a per-write puller cannot be built.
     ///
-    /// [`Effect`]: crate::EffectHandle
+    /// [`Effect`]: crate::Effect
     pub fn eager(&self, ctx: &Context) -> Self
     where
         T: 'static,

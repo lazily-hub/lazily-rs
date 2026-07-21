@@ -1,4 +1,4 @@
-use lazily::{Computed, Context, EffectHandle, Source};
+use lazily::{Computed, Context, Effect, Source};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseResult;
 use std::cell::RefCell;
@@ -46,7 +46,7 @@ impl Graph {
         let gate = ctx.cell(false);
 
         let sum = ctx.slot(move |ctx| ctx.get_cell(&a) + ctx.get_cell(&b));
-        let parity = ctx.memo(move |ctx| ctx.get(&sum).rem_euclid(2));
+        let parity = ctx.computed(move |ctx| ctx.get(&sum).rem_euclid(2));
         let branch = ctx.slot(move |ctx| {
             if ctx.get_cell(&gate) {
                 ctx.get(&sum)
@@ -89,7 +89,7 @@ fn event_counts(events: &Rc<RefCell<EffectEvents>>) -> EventCounts {
     }
 }
 
-fn install_effect(ctx: &Context, graph: &Graph, events: Rc<RefCell<EffectEvents>>) -> EffectHandle {
+fn install_effect(ctx: &Context, graph: &Graph, events: Rc<RefCell<EffectEvents>>) -> Effect {
     let out = graph.out;
     ctx.effect(move |ctx| {
         let value = ctx.get(&out);
@@ -219,7 +219,7 @@ fn assert_graph(ctx: &Context, graph: &Graph, model: Model) -> TestCaseResult {
 }
 
 fn assert_effect(
-    effect: &Option<EffectHandle>,
+    effect: &Option<Effect>,
     events: &Rc<RefCell<EffectEvents>>,
     model: Model,
 ) -> TestCaseResult {
@@ -238,7 +238,7 @@ fn apply_action(
     ctx: &Context,
     graph: &Graph,
     model: &mut Model,
-    effect: &mut Option<EffectHandle>,
+    effect: &mut Option<Effect>,
     events: &Rc<RefCell<EffectEvents>>,
     action: &Action,
 ) -> TestCaseResult {

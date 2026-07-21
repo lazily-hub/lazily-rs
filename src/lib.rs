@@ -174,7 +174,7 @@ pub use crdt_plane::CrdtPlaneRuntime;
 pub use crdt_tree::CrdtTree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
-pub use effect::{EffectCallbackResult, EffectHandle};
+pub use effect::{Effect, EffectCallbackResult};
 #[cfg(feature = "ffi")]
 pub use ffi::{
     LazilyFfiBytes, LazilyFfiChannel, LazilyFfiMessageKind, LazilyFfiStatus, lazily_ffi_bytes_free,

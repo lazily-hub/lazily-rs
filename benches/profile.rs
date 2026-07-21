@@ -29,7 +29,7 @@ fn consume_snapshot(snapshot: InstrumentationSnapshot) -> u64 {
 fn context_profile_snapshot() -> InstrumentationSnapshot {
     let ctx = Context::new();
     let root = ctx.cell(0usize);
-    let parity = ctx.memo(move |ctx| ctx.get_cell(&root) % 2);
+    let parity = ctx.computed(move |ctx| ctx.get_cell(&root) % 2);
     let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
     let _effect = ctx.effect(move |ctx| {
         black_box(ctx.get(&label));

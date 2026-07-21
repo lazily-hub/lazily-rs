@@ -101,7 +101,7 @@ fn machine_self_transition_is_accepted_but_no_invalidation() {
     let state = m.state_handle();
     let recomputes = Rc::new(RefCell::new(0usize));
     let recomputes_inner = recomputes.clone();
-    let _watch = ctx.memo(move |ctx| {
+    let _watch = ctx.computed(move |ctx| {
         *recomputes_inner.borrow_mut() += 1;
         state.get(ctx)
     });
@@ -121,7 +121,7 @@ fn derived_slot_updates_on_transition() {
     let m = garage_door(&ctx);
     let state = m.state_handle();
 
-    let label = ctx.memo(move |ctx| match state.get(ctx) {
+    let label = ctx.computed(move |ctx| match state.get(ctx) {
         Door::Closed => "closed",
         Door::Opening => "opening",
         Door::Open => "open",
@@ -163,7 +163,7 @@ fn derived_slot_drops_stale_machine_dependency_after_branch_switch() {
 
     let recomputes = Rc::new(RefCell::new(0usize));
     let recomputes_inner = recomputes.clone();
-    let selected_label = ctx.memo(move |ctx| {
+    let selected_label = ctx.computed(move |ctx| {
         *recomputes_inner.borrow_mut() += 1;
         match active_state.get(ctx) {
             ActiveDoor::Primary => match primary_state.get(ctx) {

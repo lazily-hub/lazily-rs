@@ -13,7 +13,7 @@
 
 #[cfg(feature = "thread-safe")]
 use lazily::ThreadSafeContext;
-use lazily::{Computed, Context, EffectHandle, Source};
+use lazily::{Computed, Context, Effect, Source};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 #[cfg(feature = "thread-safe")]
@@ -209,10 +209,10 @@ mod threading_contract {
     fn handles_are_copy_send_sync_ids() {
         assert_copy::<Computed<i32>>();
         assert_copy::<Source<i32>>();
-        assert_copy::<EffectHandle>();
+        assert_copy::<Effect>();
         assert_send_sync::<Computed<i32>>();
         assert_send_sync::<Source<i32>>();
-        assert_send_sync::<EffectHandle>();
+        assert_send_sync::<Effect>();
     }
 
     /// SPEC: The current `Context` is local to one thread, but multiple
@@ -311,7 +311,7 @@ mod threading_contract {
     fn thread_safe_frontier_invalidation_preserves_direct_force_recompute() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(0i32);
-        let stable = ctx.memo(move |ctx| {
+        let stable = ctx.computed(move |ctx| {
             ctx.get_cell(&root);
             0i32
         });
@@ -1081,7 +1081,7 @@ mod benchmark_instrumentation {
     fn context_instrumentation_tracks_graph_work() {
         let ctx = Context::new();
         let root = ctx.cell(0usize);
-        let parity = ctx.memo(move |ctx| ctx.get_cell(&root) % 2);
+        let parity = ctx.computed(move |ctx| ctx.get_cell(&root) % 2);
         let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
         let _effect = ctx.effect(move |ctx| {
             ctx.get(&label);
@@ -1347,7 +1347,7 @@ mod benchmark_instrumentation {
         let active_clones = Arc::new(AtomicUsize::new(0));
         let max_active_clones = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(AtomicBool::new(true));
-        let value = ctx.computed({
+        let value = ctx.slot({
             let active_clones = Arc::clone(&active_clones);
             let max_active_clones = Arc::clone(&max_active_clones);
             let release = Arc::clone(&release);
@@ -2487,7 +2487,7 @@ mod invalidation_semantics {
         let root = ctx.cell(0i32);
         let parity_computes = Rc::new(RefCell::new(0));
         let parity_computes_for_slot = Rc::clone(&parity_computes);
-        let parity = ctx.memo(move |ctx| {
+        let parity = ctx.computed(move |ctx| {
             *parity_computes_for_slot.borrow_mut() += 1;
             ctx.get_cell(&root) % 2
         });
@@ -2616,7 +2616,7 @@ mod effect_system {
         let root = ctx.cell(0i32);
         let parity_computes = Rc::new(RefCell::new(0));
         let parity_computes_for_slot = Rc::clone(&parity_computes);
-        let parity = ctx.memo(move |ctx| {
+        let parity = ctx.computed(move |ctx| {
             *parity_computes_for_slot.borrow_mut() += 1;
             ctx.get_cell(&root) % 2
         });

@@ -29,7 +29,7 @@ pub fn quiet<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
 
 mod basic {
     use super::*;
-    use lazily::{Computed, Context, EffectHandle, Source, TeardownScope};
+    use lazily::{Computed, Context, Effect, Source, TeardownScope};
 
     pub struct BasicModel {
         pub ctx: Context,
@@ -167,7 +167,7 @@ mod basic {
         ) -> Computed<i64> {
             self.0.computed(compute(reads, offset, &self.3, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Context>]) -> EffectHandle {
+        fn effect(&self, name: &str, reads: &[Ref<Context>]) -> Effect {
             self.0
                 .effect(effect_body(name, reads, &self.1, &self.2, &self.3))
         }
@@ -211,7 +211,7 @@ mod basic {
             self.ctx
                 .computed(compute(reads, offset, &self.poison, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> EffectHandle {
+        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> Effect {
             self.ctx.effect(effect_body(
                 name,
                 reads,
@@ -254,11 +254,11 @@ mod basic {
             reads: &[Ref<Self::Graph>],
             target: Source<i64>,
             merges: &Merges,
-        ) -> EffectHandle {
+        ) -> Effect {
             self.ctx
                 .effect(feed_body(reads, target, &self.poison, merges))
         }
-        fn diverge_effect(&self, _name: &str, own: Source<i64>) -> EffectHandle {
+        fn diverge_effect(&self, _name: &str, own: Source<i64>) -> Effect {
             // Only the divergent fixture builds this, so lowering the drain
             // budget here keeps the exhausting loop fast without affecting any
             // other fixture's model.
@@ -277,7 +277,7 @@ mod basic {
         fn set_cell(&self, cell: Source<i64>, value: i64) {
             self.ctx.set_cell(&cell, value);
         }
-        fn is_effect_active(&self, effect: EffectHandle) -> bool {
+        fn is_effect_active(&self, effect: Effect) -> bool {
             self.ctx.is_effect_active(&effect)
         }
         fn scope(&self) -> Self::Scope<'_> {
@@ -308,7 +308,7 @@ pub use basic::BasicModel;
 mod threadsafe {
     use super::*;
     use lazily::{
-        Computed, EffectHandle, Source, ThreadSafeContext, ThreadSafeSignalHandle,
+        Computed, Effect, Source, ThreadSafeContext, ThreadSafeSignalHandle,
         ThreadSafeTeardownScope,
     };
 
@@ -430,7 +430,7 @@ mod threadsafe {
         ) -> Computed<i64> {
             self.0.computed(compute(reads, offset, &self.3, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<ThreadSafeContext>]) -> EffectHandle {
+        fn effect(&self, name: &str, reads: &[Ref<ThreadSafeContext>]) -> Effect {
             self.0
                 .effect(effect_body(name, reads, &self.1, &self.2, &self.3))
         }
@@ -474,7 +474,7 @@ mod threadsafe {
             self.ctx
                 .computed(compute(reads, offset, &self.poison, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> EffectHandle {
+        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> Effect {
             self.ctx.effect(effect_body(
                 name,
                 reads,
@@ -517,11 +517,11 @@ mod threadsafe {
             reads: &[Ref<Self::Graph>],
             target: Source<i64>,
             merges: &Merges,
-        ) -> EffectHandle {
+        ) -> Effect {
             self.ctx
                 .effect(feed_body(reads, target, &self.poison, merges))
         }
-        fn diverge_effect(&self, _name: &str, own: Source<i64>) -> EffectHandle {
+        fn diverge_effect(&self, _name: &str, own: Source<i64>) -> Effect {
             self.ctx.set_drain_budget(256);
             self.ctx.effect(diverge_body(own))
         }
@@ -537,7 +537,7 @@ mod threadsafe {
         fn set_cell(&self, cell: Source<i64>, value: i64) {
             self.ctx.set_cell(&cell, value);
         }
-        fn is_effect_active(&self, effect: EffectHandle) -> bool {
+        fn is_effect_active(&self, effect: Effect) -> bool {
             self.ctx.is_effect_active(&effect)
         }
         fn scope(&self) -> Self::Scope<'_> {

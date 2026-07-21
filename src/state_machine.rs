@@ -13,7 +13,7 @@ use crate::async_context::{
 };
 use crate::cell::Computed;
 use crate::cell::Source;
-use crate::effect::EffectHandle;
+use crate::effect::Effect;
 #[cfg(feature = "thread-safe")]
 use crate::thread_safe::{ThreadSafeContext, ThreadSafeSignalHandle};
 
@@ -116,7 +116,7 @@ where
     /// Returns the underlying cell handle so other reactive nodes
     /// (slots, signals, effects) can depend on the machine's state.
     ///
-    /// Any `ctx.computed`, `ctx.memo`, `ctx.signal`, or `ctx.effect` that
+    /// Any `ctx.computed`, `ctx.signal`, or `ctx.effect` that
     /// reads this handle will automatically recompute or rerun when the
     /// machine transitions to a different state.
     pub fn state_handle(&self) -> Source<S> {
@@ -127,13 +127,13 @@ where
     /// transitions to a different state.
     ///
     /// The handler is **not** called on registration (initial run); it only
-    /// fires on subsequent state changes. The returned [`EffectHandle`] can be
+    /// fires on subsequent state changes. The returned [`Effect`] can be
     /// disposed to stop observing.
     ///
     /// This is the state-machine analog of on-enter/on-exit: the handler
     /// receives both the previous and new state, so it can dispatch per-state
     /// enter/exit logic from a single observer.
-    pub fn on_transition<F>(&self, ctx: &Context, handler: F) -> EffectHandle
+    pub fn on_transition<F>(&self, ctx: &Context, handler: F) -> Effect
     where
         F: Fn(&S, &S) + 'static,
     {
@@ -269,7 +269,7 @@ where
     /// Returns the underlying cell handle so other reactive nodes
     /// (slots, signals, effects) can depend on the machine's state.
     ///
-    /// Any `ctx.computed`, `ctx.memo`, `ctx.signal`, or `ctx.effect` that
+    /// Any `ctx.computed`, `ctx.signal`, or `ctx.effect` that
     /// reads this handle will automatically recompute or rerun when the
     /// machine transitions to a different state.
     pub fn state_handle(&self) -> Source<S> {
@@ -280,13 +280,13 @@ where
     /// transitions to a different state.
     ///
     /// The handler is **not** called on registration (initial run); it only
-    /// fires on subsequent state changes. The returned [`EffectHandle`] can be
+    /// fires on subsequent state changes. The returned [`Effect`] can be
     /// disposed via [`ThreadSafeContext::dispose_effect`] to stop observing.
     ///
     /// This is the state-machine analog of on-enter/on-exit: the handler
     /// receives both the previous and new state, so it can dispatch per-state
     /// enter/exit logic from a single observer.
-    pub fn on_transition<F>(&self, ctx: &ThreadSafeContext, handler: F) -> EffectHandle
+    pub fn on_transition<F>(&self, ctx: &ThreadSafeContext, handler: F) -> Effect
     where
         F: Fn(&S, &S) + Send + Sync + 'static,
     {
@@ -431,7 +431,7 @@ where
     /// (async slots, async signals, async effects) can depend on the machine's
     /// state.
     ///
-    /// Any `ctx.computed_async`, `ctx.memo_async`, `ctx.signal_async`, or
+    /// Any `ctx.computed_async`, `ctx.signal_async`, or
     /// `ctx.effect_async` that reads this handle will automatically recompute
     /// or rerun when the machine transitions to a different state.
     pub fn state_handle(&self) -> AsyncCellHandle<S> {

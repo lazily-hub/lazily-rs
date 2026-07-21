@@ -127,19 +127,19 @@ where
 
         let pending_len = {
             let state = Rc::clone(&state);
-            ctx.memo(move |_| state.borrow().pending.len())
+            ctx.computed(move |_| state.borrow().pending.len())
         };
         let is_empty = {
             let state = Rc::clone(&state);
-            ctx.memo(move |_| state.borrow().pending.is_empty())
+            ctx.computed(move |_| state.borrow().pending.is_empty())
         };
         let in_flight_len = {
             let state = Rc::clone(&state);
-            ctx.memo(move |_| state.borrow().in_flight.len())
+            ctx.computed(move |_| state.borrow().in_flight.len())
         };
         let dead_letter_len = {
             let state = Rc::clone(&state);
-            ctx.memo(move |_| state.borrow().dead_letters.len())
+            ctx.computed(move |_| state.borrow().dead_letters.len())
         };
 
         Self {

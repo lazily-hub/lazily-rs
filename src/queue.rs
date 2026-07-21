@@ -446,19 +446,19 @@ where
         // transition (see `invalidate_readers`).
         let head = {
             let storage = Rc::clone(&storage);
-            ctx.memo(move |_ctx| storage.borrow().peek().cloned())
+            ctx.computed(move |_ctx| storage.borrow().peek().cloned())
         };
         let len = {
             let storage = Rc::clone(&storage);
-            ctx.memo(move |_ctx| storage.borrow().len())
+            ctx.computed(move |_ctx| storage.borrow().len())
         };
         let is_empty = {
             let storage = Rc::clone(&storage);
-            ctx.memo(move |_ctx| storage.borrow().len() == 0)
+            ctx.computed(move |_ctx| storage.borrow().len() == 0)
         };
         let is_full = {
             let storage = Rc::clone(&storage);
-            ctx.memo(move |_ctx| {
+            ctx.computed(move |_ctx| {
                 let s = storage.borrow();
                 match s.capacity() {
                     Some(cap) => s.len() >= cap,
@@ -849,7 +849,7 @@ where
         }
         let state = Rc::clone(&self.inner.state);
         let reader_id = id.clone();
-        let handle = ctx.memo(move |_ctx| {
+        let handle = ctx.computed(move |_ctx| {
             let state = state.borrow();
             let Some(sub) = state.subscriptions.get(&reader_id) else {
                 return Vec::new();

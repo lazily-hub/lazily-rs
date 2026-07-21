@@ -7,7 +7,7 @@ use std::rc::Rc;
 use smallvec::SmallVec;
 
 use crate::cell::{Computed, Source};
-use crate::effect::{EffectCallbackResult, EffectHandle};
+use crate::effect::{Effect, EffectCallbackResult};
 use crate::merge::MergePolicy;
 
 /// Type alias for the erased compute function stored in slots.
@@ -841,21 +841,15 @@ impl Context {
     /// Create a **computed cell** — a value computed from upstream, returned as
     /// a [`Computed`] handle. This is the primary derived constructor.
     ///
-    /// Unguarded (no `PartialEq` bound): every recompute propagates. Use
-    /// [`memo`](Context::memo) for the guarded variant that suppresses
-    /// equal-value propagation, and [`signal`](Context::signal) for the eager
-    /// (eager, guarded) construction. Lazy until
+    /// **Guarded by default** (`#lzcellkernel`): every computed cell carries a
+    /// `PartialEq` equality guard, so a recompute that produces a value equal to
+    /// the cached one suppresses downstream invalidation (the version is not
+    /// bumped) — matching TC39 `Signal.Computed`. There is no unguarded mode;
+    /// the former `memo` constructor is retired because `computed` now *is* the
+    /// guarded form. Use [`signal`](Context::signal) for the eager (eager,
+    /// guarded) construction. Lazy until
     /// [`Computed::eager`](crate::Computed::eager) makes it eager.
     pub fn computed<T, F>(&self, compute: F) -> Computed<T>
-    where
-        T: 'static,
-        F: Fn(&Context) -> T + 'static,
-    {
-        self.slot(compute)
-    }
-
-    /// Create a new lazily-computed slot with a `PartialEq` memoization guard.
-    pub fn memo<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + 'static,
         F: Fn(&Context) -> T + 'static,
@@ -1284,7 +1278,7 @@ impl Context {
             inner.eager_by.remove(&id)
         };
         if let Some(effect_id) = effect_id {
-            self.dispose_effect(&EffectHandle::new(effect_id));
+            self.dispose_effect(&Effect::new(effect_id));
         }
     }
 
@@ -1560,7 +1554,7 @@ impl Context {
     /// The callback may return `()` for no cleanup or a `FnOnce() + 'static`
     /// cleanup closure. Cleanup runs before each rerun and when the effect is
     /// disposed.
-    pub fn effect<F, R>(&self, run: F) -> EffectHandle
+    pub fn effect<F, R>(&self, run: F) -> Effect
     where
         F: Fn(&Context) -> R + 'static,
         R: EffectCallbackResult + 'static,
@@ -1574,14 +1568,14 @@ impl Context {
         };
         self.insert_node(id, Node::Effect(node));
         self.inner.borrow_mut().all_effect_ids.push(id);
-        let handle = EffectHandle::new(id);
+        let handle = Effect::new(id);
         self.schedule_effect(id, false);
         self.flush_effects();
         handle
     }
 
     /// Dispose an effect by handle.
-    pub fn dispose_effect(&self, handle: &EffectHandle) {
+    pub fn dispose_effect(&self, handle: &Effect) {
         let torn_down = {
             let mut inner = self.inner.borrow_mut();
             // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
@@ -1736,7 +1730,7 @@ impl Context {
         match kind {
             0 => self.dispose_slot(&Computed::<()>::from_id(id)),
             1 => self.dispose_cell(&Source::<()>::from_id(id)),
-            _ => self.dispose_effect(&EffectHandle::new(id)),
+            _ => self.dispose_effect(&Effect::new(id)),
         }
     }
 
@@ -1785,7 +1779,7 @@ impl Context {
     }
 
     /// Check whether an effect is still registered.
-    pub fn is_effect_active(&self, handle: &EffectHandle) -> bool {
+    pub fn is_effect_active(&self, handle: &Effect) -> bool {
         let inner = self.inner.borrow();
         matches!(
             Self::get_node(&inner.nodes, handle.id),
@@ -2118,10 +2112,10 @@ impl Context {
         F: Fn(&Context) -> T + 'static,
     {
         // `#lzcellkernel` — the eager construction is a guarded computed cell
-        // that is then made eager: `memo(f).eager()`. Retires the former two-node
-        // `Signal` (memo slot + puller effect); the coalescing comes from the
-        // scheduler, so a per-write puller cannot be built.
-        let computed = self.memo(compute);
+        // that is then made eager: `computed(f).eager()`. Retires the former
+        // two-node `Signal` (guarded slot + puller effect); the coalescing comes
+        // from the scheduler, so a per-write puller cannot be built.
+        let computed = self.computed(compute);
         self.make_eager::<T>(computed.id);
         computed
     }
@@ -2470,7 +2464,7 @@ pub(crate) mod sealed {
 
 /// A node in a [`Context`]'s reactive graph, addressed by one of its handles.
 ///
-/// Sealed: implemented for [`Computed`], [`Source`], and [`EffectHandle`]
+/// Sealed: implemented for [`Computed`], [`Source`], and [`Effect`]
 /// only. It exists so the graph-shape accessors take any handle kind without
 /// exposing the internal node id, and cannot be implemented downstream.
 pub trait GraphNode: sealed::Sealed {
@@ -2493,8 +2487,8 @@ impl<T> GraphNode for Computed<T> {
     }
 }
 
-impl sealed::Sealed for EffectHandle {}
-impl GraphNode for EffectHandle {
+impl sealed::Sealed for Effect {}
+impl GraphNode for Effect {
     fn node_id(&self) -> SlotId {
         self.id
     }
@@ -2511,24 +2505,13 @@ pub struct TeardownScope<'ctx> {
 }
 
 impl TeardownScope<'_> {
-    /// Create a lazily-computed slot owned by this scope.
+    /// Create a guarded computed cell owned by this scope.
     pub fn computed<T, F>(&self, compute: F) -> Computed<T>
-    where
-        T: 'static,
-        F: Fn(&Context) -> T + 'static,
-    {
-        let handle = self.ctx.computed(compute);
-        self.owned.borrow_mut().push(handle.id);
-        handle
-    }
-
-    /// Create a memoized slot owned by this scope.
-    pub fn memo<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + 'static,
         F: Fn(&Context) -> T + 'static,
     {
-        let handle = self.ctx.memo(compute);
+        let handle = self.ctx.computed(compute);
         self.owned.borrow_mut().push(handle.id);
         handle
     }
@@ -2541,7 +2524,7 @@ impl TeardownScope<'_> {
     }
 
     /// Register an effect owned by this scope.
-    pub fn effect<F, R>(&self, run: F) -> EffectHandle
+    pub fn effect<F, R>(&self, run: F) -> Effect
     where
         F: Fn(&Context) -> R + 'static,
         R: EffectCallbackResult + 'static,
@@ -2607,7 +2590,7 @@ impl crate::reactive_graph::Teardown for TeardownScope<'_> {
 impl crate::reactive_graph::ReactiveGraph for Context {
     type Computed<T> = crate::cell::Computed<T>;
     type Source<T> = crate::cell::Source<T>;
-    type EffectHandle = crate::effect::EffectHandle;
+    type Effect = crate::effect::Effect;
     type Scope<'a> = TeardownScope<'a>;
 
     fn dispose_slot<T: 'static>(&self, handle: &Self::Computed<T>) {
@@ -2616,7 +2599,7 @@ impl crate::reactive_graph::ReactiveGraph for Context {
     fn dispose_cell<T: 'static>(&self, handle: &Self::Source<T>) {
         Context::dispose_cell(self, handle);
     }
-    fn dispose_effect(&self, handle: &Self::EffectHandle) {
+    fn dispose_effect(&self, handle: &Self::Effect) {
         Context::dispose_effect(self, handle);
     }
     fn scope(&self) -> Self::Scope<'_> {
@@ -2654,7 +2637,7 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
     }
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
-        T: Send + Sync + 'static,
+        T: PartialEq + Send + Sync + 'static,
         F: Fn(&Self) -> T + Send + Sync + 'static,
     {
         Context::computed(self, compute)
@@ -2665,7 +2648,7 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
     {
         Context::get(self, handle)
     }
-    fn effect<F, C>(&self, run: F) -> Self::EffectHandle
+    fn effect<F, C>(&self, run: F) -> Self::Effect
     where
         F: Fn(&Self) -> C + Send + Sync + 'static,
         C: FnOnce() + Send + Sync + 'static,
