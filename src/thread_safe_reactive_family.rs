@@ -81,7 +81,7 @@ impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for Source<V> {
     where
         V: Clone + Send + Sync + 'static,
     {
-        ctx.get_cell(&self)
+        ctx.get(&self)
     }
 }
 
@@ -286,7 +286,7 @@ where
             state.materialized.get(&key).copied()
         };
         if let Some(handle) = existing {
-            ctx.set_cell(&handle, value);
+            ctx.set(&handle, value);
             return;
         }
         self.get_or_insert_handle(ctx, key, move |_| value.clone());
@@ -416,9 +416,9 @@ mod tests {
         assert_eq!(ctx.get(&live_count), 3);
         // Flip one editor offline → derived count recomputes reactively.
         let h20 = liveness.handle(&20).unwrap();
-        ctx.set_cell(&h20, false);
+        ctx.set(&h20, false);
         assert_eq!(ctx.get(&live_count), 2);
-        ctx.set_cell(&h20, true);
+        ctx.set(&h20, true);
         assert_eq!(ctx.get(&live_count), 3);
     }
 

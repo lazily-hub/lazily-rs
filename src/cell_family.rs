@@ -130,7 +130,7 @@ impl<V: 'static> MapHandle<V> for Source<V> {
     where
         V: Clone + 'static,
     {
-        ctx.get_cell(&self)
+        ctx.get(&self)
     }
 
     fn clear_dependents(self, ctx: &Context) {
@@ -233,7 +233,7 @@ where
     fn bump_order(&self, ctx: &Context) {
         let next = self.inner.order_version.get().wrapping_add(1);
         self.inner.order_version.set(next);
-        ctx.set_cell(&self.inner.order_signal, next);
+        ctx.set(&self.inner.order_signal, next);
     }
 
     /// Bump set-membership (invalidates `len`/`contains_key` readers). Always
@@ -243,7 +243,7 @@ where
         self.inner.version.set(next);
         // A write, not a tracked read: membership readers are invalidated, but
         // no dependency is registered on whatever frame called the mutator.
-        ctx.set_cell(&self.inner.membership, next);
+        ctx.set(&self.inner.membership, next);
         // The key set changed, so the ordered key list changed too.
         self.bump_order(ctx);
     }
@@ -315,7 +315,7 @@ where
     /// caller to **order** changes (add/remove **and move/reorder**), not to
     /// per-entry value changes.
     pub fn keys(&self, ctx: &Context) -> Vec<K> {
-        let _ = ctx.get_cell(&self.inner.order_signal);
+        let _ = ctx.get(&self.inner.order_signal);
         self.inner.order.borrow().clone()
     }
 
@@ -407,7 +407,7 @@ where
 
     /// Reactive entry count. Subscribes the caller to membership changes only.
     pub fn len(&self, ctx: &Context) -> usize {
-        let _ = ctx.get_cell(&self.inner.membership);
+        let _ = ctx.get(&self.inner.membership);
         self.inner.order.borrow().len()
     }
 
@@ -419,7 +419,7 @@ where
     /// Reactive membership test for `key`. Subscribes the caller to membership
     /// changes (add/remove of any key), not to value changes.
     pub fn contains_key(&self, ctx: &Context, key: &K) -> bool {
-        let _ = ctx.get_cell(&self.inner.membership);
+        let _ = ctx.get(&self.inner.membership);
         self.inner.entries.borrow().contains_key(key)
     }
 

@@ -27,7 +27,7 @@ fn run_read_contention(strategy: ReadStrategy) -> ReadContentionOutcome {
     assert_eq!(ctx.read_strategy(), strategy);
 
     let input = ctx.cell(0usize);
-    let doubled = ctx.computed(move |ctx| ctx.get_cell(&input).wrapping_mul(2));
+    let doubled = ctx.computed(move |ctx| ctx.get(&input).wrapping_mul(2));
     assert_eq!(ctx.get(&doubled), 0);
 
     let barrier = Arc::new(Barrier::new(READERS + 2));
@@ -59,14 +59,14 @@ fn run_read_contention(strategy: ReadStrategy) -> ReadContentionOutcome {
         for value in 1..=WRITE_ITERS {
             if value % 8 == 0 {
                 writer_ctx.batch(|ctx| {
-                    ctx.set_cell(&input, value);
+                    ctx.set(&input, value);
                     ctx.clear(&doubled);
                     if value % 24 == 0 {
                         ctx.clear_cell_dependents(&input);
                     }
                 });
             } else {
-                writer_ctx.set_cell(&input, value);
+                writer_ctx.set(&input, value);
             }
             let observed = writer_ctx.get(&doubled);
             assert_eq!(
@@ -95,12 +95,12 @@ fn run_read_contention(strategy: ReadStrategy) -> ReadContentionOutcome {
     assert!(max_seen.load(Ordering::SeqCst) <= WRITE_ITERS * 2);
 
     ctx.batch(|ctx| {
-        ctx.set_cell(&input, 256);
+        ctx.set(&input, 256);
         ctx.clear(&doubled);
     });
 
     ReadContentionOutcome {
-        final_cell: ctx.get_cell(&input),
+        final_cell: ctx.get(&input),
         final_total: ctx.get(&doubled),
     }
 }
@@ -128,10 +128,10 @@ fn run_batch_effect_disposal_stress(strategy: ReadStrategy) -> usize {
     let bias = ctx.cell(100usize);
     let selected = ctx.computed(move |ctx| {
         expected_total(
-            ctx.get_cell(&choose_left),
-            ctx.get_cell(&left),
-            ctx.get_cell(&right),
-            ctx.get_cell(&bias),
+            ctx.get(&choose_left),
+            ctx.get(&left),
+            ctx.get(&right),
+            ctx.get(&bias),
         )
     });
 
@@ -169,10 +169,10 @@ fn run_batch_effect_disposal_stress(strategy: ReadStrategy) -> usize {
                 let right_value = step * 10;
                 let bias_value = 1_000 + step;
                 ctx.batch(|ctx| {
-                    ctx.set_cell(&choose_left, choose);
-                    ctx.set_cell(&left, left_value);
-                    ctx.set_cell(&right, right_value);
-                    ctx.set_cell(&bias, bias_value);
+                    ctx.set(&choose_left, choose);
+                    ctx.set(&left, left_value);
+                    ctx.set(&right, right_value);
+                    ctx.set(&bias, bias_value);
                     if step % 5 == 0 {
                         ctx.clear(&selected);
                     }
@@ -230,14 +230,14 @@ fn run_batch_effect_disposal_stress(strategy: ReadStrategy) -> usize {
 
     let observations_after_dispose = observations.lock().unwrap().len();
     ctx.batch(|ctx| {
-        ctx.set_cell(&choose_left, true);
-        ctx.set_cell(&left, 7);
-        ctx.set_cell(&right, 70);
-        ctx.set_cell(&bias, 100);
+        ctx.set(&choose_left, true);
+        ctx.set(&left, 7);
+        ctx.set(&right, 70);
+        ctx.set(&bias, 100);
         ctx.clear(&selected);
     });
     assert_eq!(ctx.get(&selected), 107);
-    ctx.set_cell(&left, 8);
+    ctx.set(&left, 8);
     assert_eq!(ctx.get(&selected), 108);
     assert_eq!(
         observations.lock().unwrap().len(),

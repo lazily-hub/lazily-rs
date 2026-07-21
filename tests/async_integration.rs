@@ -11,9 +11,9 @@ use std::sync::{
 async fn async_context_public_api_cell_round_trip() {
     let ctx = AsyncContext::new();
     let cell: AsyncCellHandle<i32> = ctx.cell(42);
-    assert_eq!(ctx.get_cell(&cell), 42);
-    ctx.set_cell(&cell, 99);
-    assert_eq!(ctx.get_cell(&cell), 99);
+    assert_eq!(ctx.get(&cell), 42);
+    ctx.set(&cell, 99);
+    assert_eq!(ctx.get(&cell), 99);
 }
 
 #[tokio::test]
@@ -31,7 +31,7 @@ async fn async_context_memo_async_deduplicates_equal() {
     let invocations = Arc::new(AtomicU64::new(0));
     let inv_clone = invocations.clone();
     let slot = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         let c = inv_clone.clone();
         async move {
             c.fetch_add(1, Ordering::Relaxed);
@@ -39,7 +39,7 @@ async fn async_context_memo_async_deduplicates_equal() {
         }
     });
     assert_eq!(ctx.get_async(&slot).await, 1);
-    ctx.set_cell(&cell, 7);
+    ctx.set(&cell, 7);
     assert_eq!(ctx.get_async(&slot).await, 1);
     assert_eq!(invocations.load(Ordering::Relaxed), 2);
 }
@@ -49,13 +49,13 @@ async fn async_context_batch_defers_and_applies() {
     let ctx = AsyncContext::new();
     let cell = ctx.cell(1i32);
     let slot = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         async move { v + 100 }
     });
     assert_eq!(ctx.get_async(&slot).await, 101);
     ctx.batch(|ctx| {
-        ctx.set_cell(&cell, 2);
-        ctx.set_cell(&cell, 3);
+        ctx.set(&cell, 2);
+        ctx.set(&cell, 3);
     });
     assert_eq!(ctx.get_async(&slot).await, 103);
 }
@@ -67,7 +67,7 @@ async fn async_context_effect_async_lifecycle() {
     let observations = Arc::new(Mutex::new(Vec::new()));
     let obs_clone = observations.clone();
     let handle: AsyncEffectHandle = ctx.effect_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         let o = obs_clone.clone();
         async move {
             o.lock().unwrap().push(v);
@@ -76,11 +76,11 @@ async fn async_context_effect_async_lifecycle() {
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(*observations.lock().unwrap(), vec![0]);
-    ctx.set_cell(&cell, 1);
+    ctx.set(&cell, 1);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(*observations.lock().unwrap(), vec![0, 1]);
     ctx.dispose_async_effect(&handle);
-    ctx.set_cell(&cell, 2);
+    ctx.set(&cell, 2);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(*observations.lock().unwrap(), vec![0, 1]);
 }
@@ -92,7 +92,7 @@ async fn async_context_effect_async_cleanup_before_rerun() {
     let cleanup_ran = Arc::new(AtomicBool::new(false));
     let cleanup_clone = cleanup_ran.clone();
     ctx.effect_async(move |ctx| {
-        let _v = ctx.get_cell(&cell);
+        let _v = ctx.get(&cell);
         let c = cleanup_clone.clone();
         async move {
             Some(move || {
@@ -102,7 +102,7 @@ async fn async_context_effect_async_cleanup_before_rerun() {
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(!cleanup_ran.load(Ordering::Relaxed));
-    ctx.set_cell(&cell, 20);
+    ctx.set(&cell, 20);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(cleanup_ran.load(Ordering::Relaxed));
 }
@@ -114,7 +114,7 @@ async fn async_context_effect_async_cleanup_runs_on_dispose() {
     let cleanup_ran = Arc::new(AtomicBool::new(false));
     let cleanup_clone = cleanup_ran.clone();
     let handle: AsyncEffectHandle = ctx.effect_async(move |ctx| {
-        let _v = ctx.get_cell(&cell);
+        let _v = ctx.get(&cell);
         let c = cleanup_clone.clone();
         async move {
             Some(move || {
@@ -141,7 +141,7 @@ async fn async_context_dispose_aborts_in_flight_effect_rerun() {
     let park_for_a = park.clone();
     let a_cleanup_for_a = a_cleanup.clone();
     let handle_a: AsyncEffectHandle = ctx.effect_async(move |ctx| {
-        let _ = ctx.get_cell(&cell);
+        let _ = ctx.get(&cell);
         let p = park_for_a.clone();
         let c = a_cleanup_for_a.clone();
         async move {
@@ -158,7 +158,7 @@ async fn async_context_dispose_aborts_in_flight_effect_rerun() {
     let b_ran = Arc::new(AtomicU64::new(0));
     let b_ran_for_b = b_ran.clone();
     let handle_b: AsyncEffectHandle = ctx.effect_async(move |ctx| {
-        let _ = ctx.get_cell(&cell);
+        let _ = ctx.get(&cell);
         let c = b_ran_for_b.clone();
         async move {
             Some(move || {
@@ -214,7 +214,7 @@ async fn async_context_invalidation_aborts_in_flight_across_tasks() {
     let compute_count = Arc::new(AtomicU64::new(0));
     let count_clone = compute_count.clone();
     let slot = ctx.computed_async(move |ctx| {
-        let _v = ctx.get_cell(&cell);
+        let _v = ctx.get(&cell);
         let c = count_clone.clone();
         async move {
             c.fetch_add(1, Ordering::Relaxed);
@@ -225,7 +225,7 @@ async fn async_context_invalidation_aborts_in_flight_across_tasks() {
     let ctx_reader = ctx.clone();
     let reader = tokio::spawn(async move { ctx_reader.get_async(&slot).await });
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    ctx.set_cell(&cell, 2);
+    ctx.set(&cell, 2);
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     let val = ctx.get_async(&slot).await;
     assert_eq!(val, 99);
@@ -237,7 +237,7 @@ async fn async_context_chain_propagation() {
     let ctx = AsyncContext::new();
     let cell = ctx.cell(1i32);
     let a = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         async move { v * 10 }
     });
     let b = ctx.computed_async(move |ctx| {
@@ -255,7 +255,7 @@ async fn async_context_chain_propagation() {
         }
     });
     assert_eq!(ctx.get_async(&c).await, 30);
-    ctx.set_cell(&cell, 2);
+    ctx.set(&cell, 2);
     assert_eq!(ctx.get_async(&c).await, 50);
 }
 
@@ -266,7 +266,7 @@ async fn async_context_memo_blocks_downstream_on_equal() {
     let inner_invocations = Arc::new(AtomicU64::new(0));
     let inner_clone = inner_invocations.clone();
     let memo_slot = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         let c = inner_clone.clone();
         async move {
             c.fetch_add(1, Ordering::Relaxed);
@@ -285,7 +285,7 @@ async fn async_context_memo_blocks_downstream_on_equal() {
         }
     });
     assert_eq!(ctx.get_async(&derived).await, 3);
-    ctx.set_cell(&cell, -2);
+    ctx.set(&cell, -2);
     assert_eq!(ctx.get_async(&derived).await, 3);
     assert_eq!(inner_invocations.load(Ordering::Relaxed), 2);
     assert_eq!(
@@ -302,18 +302,18 @@ async fn async_context_dynamic_dependency_switch() {
     let cell_b = ctx.cell(20i32);
     let flag = ctx.cell(true);
     let slot = ctx.computed_async(move |ctx| {
-        let f = ctx.get_cell(&flag);
+        let f = ctx.get(&flag);
         let v = if f {
-            ctx.get_cell(&cell_a)
+            ctx.get(&cell_a)
         } else {
-            ctx.get_cell(&cell_b)
+            ctx.get(&cell_b)
         };
         async move { v }
     });
     assert_eq!(ctx.get_async(&slot).await, 10);
-    ctx.set_cell(&flag, false);
+    ctx.set(&flag, false);
     assert_eq!(ctx.get_async(&slot).await, 20);
-    ctx.set_cell(&cell_a, 99);
+    ctx.set(&cell_a, 99);
     let val = ctx.get_async(&slot).await;
     assert_eq!(val, 20, "cell_a change should not propagate after switch");
 }
@@ -325,7 +325,7 @@ async fn async_context_cell_noop_set_no_invalidation() {
     let compute_count = Arc::new(AtomicU64::new(0));
     let count_clone = compute_count.clone();
     let slot = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         let c = count_clone.clone();
         async move {
             c.fetch_add(1, Ordering::Relaxed);
@@ -333,7 +333,7 @@ async fn async_context_cell_noop_set_no_invalidation() {
         }
     });
     assert_eq!(ctx.get_async(&slot).await, 10);
-    ctx.set_cell(&cell, 5);
+    ctx.set(&cell, 5);
     assert_eq!(ctx.get_async(&slot).await, 10);
     assert_eq!(compute_count.load(Ordering::Relaxed), 1);
 }
@@ -344,14 +344,14 @@ async fn async_context_batch_multiple_cells() {
     let cell_x = ctx.cell(1i32);
     let cell_y = ctx.cell(10i32);
     let slot = ctx.computed_async(move |ctx| {
-        let x = ctx.get_cell(&cell_x);
-        let y = ctx.get_cell(&cell_y);
+        let x = ctx.get(&cell_x);
+        let y = ctx.get(&cell_y);
         async move { x + y }
     });
     assert_eq!(ctx.get_async(&slot).await, 11);
     ctx.batch(|ctx| {
-        ctx.set_cell(&cell_x, 5);
-        ctx.set_cell(&cell_y, 50);
+        ctx.set(&cell_x, 5);
+        ctx.set(&cell_y, 50);
     });
     assert_eq!(ctx.get_async(&slot).await, 55);
 }
@@ -363,7 +363,7 @@ async fn async_context_dispose_effect_prevents_rerun() {
     let run_count = Arc::new(AtomicU64::new(0));
     let count_clone = run_count.clone();
     let effect = ctx.effect_async(move |ctx| {
-        let _v = ctx.get_cell(&cell);
+        let _v = ctx.get(&cell);
         let c = count_clone.clone();
         async move {
             c.fetch_add(1, Ordering::Relaxed);
@@ -375,7 +375,7 @@ async fn async_context_dispose_effect_prevents_rerun() {
     assert!(after_create >= 1);
     ctx.dispose_async_effect(&effect);
     for _ in 0..3 {
-        ctx.set_cell(&cell, 2);
+        ctx.set(&cell, 2);
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(
@@ -390,14 +390,14 @@ async fn async_context_shared_across_tokio_tasks() {
     let ctx = Arc::new(AsyncContext::new());
     let cell = ctx.cell(0i32);
     let slot = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         async move { v * 3 }
     });
     let _ = ctx.get_async(&slot).await;
     let ctx1 = ctx.clone();
     let reader = tokio::spawn(async move { ctx1.get_async(&slot).await });
     assert_eq!(reader.await.unwrap(), 0);
-    ctx.set_cell(&cell, 7);
+    ctx.set(&cell, 7);
     let ctx2 = ctx.clone();
     let reader2 = tokio::spawn(async move { ctx2.get_async(&slot).await });
     assert_eq!(reader2.await.unwrap(), 21);
@@ -409,13 +409,13 @@ async fn async_context_handles_are_copy() {
     let cell = ctx.cell(1i32);
     let cell_copy = cell;
     let slot = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell_copy);
+        let v = ctx.get(&cell_copy);
         async move { v + 1 }
     });
     let slot_copy = slot;
     assert_eq!(ctx.get_async(&slot_copy).await, 2);
     let effect = ctx.effect_async(move |ctx| {
-        let _v = ctx.get_cell(&cell);
+        let _v = ctx.get(&cell);
         async { None::<fn()> }
     });
     let _effect_copy = effect;
@@ -436,12 +436,12 @@ async fn async_context_sync_get_invalidated_returns_none() {
     let ctx = AsyncContext::new();
     let cell = ctx.cell(1i32);
     let slot = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         async move { v * 3 }
     });
     assert_eq!(ctx.get_async(&slot).await, 3);
     assert_eq!(ctx.get(&slot), Some(3));
-    ctx.set_cell(&cell, 5);
+    ctx.set(&cell, 5);
     assert!(ctx.get(&slot).is_none());
     assert_eq!(ctx.get_async(&slot).await, 15);
     assert_eq!(ctx.get(&slot), Some(15));
@@ -452,7 +452,7 @@ async fn async_context_sync_get_with_chain() {
     let ctx = AsyncContext::new();
     let cell = ctx.cell(2i32);
     let a = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         async move { v + 10 }
     });
     let b = ctx.computed_async(move |ctx| {
@@ -462,7 +462,7 @@ async fn async_context_sync_get_with_chain() {
     assert_eq!(ctx.get_async(&b).await, 24);
     assert_eq!(ctx.get(&a), Some(12));
     assert_eq!(ctx.get(&b), Some(24));
-    ctx.set_cell(&cell, 5);
+    ctx.set(&cell, 5);
     assert!(ctx.get(&a).is_none());
     assert!(ctx.get(&b).is_none());
 }
@@ -472,14 +472,14 @@ async fn async_context_sync_get_across_tokio_tasks() {
     let ctx = Arc::new(AsyncContext::new());
     let cell = ctx.cell(10i32);
     let slot = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         async move { v + 1 }
     });
     let _ = ctx.get_async(&slot).await;
     let ctx_c = ctx.clone();
     let reader = tokio::spawn(async move { ctx_c.get(&slot) });
     assert_eq!(reader.await.unwrap(), Some(11));
-    ctx.set_cell(&cell, 20);
+    ctx.set(&cell, 20);
     let ctx_c = ctx.clone();
     let reader2 = tokio::spawn(async move { ctx_c.get(&slot) });
     assert_eq!(reader2.await.unwrap(), None);
@@ -499,7 +499,7 @@ async fn async_context_concurrent_set_and_get_async_never_panics_k03k() {
     let ctx = Arc::new(AsyncContext::new());
     let cell = ctx.cell(0usize);
     let slot: AsyncSlotHandle<usize> = ctx.computed_async(move |ctx| {
-        let v = ctx.get_cell(&cell);
+        let v = ctx.get(&cell);
         async move { v.wrapping_add(1) }
     });
     let _ = ctx.get_async(&slot).await;
@@ -513,7 +513,7 @@ async fn async_context_concurrent_set_and_get_async_never_panics_k03k() {
         let slot_c = slot;
         handles.push(tokio::spawn(async move {
             for i in 0..iters {
-                ctx_c.set_cell(&cell_c, w * iters + i);
+                ctx_c.set(&cell_c, w * iters + i);
                 // Always resolves to (some observed cell + 1); never panics.
                 let v = ctx_c.get_async(&slot_c).await;
                 assert!(v >= 1, "computed value should be cell + 1");
@@ -525,7 +525,7 @@ async fn async_context_concurrent_set_and_get_async_never_panics_k03k() {
     }
 
     // After contention settles, a fresh write resolves deterministically.
-    ctx.set_cell(&cell, 4242);
+    ctx.set(&cell, 4242);
     assert_eq!(ctx.get_async(&slot).await, 4243);
 }
 
@@ -547,7 +547,7 @@ async fn async_signal_materializes_eagerly_without_a_read() {
     let computes = Arc::new(AtomicU64::new(0));
     let c = computes.clone();
     let sig: AsyncSignalHandle<i32> = ctx.signal_async(move |ctx| {
-        let v = ctx.get_cell(&n);
+        let v = ctx.get(&n);
         let c = c.clone();
         async move {
             c.fetch_add(1, Ordering::Relaxed);
@@ -569,7 +569,7 @@ async fn async_signal_recomputes_eagerly_without_a_read() {
     let computes = Arc::new(AtomicU64::new(0));
     let c = computes.clone();
     let sig = ctx.signal_async(move |ctx| {
-        let v = ctx.get_cell(&n);
+        let v = ctx.get(&n);
         let c = c.clone();
         async move {
             c.fetch_add(1, Ordering::Relaxed);
@@ -581,7 +581,7 @@ async fn async_signal_recomputes_eagerly_without_a_read() {
 
     // Changing the input recomputes eagerly: no `get_async` is needed to drive
     // it — a later non-blocking snapshot already reflects the new value.
-    ctx.set_cell(&n, 5);
+    ctx.set(&n, 5);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(computes.load(Ordering::Relaxed) >= 2);
     assert_eq!(ctx.get_signal(&sig), Some(15));
@@ -597,7 +597,7 @@ async fn async_signal_value_is_glitch_free_but_propagation_is_not_suppressed() {
     let ctx = AsyncContext::new();
     let n = ctx.cell(4i32);
     let parity = ctx.signal_async(move |ctx| {
-        let v = ctx.get_cell(&n);
+        let v = ctx.get(&n);
         async move { v % 2 }
     });
 
@@ -615,12 +615,12 @@ async fn async_signal_value_is_glitch_free_but_propagation_is_not_suppressed() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 4 -> 6: parity value stays 0 (no observable glitch)...
-    ctx.set_cell(&n, 6);
+    ctx.set(&n, 6);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(ctx.get_signal_async(&parity).await, 0);
 
     // 6 -> 7: parity flips to 1.
-    ctx.set_cell(&n, 7);
+    ctx.set(&n, 7);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(ctx.get_signal_async(&parity).await, 1);
 
@@ -640,7 +640,7 @@ async fn async_chained_signals_propagate_eagerly() {
     let ctx = AsyncContext::new();
     let n = ctx.cell(1i32);
     let a = ctx.signal_async(move |ctx| {
-        let v = ctx.get_cell(&n);
+        let v = ctx.get(&n);
         async move { v + 1 }
     });
     let b = ctx.signal_async(move |ctx| {
@@ -651,7 +651,7 @@ async fn async_chained_signals_propagate_eagerly() {
     assert_eq!(ctx.get_signal_async(&a).await, 2);
     assert_eq!(ctx.get_signal_async(&b).await, 20);
 
-    ctx.set_cell(&n, 5);
+    ctx.set(&n, 5);
     tokio::time::sleep(Duration::from_millis(50)).await;
     // Both updated eagerly; a non-blocking snapshot already reflects them.
     assert_eq!(ctx.get_signal(&a), Some(6));
@@ -665,7 +665,7 @@ async fn async_signal_dispose_stops_eager_recomputation() {
     let computes = Arc::new(AtomicU64::new(0));
     let c = computes.clone();
     let sig = ctx.signal_async(move |ctx| {
-        let v = ctx.get_cell(&n);
+        let v = ctx.get(&n);
         let c = c.clone();
         async move {
             c.fetch_add(1, Ordering::Relaxed);
@@ -680,7 +680,7 @@ async fn async_signal_dispose_stops_eager_recomputation() {
     assert!(!sig.is_active(&ctx));
 
     // Eager puller gone: a cell change no longer drives recomputation...
-    ctx.set_cell(&n, 9);
+    ctx.set(&n, 9);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(computes.load(Ordering::Relaxed), 1);
 
@@ -694,10 +694,10 @@ async fn async_signal_get_async_awaits_up_to_date_value() {
     let ctx = AsyncContext::new();
     let n = ctx.cell(3i32);
     let sig = ctx.signal_async(move |ctx| {
-        let v = ctx.get_cell(&n);
+        let v = ctx.get(&n);
         async move { v * 2 }
     });
     assert_eq!(sig.get_async(&ctx).await, 6);
-    ctx.set_cell(&n, 4);
+    ctx.set(&n, 4);
     assert_eq!(sig.get_async(&ctx).await, 8);
 }

@@ -71,7 +71,7 @@ impl<V: Send + Sync + 'static> AsyncMapHandle<V> for AsyncCellHandle<V> {
     where
         V: Clone + Send + Sync + 'static,
     {
-        Some(ctx.get_cell(&self))
+        Some(ctx.get(&self))
     }
 }
 
@@ -255,7 +255,7 @@ where
             state.materialized.get(&key).copied()
         };
         if let Some(handle) = existing {
-            ctx.set_cell(&handle, value);
+            ctx.set(&handle, value);
             return;
         }
         self.get_or_insert_handle(ctx, key, move |_| value.clone());

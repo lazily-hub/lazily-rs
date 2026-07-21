@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 async fn thread_safe_context_crosses_tokio_spawn_boundaries() {
     let ctx = ThreadSafeContext::new();
     let input = ctx.cell(1usize);
-    let doubled = ctx.computed(move |ctx| ctx.get_cell(&input) * 2);
+    let doubled = ctx.computed(move |ctx| ctx.get(&input) * 2);
 
     let reader_ctx = ctx.clone();
     let reader = tokio::spawn(async move {
@@ -18,7 +18,7 @@ async fn thread_safe_context_crosses_tokio_spawn_boundaries() {
 
     let writer_ctx = ctx.clone();
     let writer = tokio::spawn(async move {
-        writer_ctx.set_cell(&input, 21);
+        writer_ctx.set(&input, 21);
         tokio::task::yield_now().await;
         writer_ctx.get(&doubled)
     });
@@ -37,7 +37,7 @@ async fn spawn_blocking_preserves_batch_effect_flush_order() {
         seen_for_effect
             .lock()
             .expect("seen lock should not be poisoned")
-            .push(ctx.get_cell(&input));
+            .push(ctx.get(&input));
     });
 
     assert_eq!(*seen.lock().expect("seen lock"), vec![0]);
@@ -46,8 +46,8 @@ async fn spawn_blocking_preserves_batch_effect_flush_order() {
     let seen_for_worker = Arc::clone(&seen);
     tokio::task::spawn_blocking(move || {
         worker_ctx.batch(|ctx| {
-            ctx.set_cell(&input, 1);
-            ctx.set_cell(&input, 2);
+            ctx.set(&input, 1);
+            ctx.set(&input, 2);
             assert_eq!(
                 *seen_for_worker.lock().expect("seen lock"),
                 vec![0],

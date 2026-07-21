@@ -27,7 +27,7 @@ fn claim_1_group_disposes_on_drop() {
     let probe;
     {
         let conn = ctx.scope();
-        let a = conn.computed(move |c| c.get_cell(&topic) + 1);
+        let a = conn.computed(move |c| c.get(&topic) + 1);
         let _b = conn.computed(move |c| c.get(&a) * 10);
         assert_eq!(conn.len(), 2);
         probe = a;
@@ -49,8 +49,8 @@ fn claim_2_handles_stay_copy() {
     let topic = ctx.cell(5u64);
     let conn = ctx.scope();
     // `topic` captured twice, no clone: still a Copy handle.
-    let a = conn.computed(move |c| c.get_cell(&topic) + 1);
-    let b = conn.computed(move |c| c.get_cell(&topic) + 2);
+    let a = conn.computed(move |c| c.get(&topic) + 1);
+    let b = conn.computed(move |c| c.get(&topic) + 2);
     assert_eq!(ctx.get(&a) + ctx.get(&b), 13);
     println!("  claim 2 ok — source captured by two closures, no clone needed");
 }
@@ -58,7 +58,7 @@ fn claim_2_handles_stay_copy() {
 fn claim_3_cross_group_reads_work() {
     let ctx = Context::new();
     let topic = ctx.cell(2u64);
-    let outer = ctx.computed(move |c| c.get_cell(&topic) * 3);
+    let outer = ctx.computed(move |c| c.get(&topic) * 3);
     let conn = ctx.scope();
     let inner = conn.computed(move |c| c.get(&outer) + 1);
     assert_eq!(ctx.get(&inner), 7, "a scope node reads a parent-owned node");
@@ -73,7 +73,7 @@ fn cost_model(width: usize) {
     let start = Instant::now();
     let plain: Vec<_> = (0..width)
         .map(|i| {
-            let s = ctx.computed(move |c| c.get_cell(&topic) + i as u64);
+            let s = ctx.computed(move |c| c.get(&topic) + i as u64);
             ctx.get(&s);
             s
         })
@@ -89,7 +89,7 @@ fn cost_model(width: usize) {
     let start = Instant::now();
     let scope = ctx.scope();
     for i in 0..width {
-        let s = scope.computed(move |c| c.get_cell(&topic) + i as u64);
+        let s = scope.computed(move |c| c.get(&topic) + i as u64);
         ctx.get(&s);
     }
     let child_build = start.elapsed().as_nanos() as f64 / width as f64;

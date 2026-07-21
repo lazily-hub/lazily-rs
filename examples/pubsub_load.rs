@@ -137,7 +137,7 @@ fn sweep_width(width: usize) -> Rung {
     let build_start = Instant::now();
     let subscriber_a: Vec<_> = (0..width)
         .map(|i| {
-            let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + i as u64);
+            let slot = ctx.computed(move |ctx| ctx.get(&topic) + i as u64);
             ctx.get(&slot);
             slot
         })
@@ -148,7 +148,7 @@ fn sweep_width(width: usize) -> Rung {
     let publishes = (NOTIFICATION_BUDGET / width).max(1);
     let notify_start = Instant::now();
     for publish in 1..=publishes {
-        ctx.set_cell(&topic, publish as u64);
+        ctx.set(&topic, publish as u64);
         for slot in &subscriber_a {
             std::hint::black_box(ctx.get(slot));
         }
@@ -161,10 +161,10 @@ fn sweep_width(width: usize) -> Rung {
     // Scale down at huge widths: an unread publish is O(N), so 200 of them at
     // width 100M would dominate the whole run.
     let unread_publishes = if width > 1_000_000 { 5 } else { 200 };
-    ctx.set_cell(&topic, 0);
+    ctx.set(&topic, 0);
     let unread_start = Instant::now();
     for publish in 1..=unread_publishes {
-        ctx.set_cell(&topic, (publish + 1_000_000) as u64);
+        ctx.set(&topic, (publish + 1_000_000) as u64);
     }
     let unread_publish_ns = unread_start.elapsed().as_nanos() as f64 / unread_publishes as f64;
 
@@ -181,12 +181,12 @@ fn churn_soak() {
     let topic = ctx.cell(0u64);
     let mut subscriber_a: Vec<_> = (0..CHURN_LIVE_WIDTH)
         .map(|i| {
-            let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + i as u64);
+            let slot = ctx.computed(move |ctx| ctx.get(&topic) + i as u64);
             ctx.get(&slot);
             slot
         })
         .collect();
-    ctx.set_cell(&topic, 1);
+    ctx.set(&topic, 1);
     for slot in &subscriber_a {
         std::hint::black_box(ctx.get(slot));
     }
@@ -200,11 +200,11 @@ fn churn_soak() {
         // the topic survive for the life of the context.
         ctx.dispose_slot(&subscriber_a.swap_remove(victim));
         let salt = cycle as u64;
-        let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + salt);
+        let slot = ctx.computed(move |ctx| ctx.get(&topic) + salt);
         ctx.get(&slot);
         subscriber_a.push(slot);
         if cycle % 64 == 0 {
-            ctx.set_cell(&topic, cycle as u64);
+            ctx.set(&topic, cycle as u64);
             for slot in &subscriber_a {
                 std::hint::black_box(ctx.get(slot));
             }
@@ -216,7 +216,7 @@ fn churn_soak() {
     // A stale index entry — an edge naming a recycled id — surfaces as a missed
     // update, not a crash.
     let sentinel = 9_999_999u64;
-    ctx.set_cell(&topic, sentinel);
+    ctx.set(&topic, sentinel);
     for slot in &subscriber_a {
         let observed = ctx.get(slot);
         assert!(

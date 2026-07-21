@@ -45,10 +45,10 @@ impl Graph {
         let b = ctx.cell(0i32);
         let gate = ctx.cell(false);
 
-        let sum = ctx.slot(move |ctx| ctx.get_cell(&a) + ctx.get_cell(&b));
+        let sum = ctx.slot(move |ctx| ctx.get(&a) + ctx.get(&b));
         let parity = ctx.computed(move |ctx| ctx.get(&sum).rem_euclid(2));
         let branch = ctx.slot(move |ctx| {
-            if ctx.get_cell(&gate) {
+            if ctx.get(&gate) {
                 ctx.get(&sum)
             } else {
                 ctx.get(&parity)
@@ -204,9 +204,9 @@ fn assert_no_effect_delta(
 }
 
 fn assert_graph(ctx: &Context, graph: &Graph, model: Model) -> TestCaseResult {
-    prop_assert_eq!(ctx.get_cell(&graph.a), model.a);
-    prop_assert_eq!(ctx.get_cell(&graph.b), model.b);
-    prop_assert_eq!(ctx.get_cell(&graph.gate), model.gate);
+    prop_assert_eq!(ctx.get(&graph.a), model.a);
+    prop_assert_eq!(ctx.get(&graph.b), model.b);
+    prop_assert_eq!(ctx.get(&graph.gate), model.gate);
     prop_assert_eq!(ctx.get(&graph.sum), model.sum());
     prop_assert_eq!(ctx.get(&graph.parity), model.parity());
     prop_assert_eq!(ctx.get(&graph.branch), model.branch());

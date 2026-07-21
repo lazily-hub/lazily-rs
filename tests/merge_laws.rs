@@ -139,7 +139,7 @@ fn cell_is_merge_cell_keep_latest() {
     let mc: Source<i64, KeepLatest> = ctx.merge_cell(0i64);
 
     for v in [3i64, 3, 7, 7, 1] {
-        ctx.set_cell(&cell, v);
+        ctx.set(&cell, v);
         mc.merge(&ctx, v);
         assert_eq!(cell.get(&ctx), mc.get(&ctx), "keep-latest diverged at {v}");
     }

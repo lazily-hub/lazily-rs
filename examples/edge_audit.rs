@@ -44,7 +44,7 @@ fn effect_shape_rung(width: usize) -> f64 {
         let topic = *topic;
         for _ in 0..width {
             ctx.effect(move |ctx| {
-                std::hint::black_box(ctx.get_cell(&topic));
+                std::hint::black_box(ctx.get(&topic));
             });
         }
     }
@@ -52,7 +52,7 @@ fn effect_shape_rung(width: usize) -> f64 {
     // One publish per topic => topics * width == TOTAL_NODES notifications.
     let start = Instant::now();
     for (revision, topic) in topic_a.iter().enumerate() {
-        ctx.set_cell(topic, revision as u64 + 1);
+        ctx.set(topic, revision as u64 + 1);
     }
     let elapsed = start.elapsed().as_nanos() as f64;
 
@@ -71,7 +71,7 @@ fn teardown_shape_rung(width: usize) -> f64 {
     for _ in 0..topics {
         let topic = ctx.cell(0u64);
         for i in 0..width {
-            let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + i as u64);
+            let slot = ctx.computed(move |ctx| ctx.get(&topic) + i as u64);
             ctx.get(&slot);
             subscriber_a.push(slot);
         }
@@ -125,7 +125,7 @@ fn dispose_during_flush_rung(width: usize) -> f64 {
             let armed_inner = Rc::clone(&armed);
             let done_inner = Rc::clone(&done);
             let handle = ctx.effect(move |ctx| {
-                std::hint::black_box(ctx.get_cell(&topic));
+                std::hint::black_box(ctx.get(&topic));
                 if armed_inner.get() && !done_inner.get() {
                     done_inner.set(true);
                     let victim_a: Vec<_> = all_inner.borrow().clone();
@@ -145,7 +145,7 @@ fn dispose_during_flush_rung(width: usize) -> f64 {
     let disposals = topics * width.saturating_sub(1).max(1);
     let start = Instant::now();
     for (revision, topic) in topic_a.iter().enumerate() {
-        ctx.set_cell(topic, revision as u64 + 1);
+        ctx.set(topic, revision as u64 + 1);
     }
     let elapsed = start.elapsed().as_nanos() as f64;
 
@@ -167,14 +167,14 @@ mod thread_safe_audit {
             let topic = *topic;
             for _ in 0..width {
                 ctx.effect(move |ctx| {
-                    std::hint::black_box(ctx.get_cell(&topic));
+                    std::hint::black_box(ctx.get(&topic));
                 });
             }
         }
 
         let start = Instant::now();
         for (revision, topic) in topic_a.iter().enumerate() {
-            ctx.set_cell(topic, revision as u64 + 1);
+            ctx.set(topic, revision as u64 + 1);
         }
         let elapsed = start.elapsed().as_nanos() as f64;
 
@@ -203,7 +203,7 @@ mod thread_safe_audit {
                 let armed_inner = Arc::clone(&armed);
                 let done_inner = Arc::clone(&done);
                 let handle = ctx.effect(move |ctx| {
-                    std::hint::black_box(ctx.get_cell(&topic));
+                    std::hint::black_box(ctx.get(&topic));
                     if armed_inner.load(Ordering::Relaxed)
                         && !done_inner.swap(true, Ordering::Relaxed)
                     {
@@ -224,7 +224,7 @@ mod thread_safe_audit {
         let disposals = topics * width.saturating_sub(1).max(1);
         let start = Instant::now();
         for (revision, topic) in topic_a.iter().enumerate() {
-            ctx.set_cell(topic, revision as u64 + 1);
+            ctx.set(topic, revision as u64 + 1);
         }
         let elapsed = start.elapsed().as_nanos() as f64;
 

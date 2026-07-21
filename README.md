@@ -151,10 +151,11 @@ epochs remain pruned across process restarts.
 
 ### Decorator-style typed factories
 
-`#[lazily::cell]` and `#[lazily::slot]` provide the same factory style as
+`#[lazily::source]` and `#[lazily::computed]` provide the same factory style as
 `lazily-py`: the factory takes only a typed context and Lazily memoizes the
-Cell/Slot handle on that context. `ctx.get(factory)` reads a memoized cell or
-slot factory, and `ctx.set(cell_factory, value)` mutates a memoized cell.
+source/computed handle on that context. `ctx.get(factory)` reads a memoized cell,
+and `ctx.set(source_factory, value)` mutates a memoized source cell.
+(`#[lazily::cell]` / `#[lazily::slot]` remain as deprecated v1 aliases.)
 
 This example is covered by `tests/decorator_factories.rs`.
 
@@ -164,12 +165,12 @@ use lazily::TypedContext;
 lazily::define_schema!(CounterSchema);
 type CounterContext = TypedContext<CounterSchema>;
 
-#[lazily::cell]
+#[lazily::source]
 fn counter(_ctx: &CounterContext) -> i32 {
     0
 }
 
-#[lazily::slot]
+#[lazily::computed]
 fn doubled(ctx: &CounterContext) -> i32 {
     ctx.get(counter) * 2
 }
@@ -360,8 +361,8 @@ effect.dispose(&ctx);
 | `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
 | `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
 | `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
-| `#[lazily::slot] fn name(ctx: &TypedContext<_>) -> T` | Decorator-style typed slot factory over `TypedContext` |
-| `#[lazily::cell] fn name(ctx: &TypedContext<_>) -> T` | Decorator-style typed cell factory over `TypedContext` |
+| `#[lazily::computed] fn name(ctx: &TypedContext<_>) -> T` | Decorator-style typed computed factory over `TypedContext` |
+| `#[lazily::source] fn name(ctx: &TypedContext<_>) -> T` | Decorator-style typed source factory over `TypedContext` |
 | `ctx.signal(\|ctx\| T)` | Create an eager derived value (recomputes on invalidation, no unset window); `T: PartialEq + 'static` |
 | `signal.get(&ctx)` | Get the signal's value (`T: Clone`); also `ctx.get_signal(&signal)` |
 | `signal.dispose(&ctx)` | Remove the eager puller; value reverts to lazy recompute-on-read |

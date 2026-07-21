@@ -58,16 +58,16 @@ mod context {
         let ctx = Context::new();
         let a = ctx.cell(10i32);
         let b = ctx.cell(20i32);
-        assert_eq!(ctx.get_cell(&a), 10);
-        assert_eq!(ctx.get_cell(&b), 20);
+        assert_eq!(ctx.get(&a), 10);
+        assert_eq!(ctx.get(&b), 20);
     }
 
     #[test]
     fn context_handles_mixed_slots_and_cells() {
         let ctx = Context::new();
         let c = ctx.cell(100i32);
-        let s = ctx.slot(move |ctx| ctx.get_cell(&c) + 1);
-        assert_eq!(ctx.get_cell(&c), 100);
+        let s = ctx.slot(move |ctx| ctx.get(&c) + 1);
+        assert_eq!(ctx.get(&c), 100);
         assert_eq!(ctx.get(&s), 101);
     }
 
@@ -75,12 +75,12 @@ mod context {
     fn context_computed_alias_tracks_dependencies() {
         let ctx = Context::new();
         let c = ctx.cell(2i32);
-        let doubled = ctx.computed(move |ctx| ctx.get_cell(&c) * 2);
+        let doubled = ctx.computed(move |ctx| ctx.get(&c) * 2);
 
         assert_eq!(ctx.get(&doubled), 4);
         assert!(ctx.is_set(&doubled));
 
-        ctx.set_cell(&c, 3);
+        ctx.set(&c, 3);
         assert!(!ctx.is_set(&doubled));
         assert_eq!(ctx.get(&doubled), 6);
     }
@@ -89,7 +89,7 @@ mod context {
     fn context_allocates_after_effect_disposal() {
         let ctx = Context::new();
         let root = ctx.cell(1i32);
-        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root) * 2);
+        let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
         let effect = ctx.effect(move |ctx| {
             ctx.get(&doubled);
         });
@@ -97,10 +97,10 @@ mod context {
         effect.dispose(&ctx);
         assert!(!effect.is_active(&ctx));
 
-        let tripled = ctx.computed(move |ctx| ctx.get_cell(&root) * 3);
+        let tripled = ctx.computed(move |ctx| ctx.get(&root) * 3);
         assert_eq!(ctx.get(&tripled), 3);
 
-        ctx.set_cell(&root, 2);
+        ctx.set(&root, 2);
         assert_eq!(ctx.get(&tripled), 6);
     }
 
@@ -162,11 +162,11 @@ mod context {
     fn get_rc_tracks_dependencies() {
         let ctx = Context::new();
         let a = ctx.cell(1i32);
-        let b = ctx.slot(move |ctx| ctx.get_cell(&a) + 10);
+        let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
         let c = ctx.slot(move |ctx| *ctx.get_rc(&b) + 100);
 
         assert_eq!(*ctx.get_rc(&c), 111);
-        ctx.set_cell(&a, 2);
+        ctx.set(&a, 2);
         assert_eq!(*ctx.get_rc(&c), 112);
     }
 
@@ -177,7 +177,7 @@ mod context {
         let b = ctx.slot(move |ctx| *ctx.get_cell_rc(&a) + 10);
 
         assert_eq!(*ctx.get_rc(&b), 11);
-        ctx.set_cell(&a, 5);
+        ctx.set(&a, 5);
         assert_eq!(*ctx.get_rc(&b), 15);
     }
 }
@@ -225,10 +225,10 @@ mod threading_contract {
                 thread::spawn(move || {
                     let ctx = Context::new();
                     let cell = ctx.cell(seed);
-                    let doubled = ctx.computed(move |ctx| ctx.get_cell(&cell) * 2);
+                    let doubled = ctx.computed(move |ctx| ctx.get(&cell) * 2);
 
                     assert_eq!(ctx.get(&doubled), seed * 2);
-                    ctx.set_cell(&cell, seed + 10);
+                    ctx.set(&cell, seed + 10);
                     ctx.get(&doubled)
                 })
             })
@@ -254,7 +254,7 @@ mod threading_contract {
         let answer = ctx.computed(move |ctx| {
             compute_count_for_slot.fetch_add(1, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(10));
-            ctx.get_cell(&root) * 2
+            ctx.get(&root) * 2
         });
 
         let barrier = Arc::new(Barrier::new(8));
@@ -290,13 +290,13 @@ mod threading_contract {
     fn thread_safe_context_invalidates_across_threads() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(1i32);
-        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root) * 2);
+        let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
 
         assert_eq!(ctx.get(&doubled), 2);
 
         let worker_ctx = ctx.clone();
         let worker = thread::spawn(move || {
-            worker_ctx.set_cell(&root, 5);
+            worker_ctx.set(&root, 5);
             worker_ctx.get(&doubled)
         });
 
@@ -312,7 +312,7 @@ mod threading_contract {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(0i32);
         let stable = ctx.computed(move |ctx| {
-            ctx.get_cell(&root);
+            ctx.get(&root);
             0i32
         });
         let compute_count = Arc::new(AtomicUsize::new(0));
@@ -320,14 +320,14 @@ mod threading_contract {
         let mixed = ctx.computed(move |ctx| {
             compute_count_for_slot.fetch_add(1, Ordering::SeqCst);
             ctx.get(&stable);
-            ctx.get_cell(&root)
+            ctx.get(&root)
         });
 
         assert_eq!(ctx.get(&mixed), 0);
 
         let worker_ctx = ctx.clone();
         let worker = thread::spawn(move || {
-            worker_ctx.set_cell(&root, 1);
+            worker_ctx.set(&root, 1);
         });
         worker.join().expect("worker should finish");
 
@@ -350,11 +350,11 @@ mod threading_contract {
     fn thread_safe_context_allows_reentrant_computation() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(1i32);
-        let inner = ctx.computed(move |ctx| ctx.get_cell(&root) + 1);
+        let inner = ctx.computed(move |ctx| ctx.get(&root) + 1);
         let outer = ctx.computed(move |ctx| ctx.get(&inner) + 1);
 
         assert_eq!(ctx.get(&outer), 3);
-        ctx.set_cell(&root, 2);
+        ctx.set(&root, 2);
         assert_eq!(ctx.get(&outer), 4);
     }
 
@@ -372,7 +372,7 @@ mod threading_contract {
             seen_for_effect
                 .lock()
                 .expect("seen lock should not be poisoned")
-                .push(ctx.get_cell(&root));
+                .push(ctx.get(&root));
         });
 
         assert!(ctx.is_effect_active(&effect));
@@ -380,7 +380,7 @@ mod threading_contract {
 
         let worker_ctx = ctx.clone();
         let worker = thread::spawn(move || {
-            worker_ctx.set_cell(&root, 1);
+            worker_ctx.set(&root, 1);
         });
         worker.join().expect("worker should finish");
 
@@ -401,7 +401,7 @@ mod threading_contract {
         let answer = ctx.computed(move |ctx| {
             compute_count_for_slot.fetch_add(1, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(10));
-            ctx.get_cell(&root) * 2
+            ctx.get(&root) * 2
         });
 
         let barrier = Arc::new(Barrier::new(8));
@@ -435,7 +435,7 @@ mod threading_contract {
     fn thread_safe_concurrent_set_cell_contention() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(0usize);
-        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root) * 2);
+        let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
 
         assert_eq!(ctx.get(&doubled), 0);
 
@@ -447,7 +447,7 @@ mod threading_contract {
                 thread::spawn(move || {
                     barrier.wait();
                     for step in 0..200 {
-                        ctx.set_cell(&root, thread_id * 1_000 + step);
+                        ctx.set(&root, thread_id * 1_000 + step);
                         assert_eq!(ctx.get(&doubled) % 2, 0);
                     }
                 })
@@ -458,7 +458,7 @@ mod threading_contract {
             worker.join().expect("worker should finish");
         }
 
-        let final_value = ctx.get_cell(&root);
+        let final_value = ctx.get(&root);
         assert_eq!(ctx.get(&doubled), final_value * 2);
     }
 
@@ -476,7 +476,7 @@ mod threading_contract {
         let gate_for_slot = Arc::clone(&gate);
         let derived = ctx.computed(move |ctx| {
             let run = compute_runs_for_slot.fetch_add(1, Ordering::SeqCst) + 1;
-            let value = ctx.get_cell(&root);
+            let value = ctx.get(&root);
             if run == 1 {
                 gate_for_slot.store(1, Ordering::SeqCst);
                 while gate_for_slot.load(Ordering::SeqCst) == 1 {
@@ -492,7 +492,7 @@ mod threading_contract {
         while gate.load(Ordering::SeqCst) != 1 {
             thread::yield_now();
         }
-        ctx.set_cell(&root, 1);
+        ctx.set(&root, 1);
         gate.store(2, Ordering::SeqCst);
 
         assert_eq!(worker.join().expect("worker should finish"), 1);
@@ -517,7 +517,7 @@ mod threading_contract {
             seen_for_effect
                 .lock()
                 .expect("seen lock should not be poisoned")
-                .push(ctx.get_cell(&root));
+                .push(ctx.get(&root));
         });
 
         assert_eq!(*seen.lock().expect("seen lock"), vec![0]);
@@ -526,8 +526,8 @@ mod threading_contract {
         let seen_for_worker = Arc::clone(&seen);
         let worker = thread::spawn(move || {
             worker_ctx.batch(|ctx| {
-                ctx.set_cell(&root, 1);
-                ctx.set_cell(&root, 2);
+                ctx.set(&root, 1);
+                ctx.set(&root, 2);
                 assert_eq!(
                     *seen_for_worker.lock().expect("seen lock"),
                     vec![0],
@@ -547,8 +547,8 @@ mod threading_contract {
     fn thread_safe_effect_coalesces_diamond_invalidation_across_thread() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(0i32);
-        let left = ctx.computed(move |ctx| ctx.get_cell(&root) + 1);
-        let right = ctx.computed(move |ctx| ctx.get_cell(&root) + 1);
+        let left = ctx.computed(move |ctx| ctx.get(&root) + 1);
+        let right = ctx.computed(move |ctx| ctx.get(&root) + 1);
         let sum = ctx.computed(move |ctx| ctx.get(&left) + ctx.get(&right));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_for_effect = Arc::clone(&seen);
@@ -564,7 +564,7 @@ mod threading_contract {
 
         let worker_ctx = ctx.clone();
         let worker = thread::spawn(move || {
-            worker_ctx.set_cell(&root, 1);
+            worker_ctx.set(&root, 1);
         });
         worker.join().expect("worker should finish");
 
@@ -585,13 +585,13 @@ mod threading_contract {
             let seen_for_effect = Arc::clone(&seen);
 
             let effect = ctx.effect(move |ctx| {
-                let current = ctx.get_cell(&root);
+                let current = ctx.get(&root);
                 seen_for_effect
                     .lock()
                     .expect("seen lock should not be poisoned")
                     .push(current);
                 if current == 0 {
-                    ctx.set_cell(&root, 1);
+                    ctx.set(&root, 1);
                 }
             });
 
@@ -614,7 +614,7 @@ mod threading_contract {
     fn thread_safe_clear_and_dispose_races_remain_consistent() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(1usize);
-        let doubled = ctx.computed(move |ctx| ctx.get_cell(&root) * 2);
+        let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
         let runs = Arc::new(AtomicUsize::new(0));
         let runs_for_effect = Arc::clone(&runs);
 
@@ -640,7 +640,7 @@ mod threading_contract {
             thread::spawn(move || {
                 barrier.wait();
                 for value in 2..100 {
-                    ctx.set_cell(&root, value);
+                    ctx.set(&root, value);
                 }
             })
         };
@@ -675,7 +675,7 @@ mod threading_contract {
             .expect("cell clear thread should finish");
 
         assert!(!ctx.is_effect_active(&effect));
-        let final_value = ctx.get_cell(&root);
+        let final_value = ctx.get(&root);
         assert_eq!(ctx.get(&doubled), final_value * 2);
         assert!(runs.load(Ordering::SeqCst) >= 1);
     }
@@ -696,10 +696,10 @@ mod threading_contract {
         let cleanup_runs_for_effect = Arc::clone(&cleanup_runs);
 
         let effect = ctx.effect(move |ctx| {
-            let value = if ctx.get_cell(&choose_left) {
-                ctx.get_cell(&left)
+            let value = if ctx.get(&choose_left) {
+                ctx.get(&left)
             } else {
-                ctx.get_cell(&right)
+                ctx.get(&right)
             };
             seen_for_effect
                 .lock()
@@ -713,7 +713,7 @@ mod threading_contract {
 
         assert_eq!(*seen.lock().expect("seen lock"), vec![1]);
 
-        ctx.set_cell(&choose_left, false);
+        ctx.set(&choose_left, false);
         assert_eq!(*seen.lock().expect("seen lock"), vec![1, 10]);
         assert_eq!(
             cleanup_runs.load(Ordering::SeqCst),
@@ -721,14 +721,14 @@ mod threading_contract {
             "switching dynamic dependencies should run the previous cleanup once"
         );
 
-        ctx.set_cell(&left, 2);
+        ctx.set(&left, 2);
         assert_eq!(
             *seen.lock().expect("seen lock"),
             vec![1, 10],
             "stale left dependency should not rerun the effect after it switches to right"
         );
 
-        ctx.set_cell(&right, 11);
+        ctx.set(&right, 11);
         assert_eq!(*seen.lock().expect("seen lock"), vec![1, 10, 11]);
 
         let dispose_ctx = ctx.clone();
@@ -737,9 +737,9 @@ mod threading_contract {
         });
         let writer_ctx = ctx.clone();
         let writer = thread::spawn(move || {
-            writer_ctx.set_cell(&right, 12);
-            writer_ctx.set_cell(&choose_left, true);
-            writer_ctx.set_cell(&left, 3);
+            writer_ctx.set(&right, 12);
+            writer_ctx.set(&choose_left, true);
+            writer_ctx.set(&left, 3);
         });
 
         dispose_thread.join().expect("dispose thread should finish");
@@ -747,8 +747,8 @@ mod threading_contract {
 
         assert!(!ctx.is_effect_active(&effect));
         let after_dispose = seen.lock().expect("seen lock").clone();
-        ctx.set_cell(&right, 13);
-        ctx.set_cell(&left, 4);
+        ctx.set(&right, 13);
+        ctx.set(&left, 4);
         assert_eq!(
             *seen.lock().expect("seen lock"),
             after_dispose,
@@ -1081,7 +1081,7 @@ mod benchmark_instrumentation {
     fn context_instrumentation_tracks_graph_work() {
         let ctx = Context::new();
         let root = ctx.cell(0usize);
-        let parity = ctx.computed(move |ctx| ctx.get_cell(&root) % 2);
+        let parity = ctx.computed(move |ctx| ctx.get(&root) % 2);
         let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
         let _effect = ctx.effect(move |ctx| {
             ctx.get(&label);
@@ -1094,7 +1094,7 @@ mod benchmark_instrumentation {
         );
 
         ctx.reset_instrumentation();
-        ctx.set_cell(&root, 2);
+        ctx.set(&root, 2);
         assert_eq!(ctx.get(&label), 1);
 
         let snapshot = ctx.instrumentation_snapshot();
@@ -1133,7 +1133,7 @@ mod benchmark_instrumentation {
                     thread::yield_now();
                 }
             }
-            ctx.get_cell(&root).wrapping_add(2)
+            ctx.get(&root).wrapping_add(2)
         });
 
         let allocation_snapshot = ctx.instrumentation_snapshot();
@@ -1163,7 +1163,7 @@ mod benchmark_instrumentation {
         assert_eq!(computing_worker.join().expect("worker should finish"), 42);
         assert_eq!(waiting_worker.join().expect("worker should finish"), 42);
 
-        ctx.set_cell(&root, 41);
+        ctx.set(&root, 41);
         assert_eq!(ctx.get(&answer), 43);
 
         let snapshot = ctx.instrumentation_snapshot();
@@ -1236,7 +1236,7 @@ mod benchmark_instrumentation {
     fn thread_safe_cached_get_bypasses_get_refresh_graph_lock() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(40usize);
-        let answer = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(2));
+        let answer = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(2));
 
         assert_eq!(ctx.get(&answer), 42);
         ctx.reset_instrumentation();
@@ -1276,7 +1276,7 @@ mod benchmark_instrumentation {
             runs_for_effect.fetch_add(1, Ordering::SeqCst);
             let total = effect_cells
                 .iter()
-                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)));
+                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)));
             sink_for_effect.store(total, Ordering::SeqCst);
         });
 
@@ -1285,7 +1285,7 @@ mod benchmark_instrumentation {
 
         ctx.batch(|ctx| {
             for (index, cell) in cells.iter().enumerate() {
-                ctx.set_cell(cell, index + 1);
+                ctx.set(cell, index + 1);
             }
         });
 
@@ -1398,14 +1398,14 @@ mod benchmark_instrumentation {
     fn thread_safe_cached_get_revalidates_after_cross_thread_invalidation() {
         let ctx = ThreadSafeContext::new();
         let root = ctx.cell(40usize);
-        let answer = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(2));
+        let answer = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(2));
 
         assert_eq!(ctx.get(&answer), 42);
         ctx.reset_instrumentation();
 
         let writer_ctx = ctx.clone();
         let writer = thread::spawn(move || {
-            writer_ctx.set_cell(&root, 41);
+            writer_ctx.set(&root, 41);
         });
         writer.join().expect("writer should finish");
 
@@ -1447,7 +1447,7 @@ mod benchmark_instrumentation {
                     thread::yield_now();
                 }
             }
-            ctx.get_cell(&root).wrapping_add(2)
+            ctx.get(&root).wrapping_add(2)
         });
 
         let computing_ctx = ctx.clone();
@@ -1506,11 +1506,11 @@ mod benchmark_instrumentation {
                     thread::yield_now();
                 }
             }
-            ctx.get_cell(&root).wrapping_add(2)
+            ctx.get(&root).wrapping_add(2)
         });
 
         assert_eq!(ctx.get(&answer), 42);
-        ctx.set_cell(&root, 41);
+        ctx.set(&root, 41);
         ctx.reset_instrumentation();
 
         let computing_ctx = ctx.clone();
@@ -1589,7 +1589,7 @@ mod benchmark_instrumentation {
             .iter()
             .map(|root| {
                 let root = *root;
-                ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+                ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1))
             })
             .collect::<Vec<_>>();
 
@@ -1607,7 +1607,7 @@ mod benchmark_instrumentation {
                 thread::spawn(move || {
                     barrier.wait();
                     for iter in 0..iters {
-                        ctx.set_cell(&root, worker.wrapping_mul(iters).wrapping_add(iter));
+                        ctx.set(&root, worker.wrapping_mul(iters).wrapping_add(iter));
                     }
                 })
             })
@@ -1664,7 +1664,7 @@ mod benchmark_instrumentation {
             .iter()
             .map(|root| {
                 let root = *root;
-                ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+                ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1))
             })
             .collect::<Vec<_>>();
 
@@ -1673,7 +1673,7 @@ mod benchmark_instrumentation {
         }
 
         for (worker, root) in roots.iter().enumerate() {
-            ctx.set_cell(root, worker + 10);
+            ctx.set(root, worker + 10);
         }
         ctx.reset_instrumentation();
 
@@ -1708,7 +1708,7 @@ mod benchmark_instrumentation {
         let total = ctx.computed(move |ctx| {
             cells
                 .iter()
-                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)))
         });
 
         assert_eq!(ctx.get(&total), 0);
@@ -1716,7 +1716,7 @@ mod benchmark_instrumentation {
 
         ctx.batch(|ctx| {
             for (offset, cell) in cells.iter().enumerate() {
-                ctx.set_cell(cell, offset + 1);
+                ctx.set(cell, offset + 1);
             }
 
             assert_eq!(
@@ -1759,14 +1759,14 @@ mod benchmark_instrumentation {
             while gate_a_for_slot.load(Ordering::SeqCst) == 1 {
                 thread::yield_now();
             }
-            ctx.get_cell(&root_a).wrapping_add(2)
+            ctx.get(&root_a).wrapping_add(2)
         });
         let value_b = ctx.computed(move |ctx| {
             gate_b_for_slot.store(1, Ordering::SeqCst);
             while gate_b_for_slot.load(Ordering::SeqCst) == 1 {
                 thread::yield_now();
             }
-            ctx.get_cell(&root_b).wrapping_add(2)
+            ctx.get(&root_b).wrapping_add(2)
         });
 
         let computing_a_ctx = ctx.clone();
@@ -1848,13 +1848,13 @@ mod benchmark_instrumentation {
         let total = ctx.computed(move |ctx| {
             cells
                 .iter()
-                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+                .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)))
         });
 
         assert_eq!(ctx.get(&total), 0);
         ctx.reset_instrumentation();
 
-        ctx.set_cell(&cells[0], 1);
+        ctx.set(&cells[0], 1);
         assert_eq!(ctx.get(&total), 1);
 
         let snapshot = ctx.instrumentation_snapshot();
@@ -1892,17 +1892,17 @@ mod benchmark_instrumentation {
         let left = ctx.cell(1usize);
         let right = ctx.cell(10usize);
         let selected = ctx.computed(move |ctx| {
-            if ctx.get_cell(&use_right) {
-                ctx.get_cell(&right)
+            if ctx.get(&use_right) {
+                ctx.get(&right)
             } else {
-                ctx.get_cell(&left)
+                ctx.get(&left)
             }
         });
 
         assert_eq!(ctx.get(&selected), 1);
         ctx.reset_instrumentation();
 
-        ctx.set_cell(&use_right, true);
+        ctx.set(&use_right, true);
         assert_eq!(ctx.get(&selected), 10);
 
         let snapshot = ctx.instrumentation_snapshot();
@@ -1997,13 +1997,13 @@ mod slot_semantics {
     fn clear_removes_cached_value() {
         let ctx = Context::new();
         let c = ctx.cell(1i32);
-        let s = ctx.slot(move |ctx| ctx.get_cell(&c) * 10);
+        let s = ctx.slot(move |ctx| ctx.get(&c) * 10);
 
         assert_eq!(ctx.get(&s), 10);
         assert!(ctx.is_set(&s));
 
         // Changing the cell clears the dependent slot.
-        ctx.set_cell(&c, 2);
+        ctx.set(&c, 2);
         assert!(!ctx.is_set(&s), "slot should be cleared after cell change");
     }
 
@@ -2013,7 +2013,7 @@ mod slot_semantics {
     fn clear_cascades_to_dependents() {
         let ctx = Context::new();
         let c = ctx.cell(1i32);
-        let a = ctx.slot(move |ctx| ctx.get_cell(&c));
+        let a = ctx.slot(move |ctx| ctx.get(&c));
         let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
         let d = ctx.slot(move |ctx| ctx.get(&b) + 100);
 
@@ -2025,7 +2025,7 @@ mod slot_semantics {
 
         // Change cell — slots become dirty while keeping cached values for
         // validation until access proves whether `a` changed.
-        ctx.set_cell(&c, 2);
+        ctx.set(&c, 2);
         assert!(!ctx.is_set(&a), "a should be stale");
         assert!(!ctx.is_set(&b), "b should be dirty");
         assert!(!ctx.is_set(&d), "d should be dirty");
@@ -2042,7 +2042,7 @@ mod slot_semantics {
 
         let ctx = Context::new();
         let c = ctx.cell(1i32);
-        let a = ctx.slot(move |ctx| ctx.get_cell(&c));
+        let a = ctx.slot(move |ctx| ctx.get(&c));
         let b = ctx.slot(move |ctx| {
             B_COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&a) * 2
@@ -2052,7 +2052,7 @@ mod slot_semantics {
         B_COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
 
         // Changing cell should invalidate b (through a) automatically.
-        ctx.set_cell(&c, 5);
+        ctx.set(&c, 5);
         assert_eq!(ctx.get(&b), 10);
         B_COUNT.with(|cnt| assert_eq!(cnt.get(), 2, "b should recompute after dependency changed"));
     }
@@ -2096,7 +2096,7 @@ mod cell_semantics {
     fn cell_initial_value_accessible() {
         let ctx = Context::new();
         let c = ctx.cell(42i32);
-        assert_eq!(ctx.get_cell(&c), 42);
+        assert_eq!(ctx.get(&c), 42);
     }
 
     /// SPEC: `cell.set(&ctx, value)` updates the cell value.
@@ -2104,8 +2104,8 @@ mod cell_semantics {
     fn cell_set_updates_value() {
         let ctx = Context::new();
         let c = ctx.cell(0i32);
-        ctx.set_cell(&c, 100);
-        assert_eq!(ctx.get_cell(&c), 100);
+        ctx.set(&c, 100);
+        assert_eq!(ctx.get(&c), 100);
     }
 
     /// SPEC: Set with same value (PartialEq) does NOT invalidate dependents.
@@ -2120,14 +2120,14 @@ mod cell_semantics {
         let c = ctx.cell(5i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c) * 3
+            ctx.get(&c) * 3
         });
 
         assert_eq!(ctx.get(&s), 15);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
 
         // Set same value.
-        ctx.set_cell(&c, 5);
+        ctx.set(&c, 5);
         assert!(
             ctx.is_set(&s),
             "slot should remain cached when cell value unchanged"
@@ -2148,14 +2148,14 @@ mod cell_semantics {
         let c = ctx.cell(1i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c) + 100
+            ctx.get(&c) + 100
         });
 
         assert_eq!(ctx.get(&s), 101);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
 
         // Set different value.
-        ctx.set_cell(&c, 2);
+        ctx.set(&c, 2);
         assert!(
             !ctx.is_set(&s),
             "slot should be cleared after cell value changed"
@@ -2180,7 +2180,7 @@ mod cell_semantics {
         let root = ctx.cell(1i32);
         let a = ctx.slot(move |ctx| {
             A_COUNT.with(|c| c.set(c.get() + 1));
-            ctx.get_cell(&root)
+            ctx.get(&root)
         });
         let b = ctx.slot(move |ctx| {
             B_COUNT.with(|c| c.set(c.get() + 1));
@@ -2197,7 +2197,7 @@ mod cell_semantics {
         C_COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
 
         // Change root — all three slots should invalidate and recompute on access.
-        ctx.set_cell(&root, 10);
+        ctx.set(&root, 10);
         assert_eq!(ctx.get(&c), 60); // 10 * 2 * 3
         A_COUNT.with(|cnt| assert_eq!(cnt.get(), 2));
         B_COUNT.with(|cnt| assert_eq!(cnt.get(), 2));
@@ -2216,13 +2216,13 @@ mod cell_semantics {
         let name = ctx.cell("alice".to_string());
         let greeting = ctx.slot(move |ctx| {
             COUNT.with(|c| c.set(c.get() + 1));
-            format!("hi {}", ctx.get_cell(&name))
+            format!("hi {}", ctx.get(&name))
         });
 
         assert_eq!(ctx.get(&greeting), "hi alice");
 
         // Same value (different allocation, same content).
-        ctx.set_cell(&name, "alice".to_string());
+        ctx.set(&name, "alice".to_string());
         assert!(
             ctx.is_set(&greeting),
             "should not invalidate on equal string"
@@ -2230,7 +2230,7 @@ mod cell_semantics {
         COUNT.with(|c| assert_eq!(c.get(), 1));
 
         // Different value.
-        ctx.set_cell(&name, "bob".to_string());
+        ctx.set(&name, "bob".to_string());
         assert!(!ctx.is_set(&greeting));
         assert_eq!(ctx.get(&greeting), "hi bob");
         COUNT.with(|c| assert_eq!(c.get(), 2));
@@ -2258,7 +2258,7 @@ mod dependency_tracking {
         let c = ctx.cell(1i32);
         let inner = ctx.slot(move |ctx| {
             INNER_COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c) * 10
+            ctx.get(&c) * 10
         });
         let outer = ctx.slot(move |ctx| {
             OUTER_COUNT.with(|cnt| cnt.set(cnt.get() + 1));
@@ -2269,7 +2269,7 @@ mod dependency_tracking {
 
         // Change cell — dependents become dirty until their dependency chain is
         // refreshed.
-        ctx.set_cell(&c, 5);
+        ctx.set(&c, 5);
         assert!(!ctx.is_set(&inner));
         assert!(!ctx.is_set(&outer));
 
@@ -2291,20 +2291,20 @@ mod dependency_tracking {
         let c2 = ctx.cell(20i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c1) + ctx.get_cell(&c2)
+            ctx.get(&c1) + ctx.get(&c2)
         });
 
         assert_eq!(ctx.get(&s), 30);
         COUNT.with(|c| assert_eq!(c.get(), 1));
 
         // Changing c1 should invalidate s.
-        ctx.set_cell(&c1, 100);
+        ctx.set(&c1, 100);
         assert!(!ctx.is_set(&s));
         assert_eq!(ctx.get(&s), 120);
         COUNT.with(|c| assert_eq!(c.get(), 2));
 
         // Changing c2 should also invalidate s.
-        ctx.set_cell(&c2, 200);
+        ctx.set(&c2, 200);
         assert!(!ctx.is_set(&s));
         assert_eq!(ctx.get(&s), 300);
         COUNT.with(|c| assert_eq!(c.get(), 3));
@@ -2329,10 +2329,10 @@ mod dependency_tracking {
         // When flag is true, depends on a. When false, depends on b.
         let s = ctx.slot(move |ctx| {
             COUNT.with(|c| c.set(c.get() + 1));
-            if ctx.get_cell(&flag) {
-                ctx.get_cell(&a)
+            if ctx.get(&flag) {
+                ctx.get(&a)
             } else {
-                ctx.get_cell(&b)
+                ctx.get(&b)
             }
         });
 
@@ -2341,7 +2341,7 @@ mod dependency_tracking {
         COUNT.with(|c| assert_eq!(c.get(), 1));
 
         // Changing b should NOT invalidate s (s doesn't depend on b right now).
-        ctx.set_cell(&b, 99);
+        ctx.set(&b, 99);
         assert!(
             ctx.is_set(&s),
             "s should still be cached since it doesn't depend on b"
@@ -2349,13 +2349,13 @@ mod dependency_tracking {
         COUNT.with(|c| assert_eq!(c.get(), 1));
 
         // Changing flag to false → s recomputes, now depends on b.
-        ctx.set_cell(&flag, false);
+        ctx.set(&flag, false);
         assert!(!ctx.is_set(&s));
         assert_eq!(ctx.get(&s), 99); // b was set to 99
         COUNT.with(|c| assert_eq!(c.get(), 2));
 
         // Now changing a should NOT invalidate s (dynamic dep changed).
-        ctx.set_cell(&a, 999);
+        ctx.set(&a, 999);
         assert!(
             ctx.is_set(&s),
             "s should still be cached since it no longer depends on a"
@@ -2363,7 +2363,7 @@ mod dependency_tracking {
         COUNT.with(|c| assert_eq!(c.get(), 2));
 
         // But changing b should invalidate s now.
-        ctx.set_cell(&b, 50);
+        ctx.set(&b, 50);
         assert!(!ctx.is_set(&s));
         assert_eq!(ctx.get(&s), 50);
         COUNT.with(|c| assert_eq!(c.get(), 3));
@@ -2382,26 +2382,26 @@ mod invalidation_semantics {
     fn cell_set_clears_dependents_not_self() {
         let ctx = Context::new();
         let c = ctx.cell(1i32);
-        let s = ctx.slot(move |ctx| ctx.get_cell(&c));
+        let s = ctx.slot(move |ctx| ctx.get(&c));
 
         assert_eq!(ctx.get(&s), 1);
-        ctx.set_cell(&c, 2);
+        ctx.set(&c, 2);
 
         // Cell has new value immediately.
-        assert_eq!(ctx.get_cell(&c), 2);
+        assert_eq!(ctx.get(&c), 2);
         // Dependent slot is forced stale.
         assert!(!ctx.is_set(&s));
         // Recomputes with new value.
         assert_eq!(ctx.get(&s), 2);
     }
 
-    /// SPEC: `ctx.set_cell()` marks direct slot dependents stale without hard
+    /// SPEC: `ctx.set()` marks direct slot dependents stale without hard
     /// clearing downstream memoized values.
     #[test]
     fn slot_clear_cascades() {
         let ctx = Context::new();
         let c = ctx.cell(1i32);
-        let a = ctx.slot(move |ctx| ctx.get_cell(&c));
+        let a = ctx.slot(move |ctx| ctx.get(&c));
         let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
 
         assert_eq!(ctx.get(&b), 11);
@@ -2410,7 +2410,7 @@ mod invalidation_semantics {
 
         // Changing the cell makes both slots dirty until access proves whether
         // `a` changed.
-        ctx.set_cell(&c, 2);
+        ctx.set(&c, 2);
         assert!(!ctx.is_set(&a));
         assert!(!ctx.is_set(&b));
         assert_eq!(ctx.get(&b), 12);
@@ -2428,19 +2428,19 @@ mod invalidation_semantics {
         let c = ctx.cell(1i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c)
+            ctx.get(&c)
         });
 
         assert_eq!(ctx.get(&s), 1);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
 
         // Invalidate.
-        ctx.set_cell(&c, 2);
+        ctx.set(&c, 2);
         // Count should NOT have increased — no eager recompute.
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1, "should not recompute eagerly"));
 
         // Invalidate again without ever accessing.
-        ctx.set_cell(&c, 3);
+        ctx.set(&c, 3);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1, "still should not recompute"));
 
         // Now access — should recompute once.
@@ -2460,18 +2460,18 @@ mod invalidation_semantics {
         let c = ctx.cell(0i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c)
+            ctx.get(&c)
         });
 
         assert_eq!(ctx.get(&s), 0);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
 
         // Multiple set_cell calls without accessing s.
-        ctx.set_cell(&c, 1);
-        ctx.set_cell(&c, 2);
-        ctx.set_cell(&c, 3);
-        ctx.set_cell(&c, 4);
-        ctx.set_cell(&c, 5);
+        ctx.set(&c, 1);
+        ctx.set(&c, 2);
+        ctx.set(&c, 3);
+        ctx.set(&c, 4);
+        ctx.set(&c, 5);
 
         // Only one recompute on access.
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1, "no recomputes during invalidation"));
@@ -2489,7 +2489,7 @@ mod invalidation_semantics {
         let parity_computes_for_slot = Rc::clone(&parity_computes);
         let parity = ctx.computed(move |ctx| {
             *parity_computes_for_slot.borrow_mut() += 1;
-            ctx.get_cell(&root) % 2
+            ctx.get(&root) % 2
         });
         let downstream_computes = Rc::new(RefCell::new(0));
         let downstream_computes_for_slot = Rc::clone(&downstream_computes);
@@ -2502,7 +2502,7 @@ mod invalidation_semantics {
         assert_eq!(*parity_computes.borrow(), 1);
         assert_eq!(*downstream_computes.borrow(), 1);
 
-        ctx.set_cell(&root, 2);
+        ctx.set(&root, 2);
         assert!(!ctx.is_set(&parity));
         assert!(!ctx.is_set(&downstream));
 
@@ -2535,7 +2535,7 @@ mod invalidation_semantics {
             "clean downstream read should keep the preserved cache"
         );
 
-        ctx.set_cell(&root, 3);
+        ctx.set(&root, 3);
         assert_eq!(ctx.get(&downstream), 10);
         assert_eq!(*parity_computes.borrow(), 3);
         assert_eq!(
@@ -2562,20 +2562,20 @@ mod effect_system {
         let seen_for_effect = Rc::clone(&seen);
 
         let effect = ctx.effect(move |ctx| {
-            seen_for_effect.borrow_mut().push(ctx.get_cell(&count));
+            seen_for_effect.borrow_mut().push(ctx.get(&count));
         });
 
         assert!(effect.is_active(&ctx));
         assert_eq!(*seen.borrow(), vec![0], "effect should run on creation");
 
-        ctx.set_cell(&count, 1);
+        ctx.set(&count, 1);
         assert_eq!(
             *seen.borrow(),
             vec![0, 1],
             "effect should rerun after dependency changes"
         );
 
-        ctx.set_cell(&count, 1);
+        ctx.set(&count, 1);
         assert_eq!(
             *seen.borrow(),
             vec![0, 1],
@@ -2588,8 +2588,8 @@ mod effect_system {
     fn effect_tracks_slot_dependencies_and_coalesces_scheduling() {
         let ctx = Context::new();
         let root = ctx.cell(1i32);
-        let left = ctx.slot(move |ctx| ctx.get_cell(&root) + 1);
-        let right = ctx.slot(move |ctx| ctx.get_cell(&root) + 2);
+        let left = ctx.slot(move |ctx| ctx.get(&root) + 1);
+        let right = ctx.slot(move |ctx| ctx.get(&root) + 2);
         let sum = ctx.slot(move |ctx| ctx.get(&left) + ctx.get(&right));
         let seen = Rc::new(RefCell::new(Vec::new()));
         let seen_for_effect = Rc::clone(&seen);
@@ -2600,7 +2600,7 @@ mod effect_system {
 
         assert_eq!(*seen.borrow(), vec![5]);
 
-        ctx.set_cell(&root, 10);
+        ctx.set(&root, 10);
         assert_eq!(
             *seen.borrow(),
             vec![5, 23],
@@ -2618,7 +2618,7 @@ mod effect_system {
         let parity_computes_for_slot = Rc::clone(&parity_computes);
         let parity = ctx.computed(move |ctx| {
             *parity_computes_for_slot.borrow_mut() += 1;
-            ctx.get_cell(&root) % 2
+            ctx.get(&root) % 2
         });
         let label_computes = Rc::new(RefCell::new(0));
         let label_computes_for_slot = Rc::clone(&label_computes);
@@ -2637,7 +2637,7 @@ mod effect_system {
         assert_eq!(*parity_computes.borrow(), 1);
         assert_eq!(*label_computes.borrow(), 1);
 
-        ctx.set_cell(&root, 2);
+        ctx.set(&root, 2);
         assert_eq!(
             *seen.borrow(),
             vec![0],
@@ -2650,7 +2650,7 @@ mod effect_system {
             "effect validation should not recompute unchanged downstream slot"
         );
 
-        ctx.set_cell(&root, 3);
+        ctx.set(&root, 3);
         assert_eq!(*seen.borrow(), vec![0, 10]);
         assert_eq!(*parity_computes.borrow(), 3);
         assert_eq!(*label_computes.borrow(), 2);
@@ -2665,7 +2665,7 @@ mod effect_system {
         let events_for_effect = Rc::clone(&events);
 
         let effect = ctx.effect(move |ctx| {
-            let current = ctx.get_cell(&value);
+            let current = ctx.get(&value);
             events_for_effect
                 .borrow_mut()
                 .push(format!("run:{current}"));
@@ -2679,7 +2679,7 @@ mod effect_system {
 
         assert_eq!(*events.borrow(), vec!["run:0"]);
 
-        ctx.set_cell(&value, 1);
+        ctx.set(&value, 1);
         assert_eq!(
             *events.borrow(),
             vec!["run:0", "cleanup:0", "run:1"],
@@ -2694,7 +2694,7 @@ mod effect_system {
             "dispose should run the latest cleanup"
         );
 
-        ctx.set_cell(&value, 2);
+        ctx.set(&value, 2);
         assert_eq!(
             *events.borrow(),
             vec!["run:0", "cleanup:0", "run:1", "cleanup:1"],
@@ -2713,12 +2713,12 @@ mod effect_system {
         let events_for_effect = Rc::clone(&events);
 
         let effect = ctx.effect(move |ctx| {
-            let current = ctx.get_cell(&value);
+            let current = ctx.get(&value);
             events_for_effect
                 .borrow_mut()
                 .push(format!("run:{current}"));
             if current == 0 {
-                ctx.set_cell(&value, 1);
+                ctx.set(&value, 1);
             }
             let events_for_cleanup = Rc::clone(&events_for_effect);
             move || {
@@ -2753,34 +2753,34 @@ mod effect_system {
         let seen_for_effect = Rc::clone(&seen);
 
         let _effect = ctx.effect(move |ctx| {
-            let value = if ctx.get_cell(&flag) {
-                ctx.get_cell(&a)
+            let value = if ctx.get(&flag) {
+                ctx.get(&a)
             } else {
-                ctx.get_cell(&b)
+                ctx.get(&b)
             };
             seen_for_effect.borrow_mut().push(value);
         });
 
         assert_eq!(*seen.borrow(), vec![10]);
 
-        ctx.set_cell(&b, 99);
+        ctx.set(&b, 99);
         assert_eq!(
             *seen.borrow(),
             vec![10],
             "inactive branch should not schedule the effect"
         );
 
-        ctx.set_cell(&flag, false);
+        ctx.set(&flag, false);
         assert_eq!(*seen.borrow(), vec![10, 99]);
 
-        ctx.set_cell(&a, 100);
+        ctx.set(&a, 100);
         assert_eq!(
             *seen.borrow(),
             vec![10, 99],
             "old branch dependency should be unsubscribed"
         );
 
-        ctx.set_cell(&b, 50);
+        ctx.set(&b, 50);
         assert_eq!(*seen.borrow(), vec![10, 99, 50]);
     }
 }
@@ -2801,17 +2801,17 @@ mod batch_updates {
         let computes_for_slot = Rc::clone(&computes);
         let doubled = ctx.slot(move |ctx| {
             *computes_for_slot.borrow_mut() += 1;
-            ctx.get_cell(&value) * 2
+            ctx.get(&value) * 2
         });
 
         assert_eq!(ctx.get(&doubled), 0);
         assert_eq!(*computes.borrow(), 1);
 
         ctx.batch(|ctx| {
-            ctx.set_cell(&value, 1);
-            ctx.set_cell(&value, 2);
+            ctx.set(&value, 1);
+            ctx.set(&value, 2);
 
-            assert_eq!(ctx.get_cell(&value), 2);
+            assert_eq!(ctx.get(&value), 2);
             assert!(
                 ctx.is_set(&doubled),
                 "dependent slot should stay cached while the batch is open"
@@ -2844,15 +2844,15 @@ mod batch_updates {
         let seen_for_effect = Rc::clone(&seen);
 
         let _effect = ctx.effect(move |ctx| {
-            seen_for_effect.borrow_mut().push(ctx.get_cell(&value));
+            seen_for_effect.borrow_mut().push(ctx.get(&value));
         });
 
         assert_eq!(*seen.borrow(), vec![0]);
 
         ctx.batch(|ctx| {
-            ctx.set_cell(&value, 1);
-            ctx.set_cell(&value, 2);
-            ctx.set_cell(&value, 3);
+            ctx.set(&value, 1);
+            ctx.set(&value, 2);
+            ctx.set(&value, 3);
             assert_eq!(
                 *seen.borrow(),
                 vec![0],
@@ -2876,14 +2876,14 @@ mod batch_updates {
         let seen_for_effect = Rc::clone(&seen);
 
         let _effect = ctx.effect(move |ctx| {
-            seen_for_effect.borrow_mut().push(ctx.get_cell(&value));
+            seen_for_effect.borrow_mut().push(ctx.get(&value));
         });
 
         ctx.batch(|ctx| {
-            ctx.set_cell(&value, 1);
+            ctx.set(&value, 1);
 
             ctx.batch(|ctx| {
-                ctx.set_cell(&value, 2);
+                ctx.set(&value, 2);
             });
 
             assert_eq!(
@@ -2902,7 +2902,7 @@ mod batch_updates {
     fn batch_defers_slot_clear_and_effect_cleanup() {
         let ctx = Context::new();
         let value = ctx.cell(2i32);
-        let doubled = ctx.slot(move |ctx| ctx.get_cell(&value) * 2);
+        let doubled = ctx.slot(move |ctx| ctx.get(&value) * 2);
         let events = Rc::new(RefCell::new(Vec::new()));
         let events_for_effect = Rc::clone(&events);
 
@@ -2950,7 +2950,7 @@ mod batch_updates {
         let computes_for_slot = Rc::clone(&computes);
         let doubled = ctx.slot(move |ctx| {
             *computes_for_slot.borrow_mut() += 1;
-            ctx.get_cell(&value) * 2
+            ctx.get(&value) * 2
         });
 
         assert_eq!(ctx.get(&doubled), 4);
@@ -2987,7 +2987,7 @@ mod batch_updates {
     fn batch_cell_set_plus_clear_dependents_hard_clears_transitive_slots() {
         let ctx = Context::new();
         let value = ctx.cell(2i32);
-        let doubled = ctx.slot(move |ctx| ctx.get_cell(&value) * 2);
+        let doubled = ctx.slot(move |ctx| ctx.get(&value) * 2);
         let label = ctx.slot(move |ctx| format!("value:{}", ctx.get(&doubled)));
 
         assert_eq!(ctx.get(&label), "value:4");
@@ -2995,7 +2995,7 @@ mod batch_updates {
         assert!(ctx.is_set(&label));
 
         ctx.batch(|ctx| {
-            ctx.set_cell(&value, 3);
+            ctx.set(&value, 3);
             value.clear_dependents(ctx);
             assert!(ctx.is_set(&doubled));
             assert!(ctx.is_set(&label));
@@ -3050,15 +3050,15 @@ mod edge_cases {
 
         let a = ctx.slot(move |ctx| {
             A_COUNT.with(|c| c.set(c.get() + 1));
-            ctx.get_cell(&base) + 1
+            ctx.get(&base) + 1
         });
         let b = ctx.slot(move |ctx| {
             B_COUNT.with(|c| c.set(c.get() + 1));
-            ctx.get_cell(&base) + 2
+            ctx.get(&base) + 2
         });
         let c = ctx.slot(move |ctx| {
             C_COUNT.with(|c| c.set(c.get() + 1));
-            ctx.get_cell(&base) + 3
+            ctx.get(&base) + 3
         });
 
         assert_eq!(ctx.get(&a), 11);
@@ -3066,7 +3066,7 @@ mod edge_cases {
         assert_eq!(ctx.get(&c), 13);
 
         // Change base — all three should invalidate.
-        ctx.set_cell(&base, 100);
+        ctx.set(&base, 100);
         assert!(!ctx.is_set(&a));
         assert!(!ctx.is_set(&b));
         assert!(!ctx.is_set(&c));
@@ -3097,7 +3097,7 @@ mod edge_cases {
                 v[0] += 1;
                 c.set(v);
             });
-            ctx.get_cell(&root)
+            ctx.get(&root)
         });
         let s2 = ctx.slot(move |ctx| {
             COUNTS.with(|c| {
@@ -3137,7 +3137,7 @@ mod edge_cases {
         COUNTS.with(|c| assert_eq!(c.get(), [1, 1, 1, 1, 1], "each slot computed once"));
 
         // Change root.
-        ctx.set_cell(&root, 100);
+        ctx.set(&root, 100);
         // The chain is dirty until access proves each previous layer changed.
         assert!(!ctx.is_set(&s1));
         assert!(!ctx.is_set(&s2));
@@ -3165,14 +3165,14 @@ mod edge_cases {
 
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&a) + ctx.get_cell(&b) + ctx.get_cell(&c)
+            ctx.get(&a) + ctx.get(&b) + ctx.get(&c)
         });
 
         assert_eq!(ctx.get(&s), 6);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
 
         // Change any one cell — slot invalidates.
-        ctx.set_cell(&b, 20);
+        ctx.set(&b, 20);
         assert!(!ctx.is_set(&s));
         assert_eq!(ctx.get(&s), 24); // 1 + 20 + 3
         COUNT.with(|cnt| assert_eq!(cnt.get(), 2));
@@ -3191,16 +3191,16 @@ mod edge_cases {
         let c = ctx.cell(1i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c) * 10
+            ctx.get(&c) * 10
         });
 
         // First cycle.
         assert_eq!(ctx.get(&s), 10);
-        ctx.set_cell(&c, 2);
+        ctx.set(&c, 2);
         assert_eq!(ctx.get(&s), 20);
 
         // Second cycle — deps should still work.
-        ctx.set_cell(&c, 3);
+        ctx.set(&c, 3);
         assert!(
             !ctx.is_set(&s),
             "dep should still be tracked after recompute"
@@ -3208,7 +3208,7 @@ mod edge_cases {
         assert_eq!(ctx.get(&s), 30);
 
         // Third cycle.
-        ctx.set_cell(&c, 4);
+        ctx.set(&c, 4);
         assert_eq!(ctx.get(&s), 40);
 
         COUNT.with(|cnt| assert_eq!(cnt.get(), 4, "should compute exactly 4 times"));
@@ -3225,8 +3225,8 @@ mod edge_cases {
 
         let ctx = Context::new();
         let root = ctx.cell(1i32);
-        let a = ctx.slot(move |ctx| ctx.get_cell(&root) + 1);
-        let b = ctx.slot(move |ctx| ctx.get_cell(&root) + 2);
+        let a = ctx.slot(move |ctx| ctx.get(&root) + 1);
+        let b = ctx.slot(move |ctx| ctx.get(&root) + 2);
         let d = ctx.slot(move |ctx| {
             D_COUNT.with(|c| c.set(c.get() + 1));
             ctx.get(&a) + ctx.get(&b)
@@ -3235,7 +3235,7 @@ mod edge_cases {
         assert_eq!(ctx.get(&d), 5); // (1+1) + (1+2) = 5
         D_COUNT.with(|c| assert_eq!(c.get(), 1));
 
-        ctx.set_cell(&root, 10);
+        ctx.set(&root, 10);
         assert!(!ctx.is_set(&a));
         assert!(!ctx.is_set(&b));
         assert!(!ctx.is_set(&d));
@@ -3258,7 +3258,7 @@ mod edge_cases {
         let c = ctx.cell(1i32);
         let a = ctx.slot(move |ctx| {
             A_COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c)
+            ctx.get(&c)
         });
         let b = ctx.slot(move |ctx| {
             B_COUNT.with(|cnt| cnt.set(cnt.get() + 1));
@@ -3283,13 +3283,13 @@ mod edge_cases {
         let c = ctx.cell(0i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c)
+            ctx.get(&c)
         });
 
         // Set cell multiple times before ever accessing the slot.
-        ctx.set_cell(&c, 1);
-        ctx.set_cell(&c, 2);
-        ctx.set_cell(&c, 3);
+        ctx.set(&c, 1);
+        ctx.set(&c, 2);
+        ctx.set(&c, 3);
 
         // First access should see latest value and compute only once.
         assert_eq!(ctx.get(&s), 3);
@@ -3308,16 +3308,16 @@ mod edge_cases {
         let c = ctx.cell(1i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c)
+            ctx.get(&c)
         });
 
         assert_eq!(ctx.get(&s), 1);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1));
 
         // Invalidate but never re-access.
-        ctx.set_cell(&c, 2);
-        ctx.set_cell(&c, 3);
-        ctx.set_cell(&c, 4);
+        ctx.set(&c, 2);
+        ctx.set(&c, 3);
+        ctx.set(&c, 4);
 
         // Compute count should still be 1.
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1, "no recompute without access"));
@@ -3392,7 +3392,7 @@ mod edge_cases {
         let c = ctx.cell(10i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
-            ctx.get_cell(&c) * 2
+            ctx.get(&c) * 2
         });
 
         assert_eq!(ctx.get(&s), 20);
@@ -3400,7 +3400,7 @@ mod edge_cases {
 
         c.clear_dependents(&ctx);
         assert!(!ctx.is_set(&s), "slot should be cleared");
-        assert_eq!(ctx.get_cell(&c), 10, "cell value unchanged");
+        assert_eq!(ctx.get(&c), 10, "cell value unchanged");
 
         assert_eq!(ctx.get(&s), 20);
         COUNT.with(|cnt| assert_eq!(cnt.get(), 2, "slot recomputed after clear_dependents"));
@@ -3411,7 +3411,7 @@ mod edge_cases {
     fn cell_handle_clear_dependents_cascades() {
         let ctx = Context::new();
         let c = ctx.cell(1i32);
-        let a = ctx.slot(move |ctx| ctx.get_cell(&c) + 1);
+        let a = ctx.slot(move |ctx| ctx.get(&c) + 1);
         let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
         let d = ctx.slot(move |ctx| ctx.get(&b) + 100);
 
@@ -3424,7 +3424,7 @@ mod edge_cases {
         assert!(!ctx.is_set(&a));
         assert!(!ctx.is_set(&b));
         assert!(!ctx.is_set(&d));
-        assert_eq!(ctx.get_cell(&c), 1, "cell value unchanged");
+        assert_eq!(ctx.get(&c), 1, "cell value unchanged");
 
         assert_eq!(ctx.get(&d), 112);
     }
@@ -3434,13 +3434,13 @@ mod edge_cases {
     fn cell_handle_set_updates_and_invalidates_dependents() {
         let ctx = Context::new();
         let c = ctx.cell(1i32);
-        let doubled = ctx.slot(move |ctx| ctx.get_cell(&c) * 2);
+        let doubled = ctx.slot(move |ctx| ctx.get(&c) * 2);
 
         assert_eq!(ctx.get(&doubled), 2);
         c.set(&ctx, 21);
 
         assert!(!ctx.is_set(&doubled));
-        assert_eq!(ctx.get_cell(&c), 21);
+        assert_eq!(ctx.get(&c), 21);
         assert_eq!(ctx.get(&doubled), 42);
     }
 
@@ -3449,13 +3449,13 @@ mod edge_cases {
     fn slot_handle_copy_refers_to_same_slot() {
         let ctx = Context::new();
         let c = ctx.cell(5i32);
-        let s = ctx.slot(move |ctx| ctx.get_cell(&c) * 2);
+        let s = ctx.slot(move |ctx| ctx.get(&c) * 2);
         let s_copy = s;
 
         assert_eq!(ctx.get(&s), 10);
         assert_eq!(ctx.get(&s_copy), 10);
 
-        ctx.set_cell(&c, 7);
+        ctx.set(&c, 7);
         assert_eq!(ctx.get(&s), 14);
         assert_eq!(ctx.get(&s_copy), 14);
     }
@@ -3467,8 +3467,8 @@ mod edge_cases {
         let c = ctx.cell(1i32);
         let c_copy = c;
 
-        ctx.set_cell(&c, 42);
-        assert_eq!(ctx.get_cell(&c_copy), 42);
+        ctx.set(&c, 42);
+        assert_eq!(ctx.get(&c_copy), 42);
     }
 
     /// Slots can produce non-numeric types (Vec, struct, etc.).
@@ -3477,12 +3477,12 @@ mod edge_cases {
         let ctx = Context::new();
         let size = ctx.cell(3usize);
         let v = ctx.slot(move |ctx| {
-            let n = ctx.get_cell(&size);
+            let n = ctx.get(&size);
             (0..n).collect::<Vec<usize>>()
         });
 
         assert_eq!(ctx.get(&v), vec![0, 1, 2]);
-        ctx.set_cell(&size, 5);
+        ctx.set(&size, 5);
         assert_eq!(ctx.get(&v), vec![0, 1, 2, 3, 4]);
     }
 }
@@ -3505,7 +3505,7 @@ mod handle_get_methods {
     fn cell_handle_get_matches_context_get_cell() {
         let ctx = Context::new();
         let c = ctx.cell(99i32);
-        assert_eq!(c.get(&ctx), ctx.get_cell(&c));
+        assert_eq!(c.get(&ctx), ctx.get(&c));
     }
 
     #[test]
@@ -3547,7 +3547,7 @@ mod handle_get_methods {
     fn thread_safe_cell_get_cell_still_works() {
         let ctx = ThreadSafeContext::new();
         let c = ctx.cell(42i32);
-        assert_eq!(ctx.get_cell(&c), 42);
+        assert_eq!(ctx.get(&c), 42);
     }
 
     #[cfg(feature = "thread-safe")]
@@ -3555,7 +3555,7 @@ mod handle_get_methods {
     fn thread_safe_slot_get_still_works() {
         let ctx = ThreadSafeContext::new();
         let c = ctx.cell(10i32);
-        let s = ctx.computed(move |ctx| ctx.get_cell(&c) * 2);
+        let s = ctx.computed(move |ctx| ctx.get(&c) * 2);
         assert_eq!(ctx.get(&s), 20);
     }
 }

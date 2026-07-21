@@ -526,7 +526,7 @@ impl StateChart {
 
     /// The full active configuration (active leaves plus all active ancestors).
     pub fn configuration(&self, ctx: &Context) -> BTreeSet<String> {
-        ctx.get_cell(&self.config)
+        ctx.get(&self.config)
     }
 
     /// Active atomic leaves, sorted (one per parallel region; one for single-region).
@@ -557,7 +557,7 @@ impl StateChart {
                 drop(history);
                 *self.last_actions.borrow_mut() = actions;
                 if new_config != config {
-                    ctx.set_cell(&self.config, new_config);
+                    ctx.set(&self.config, new_config);
                 }
                 true
             }
@@ -607,7 +607,7 @@ impl ThreadSafeStateChart {
 
     /// The full active configuration (active leaves plus all active ancestors).
     pub fn configuration(&self, ctx: &ThreadSafeContext) -> BTreeSet<String> {
-        ctx.get_cell(&self.config)
+        ctx.get(&self.config)
     }
 
     /// Active atomic leaves, sorted (one per parallel region).
@@ -642,7 +642,7 @@ impl ThreadSafeStateChart {
                 drop(history);
                 *self.last_actions.lock() = actions;
                 if new_config != config {
-                    ctx.set_cell(&self.config, new_config);
+                    ctx.set(&self.config, new_config);
                 }
                 true
             }
@@ -691,7 +691,7 @@ impl AsyncStateChart {
 
     /// The full active configuration (active leaves plus all active ancestors).
     pub fn configuration(&self, ctx: &AsyncContext) -> BTreeSet<String> {
-        ctx.get_cell(&self.config)
+        ctx.get(&self.config)
     }
 
     /// Active atomic leaves, sorted (one per parallel region).
@@ -720,7 +720,7 @@ impl AsyncStateChart {
                 drop(history);
                 *self.last_actions.lock() = actions;
                 if new_config != config {
-                    ctx.set_cell(&self.config, new_config);
+                    ctx.set(&self.config, new_config);
                 }
                 true
             }

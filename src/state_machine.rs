@@ -98,10 +98,10 @@ where
     /// not invalidate dependents (the `PartialEq` guard on the underlying cell
     /// suppresses no-op updates).
     pub fn send(&self, ctx: &Context, event: E) -> bool {
-        let current = ctx.get_cell(&self.state);
+        let current = ctx.get(&self.state);
         match (self.transition)(&current, &event) {
             Some(next) => {
-                ctx.set_cell(&self.state, next);
+                ctx.set(&self.state, next);
                 true
             }
             None => false,
@@ -110,7 +110,7 @@ where
 
     /// Read the current state.
     pub fn state(&self, ctx: &Context) -> S {
-        ctx.get_cell(&self.state)
+        ctx.get(&self.state)
     }
 
     /// Returns the underlying cell handle so other reactive nodes
@@ -141,7 +141,7 @@ where
         let prev: Rc<RefCell<Option<S>>> = Rc::new(RefCell::new(None));
         let handler = Rc::new(handler);
         ctx.effect(move |ctx| {
-            let current = ctx.get_cell(&state);
+            let current = ctx.get(&state);
             let mut prev_ref = prev.borrow_mut();
             if let Some(ref old) = *prev_ref
                 && old != &current
@@ -160,7 +160,7 @@ where
     /// machine state without requiring a manual read.
     pub fn state_is(&self, ctx: &Context, target: S) -> Computed<bool> {
         let state = self.state;
-        ctx.signal(move |ctx| ctx.get_cell(&state) == target)
+        ctx.signal(move |ctx| ctx.get(&state) == target)
     }
 }
 
@@ -251,10 +251,10 @@ where
     /// dependents (the `PartialEq` guard on the underlying cell suppresses
     /// no-op updates).
     pub fn send(&self, ctx: &ThreadSafeContext, event: E) -> bool {
-        let current = ctx.get_cell(&self.state);
+        let current = ctx.get(&self.state);
         match (self.transition)(&current, &event) {
             Some(next) => {
-                ctx.set_cell(&self.state, next);
+                ctx.set(&self.state, next);
                 true
             }
             None => false,
@@ -263,7 +263,7 @@ where
 
     /// Read the current state.
     pub fn state(&self, ctx: &ThreadSafeContext) -> S {
-        ctx.get_cell(&self.state)
+        ctx.get(&self.state)
     }
 
     /// Returns the underlying cell handle so other reactive nodes
@@ -294,7 +294,7 @@ where
         let prev: Arc<Mutex<Option<S>>> = Arc::new(Mutex::new(None));
         let handler = Arc::new(handler);
         ctx.effect(move |ctx: &ThreadSafeContext| {
-            let current = ctx.get_cell(&state);
+            let current = ctx.get(&state);
             let mut prev_ref = prev.lock();
             if let Some(ref old) = *prev_ref
                 && old != &current
@@ -313,7 +313,7 @@ where
     /// machine state without requiring a manual read.
     pub fn state_is(&self, ctx: &ThreadSafeContext, target: S) -> ThreadSafeSignalHandle<bool> {
         let state = self.state;
-        ctx.signal(move |ctx: &ThreadSafeContext| ctx.get_cell(&state) == target)
+        ctx.signal(move |ctx: &ThreadSafeContext| ctx.get(&state) == target)
     }
 }
 
@@ -408,10 +408,10 @@ where
     /// slots/effects that depend on the machine's state are invalidated and
     /// rescheduled synchronously, then re-resolved on the runtime.
     pub fn send(&self, ctx: &AsyncContext, event: E) -> bool {
-        let current = ctx.get_cell(&self.state);
+        let current = ctx.get(&self.state);
         match (self.transition)(&current, &event) {
             Some(next) => {
-                ctx.set_cell(&self.state, next);
+                ctx.set(&self.state, next);
                 true
             }
             None => false,
@@ -424,7 +424,7 @@ where
     /// [`AsyncContext`], so reading the machine's state does not require an
     /// await.
     pub fn state(&self, ctx: &AsyncContext) -> S {
-        ctx.get_cell(&self.state)
+        ctx.get(&self.state)
     }
 
     /// Returns the underlying cell handle so other reactive nodes
@@ -458,7 +458,7 @@ where
         let prev: Arc<Mutex<Option<S>>> = Arc::new(Mutex::new(None));
         let handler = Arc::new(handler);
         ctx.effect_async(move |compute_ctx: AsyncComputeContext| {
-            let current = compute_ctx.get_cell(&state);
+            let current = compute_ctx.get(&state);
             let prev = prev.clone();
             let handler = handler.clone();
             async move {
@@ -489,7 +489,7 @@ where
         let state = self.state;
         ctx.signal_async(move |compute_ctx: AsyncComputeContext| {
             let t = target.clone();
-            async move { compute_ctx.get_cell(&state) == t }
+            async move { compute_ctx.get(&state) == t }
         })
     }
 }

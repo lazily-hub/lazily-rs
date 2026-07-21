@@ -113,13 +113,13 @@ where
     /// Reactively read this node's value. A reader is invalidated only when
     /// *this* node's value changes, not when a sibling or child changes.
     pub fn get(&self, ctx: &Context) -> V {
-        ctx.get_cell(&self.inner.value)
+        ctx.get(&self.inner.value)
     }
 
     /// Set this node's value. Invalidates only this node's value dependents
     /// (PartialEq-guarded — a no-op write does not invalidate).
     pub fn set(&self, ctx: &Context, value: V) {
-        ctx.set_cell(&self.inner.value, value);
+        ctx.set(&self.inner.value, value);
     }
 
     /// Insert (and return) a new leaf child appended at the end of this node's

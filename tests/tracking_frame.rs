@@ -27,7 +27,7 @@ fn quiet<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
 fn a_panic_out_of_a_slot_compute_does_not_strand_the_frame() {
     let ctx = Context::new();
     let src = ctx.cell(1i64);
-    let mid = ctx.computed(move |c| c.get_cell(&src) + 1);
+    let mid = ctx.computed(move |c| c.get(&src) + 1);
     let survivor = ctx.computed(move |c| c.get(&mid) * 10);
     assert_eq!(ctx.get(&survivor), 20);
 
@@ -39,7 +39,7 @@ fn a_panic_out_of_a_slot_compute_does_not_strand_the_frame() {
 
     // A top-level read is not inside any compute, so it must register nothing.
     let fresh = ctx.cell(100i64);
-    assert_eq!(ctx.get_cell(&fresh), 100);
+    assert_eq!(ctx.get(&fresh), 100);
     assert_eq!(
         ctx.dependent_count(&fresh),
         0,
@@ -51,14 +51,14 @@ fn a_panic_out_of_a_slot_compute_does_not_strand_the_frame() {
 fn a_panic_out_of_an_effect_body_does_not_strand_the_frame() {
     let ctx = Context::new();
     let src = ctx.cell(1i64);
-    let mid = ctx.computed(move |c| c.get_cell(&src) + 1);
+    let mid = ctx.computed(move |c| c.get(&src) + 1);
     // The effect reads `src` directly as well as through `mid`. The direct edge
     // is what survives the disposal and gives the write below something to
     // invalidate, so the effect actually reruns and reaches the disposed `mid`.
     // Reading only `mid` would not do: disposal detaches that edge, the write
     // would reach nothing, and the effect body would never run again.
     let _watch = ctx.effect(move |c| {
-        let _ = c.get_cell(&src);
+        let _ = c.get(&src);
         let _ = c.get(&mid);
     });
 
@@ -66,12 +66,12 @@ fn a_panic_out_of_an_effect_body_does_not_strand_the_frame() {
     // Disposal must not run the survivor, so force the rerun explicitly to
     // reach the effect-body unwind path this test is about.
     assert!(
-        quiet(|| ctx.set_cell(&src, 2)).is_err(),
+        quiet(|| ctx.set(&src, 2)).is_err(),
         "rerunning an effect over a disposed dependency must error"
     );
 
     let fresh = ctx.cell(100i64);
-    assert_eq!(ctx.get_cell(&fresh), 100);
+    assert_eq!(ctx.get(&fresh), 100);
     assert_eq!(
         ctx.dependent_count(&fresh),
         0,

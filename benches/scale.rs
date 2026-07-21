@@ -55,7 +55,7 @@ fn build_graph(n: usize) -> Graph {
     for i in 0..n {
         let a = inputs[i];
         let b = inputs[i.saturating_sub(1)];
-        formulas.push(ctx.computed(move |ctx| ctx.get_cell(&a) + ctx.get_cell(&b)));
+        formulas.push(ctx.computed(move |ctx| ctx.get(&a) + ctx.get(&b)));
     }
     (ctx, inputs, formulas)
 }

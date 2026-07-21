@@ -45,15 +45,15 @@ fn slot_caches_value() {
 fn cell_get_returns_initial_value() {
     let ctx = Context::new();
     let counter = ctx.cell(10i32);
-    assert_eq!(ctx.get_cell(&counter), 10);
+    assert_eq!(ctx.get(&counter), 10);
 }
 
 #[test]
 fn cell_set_updates_value() {
     let ctx = Context::new();
     let counter = ctx.cell(0i32);
-    ctx.set_cell(&counter, 5);
-    assert_eq!(ctx.get_cell(&counter), 5);
+    ctx.set(&counter, 5);
+    assert_eq!(ctx.get(&counter), 5);
 }
 
 #[test]
@@ -67,14 +67,14 @@ fn cell_set_same_value_no_invalidation() {
     let counter = ctx.cell(5i32);
     let doubled = ctx.slot(move |ctx| {
         SAME_COUNT.with(|c| c.set(c.get() + 1));
-        ctx.get_cell(&counter) * 2
+        ctx.get(&counter) * 2
     });
 
     assert_eq!(ctx.get(&doubled), 10);
     SAME_COUNT.with(|c| assert_eq!(c.get(), 1));
 
     // Set same value — should NOT clear the slot.
-    ctx.set_cell(&counter, 5);
+    ctx.set(&counter, 5);
     assert!(
         ctx.is_set(&doubled),
         "slot should still be cached when cell value unchanged"
@@ -92,10 +92,10 @@ fn cell_set_same_value_no_invalidation() {
 fn cell_change_clears_dependent_slot() {
     let ctx = Context::new();
     let counter = ctx.cell(0i32);
-    let doubled = ctx.slot(move |ctx| ctx.get_cell(&counter) * 2);
+    let doubled = ctx.slot(move |ctx| ctx.get(&counter) * 2);
 
     assert_eq!(ctx.get(&doubled), 0);
-    ctx.set_cell(&counter, 5);
+    ctx.set(&counter, 5);
     assert_eq!(ctx.get(&doubled), 10);
 }
 
@@ -104,12 +104,12 @@ fn api_style_example() {
     let ctx = Context::new();
     let counter = ctx.cell(0i32);
     let doubled = ctx.slot(move |ctx| {
-        let val = ctx.get_cell(&counter);
+        let val = ctx.get(&counter);
         val * 2
     });
 
     assert_eq!(ctx.get(&doubled), 0);
-    ctx.set_cell(&counter, 5);
+    ctx.set(&counter, 5);
     // doubled is now invalid but NOT recomputed yet (lazy)
     assert_eq!(ctx.get(&doubled), 10); // recomputed here
 }
@@ -122,12 +122,12 @@ fn api_style_example() {
 fn dependency_chain_clears_transitively() {
     let ctx = Context::new();
     let a = ctx.cell(1i32);
-    let b = ctx.slot(move |ctx| ctx.get_cell(&a) + 10);
+    let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
     let c = ctx.slot(move |ctx| ctx.get(&b) + 100);
 
     assert_eq!(ctx.get(&c), 111); // a=1, b=11, c=111
 
-    ctx.set_cell(&a, 2);
+    ctx.set(&a, 2);
     assert_eq!(ctx.get(&c), 112); // a=2, b=12, c=112
 }
 
@@ -139,13 +139,13 @@ fn diamond_dependency() {
     //    └─ d (slot: b + c)
     let ctx = Context::new();
     let a = ctx.cell(1i32);
-    let b = ctx.slot(move |ctx| ctx.get_cell(&a) + 1);
-    let c = ctx.slot(move |ctx| ctx.get_cell(&a) + 2);
+    let b = ctx.slot(move |ctx| ctx.get(&a) + 1);
+    let c = ctx.slot(move |ctx| ctx.get(&a) + 2);
     let d = ctx.slot(move |ctx| ctx.get(&b) + ctx.get(&c));
 
     assert_eq!(ctx.get(&d), 5); // b=2, c=3, d=5
 
-    ctx.set_cell(&a, 10);
+    ctx.set(&a, 10);
     assert_eq!(ctx.get(&d), 23); // b=11, c=12, d=23
 }
 
@@ -164,7 +164,7 @@ fn lazy_recomputation() {
     let a = ctx.cell(1i32);
     let b = ctx.slot(move |ctx| {
         LAZY_COUNT.with(|c| c.set(c.get() + 1));
-        ctx.get_cell(&a) * 2
+        ctx.get(&a) * 2
     });
 
     // First access: computes.
@@ -172,7 +172,7 @@ fn lazy_recomputation() {
     LAZY_COUNT.with(|c| assert_eq!(c.get(), 1));
 
     // Change a — b should be cleared but NOT recomputed.
-    ctx.set_cell(&a, 5);
+    ctx.set(&a, 5);
     LAZY_COUNT.with(|c| assert_eq!(c.get(), 1, "should not recompute on invalidation"));
     assert!(!ctx.is_set(&b), "slot should be cleared after cell change");
 
@@ -190,14 +190,14 @@ fn multiple_cell_dependencies() {
     let ctx = Context::new();
     let x = ctx.cell(3i32);
     let y = ctx.cell(4i32);
-    let sum = ctx.slot(move |ctx| ctx.get_cell(&x) + ctx.get_cell(&y));
+    let sum = ctx.slot(move |ctx| ctx.get(&x) + ctx.get(&y));
 
     assert_eq!(ctx.get(&sum), 7);
 
-    ctx.set_cell(&x, 10);
+    ctx.set(&x, 10);
     assert_eq!(ctx.get(&sum), 14);
 
-    ctx.set_cell(&y, 20);
+    ctx.set(&y, 20);
     assert_eq!(ctx.get(&sum), 30);
 }
 
@@ -209,12 +209,12 @@ fn multiple_cell_dependencies() {
 fn slot_depending_on_slot() {
     let ctx = Context::new();
     let a = ctx.cell(2i32);
-    let b = ctx.slot(move |ctx| ctx.get_cell(&a) * 3);
+    let b = ctx.slot(move |ctx| ctx.get(&a) * 3);
     let c = ctx.slot(move |ctx| ctx.get(&b) + 1);
 
     assert_eq!(ctx.get(&c), 7); // a=2, b=6, c=7
 
-    ctx.set_cell(&a, 10);
+    ctx.set(&a, 10);
     assert_eq!(ctx.get(&c), 31); // a=10, b=30, c=31
 }
 
@@ -226,9 +226,9 @@ fn slot_depending_on_slot() {
 fn works_with_string_types() {
     let ctx = Context::new();
     let name = ctx.cell("world".to_string());
-    let greeting = ctx.slot(move |ctx| format!("hello, {}!", ctx.get_cell(&name)));
+    let greeting = ctx.slot(move |ctx| format!("hello, {}!", ctx.get(&name)));
 
     assert_eq!(ctx.get(&greeting), "hello, world!");
-    ctx.set_cell(&name, "rust".to_string());
+    ctx.set(&name, "rust".to_string());
     assert_eq!(ctx.get(&greeting), "hello, rust!");
 }

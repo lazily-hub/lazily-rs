@@ -24,7 +24,7 @@ fn make_fanout_graph(
 ) -> (lazily::Source<i32>, Vec<lazily::Computed<i32>>) {
     let source = ctx.cell(0);
     let slots: Vec<_> = (0..fanout)
-        .map(|_| ctx.computed(move |ctx| ctx.get_cell(&source) + 1))
+        .map(|_| ctx.computed(move |ctx| ctx.get(&source) + 1))
         .collect();
     // Prime: compute all slots once.
     for s in &slots {
@@ -42,7 +42,7 @@ fn bench_write_cost(c: &mut Criterion) {
                 let ctx = Context::new();
                 let (source, _) = make_fanout_graph(&ctx, fanout);
                 for i in 0..WRITES_PER_MEASUREMENT as i32 {
-                    ctx.set_cell(&source, i);
+                    ctx.set(&source, i);
                 }
                 black_box(&ctx);
             });
@@ -56,7 +56,7 @@ fn bench_write_cost(c: &mut Criterion) {
                     let ctx = Context::with_revision_engine();
                     let (source, _) = make_fanout_graph(&ctx, fanout);
                     for i in 0..WRITES_PER_MEASUREMENT as i32 {
-                        ctx.set_cell(&source, i);
+                        ctx.set(&source, i);
                     }
                     black_box(&ctx);
                 });
@@ -74,7 +74,7 @@ fn bench_write_then_read(c: &mut Criterion) {
             b.iter(|| {
                 let ctx = Context::new();
                 let (source, slots) = make_fanout_graph(&ctx, fanout);
-                ctx.set_cell(&source, 42);
+                ctx.set(&source, 42);
                 for s in &slots {
                     black_box(ctx.get(s));
                 }
@@ -88,7 +88,7 @@ fn bench_write_then_read(c: &mut Criterion) {
                 b.iter(|| {
                     let ctx = Context::with_revision_engine();
                     let (source, slots) = make_fanout_graph(&ctx, fanout);
-                    ctx.set_cell(&source, 42);
+                    ctx.set(&source, 42);
                     for s in &slots {
                         black_box(ctx.get(s));
                     }

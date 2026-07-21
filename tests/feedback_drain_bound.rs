@@ -34,12 +34,12 @@ fn divergent_loop_reports_exhaustion_instead_of_hanging() {
     // Writes into its own dependency cone: reads `counter`, then writes it.
     // Each run reschedules the next.
     let _effect = ctx.effect(move |c| {
-        let n = c.get_cell(&counter);
-        c.set_cell(&counter, n + 1);
+        let n = c.get(&counter);
+        c.set(&counter, n + 1);
     });
 
     // Kick the drain. Without the bound this call never returns.
-    ctx.set_cell(&counter, 1);
+    ctx.set(&counter, 1);
 
     let report = ctx
         .last_drain_exhaustion()
@@ -82,11 +82,11 @@ fn terminating_cascade_does_not_report_exhaustion() {
     // across effects rather than concentrated in one.
     for _ in 0..16 {
         effects.push(ctx.effect(move |c| {
-            let _ = c.get_cell(&source);
+            let _ = c.get(&source);
         }));
     }
 
-    ctx.set_cell(&source, 1);
+    ctx.set(&source, 1);
 
     assert!(
         ctx.last_drain_exhaustion().is_none(),
@@ -106,22 +106,22 @@ fn stop_condition_in_effect_body_terminates_the_loop() {
     let counter = ctx.cell(0i64);
 
     let _effect = ctx.effect(move |c| {
-        let n = c.get_cell(&counter);
+        let n = c.get(&counter);
         // The decreasing measure the caller owes. Without it this is the
         // divergent case above.
         if n < 10 {
-            c.set_cell(&counter, n + 1);
+            c.set(&counter, n + 1);
         }
     });
 
-    ctx.set_cell(&counter, 1);
+    ctx.set(&counter, 1);
 
     assert!(
         ctx.last_drain_exhaustion().is_none(),
         "a loop with a stop condition converges within budget"
     );
     assert_eq!(
-        ctx.get_cell(&counter),
+        ctx.get(&counter),
         10,
         "loop ran to its fixed point rather than being cut short"
     );

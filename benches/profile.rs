@@ -29,14 +29,14 @@ fn consume_snapshot(snapshot: InstrumentationSnapshot) -> u64 {
 fn context_profile_snapshot() -> InstrumentationSnapshot {
     let ctx = Context::new();
     let root = ctx.cell(0usize);
-    let parity = ctx.computed(move |ctx| ctx.get_cell(&root) % 2);
+    let parity = ctx.computed(move |ctx| ctx.get(&root) % 2);
     let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
     let _effect = ctx.effect(move |ctx| {
         black_box(ctx.get(&label));
     });
 
     ctx.reset_instrumentation();
-    ctx.set_cell(&root, 2);
+    ctx.set(&root, 2);
     black_box(ctx.get(&label));
 
     ctx.instrumentation_snapshot()
@@ -47,7 +47,7 @@ fn thread_safe_profile_snapshot() -> InstrumentationSnapshot {
     let root = ctx.cell(40usize);
     let answer = ctx.computed(move |ctx| {
         thread::sleep(Duration::from_micros(200));
-        ctx.get_cell(&root).wrapping_add(2)
+        ctx.get(&root).wrapping_add(2)
     });
     let start = Arc::new(Barrier::new(2));
 

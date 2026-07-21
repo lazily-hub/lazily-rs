@@ -245,13 +245,13 @@ fn context_memo_effect() -> InstrumentationSnapshot {
     ctx.reset_instrumentation();
 
     let root = ctx.cell(0usize);
-    let parity = ctx.computed(move |ctx| ctx.get_cell(&root) % 2);
+    let parity = ctx.computed(move |ctx| ctx.get(&root) % 2);
     let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
     let _effect = ctx.effect(move |ctx| {
         black_box(ctx.get(&label));
     });
 
-    ctx.set_cell(&root, 2);
+    ctx.set(&root, 2);
     black_box(ctx.get(&label));
 
     ctx.instrumentation_snapshot()
@@ -263,14 +263,14 @@ fn context_fan_out() -> InstrumentationSnapshot {
 
     let root = ctx.cell(0usize);
     let slots = (0..FAN_OUT_WIDTH)
-        .map(|offset| ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(offset)))
+        .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
 
     for slot in &slots {
         black_box(ctx.get(slot));
     }
 
-    ctx.set_cell(&root, 1);
+    ctx.set(&root, 1);
     let total = slots
         .iter()
         .fold(0usize, |sum, slot| sum.wrapping_add(ctx.get(slot)));
@@ -293,13 +293,13 @@ fn context_batch_storm() -> InstrumentationSnapshot {
     let _effect = ctx.effect(move |ctx| {
         let total = effect_cells
             .iter()
-            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)));
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)));
         effect_sink.set(total);
     });
 
     ctx.batch(|ctx| {
         for (offset, cell) in cells.iter().enumerate() {
-            ctx.set_cell(cell, BATCH_STORM_CELLS.wrapping_add(offset));
+            ctx.set(cell, BATCH_STORM_CELLS.wrapping_add(offset));
         }
     });
     black_box(sink.get());
@@ -314,7 +314,7 @@ fn thread_safe_first_get() -> InstrumentationSnapshot {
     let root = ctx.cell(40usize);
     let answer = ctx.computed(move |ctx| {
         thread::sleep(Duration::from_micros(200));
-        ctx.get_cell(&root).wrapping_add(2)
+        ctx.get(&root).wrapping_add(2)
     });
     let barrier = Arc::new(Barrier::new(2));
 
@@ -340,7 +340,7 @@ fn thread_safe_set_cell_invalidation_high_fan_out() -> ProfileResult {
     let ctx = ThreadSafeContext::new();
     let root = ctx.cell(0usize);
     let slots = (0..SET_CELL_INVALIDATION_FAN_OUT)
-        .map(|offset| ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(offset)))
+        .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
 
     for slot in &slots {
@@ -348,7 +348,7 @@ fn thread_safe_set_cell_invalidation_high_fan_out() -> ProfileResult {
     }
 
     ctx.reset_instrumentation();
-    ctx.set_cell(&root, 1);
+    ctx.set(&root, 1);
     black_box(slots.len());
 
     thread_safe_set_cell_profile_result(ctx)
@@ -477,7 +477,7 @@ fn thread_safe_contention_profile(
 fn run_thread_safe_fan_out_eager_validation(ctx: &ThreadSafeContext, workers: usize) -> usize {
     let root = ctx.cell(0usize);
     let slots = (0..GRAPH_PROPAGATION_WIDTH)
-        .map(|offset| ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(offset)))
+        .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
     let effect_slots = slots.clone();
     let sink = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -503,7 +503,7 @@ fn run_thread_safe_fan_out_eager_validation(ctx: &ThreadSafeContext, workers: us
                     let next = worker
                         .wrapping_mul(GRAPH_PROPAGATION_ITERS_PER_WORKER)
                         .wrapping_add(iter);
-                    worker_ctx.set_cell(&root, black_box(next));
+                    worker_ctx.set(&root, black_box(next));
                     sum = sum.wrapping_add(sink.load(std::sync::atomic::Ordering::Relaxed));
                 }
                 sum
@@ -520,7 +520,7 @@ fn run_thread_safe_fan_out_eager_validation(ctx: &ThreadSafeContext, workers: us
 fn run_thread_safe_fan_out_lazy_dirty_epochs(ctx: &ThreadSafeContext, workers: usize) -> usize {
     let root = ctx.cell(0usize);
     let slots = (0..GRAPH_PROPAGATION_WIDTH)
-        .map(|offset| ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(offset)))
+        .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
     for slot in &slots {
         black_box(ctx.get(slot));
@@ -539,7 +539,7 @@ fn run_thread_safe_fan_out_lazy_dirty_epochs(ctx: &ThreadSafeContext, workers: u
                     let next = worker
                         .wrapping_mul(GRAPH_PROPAGATION_ITERS_PER_WORKER)
                         .wrapping_add(iter);
-                    worker_ctx.set_cell(&root, black_box(next));
+                    worker_ctx.set(&root, black_box(next));
                     sum = sum.wrapping_add(next);
                 }
                 sum
@@ -573,7 +573,7 @@ fn run_thread_safe_fan_in_lazy_dirty_epochs(ctx: &ThreadSafeContext, workers: us
         .iter()
         .map(|root| {
             let root = *root;
-            ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+            ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1))
         })
         .collect::<Vec<_>>();
     let total_branches = branches.clone();
@@ -603,7 +603,7 @@ fn run_thread_safe_fan_in_lazy_dirty_epochs(ctx: &ThreadSafeContext, workers: us
                             .wrapping_add(iter)
                             .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                             .wrapping_add(offset);
-                        worker_ctx.set_cell(root, black_box(next));
+                        worker_ctx.set(root, black_box(next));
                         sum = sum.wrapping_add(next);
                     }
                 }
@@ -630,7 +630,7 @@ fn run_thread_safe_fan_in_batched_flush(ctx: &ThreadSafeContext, workers: usize)
         .iter()
         .map(|cell| {
             let cell = *cell;
-            ctx.computed(move |ctx| ctx.get_cell(&cell).wrapping_add(1))
+            ctx.computed(move |ctx| ctx.get(&cell).wrapping_add(1))
         })
         .collect::<Vec<_>>();
     let total_branches = branches.clone();
@@ -664,7 +664,7 @@ fn run_thread_safe_fan_in_batched_flush(ctx: &ThreadSafeContext, workers: usize)
                                 .wrapping_add(iter)
                                 .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                                 .wrapping_add(offset);
-                            ctx.set_cell(cell, black_box(next));
+                            ctx.set(cell, black_box(next));
                         }
                     });
                     sum = sum.wrapping_add(sink.load(std::sync::atomic::Ordering::Relaxed));
@@ -685,7 +685,7 @@ fn run_thread_safe_same_slot_set_cell_invalidation(
     workers: usize,
 ) -> usize {
     let root = ctx.cell(1usize);
-    let value = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
+    let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
     let barrier = Arc::new(Barrier::new(workers));
@@ -702,7 +702,7 @@ fn run_thread_safe_same_slot_set_cell_invalidation(
                     let next = worker
                         .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
                         .wrapping_add(iter);
-                    worker_ctx.set_cell(&root, black_box(next));
+                    worker_ctx.set(&root, black_box(next));
                     sum = sum.wrapping_add(next);
                 }
 
@@ -715,7 +715,7 @@ fn run_thread_safe_same_slot_set_cell_invalidation(
         .into_iter()
         .map(|worker| worker.join().expect("invalidation worker should finish"))
         .fold(0usize, usize::wrapping_add);
-    total.wrapping_add(ctx.get_cell(&root))
+    total.wrapping_add(ctx.get(&root))
 }
 
 fn run_thread_safe_independent_slot_set_cell_invalidation(
@@ -729,7 +729,7 @@ fn run_thread_safe_independent_slot_set_cell_invalidation(
         .iter()
         .map(|root| {
             let root = *root;
-            ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+            ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1))
         })
         .collect::<Vec<_>>();
     for value in &values {
@@ -751,7 +751,7 @@ fn run_thread_safe_independent_slot_set_cell_invalidation(
                     let next = worker
                         .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
                         .wrapping_add(iter);
-                    worker_ctx.set_cell(&root, black_box(next));
+                    worker_ctx.set(&root, black_box(next));
                     sum = sum.wrapping_add(next);
                 }
 
@@ -788,7 +788,7 @@ fn run_thread_safe_batched_set_cell_invalidation(ctx: &ThreadSafeContext, worker
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()
-            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)))
     });
     black_box(ctx.get(&total));
 
@@ -811,7 +811,7 @@ fn run_thread_safe_batched_set_cell_invalidation(ctx: &ThreadSafeContext, worker
                                 .wrapping_add(iter)
                                 .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                                 .wrapping_add(offset);
-                            ctx.set_cell(cell, black_box(next));
+                            ctx.set(cell, black_box(next));
                             sum = sum.wrapping_add(next);
                         }
                     });
@@ -830,7 +830,7 @@ fn run_thread_safe_batched_set_cell_invalidation(ctx: &ThreadSafeContext, worker
 
 fn run_thread_safe_same_slot_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
     let root = ctx.cell(1usize);
-    let value = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
+    let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
     let barrier = Arc::new(Barrier::new(workers));
@@ -848,7 +848,7 @@ fn run_thread_safe_same_slot_contention(ctx: &ThreadSafeContext, workers: usize)
                     let next = worker
                         .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
                         .wrapping_add(iter);
-                    worker_ctx.set_cell(&root, black_box(next));
+                    worker_ctx.set(&root, black_box(next));
                     sum = sum.wrapping_add(worker_ctx.get(&value));
                 }
 
@@ -871,7 +871,7 @@ fn run_thread_safe_independent_slot_contention(ctx: &ThreadSafeContext, workers:
         .iter()
         .map(|root| {
             let root = *root;
-            ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1))
+            ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1))
         })
         .collect::<Vec<_>>();
     for value in &values {
@@ -894,7 +894,7 @@ fn run_thread_safe_independent_slot_contention(ctx: &ThreadSafeContext, workers:
                     let next = worker
                         .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
                         .wrapping_add(iter);
-                    worker_ctx.set_cell(&root, black_box(next));
+                    worker_ctx.set(&root, black_box(next));
                     sum = sum.wrapping_add(worker_ctx.get(&value));
                 }
 
@@ -911,7 +911,7 @@ fn run_thread_safe_independent_slot_contention(ctx: &ThreadSafeContext, workers:
 
 fn run_thread_safe_read_mostly_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
     let root = ctx.cell(1usize);
-    let value = ctx.computed(move |ctx| ctx.get_cell(&root).wrapping_add(1));
+    let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
     let barrier = Arc::new(Barrier::new(workers));
@@ -926,7 +926,7 @@ fn run_thread_safe_read_mostly_contention(ctx: &ThreadSafeContext, workers: usiz
 
                 for iter in 0..CONTENTION_ITERS_PER_WORKER {
                     if worker == 0 {
-                        worker_ctx.set_cell(&root, black_box(iter));
+                        worker_ctx.set(&root, black_box(iter));
                     }
                     sum = sum.wrapping_add(worker_ctx.get(&value));
                 }
@@ -964,7 +964,7 @@ fn run_thread_safe_batched_write_bursts(ctx: &ThreadSafeContext, workers: usize)
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()
-            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)))
     });
     black_box(ctx.get(&total));
 
@@ -987,7 +987,7 @@ fn run_thread_safe_batched_write_bursts(ctx: &ThreadSafeContext, workers: usize)
                                 .wrapping_add(iter)
                                 .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                                 .wrapping_add(offset);
-                            ctx.set_cell(cell, black_box(next));
+                            ctx.set(cell, black_box(next));
                         }
                     });
                     sum = sum.wrapping_add(worker_ctx.get(&total));
@@ -1035,7 +1035,7 @@ fn run_thread_safe_effect_queue_coalescing(ctx: &ThreadSafeContext, workers: usi
         effect_runs_for_effect.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let total = all_cells
             .iter()
-            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)));
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)));
         sink_for_effect.store(total, std::sync::atomic::Ordering::Relaxed);
     });
 
@@ -1060,7 +1060,7 @@ fn run_thread_safe_effect_queue_coalescing(ctx: &ThreadSafeContext, workers: usi
                                 .wrapping_add(iter)
                                 .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                                 .wrapping_add(offset);
-                            ctx.set_cell(cell, black_box(next));
+                            ctx.set(cell, black_box(next));
                         }
                     });
                     sum = sum
@@ -1091,7 +1091,7 @@ fn run_thread_safe_effect_cleanup_execution(ctx: &ThreadSafeContext, workers: us
     let effect = ctx.effect(move |ctx| {
         let total = effect_cells
             .iter()
-            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)));
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)));
         sink_for_effect.store(total, std::sync::atomic::Ordering::Relaxed);
         let cleanup_runs = Arc::clone(&cleanup_runs_for_effect);
         move || {
@@ -1116,7 +1116,7 @@ fn run_thread_safe_effect_cleanup_execution(ctx: &ThreadSafeContext, workers: us
                     let next = worker
                         .wrapping_mul(CONTENTION_ITERS_PER_WORKER)
                         .wrapping_add(iter);
-                    worker_ctx.set_cell(&cell, black_box(next));
+                    worker_ctx.set(&cell, black_box(next));
                     sum = sum
                         .wrapping_add(sink.load(std::sync::atomic::Ordering::Relaxed))
                         .wrapping_add(cleanup_runs.load(std::sync::atomic::Ordering::Relaxed));
@@ -1145,7 +1145,7 @@ fn run_thread_safe_effect_batch_flush(ctx: &ThreadSafeContext, workers: usize) -
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()
-            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get_cell(cell)))
+            .fold(0usize, |sum, cell| sum.wrapping_add(ctx.get(cell)))
     });
     let sink = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sink_for_effect = Arc::clone(&sink);
@@ -1175,7 +1175,7 @@ fn run_thread_safe_effect_batch_flush(ctx: &ThreadSafeContext, workers: usize) -
                                         .wrapping_add(iter)
                                         .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                                         .wrapping_add(offset);
-                                    ctx.set_cell(cell, black_box(next));
+                                    ctx.set(cell, black_box(next));
                                 }
                             }
                         });
@@ -1186,7 +1186,7 @@ fn run_thread_safe_effect_batch_flush(ctx: &ThreadSafeContext, workers: usize) -
                                     .wrapping_add(iter)
                                     .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                                     .wrapping_add(offset);
-                                ctx.set_cell(cell, black_box(next));
+                                ctx.set(cell, black_box(next));
                             }
                         }
                     });

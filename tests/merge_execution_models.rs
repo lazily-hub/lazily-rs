@@ -20,7 +20,7 @@ fn threadsafe_apply_merge_folds_under_sum_without_an_edge() {
     ctx.apply_merge::<i64, Sum>(&acc, 2);
     ctx.apply_merge::<i64, Sum>(&acc, 3);
 
-    assert_eq!(ctx.get_cell(&acc), 6, "1 + 2 + 3 under Sum");
+    assert_eq!(ctx.get(&acc), 6, "1 + 2 + 3 under Sum");
     // A written source stays edge-free in both directions (§9.2.3).
     assert_eq!(ctx.dependency_count(&acc), 0);
     assert_eq!(ctx.dependent_count(&acc), 0);
@@ -38,7 +38,7 @@ fn threadsafe_apply_merge_identity_fold_is_a_no_op() {
     // A memo over acc so we can see whether a merge invalidated downstream.
     let mirror = ctx.computed(move |c| {
         seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        c.get_cell(&acc)
+        c.get(&acc)
     });
     assert_eq!(ctx.get(&mirror), 5);
     let before = observed.load(std::sync::atomic::Ordering::SeqCst);
@@ -71,7 +71,7 @@ async fn async_apply_merge_folds_under_sum_without_an_edge() {
     ctx.apply_merge::<i64, Sum>(&acc, 2);
     ctx.apply_merge::<i64, Sum>(&acc, 3);
 
-    assert_eq!(ctx.get_cell(&acc), 6, "1 + 2 + 3 under Sum");
+    assert_eq!(ctx.get(&acc), 6, "1 + 2 + 3 under Sum");
     assert_eq!(ctx.dependency_count(&acc), 0);
     assert_eq!(ctx.dependent_count(&acc), 0);
 }

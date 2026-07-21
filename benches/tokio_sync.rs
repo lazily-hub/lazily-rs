@@ -29,7 +29,7 @@ fn bench_tokio_sync_cached_read(c: &mut Criterion) {
             rt.block_on(async {
                 let ctx = ThreadSafeContext::new();
                 let cell = ctx.cell(21usize);
-                let slot = ctx.computed(move |ctx| ctx.get_cell(&cell) * 2);
+                let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
                 let _ = ctx.get(&slot);
                 black_box(ctx.get(&slot))
             })
@@ -42,7 +42,7 @@ fn bench_tokio_sync_cached_read(c: &mut Criterion) {
             rt.block_on(async {
                 let ctx = Arc::new(ThreadSafeContext::new());
                 let cell = ctx.cell(21usize);
-                let slot = ctx.computed(move |ctx| ctx.get_cell(&cell) * 2);
+                let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
                 let _ = ctx.get(&slot);
                 let ctx_c = ctx.clone();
                 tokio::spawn(async move { black_box(ctx_c.get(&slot)) })
@@ -64,7 +64,7 @@ fn bench_tokio_sync_cold_first_get(c: &mut Criterion) {
             rt.block_on(async {
                 let ctx = ThreadSafeContext::new();
                 let cell = ctx.cell(21usize);
-                let slot = ctx.computed(move |ctx| ctx.get_cell(&cell) * 2);
+                let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
                 black_box(ctx.get(&slot))
             })
         });
@@ -76,7 +76,7 @@ fn bench_tokio_sync_cold_first_get(c: &mut Criterion) {
             rt.block_on(async {
                 let ctx = Arc::new(ThreadSafeContext::new());
                 let cell = ctx.cell(21usize);
-                let slot = ctx.computed(move |ctx| ctx.get_cell(&cell) * 2);
+                let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
                 let ctx_c = ctx.clone();
                 tokio::spawn(async move { black_box(ctx_c.get(&slot)) })
                     .await
@@ -97,11 +97,11 @@ fn bench_tokio_sync_invalidation(c: &mut Criterion) {
             rt.block_on(async {
                 let ctx = ThreadSafeContext::new();
                 let cell = ctx.cell(0usize);
-                let slot = ctx.computed(move |ctx| ctx.get_cell(&cell).wrapping_add(1));
+                let slot = ctx.computed(move |ctx| ctx.get(&cell).wrapping_add(1));
                 let _ = ctx.get(&slot);
                 let mut sum = 0usize;
                 for i in 0..TOKIO_SYNC_ITERS {
-                    ctx.set_cell(&cell, black_box(i));
+                    ctx.set(&cell, black_box(i));
                     sum = sum.wrapping_add(ctx.get(&slot));
                 }
                 black_box(sum)
@@ -126,7 +126,7 @@ fn bench_tokio_sync_concurrent_contention(c: &mut Criterion) {
                     rt.block_on(async move {
                         let ctx = Arc::new(ThreadSafeContext::new());
                         let cell = ctx.cell(0usize);
-                        let slot = ctx.computed(move |ctx| ctx.get_cell(&cell).wrapping_add(1));
+                        let slot = ctx.computed(move |ctx| ctx.get(&cell).wrapping_add(1));
                         let _ = ctx.get(&slot);
                         let mut handles = Vec::with_capacity(workers);
                         for w in 0..workers {
@@ -137,7 +137,7 @@ fn bench_tokio_sync_concurrent_contention(c: &mut Criterion) {
                                 let mut sum = 0usize;
                                 for i in 0..TOKIO_SYNC_ITERS {
                                     let next = w.wrapping_mul(TOKIO_SYNC_ITERS).wrapping_add(i);
-                                    ctx_c.set_cell(&cell_c, black_box(next));
+                                    ctx_c.set(&cell_c, black_box(next));
                                     sum = sum.wrapping_add(ctx_c.get(&slot_c));
                                 }
                                 sum
@@ -168,10 +168,10 @@ fn bench_tokio_sync_concurrent_contention(c: &mut Criterion) {
                             handles.push(tokio::spawn(async move {
                                 let cell = ctx_c.cell(w);
                                 let slot =
-                                    ctx_c.computed(move |ctx| ctx.get_cell(&cell).wrapping_add(1));
+                                    ctx_c.computed(move |ctx| ctx.get(&cell).wrapping_add(1));
                                 let mut sum = 0usize;
                                 for i in 0..TOKIO_SYNC_ITERS {
-                                    ctx_c.set_cell(&cell, black_box(i));
+                                    ctx_c.set(&cell, black_box(i));
                                     sum = sum.wrapping_add(ctx_c.get(&slot));
                                 }
                                 sum
@@ -203,7 +203,7 @@ fn bench_tokio_sync_batch(c: &mut Criterion) {
                 let slot = ctx.computed(move |ctx| {
                     cells_clone
                         .iter()
-                        .fold(0usize, |s, c| s.wrapping_add(ctx.get_cell(c)))
+                        .fold(0usize, |s, c| s.wrapping_add(ctx.get(c)))
                 });
                 let _ = ctx.get(&slot);
                 let mut total = 0usize;
@@ -211,7 +211,7 @@ fn bench_tokio_sync_batch(c: &mut Criterion) {
                     let base = round.wrapping_mul(TOKIO_SYNC_BATCH_CELLS);
                     ctx.batch(|ctx| {
                         for (i, cell) in cells.iter().enumerate() {
-                            ctx.set_cell(cell, black_box(base.wrapping_add(i)));
+                            ctx.set(cell, black_box(base.wrapping_add(i)));
                         }
                     });
                     total = total.wrapping_add(ctx.get(&slot));
@@ -236,12 +236,12 @@ fn bench_tokio_sync_effect(c: &mut Criterion) {
                 let sink = Arc::new(AtomicUsize::new(0));
                 let sink_clone = sink.clone();
                 ctx.effect(move |ctx| {
-                    sink_clone.store(ctx.get_cell(&cell), Ordering::Relaxed);
+                    sink_clone.store(ctx.get(&cell), Ordering::Relaxed);
                 });
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 let mut sum = 0usize;
                 for i in 0..16usize {
-                    ctx.set_cell(&cell, black_box(i));
+                    ctx.set(&cell, black_box(i));
                     sum = sum.wrapping_add(sink.load(Ordering::Relaxed));
                 }
                 black_box(sum)

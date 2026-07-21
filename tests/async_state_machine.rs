@@ -110,7 +110,7 @@ async fn async_machine_self_transition_is_accepted_but_no_invalidation() {
         let r = recomputes_inner.clone();
         async move {
             *r.lock().unwrap() += 1;
-            cctx.get_cell(&state)
+            cctx.get(&state)
         }
     });
 
@@ -135,7 +135,7 @@ async fn async_derived_slot_updates_on_transition() {
     let label = ctx.computed_async(move |cctx| {
         let s = state;
         async move {
-            match cctx.get_cell(&s) {
+            match cctx.get(&s) {
                 Door::Closed => "closed",
                 Door::Opening => "opening",
                 Door::Open => "open",
@@ -183,14 +183,14 @@ async fn async_derived_slot_drops_stale_machine_dependency_after_branch_switch()
         let recomputes = recomputes_inner.clone();
         async move {
             *recomputes.lock().unwrap() += 1;
-            match cctx.get_cell(&active_state) {
-                ActiveDoor::Primary => match cctx.get_cell(&primary_state) {
+            match cctx.get(&active_state) {
+                ActiveDoor::Primary => match cctx.get(&primary_state) {
                     Door::Closed => "primary:closed",
                     Door::Opening => "primary:opening",
                     Door::Open => "primary:open",
                     Door::Closing => "primary:closing",
                 },
-                ActiveDoor::Secondary => match cctx.get_cell(&secondary_state) {
+                ActiveDoor::Secondary => match cctx.get(&secondary_state) {
                     Door::Closed => "secondary:closed",
                     Door::Opening => "secondary:opening",
                     Door::Open => "secondary:open",
@@ -231,7 +231,7 @@ async fn async_eager_signal_tracks_machine_state() {
     let _sig = ctx.signal_async(move |cctx| {
         let o = observed_inner.clone();
         async move {
-            let s = cctx.get_cell(&state);
+            let s = cctx.get(&state);
             o.lock().unwrap().push(s.clone());
             s
         }

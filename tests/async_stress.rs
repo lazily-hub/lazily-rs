@@ -44,7 +44,7 @@ async fn get_async_waiter_cancellation_and_stale_completion_keep_latest() {
     let slot = ctx.computed_async({
         let gates = gates.clone();
         move |ctx| {
-            let observed = ctx.get_cell(&cell);
+            let observed = ctx.get(&cell);
             let gate = gates.lock().unwrap().pop_front();
             let starts_tx = starts_tx.clone();
             async move {
@@ -82,7 +82,7 @@ async fn get_async_waiter_cancellation_and_stale_completion_keep_latest() {
     canceled_waiter.abort();
     assert!(canceled_waiter.await.unwrap_err().is_cancelled());
 
-    ctx.set_cell(&cell, 2);
+    ctx.set(&cell, 2);
     let _ = release_first.send(());
     assert_eq!(
         recv_compute_start(&mut starts_rx, "replacement compute").await,
@@ -109,14 +109,14 @@ async fn dependency_tracking_across_awaits_replaces_dynamic_edges() {
     let outer_runs = Arc::new(AtomicU64::new(0));
 
     let left_slot = ctx.computed_async(move |ctx| {
-        let value = ctx.get_cell(&left);
+        let value = ctx.get(&left);
         async move {
             tokio::task::yield_now().await;
             value * 10
         }
     });
     let right_slot = ctx.computed_async(move |ctx| {
-        let value = ctx.get_cell(&right);
+        let value = ctx.get(&right);
         async move {
             tokio::task::yield_now().await;
             value * 10
@@ -126,7 +126,7 @@ async fn dependency_tracking_across_awaits_replaces_dynamic_edges() {
     let outer = ctx.computed_async({
         let outer_runs = outer_runs.clone();
         move |ctx| {
-            let selected = if ctx.get_cell(&use_left) {
+            let selected = if ctx.get(&use_left) {
                 left_slot
             } else {
                 right_slot
@@ -142,18 +142,18 @@ async fn dependency_tracking_across_awaits_replaces_dynamic_edges() {
     });
 
     assert_eq!(ctx.get_async(&outer).await, 21);
-    ctx.set_cell(&left, 3);
+    ctx.set(&left, 3);
     assert_eq!(ctx.get_async(&outer).await, 31);
 
-    ctx.set_cell(&use_left, false);
+    ctx.set(&use_left, false);
     assert_eq!(ctx.get_async(&outer).await, 101);
     let runs_after_switch = outer_runs.load(Ordering::Relaxed);
 
-    ctx.set_cell(&left, 4);
+    ctx.set(&left, 4);
     assert_eq!(ctx.get(&outer), Some(101));
     assert_eq!(outer_runs.load(Ordering::Relaxed), runs_after_switch);
 
-    ctx.set_cell(&right, 11);
+    ctx.set(&right, 11);
     assert_eq!(ctx.get_async(&outer).await, 111);
 }
 
@@ -166,7 +166,7 @@ async fn effect_cleanup_runs_before_each_replacement_body() {
     ctx.effect_async({
         let events = events.clone();
         move |ctx| {
-            let observed = ctx.get_cell(&cell);
+            let observed = ctx.get(&cell);
             let events = events.clone();
             async move {
                 events.lock().unwrap().push(format!("run:{observed}"));
@@ -183,7 +183,7 @@ async fn effect_cleanup_runs_before_each_replacement_body() {
     .await;
 
     for value in 1..=6 {
-        ctx.set_cell(&cell, value);
+        ctx.set(&cell, value);
         wait_until(&format!("async effect run {value}"), || {
             events
                 .lock()
@@ -237,7 +237,7 @@ fn cyclic_async_dependency_invalidation_terminates() {
             static B_HANDLE: OnceLock<lazily::AsyncSlotHandle<i32>> = OnceLock::new();
 
             let a = ctx.computed_async(move |cx| {
-                let v = cx.get_cell(&cell);
+                let v = cx.get(&cell);
                 if let Some(b) = B_HANDLE.get() {
                     // Register the edge a -> b without awaiting it. The edge is
                     // recorded by `get_async` itself; dropping the future avoids
@@ -258,7 +258,7 @@ fn cyclic_async_dependency_invalidation_terminates() {
             let _ = ctx.get_async(&a).await;
 
             // Force `a` to recompute so it observes B_HANDLE and registers a -> b.
-            ctx.set_cell(&cell, 2);
+            ctx.set(&cell, 2);
             let _ = ctx.get_async(&a).await;
 
             // Both directions are now present: the walk has a real cycle.
@@ -266,7 +266,7 @@ fn cyclic_async_dependency_invalidation_terminates() {
             assert_eq!(ctx.dependent_count(&b), 1, "a must depend on b");
 
             // Pre-fix this never returns -- it spins forever holding inner.lock().
-            ctx.set_cell(&cell, 3);
+            ctx.set(&cell, 3);
         });
         let _ = done_tx.send(());
     });

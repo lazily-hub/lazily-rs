@@ -213,7 +213,7 @@ mod thread_safe {
     fn signal_is_materialized_eagerly_on_creation() {
         let ctx = ThreadSafeContext::new();
         let n = ctx.cell(2i32);
-        let doubled = ctx.signal(move |ctx| ctx.get_cell(&n) * 2);
+        let doubled = ctx.signal(move |ctx| ctx.get(&n) * 2);
         assert_eq!(doubled.get(&ctx), 4);
     }
 
@@ -225,12 +225,12 @@ mod thread_safe {
         let computes_inner = computes.clone();
         let sig = ctx.signal(move |ctx| {
             *computes_inner.lock().unwrap() += 1;
-            ctx.get_cell(&n) + 10
+            ctx.get(&n) + 10
         });
 
         assert_eq!(*computes.lock().unwrap(), 1);
 
-        ctx.set_cell(&n, 5);
+        ctx.set(&n, 5);
         assert_eq!(*computes.lock().unwrap(), 2);
         assert_eq!(sig.get(&ctx), 15);
     }
@@ -239,7 +239,7 @@ mod thread_safe {
     fn signal_value_goes_v1_to_v2_with_no_intermediate_unset() {
         let ctx = ThreadSafeContext::new();
         let n = ctx.cell(1i32);
-        let sig = ctx.signal(move |ctx| ctx.get_cell(&n) * 100);
+        let sig = ctx.signal(move |ctx| ctx.get(&n) * 100);
 
         let seen = Arc::new(Mutex::new(Vec::<i32>::new()));
         let seen_inner = seen.clone();
@@ -247,8 +247,8 @@ mod thread_safe {
             seen_inner.lock().unwrap().push(sig.get(ctx));
         });
 
-        ctx.set_cell(&n, 2);
-        ctx.set_cell(&n, 3);
+        ctx.set(&n, 2);
+        ctx.set(&n, 3);
 
         assert_eq!(*seen.lock().unwrap(), vec![100, 200, 300]);
         assert_eq!(sig.get(&ctx), 300);
@@ -258,7 +258,7 @@ mod thread_safe {
     fn signal_memo_guard_skips_equal_recomputation() {
         let ctx = ThreadSafeContext::new();
         let n = ctx.cell(4i32);
-        let parity = ctx.signal(move |ctx| ctx.get_cell(&n) % 2);
+        let parity = ctx.signal(move |ctx| ctx.get(&n) % 2);
 
         let downstream_runs = Arc::new(Mutex::new(0usize));
         let downstream_inner = downstream_runs.clone();
@@ -270,12 +270,12 @@ mod thread_safe {
         assert_eq!(*downstream_runs.lock().unwrap(), 1);
 
         // 4 -> 6: parity stays 0, downstream must not rerun (memo guard).
-        ctx.set_cell(&n, 6);
+        ctx.set(&n, 6);
         assert_eq!(*downstream_runs.lock().unwrap(), 1);
         assert_eq!(parity.get(&ctx), 0);
 
         // 6 -> 7: parity flips to 1, downstream reruns once.
-        ctx.set_cell(&n, 7);
+        ctx.set(&n, 7);
         assert_eq!(*downstream_runs.lock().unwrap(), 2);
         assert_eq!(parity.get(&ctx), 1);
     }
@@ -284,13 +284,13 @@ mod thread_safe {
     fn chained_signals_propagate_eagerly() {
         let ctx = ThreadSafeContext::new();
         let n = ctx.cell(1i32);
-        let a = ctx.signal(move |ctx| ctx.get_cell(&n) + 1);
+        let a = ctx.signal(move |ctx| ctx.get(&n) + 1);
         let b = ctx.signal(move |ctx| a.get(ctx) * 10);
 
         assert_eq!(a.get(&ctx), 2);
         assert_eq!(b.get(&ctx), 20);
 
-        ctx.set_cell(&n, 5);
+        ctx.set(&n, 5);
         assert_eq!(a.get(&ctx), 6);
         assert_eq!(b.get(&ctx), 60);
     }
@@ -299,7 +299,7 @@ mod thread_safe {
     fn diamond_signal_graph_is_glitch_free() {
         let ctx = ThreadSafeContext::new();
         let n = ctx.cell(1i32);
-        let a = ctx.signal(move |ctx| ctx.get_cell(&n) + 1);
+        let a = ctx.signal(move |ctx| ctx.get(&n) + 1);
         let c = ctx.signal(move |ctx| a.get(ctx) * 2);
         let d = ctx.signal(move |ctx| a.get(ctx) + c.get(ctx));
 
@@ -309,7 +309,7 @@ mod thread_safe {
             seen_inner.lock().unwrap().push(d.get(ctx));
         });
 
-        ctx.set_cell(&n, 5);
+        ctx.set(&n, 5);
 
         assert_eq!(d.get(&ctx), 18);
         let seen = seen.lock().unwrap();
@@ -325,7 +325,7 @@ mod thread_safe {
         let ctx = ThreadSafeContext::new();
         let a = ctx.cell(1i32);
         let b = ctx.cell(10i32);
-        let sum = ctx.signal(move |ctx| ctx.get_cell(&a) + ctx.get_cell(&b));
+        let sum = ctx.signal(move |ctx| ctx.get(&a) + ctx.get(&b));
 
         let seen = Arc::new(Mutex::new(Vec::<i32>::new()));
         let seen_inner = seen.clone();
@@ -334,8 +334,8 @@ mod thread_safe {
         });
 
         ctx.batch(|ctx| {
-            ctx.set_cell(&a, 2);
-            ctx.set_cell(&b, 20);
+            ctx.set(&a, 2);
+            ctx.set(&b, 20);
         });
 
         assert_eq!(*seen.lock().unwrap(), vec![11, 22]);
@@ -350,7 +350,7 @@ mod thread_safe {
         let computes_inner = computes.clone();
         let sig = ctx.signal(move |ctx| {
             *computes_inner.lock().unwrap() += 1;
-            ctx.get_cell(&n) + 1
+            ctx.get(&n) + 1
         });
 
         assert!(sig.is_active(&ctx));
@@ -360,7 +360,7 @@ mod thread_safe {
         assert!(!sig.is_active(&ctx));
 
         // Eager puller gone: a cell change no longer triggers recomputation...
-        ctx.set_cell(&n, 9);
+        ctx.set(&n, 9);
         assert_eq!(*computes.lock().unwrap(), 1);
 
         // ...but the value is still readable, recomputed lazily on demand.
@@ -376,11 +376,11 @@ mod thread_safe {
         let computes_inner = computes.clone();
         let sig = ctx.signal(move |ctx| {
             *computes_inner.lock().unwrap() += 1;
-            ctx.get_cell(&n) * 2
+            ctx.get(&n) * 2
         });
 
         assert_eq!(*computes.lock().unwrap(), 1);
-        ctx.set_cell(&n, 3);
+        ctx.set(&n, 3);
         assert_eq!(*computes.lock().unwrap(), 1);
         assert_eq!(sig.get(&ctx), 6);
     }
@@ -391,14 +391,14 @@ mod thread_safe {
         // is the entire point of the ThreadSafeContext variant.
         let ctx = ThreadSafeContext::new();
         let n = ctx.cell(2i32);
-        let sig = ctx.signal(move |ctx| ctx.get_cell(&n) * 3);
+        let sig = ctx.signal(move |ctx| ctx.get(&n) * 3);
         assert_eq!(sig.get(&ctx), 6);
 
         let ctx2 = ctx.clone();
         let observed = std::thread::spawn(move || sig.get(&ctx2)).join().unwrap();
         assert_eq!(observed, 6);
 
-        ctx.set_cell(&n, 4);
+        ctx.set(&n, 4);
         let ctx3 = ctx.clone();
         let observed = std::thread::spawn(move || sig.get(&ctx3)).join().unwrap();
         assert_eq!(observed, 12);

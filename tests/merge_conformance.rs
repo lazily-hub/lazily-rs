@@ -42,7 +42,7 @@ where
     let runs = Rc::new(StdCell::new(0u32));
     let runs2 = runs.clone();
     let _eff = ctx.effect(move |c| {
-        let _ = c.get_cell(&mc.cell());
+        let _ = c.get(&mc.cell());
         runs2.set(runs2.get() + 1);
     });
     assert_eq!(runs.get(), 1, "subscribe runs once on creation");

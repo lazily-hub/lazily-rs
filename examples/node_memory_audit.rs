@@ -264,8 +264,7 @@ fn sweep_width(width: usize) -> WidthReport {
     let ctx_only = snapshot().since(base);
     let hist_ctx = hist_capture();
 
-    subscriber_a
-        .extend((0..width).map(|i| ctx.computed(move |ctx| ctx.get_cell(&topic) + i as u64)));
+    subscriber_a.extend((0..width).map(|i| ctx.computed(move |ctx| ctx.get(&topic) + i as u64)));
     let after_create = snapshot().since(base);
     let hist_create = hist_capture();
 
@@ -385,9 +384,8 @@ fn sweep_heap_valued(width: usize) -> (i64, i64) {
     let base = snapshot();
     let ctx = Context::new();
     let topic = ctx.cell(0u64);
-    subscriber_a.extend(
-        (0..width).map(|i| ctx.computed(move |ctx| format!("{}-{}", ctx.get_cell(&topic), i))),
-    );
+    subscriber_a
+        .extend((0..width).map(|i| ctx.computed(move |ctx| format!("{}-{}", ctx.get(&topic), i))));
     for slot in &subscriber_a {
         std::hint::black_box(ctx.get(slot));
     }

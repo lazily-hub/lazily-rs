@@ -40,7 +40,7 @@ mod basic {
 
     fn read_ref(ctx: &Context, node: Ref<Context>) -> Result<i64, ()> {
         match node {
-            Ref::Cell(h) => quiet(|| ctx.get_cell(&h)),
+            Ref::Cell(h) => quiet(|| ctx.get(&h)),
             Ref::Slot(h) => quiet(|| ctx.get(&h)),
             Ref::Effect(_) => Err(()),
         }
@@ -147,9 +147,9 @@ mod basic {
     /// loop diverges under `KeepLatest` — the step-2 exhaustion.
     fn diverge_body(own: Source<i64>) -> impl Fn(&Context) + 'static {
         move |c: &Context| {
-            let v = c.get_cell(&own);
+            let v = c.get(&own);
             let next = if v == 0 { 0 } else { v.wrapping_add(1) };
-            c.set_cell(&own, next);
+            c.set(&own, next);
         }
     }
 
@@ -238,7 +238,7 @@ mod basic {
         fn batch(&self, writes: &[(Source<i64>, i64)], merges: &[(Source<i64>, i64)]) {
             self.ctx.batch(|c| {
                 for (h, v) in writes {
-                    c.set_cell(h, *v);
+                    c.set(h, *v);
                 }
                 for (h, v) in merges {
                     c.apply_merge::<i64, Sum>(h, *v);
@@ -275,7 +275,7 @@ mod basic {
             read_ref(&self.ctx, node)
         }
         fn set_cell(&self, cell: Source<i64>, value: i64) {
-            self.ctx.set_cell(&cell, value);
+            self.ctx.set(&cell, value);
         }
         fn is_effect_active(&self, effect: Effect) -> bool {
             self.ctx.is_effect_active(&effect)
@@ -321,7 +321,7 @@ mod threadsafe {
 
     fn read_ref(ctx: &ThreadSafeContext, node: Ref<ThreadSafeContext>) -> Result<i64, ()> {
         match node {
-            Ref::Cell(h) => quiet(|| ctx.get_cell(&h)),
+            Ref::Cell(h) => quiet(|| ctx.get(&h)),
             Ref::Slot(h) => quiet(|| ctx.get(&h)),
             Ref::Effect(_) => Err(()),
         }
@@ -407,9 +407,9 @@ mod threadsafe {
     /// `wrapping_add` — see the basic module's `diverge_body` for why.
     fn diverge_body(own: Source<i64>) -> impl Fn(&ThreadSafeContext) + Send + Sync + 'static {
         move |c: &ThreadSafeContext| {
-            let v = c.get_cell(&own);
+            let v = c.get(&own);
             let next = if v == 0 { 0 } else { v.wrapping_add(1) };
-            c.set_cell(&own, next);
+            c.set(&own, next);
         }
     }
 
@@ -501,7 +501,7 @@ mod threadsafe {
         fn batch(&self, writes: &[(Source<i64>, i64)], merges: &[(Source<i64>, i64)]) {
             self.ctx.batch(|c| {
                 for (h, v) in writes {
-                    c.set_cell(h, *v);
+                    c.set(h, *v);
                 }
                 for (h, v) in merges {
                     c.apply_merge::<i64, Sum>(h, *v);
@@ -535,7 +535,7 @@ mod threadsafe {
             read_ref(&self.ctx, node)
         }
         fn set_cell(&self, cell: Source<i64>, value: i64) {
-            self.ctx.set_cell(&cell, value);
+            self.ctx.set(&cell, value);
         }
         fn is_effect_active(&self, effect: Effect) -> bool {
             self.ctx.is_effect_active(&effect)
@@ -626,7 +626,7 @@ mod asynchronous {
     /// the two halves separately: building the future, and driving it.
     async fn read_in_compute(c: &AsyncComputeContext, node: Ref<AsyncContext>) -> Result<i64, ()> {
         match node {
-            Ref::Cell(h) => quiet(|| c.get_cell(&h)),
+            Ref::Cell(h) => quiet(|| c.get(&h)),
             Ref::Slot(h) => match quiet(|| c.get_async(&h)) {
                 Ok(fut) => {
                     let prev = std::panic::take_hook();
@@ -817,7 +817,7 @@ mod asynchronous {
             let _guard = self.rt.enter();
             self.ctx.batch(|c| {
                 for (h, v) in writes {
-                    c.set_cell(h, *v);
+                    c.set(h, *v);
                 }
                 for (h, v) in merges {
                     c.apply_merge::<i64, Sum>(h, *v);
@@ -853,14 +853,14 @@ mod asynchronous {
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             match node {
-                Ref::Cell(h) => quiet(|| self.ctx.get_cell(&h)),
+                Ref::Cell(h) => quiet(|| self.ctx.get(&h)),
                 Ref::Slot(h) => quiet(|| self.rt.block_on(self.ctx.get_async(&h))),
                 Ref::Effect(_) => Err(()),
             }
         }
         fn set_cell(&self, cell: AsyncCellHandle<i64>, value: i64) {
             let _guard = self.rt.enter();
-            self.ctx.set_cell(&cell, value);
+            self.ctx.set(&cell, value);
         }
         fn is_effect_active(&self, effect: AsyncEffectHandle) -> bool {
             self.ctx.is_async_effect_active(&effect)

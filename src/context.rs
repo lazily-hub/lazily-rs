@@ -913,9 +913,22 @@ impl Context {
         Computed::from_id(id)
     }
 
-    /// Get the value of a slot, computing it if necessary.
-    pub fn get<T: Clone + 'static>(&self, handle: &Computed<T>) -> T {
-        self.get_slot(handle.id)
+    /// Read the current value of a cell — a [`Computed`] or a [`Source`].
+    ///
+    /// The unified read of the Cell kernel (`#lzcellkernel`). Supersedes the
+    /// deprecated `get_cell`; a `Computed` recomputes if necessary, a `Source`
+    /// returns its stored value.
+    pub fn get<H: Read<Self> + ?Sized>(&self, handle: &H) -> <H as Read<Self>>::Output {
+        handle.read(self)
+    }
+
+    /// Write a new value to a [`Source`] cell.
+    ///
+    /// The unified write of the Cell kernel (`#lzcellkernel`). Supersedes the
+    /// deprecated `set_cell`. Only `Source` implements [`ContextWrite`], so
+    /// `ctx.set(computed, v)` is a compile error (write protection, design §3).
+    pub fn set<H: Write<Self> + ?Sized>(&self, handle: &H, value: <H as Write<Self>>::Value) {
+        handle.write(self, value)
     }
 
     /// Get the value of a slot as `Rc<T>`, avoiding a deep clone.
@@ -1156,18 +1169,9 @@ impl Context {
     }
 
     /// Get the value of a cell.
+    #[deprecated(note = "use `Context::get` — the unified cell read (#lzcellkernel)")]
     pub fn get_cell<T: Clone + 'static>(&self, handle: &Source<T>) -> T {
-        if let Some(parent_id) = current_tracking_frame() {
-            self.register_dependency(handle.id, parent_id);
-        }
-
-        let inner = self.inner.borrow();
-        if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, handle.id) {
-            assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
-            unsafe { c.value.as_t_ref_unchecked::<T>() }.clone()
-        } else {
-            panic!("get_cell called on non-cell id");
-        }
+        self.get(handle)
     }
 
     /// Get the value of a cell as `Rc<T>`, avoiding a deep clone.
@@ -1392,8 +1396,9 @@ impl Context {
 
     /// Set the value of a cell. If the value differs (via PartialEq),
     /// dependent slots are marked dirty for memoized validation.
+    #[deprecated(note = "use `Context::set` — the unified cell write (#lzcellkernel)")]
     pub fn set_cell<T: PartialEq + 'static>(&self, handle: &Source<T>, new_value: T) {
-        self.set_source::<T>(handle.id, new_value);
+        self.set(handle, new_value);
     }
 
     /// `#lzcellkernel` — the source write by node id, backing `Source::set`
@@ -1693,7 +1698,7 @@ impl Context {
     /// let topic = ctx.cell(0u64);
     /// {
     ///     let conn = ctx.scope();
-    ///     let a = conn.computed(move |c| c.get_cell(&topic) + 1);
+    ///     let a = conn.computed(move |c| c.get(&topic) + 1);
     ///     let _b = conn.computed(move |c| c.get(&a) * 2);   // `a` captured, still Copy
     ///     assert_eq!(ctx.get(&a), 1);
     /// } // both slots disposed here
@@ -2627,13 +2632,13 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
     where
         T: Clone + Send + Sync + 'static,
     {
-        Context::get_cell(self, handle)
+        Context::get(self, handle)
     }
     fn set_cell<T>(&self, handle: &Self::Source<T>, value: T)
     where
         T: PartialEq + Send + Sync + 'static,
     {
-        Context::set_cell(self, handle, value);
+        Context::set(self, handle, value);
     }
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
@@ -2657,6 +2662,60 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
     }
 }
 
+/// A handle readable through a context's `get` (`#lzcellkernel`), generic over
+/// the context type `Ctx`.
+///
+/// One trait for every context (`Context`, `ThreadSafeContext`, `AsyncContext`,
+/// …). `Output` carries the read result — usually the value `T`, but
+/// `Option<T>` for an async computed that may still be pending. Implemented by
+/// both [`Computed`] (recompute-if-needed) and [`Source`] (stored value); the
+/// unified read that supersedes the deprecated `get_cell`.
+pub trait Read<Ctx: ?Sized> {
+    type Output;
+    fn read(&self, ctx: &Ctx) -> Self::Output;
+}
+
+/// A handle writable through a context's `set` (`#lzcellkernel`), generic over
+/// the context type `Ctx`.
+///
+/// Implemented only by source handles — writes do not exist on [`Computed`], so
+/// `ctx.set(computed, v)` fails to compile (write protection, design §3).
+pub trait Write<Ctx: ?Sized> {
+    type Value;
+    fn write(&self, ctx: &Ctx, value: Self::Value);
+}
+
+impl<T: Clone + 'static> Read<Context> for Computed<T> {
+    type Output = T;
+    fn read(&self, ctx: &Context) -> T {
+        ctx.get_slot(self.id)
+    }
+}
+
+impl<T: Clone + 'static> Read<Context> for Source<T> {
+    type Output = T;
+    fn read(&self, ctx: &Context) -> T {
+        if let Some(parent_id) = current_tracking_frame() {
+            ctx.register_dependency(self.id, parent_id);
+        }
+
+        let inner = ctx.inner.borrow();
+        if let Some(Node::Source(c)) = Context::get_node(&inner.nodes, self.id) {
+            assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
+            unsafe { c.value.as_t_ref_unchecked::<T>() }.clone()
+        } else {
+            panic!("get called on non-cell id");
+        }
+    }
+}
+
+impl<T: PartialEq + 'static> Write<Context> for Source<T> {
+    type Value = T;
+    fn write(&self, ctx: &Context, value: T) {
+        ctx.set_source::<T>(self.id, value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2675,7 +2734,7 @@ mod tests {
         // serve the value it cached before the disposal, forever.
         let ctx = Context::new();
         let src = ctx.cell(4i64);
-        let derived = ctx.computed(move |c| c.get_cell(&src));
+        let derived = ctx.computed(move |c| c.get(&src));
         let reader = ctx.computed(move |c| c.get(&derived) + 1);
         assert_eq!(ctx.get(&reader), 5);
 
@@ -2687,7 +2746,7 @@ mod tests {
         );
 
         // ... and a later publish on the surviving source must not revive it.
-        ctx.set_cell(&src, 99);
+        ctx.set(&src, 99);
         let after_publish =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.get(&reader)));
         assert!(after_publish.is_err());
@@ -2697,7 +2756,7 @@ mod tests {
     fn degree_accessors_report_live_edge_set_sizes() {
         let ctx = Context::new();
         let topic = ctx.cell(1usize);
-        let a = ctx.computed(move |c| c.get_cell(&topic) + 1);
+        let a = ctx.computed(move |c| c.get(&topic) + 1);
         let b = ctx.computed(move |c| c.get(&a) + 1);
         // Lazy: no edge is registered until the slot is pulled.
         assert_eq!(ctx.dependent_count(&topic), 0);
@@ -2723,7 +2782,7 @@ mod tests {
         let ctx = Context::new();
         let topic = ctx.cell(1usize);
         let watch = ctx.effect(move |c| {
-            let _ = c.get_cell(&topic);
+            let _ = c.get(&topic);
         });
         assert_eq!(ctx.dependency_count(&watch), 1);
         assert_eq!(ctx.dependent_count(&topic), 1);
@@ -2741,7 +2800,7 @@ mod tests {
         let probe;
         {
             let conn = ctx.scope();
-            let a = conn.computed(move |c| c.get_cell(&topic) + 1);
+            let a = conn.computed(move |c| c.get(&topic) + 1);
             let _b = conn.computed(move |c| c.get(&a) * 10);
             assert_eq!(conn.len(), 2);
             probe = a;
@@ -2769,8 +2828,8 @@ mod tests {
         let ctx = Context::new();
         let topic = ctx.cell(5usize);
         let conn = ctx.scope();
-        let a = conn.computed(move |c| c.get_cell(&topic) + 1);
-        let b = conn.computed(move |c| c.get_cell(&topic) + 2);
+        let a = conn.computed(move |c| c.get(&topic) + 1);
+        let b = conn.computed(move |c| c.get(&topic) + 2);
         assert_eq!(ctx.get(&a) + ctx.get(&b), 13);
     }
 
@@ -2779,7 +2838,7 @@ mod tests {
         // Grouping bounds teardown, not visibility.
         let ctx = Context::new();
         let topic = ctx.cell(2usize);
-        let outer = ctx.computed(move |c| c.get_cell(&topic) * 3);
+        let outer = ctx.computed(move |c| c.get(&topic) * 3);
         let conn = ctx.scope();
         let inner = conn.computed(move |c| c.get(&outer) + 1);
         assert_eq!(ctx.get(&inner), 7);
@@ -2794,7 +2853,7 @@ mod tests {
             let cell = conn.cell(1usize);
             cell_id = cell.id;
             let effect = conn.effect(move |c| {
-                let _ = c.get_cell(&cell);
+                let _ = c.get(&cell);
             });
             effect_id = effect.id;
             assert_eq!(conn.len(), 2);
@@ -2810,12 +2869,12 @@ mod tests {
         let topic = ctx.cell(1usize);
         let escaped = {
             let conn = ctx.scope();
-            let slot = conn.computed(move |c| c.get_cell(&topic) * 10);
+            let slot = conn.computed(move |c| c.get(&topic) * 10);
             conn.disarm();
             slot
         };
         assert_eq!(ctx.get(&escaped), 10);
-        ctx.set_cell(&topic, 4);
+        ctx.set(&topic, 4);
         assert_eq!(ctx.get(&escaped), 40);
     }
 
@@ -2826,7 +2885,7 @@ mod tests {
         let topic = ctx.cell(0usize);
         for cycle in 0..500usize {
             let conn = ctx.scope();
-            let slot = conn.computed(move |c| c.get_cell(&topic) + cycle);
+            let slot = conn.computed(move |c| c.get(&topic) + cycle);
             assert_eq!(ctx.get(&slot), cycle);
         }
         match Context::get_node(&ctx.inner.borrow().nodes, topic.id) {
@@ -2862,7 +2921,7 @@ mod tests {
 
         let ctx = std::rc::Rc::new(Context::new());
         let base = ctx.cell(1u64);
-        let victim = ctx.computed(move |c| c.get_cell(&base) + 1);
+        let victim = ctx.computed(move |c| c.get(&base) + 1);
         assert_eq!(ctx.get(&victim), 2);
 
         let reentrant = ReentersOnDrop {
@@ -2871,7 +2930,7 @@ mod tests {
         };
         let holder = ctx.computed(move |c| {
             let _ = &reentrant;
-            c.get_cell(&base) + 100
+            c.get(&base) + 100
         });
         assert_eq!(ctx.get(&holder), 101);
 
@@ -2888,7 +2947,7 @@ mod tests {
     fn dispose_slot_detaches_both_edge_directions_and_recycles_the_id() {
         let ctx = Context::new();
         let src = ctx.cell(1usize);
-        let mid = ctx.computed(move |ctx| ctx.get_cell(&src) + 1);
+        let mid = ctx.computed(move |ctx| ctx.get(&src) + 1);
         let sink = ctx.computed(move |ctx| ctx.get(&mid) * 10);
         assert_eq!(ctx.get(&sink), 20);
 
@@ -2917,10 +2976,10 @@ mod tests {
         }
 
         // the recycled id is handed to the next node and behaves normally
-        let reused = ctx.computed(move |ctx| ctx.get_cell(&src) + 100);
+        let reused = ctx.computed(move |ctx| ctx.get(&src) + 100);
         assert_eq!(reused.id, recycled);
         assert_eq!(ctx.get(&reused), 101);
-        ctx.set_cell(&src, 5);
+        ctx.set(&src, 5);
         assert_eq!(ctx.get(&reused), 105);
     }
 
@@ -2928,7 +2987,7 @@ mod tests {
     fn dispose_cell_detaches_dependents_and_recycles_the_id() {
         let ctx = Context::new();
         let src = ctx.cell(2usize);
-        let derived = ctx.computed(move |ctx| ctx.get_cell(&src) * 3);
+        let derived = ctx.computed(move |ctx| ctx.get(&src) * 3);
         assert_eq!(ctx.get(&derived), 6);
 
         let recycled = src.id;
@@ -2956,7 +3015,7 @@ mod tests {
             _marker: std::marker::PhantomData,
         };
         ctx.dispose_slot(&stale);
-        assert_eq!(ctx.get_cell(&cell), 1, "the cell must survive");
+        assert_eq!(ctx.get(&cell), 1, "the cell must survive");
         assert!(
             !ctx.inner.borrow().free_ids.contains(&cell.id.0),
             "a live node's id must not be recycled"
@@ -2973,7 +3032,7 @@ mod tests {
         let live_width = 8usize;
         let mut live_a: Vec<_> = (0..live_width)
             .map(|i| {
-                let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + i);
+                let slot = ctx.computed(move |ctx| ctx.get(&topic) + i);
                 ctx.get(&slot);
                 slot
             })
@@ -2982,7 +3041,7 @@ mod tests {
         for cycle in 0..500usize {
             let victim = live_a.swap_remove(cycle % live_a.len());
             ctx.dispose_slot(&victim);
-            let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + cycle);
+            let slot = ctx.computed(move |ctx| ctx.get(&topic) + cycle);
             ctx.get(&slot);
             live_a.push(slot);
         }
@@ -3005,7 +3064,7 @@ mod tests {
         // comfortably past EDGE_INDEX_THRESHOLD so the index is built
         let width = EDGE_INDEX_THRESHOLD * 4;
         let dep_a: Vec<_> = (0..width)
-            .map(|i| ctx.computed(move |ctx| ctx.get_cell(&src) + i))
+            .map(|i| ctx.computed(move |ctx| ctx.get(&src) + i))
             .collect();
         for slot in &dep_a {
             ctx.get(slot);
@@ -3034,7 +3093,7 @@ mod tests {
             }
         }
 
-        ctx.set_cell(&src, 7);
+        ctx.set(&src, 7);
         for (i, slot) in dep_a.iter().enumerate() {
             assert_eq!(ctx.get(slot), 7 + i, "every dependent recomputed");
         }
@@ -3051,8 +3110,8 @@ mod tests {
         let dep_a: Vec<_> = (0..width)
             .map(|i| {
                 ctx.computed(move |ctx| {
-                    if ctx.get_cell(&toggle) {
-                        ctx.get_cell(&src) + i
+                    if ctx.get(&toggle) {
+                        ctx.get(&src) + i
                     } else {
                         i
                     }
@@ -3067,7 +3126,7 @@ mod tests {
             "wide list must be indexed"
         );
 
-        ctx.set_cell(&toggle, false);
+        ctx.set(&toggle, false);
         for slot in &dep_a {
             ctx.get(slot);
         }
@@ -3077,7 +3136,7 @@ mod tests {
         );
 
         // and the graph still behaves
-        ctx.set_cell(&src, 99);
+        ctx.set(&src, 99);
         for (i, slot) in dep_a.iter().enumerate() {
             assert_eq!(ctx.get(slot), i, "src is no longer a dependency");
         }
@@ -3093,7 +3152,7 @@ mod tests {
         let cell_a: Vec<_> = (0..width).map(|i| ctx.cell(i)).collect();
         let effect = ctx.effect(move |ctx| {
             for cell in &cell_a {
-                let _ = ctx.get_cell(cell);
+                let _ = ctx.get(cell);
             }
         });
         assert!(
@@ -3114,10 +3173,10 @@ mod tests {
             "disposal must drop the index entry before the id is recycled"
         );
 
-        let reused = ctx.computed(move |ctx| ctx.get_cell(&src) + 1);
+        let reused = ctx.computed(move |ctx| ctx.get(&src) + 1);
         assert_eq!(reused.id, recycled, "id was recycled as expected");
         assert_eq!(ctx.get(&reused), 1, "recycled node computes normally");
-        ctx.set_cell(&src, 41);
+        ctx.set(&src, 41);
         assert_eq!(ctx.get(&reused), 42, "recycled node propagates normally");
     }
 
@@ -3174,7 +3233,7 @@ mod tests {
         let effect_a: Vec<_> = (0..8)
             .map(|_| {
                 ctx.effect(move |ctx| {
-                    let _ = ctx.get_cell(&cell);
+                    let _ = ctx.get(&cell);
                 })
             })
             .collect();
@@ -3217,17 +3276,17 @@ mod tests {
         for i in 0..WIDTH {
             let run_count = Rc::clone(&run_count);
             ctx.effect(move |ctx| {
-                let _ = ctx.get_cell(&cell);
+                let _ = ctx.get(&cell);
                 run_count.borrow_mut()[i] += 1;
             });
         }
         // Creation runs each effect once.
         assert_eq!(*run_count.borrow(), vec![1usize; WIDTH]);
 
-        ctx.set_cell(&cell, 1);
+        ctx.set(&cell, 1);
         assert_eq!(*run_count.borrow(), vec![2usize; WIDTH]);
 
-        ctx.set_cell(&cell, 2);
+        ctx.set(&cell, 2);
         assert_eq!(*run_count.borrow(), vec![3usize; WIDTH]);
     }
 
@@ -3241,7 +3300,7 @@ mod tests {
         let ctx = Context::new();
         let cell = ctx.cell(0i32);
         let effect = ctx.effect(move |ctx| {
-            let _ = ctx.get_cell(&cell);
+            let _ = ctx.get(&cell);
         });
 
         // Simulate the effect being scheduled (pending) but not yet flushed,
@@ -3277,7 +3336,7 @@ mod tests {
         let cell = ctx.cell(0i32);
 
         let doomed = ctx.effect(move |ctx| {
-            let _ = ctx.get_cell(&cell);
+            let _ = ctx.get(&cell);
         });
         // Queue it, then dispose it: entry stays behind, id goes on free_ids.
         ctx.schedule_effect(doomed.id, true);
@@ -3288,7 +3347,7 @@ mod tests {
         let recycled = {
             let run_count = Rc::clone(&run_count);
             ctx.effect(move |ctx| {
-                let _ = ctx.get_cell(&cell);
+                let _ = ctx.get(&cell);
                 *run_count.borrow_mut() += 1;
             })
         };
@@ -3296,7 +3355,7 @@ mod tests {
         assert_eq!(*run_count.borrow(), 1, "creation runs it once");
 
         // A publish must run it exactly once despite the aliased tombstone.
-        ctx.set_cell(&cell, 1);
+        ctx.set(&cell, 1);
         assert_eq!(
             *run_count.borrow(),
             2,
@@ -3305,7 +3364,7 @@ mod tests {
 
         // And the tombstone must not resurrect it after a real disposal.
         recycled.dispose(&ctx);
-        ctx.set_cell(&cell, 2);
+        ctx.set(&cell, 2);
         assert_eq!(
             *run_count.borrow(),
             2,
@@ -3386,8 +3445,8 @@ mod tests {
         // cycle guard must not misfire on shared, non-nested dependencies.
         let ctx = Context::new();
         let a = ctx.cell(1i32);
-        let b = ctx.computed(move |ctx| ctx.get_cell(&a) + 1);
-        let c = ctx.computed(move |ctx| ctx.get_cell(&a) + 2);
+        let b = ctx.computed(move |ctx| ctx.get(&a) + 1);
+        let c = ctx.computed(move |ctx| ctx.get(&a) + 2);
         let d = ctx.computed(move |ctx| ctx.get(&b) + ctx.get(&c));
         assert_eq!(ctx.get(&d), (1 + 1) + (1 + 2));
         a.set(&ctx, 10);
@@ -3403,7 +3462,7 @@ mod tests {
         let ctx = Context::new();
         let a = ctx.cell(0i32);
         let b = ctx.cell(0i32);
-        let total = ctx.computed(move |ctx| ctx.get_cell(&a) + ctx.get_cell(&b));
+        let total = ctx.computed(move |ctx| ctx.get(&a) + ctx.get(&b));
         assert_eq!(ctx.get(&total), 0);
 
         ctx.batch(|ctx| {

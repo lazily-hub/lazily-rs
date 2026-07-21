@@ -582,7 +582,7 @@ where
             return;
         }
         self.inner.storage.borrow_mut().close();
-        ctx.set_cell(&self.inner.closed, true);
+        ctx.set(&self.inner.closed, true);
     }
 
     // -- Reactive reader-kind reads ----------------------------------------
@@ -625,7 +625,7 @@ where
     /// Reactive read of the closed flag. Invalidated only on the open → closed
     /// transition.
     pub fn is_closed(&self, ctx: &Context) -> bool {
-        ctx.get_cell(&self.inner.closed)
+        ctx.get(&self.inner.closed)
     }
 
     /// Handles to the reader-kind nodes, for advanced wiring (e.g. effects that

@@ -157,7 +157,7 @@ pub use command::{
     CommandProjectionImage, CommandRpcClient, CommandStatus, CommandSubmit, CommandTransport,
     DedupePolicy, applied_receipt, rejected_receipt,
 };
-pub use context::{Context, DrainExhaustion, GraphNode, TeardownScope};
+pub use context::{Context, DrainExhaustion, GraphNode, Read, TeardownScope, Write};
 pub use coordination::{
     BarrierCell, BarrierCore, LeaderCell, LeaderRole, LeaseCell, LeaseCore, LockCell,
     SemaphoreCell, SemaphoreCore,
@@ -224,7 +224,7 @@ pub use ipc::{
     )
 ))]
 pub use ipc::{DecodeError, EncodeError};
-pub use lazily_macros::{cell, slot};
+pub use lazily_macros::{cell, computed, slot, source};
 #[cfg(feature = "lossless-tree")]
 pub use lossless_tree_crdt::{
     LeafKind, LosslessTreeCrdt, NodeSeed, TreeError, TreeNodeId, TreeOp, TreeOpId, TreeUpdate,

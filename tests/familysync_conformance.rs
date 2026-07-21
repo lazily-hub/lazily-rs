@@ -61,7 +61,7 @@ fn family_sync_materialize_on_ingest_conformance() {
         let mut target = CrdtPlaneRuntime::new(PeerId(target_peer));
         target.register_family_lww::<bool>(&ctx_t, namespace);
         let epoch = target.membership_epoch().expect("membership epoch");
-        let epoch_before = ctx_t.get_cell(&epoch);
+        let epoch_before = ctx_t.get(&epoch);
 
         // Apply the origin's family writes in order.
         for set in scenario["origin_sets"].as_array().expect("origin_sets") {
@@ -138,7 +138,7 @@ fn family_sync_materialize_on_ingest_conformance() {
         if expect["target_epoch_bumped"].as_bool().unwrap_or(false) {
             assert_ne!(
                 epoch_before,
-                ctx_t.get_cell(&epoch),
+                ctx_t.get(&epoch),
                 "[{name}] membership epoch bumped on materialize"
             );
         }

@@ -91,7 +91,7 @@ fn claim_1_leaf_disposes_on_drop() {
     let topic = ctx.cell(1u64);
     let before = disposed_count();
     {
-        let leaf = rc_slot(&ctx, move |c| c.get_cell(&topic) + 1);
+        let leaf = rc_slot(&ctx, move |c| c.get(&topic) + 1);
         assert_eq!(ctx.get(leaf.handle()), 2);
         assert_eq!(leaf.strong_count(), 1);
     }
@@ -106,7 +106,7 @@ fn claim_1_leaf_disposes_on_drop() {
 fn claim_2_and_3_dependent_keeps_alive_then_cascades() {
     let ctx = Rc::new(Context::new());
     let topic = ctx.cell(1u64);
-    let mid = rc_slot(&ctx, move |c| c.get_cell(&topic) + 10);
+    let mid = rc_slot(&ctx, move |c| c.get(&topic) + 10);
 
     // sink captures a clone of mid: the strong reference is upward.
     let mid_for_sink = mid.clone();
@@ -143,7 +143,7 @@ fn claim_4_no_reference_cycle() {
         let ctx = Rc::new(Context::new());
         weak_probe = Rc::downgrade(&ctx);
         let topic = ctx.cell(1u64);
-        let a = rc_slot(&ctx, move |c| c.get_cell(&topic) + 1);
+        let a = rc_slot(&ctx, move |c| c.get(&topic) + 1);
         let a2 = a.clone();
         let _b = rc_slot(&ctx, move |c| c.get(a2.handle()) + 1);
         assert_eq!(Rc::strong_count(&ctx), 1, "handles hold Weak, not Rc");
@@ -163,7 +163,7 @@ fn cost_model(width: usize) {
     let start = Instant::now();
     let plain_a: Vec<_> = (0..width)
         .map(|i| {
-            let slot = ctx_plain.computed(move |c| c.get_cell(&topic_plain) + i as u64);
+            let slot = ctx_plain.computed(move |c| c.get(&topic_plain) + i as u64);
             ctx_plain.get(&slot);
             slot
         })
@@ -175,7 +175,7 @@ fn cost_model(width: usize) {
     let start = Instant::now();
     let rc_a: Vec<_> = (0..width)
         .map(|i| {
-            let slot = rc_slot(&ctx_rc, move |c| c.get_cell(&topic_rc) + i as u64);
+            let slot = rc_slot(&ctx_rc, move |c| c.get(&topic_rc) + i as u64);
             ctx_rc.get(slot.handle());
             slot
         })
@@ -186,7 +186,7 @@ fn cost_model(width: usize) {
     let publishes = (200_000 / width).max(1);
     let start = Instant::now();
     for publish in 1..=publishes {
-        ctx_plain.set_cell(&topic_plain, publish as u64);
+        ctx_plain.set(&topic_plain, publish as u64);
         for slot in &plain_a {
             std::hint::black_box(ctx_plain.get(slot));
         }
@@ -195,7 +195,7 @@ fn cost_model(width: usize) {
 
     let start = Instant::now();
     for publish in 1..=publishes {
-        ctx_rc.set_cell(&topic_rc, publish as u64);
+        ctx_rc.set(&topic_rc, publish as u64);
         for slot in &rc_a {
             std::hint::black_box(ctx_rc.get(slot.handle()));
         }
@@ -209,7 +209,7 @@ fn cost_model(width: usize) {
     for cycle in 0..CYCLES {
         let victim = plain_live.swap_remove(cycle % plain_live.len());
         ctx_plain.dispose_slot(&victim);
-        let slot = ctx_plain.computed(move |c| c.get_cell(&topic_plain) + cycle as u64);
+        let slot = ctx_plain.computed(move |c| c.get(&topic_plain) + cycle as u64);
         ctx_plain.get(&slot);
         plain_live.push(slot);
     }
@@ -219,7 +219,7 @@ fn cost_model(width: usize) {
     let start = Instant::now();
     for cycle in 0..CYCLES {
         rc_live.swap_remove(cycle % rc_live.len()); // dropped => disposed
-        let slot = rc_slot(&ctx_rc, move |c| c.get_cell(&topic_rc) + cycle as u64);
+        let slot = rc_slot(&ctx_rc, move |c| c.get(&topic_rc) + cycle as u64);
         ctx_rc.get(slot.handle());
         rc_live.push(slot);
     }

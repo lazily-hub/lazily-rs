@@ -93,7 +93,7 @@ pub trait Teardown {
 ///
 /// let ctx = Context::new();
 /// let topic = SyncReactiveGraph::cell(&ctx, 1i64);
-/// let derived = SyncReactiveGraph::computed(&ctx, move |c: &Context| c.get_cell(&topic) + 1);
+/// let derived = SyncReactiveGraph::computed(&ctx, move |c: &Context| c.get(&topic) + 1);
 /// assert_eq!(SyncReactiveGraph::get(&ctx, &derived), 2);
 /// assert_eq!(leaked_edges(&ctx, &topic), 1);
 ///

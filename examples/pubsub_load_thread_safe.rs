@@ -42,7 +42,7 @@ fn sweep_width(width: usize) -> (f64, f64, f64) {
     let build_start = Instant::now();
     let subscriber_a: Vec<_> = (0..width)
         .map(|i| {
-            let slot = ctx.computed(move |ctx| ctx.get_cell(&topic) + i as u64);
+            let slot = ctx.computed(move |ctx| ctx.get(&topic) + i as u64);
             ctx.get(&slot);
             slot
         })
@@ -53,7 +53,7 @@ fn sweep_width(width: usize) -> (f64, f64, f64) {
     let publishes = (NOTIFICATION_BUDGET / width).max(1);
     let notify_start = Instant::now();
     for publish in 1..=publishes {
-        ctx.set_cell(&topic, publish as u64);
+        ctx.set(&topic, publish as u64);
         for slot in &subscriber_a {
             std::hint::black_box(ctx.get(slot));
         }

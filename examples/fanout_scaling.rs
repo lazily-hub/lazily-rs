@@ -36,14 +36,14 @@ fn wide(n: usize) -> f64 {
     let src = ctx.cell(0_usize);
     let dep_a: Vec<_> = (0..n)
         .map(|i| {
-            let slot = ctx.computed(move |ctx| ctx.get_cell(&src) + i);
+            let slot = ctx.computed(move |ctx| ctx.get(&src) + i);
             ctx.get(&slot);
             slot
         })
         .collect();
     let start = Instant::now();
     for write in 1..=WRITES {
-        ctx.set_cell(&src, write);
+        ctx.set(&src, write);
         for slot in &dep_a {
             std::hint::black_box(ctx.get(slot));
         }
@@ -57,7 +57,7 @@ fn narrow(n: usize) -> f64 {
     let pair_a: Vec<_> = (0..n)
         .map(|i| {
             let src = ctx.cell(0_usize);
-            let slot = ctx.computed(move |ctx| ctx.get_cell(&src) + i);
+            let slot = ctx.computed(move |ctx| ctx.get(&src) + i);
             ctx.get(&slot);
             (src, slot)
         })
@@ -65,7 +65,7 @@ fn narrow(n: usize) -> f64 {
     let start = Instant::now();
     for write in 1..=WRITES {
         for (src, slot) in &pair_a {
-            ctx.set_cell(src, write);
+            ctx.set(src, write);
             std::hint::black_box(ctx.get(slot));
         }
     }

@@ -87,12 +87,12 @@ fn store_without_cascade_skips_flush_but_stays_glitch_free() {
     let cell = ctx.cell(0i32);
 
     // A lazy Slot dependent (no Effect in the cone).
-    let doubled = ctx.computed(move |ctx| ctx.get_cell(&cell) * 2);
+    let doubled = ctx.computed(move |ctx| ctx.get(&cell) * 2);
     assert_eq!(ctx.get(&doubled), 0);
 
     ctx.reset_instrumentation();
     for v in 1..=100 {
-        ctx.set_cell(&cell, v);
+        ctx.set(&cell, v);
     }
     assert_eq!(
         ctx.instrumentation_snapshot().effect_queue_pushes,

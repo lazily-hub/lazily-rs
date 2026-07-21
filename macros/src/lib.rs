@@ -5,11 +5,29 @@ use syn::{
     spanned::Spanned,
 };
 
+/// Declare a computed (derived) cell factory. Canonical construction sugar of
+/// the Cell kernel (`#lzcellkernel`) — the guarded derived cell.
+#[proc_macro_attribute]
+pub fn computed(args: TokenStream, input: TokenStream) -> TokenStream {
+    expand_factory("slot", args, input)
+}
+
+/// Declare a source (writable) cell factory. Canonical construction sugar of
+/// the Cell kernel (`#lzcellkernel`) — the source cell written from outside.
+#[proc_macro_attribute]
+pub fn source(args: TokenStream, input: TokenStream) -> TokenStream {
+    expand_factory("cell", args, input)
+}
+
+/// Deprecated v1 spelling of [`macro@computed`]. Kept as a construction-sugar
+/// alias; prefer `#[lazily::computed]`.
 #[proc_macro_attribute]
 pub fn slot(args: TokenStream, input: TokenStream) -> TokenStream {
     expand_factory("slot", args, input)
 }
 
+/// Deprecated v1 spelling of [`macro@source`]. Kept as a construction-sugar
+/// alias; prefer `#[lazily::source]`.
 #[proc_macro_attribute]
 pub fn cell(args: TokenStream, input: TokenStream) -> TokenStream {
     expand_factory("cell", args, input)
@@ -20,7 +38,7 @@ fn expand_factory(kind: &str, args: TokenStream, input: TokenStream) -> TokenStr
     if !args.is_empty() {
         return syn::Error::new(
             args.span(),
-            "#[lazily::slot] and #[lazily::cell] do not take arguments",
+            "lazily factory decorators (#[lazily::source] / #[lazily::computed]) do not take arguments",
         )
         .to_compile_error()
         .into();

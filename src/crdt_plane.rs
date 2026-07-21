@@ -262,8 +262,8 @@ impl CrdtPlaneRuntime {
     /// its present set grows.
     fn bump_membership_epoch(&self, ctx: &Context) {
         if let Some(epoch) = self.membership_epoch {
-            let current = ctx.get_cell(&epoch);
-            ctx.set_cell(&epoch, current.wrapping_add(1));
+            let current = ctx.get(&epoch);
+            ctx.set(&epoch, current.wrapping_add(1));
         }
     }
 
@@ -507,8 +507,8 @@ impl CrdtPlaneRuntime {
             // Bump membership so a derived aggregate over the family recomputes for the
             // newly-present key (a brand-new cell is not yet a dependency; the epoch is).
             if let Some(epoch) = membership_epoch.as_ref() {
-                let current = ctx.get_cell(epoch);
-                ctx.set_cell(epoch, current.wrapping_add(1));
+                let current = ctx.get(epoch);
+                ctx.set(epoch, current.wrapping_add(1));
             }
         })
     }
@@ -719,14 +719,14 @@ mod tests {
         let epoch = b
             .membership_epoch()
             .expect("registering a family creates the membership epoch");
-        let before = ctx_b.get_cell(&epoch);
+        let before = ctx_b.get(&epoch);
 
         let frame = CrdtSync::new(a.wire_frontier(), vec![op]);
         b.ingest(&ctx_b, &frame, 200);
 
         assert_ne!(
             before,
-            ctx_b.get_cell(&epoch),
+            ctx_b.get(&epoch),
             "materializing a remote key bumps the membership epoch"
         );
     }

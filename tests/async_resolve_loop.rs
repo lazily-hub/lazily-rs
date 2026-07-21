@@ -79,7 +79,7 @@ async fn window2_superseded_notifier_drop_reresolves_to_latest() {
     let slot = ctx.computed_async({
         let first_gate = first_gate.clone();
         move |ctx| {
-            let observed = ctx.get_cell(&cell);
+            let observed = ctx.get(&cell);
             let first_gate = first_gate.clone();
             async move {
                 // Only the first (observed == 1) compute parks on the gate; the
@@ -104,7 +104,7 @@ async fn window2_superseded_notifier_drop_reresolves_to_latest() {
 
     // Supersede: a new revision drops the first compute's notifier without a
     // final `Resolved` send, forcing the reader through window 2.
-    ctx.set_cell(&cell, 2);
+    ctx.set(&cell, 2);
     let _ = release_first.send(());
 
     assert_eq!(

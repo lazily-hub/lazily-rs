@@ -6,11 +6,11 @@ use lazily::ThreadSafeContext;
 async fn main() {
     let ctx = ThreadSafeContext::new();
     let input = ctx.cell(20usize);
-    let doubled = ctx.computed(move |ctx| ctx.get_cell(&input) * 2);
+    let doubled = ctx.computed(move |ctx| ctx.get(&input) * 2);
 
     let worker_ctx = ctx.clone();
     let result = tokio::task::spawn_blocking(move || {
-        worker_ctx.set_cell(&input, 21);
+        worker_ctx.set(&input, 21);
         worker_ctx.get(&doubled)
     })
     .await

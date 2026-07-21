@@ -108,7 +108,7 @@ fn thread_safe_machine_self_transition_is_accepted_but_no_invalidation() {
     let recomputes_inner = recomputes.clone();
     let _watch = ctx.computed(move |ctx| {
         *recomputes_inner.lock().unwrap() += 1;
-        ctx.get_cell(&state)
+        ctx.get(&state)
     });
 
     let baseline = *recomputes.lock().unwrap();
@@ -126,7 +126,7 @@ fn thread_safe_derived_slot_updates_on_transition() {
     let m = garage_door(&ctx);
     let state = m.state_handle();
 
-    let label = ctx.computed(move |ctx| match ctx.get_cell(&state) {
+    let label = ctx.computed(move |ctx| match ctx.get(&state) {
         Door::Closed => "closed",
         Door::Opening => "opening",
         Door::Open => "open",
@@ -170,14 +170,14 @@ fn thread_safe_derived_slot_drops_stale_machine_dependency_after_branch_switch()
     let recomputes_inner = recomputes.clone();
     let selected_label = ctx.computed(move |ctx| {
         *recomputes_inner.lock().unwrap() += 1;
-        match ctx.get_cell(&active_state) {
-            ActiveDoor::Primary => match ctx.get_cell(&primary_state) {
+        match ctx.get(&active_state) {
+            ActiveDoor::Primary => match ctx.get(&primary_state) {
                 Door::Closed => "primary:closed",
                 Door::Opening => "primary:opening",
                 Door::Open => "primary:open",
                 Door::Closing => "primary:closing",
             },
-            ActiveDoor::Secondary => match ctx.get_cell(&secondary_state) {
+            ActiveDoor::Secondary => match ctx.get(&secondary_state) {
                 Door::Closed => "secondary:closed",
                 Door::Opening => "secondary:opening",
                 Door::Open => "secondary:open",
@@ -215,7 +215,7 @@ fn thread_safe_eager_signal_tracks_machine_state() {
     let observed = Arc::new(Mutex::new(Vec::<Door>::new()));
     let observed_inner = observed.clone();
     let _sig = ctx.signal(move |ctx| {
-        let s = ctx.get_cell(&state);
+        let s = ctx.get(&state);
         observed_inner.lock().unwrap().push(s.clone());
         s
     });
@@ -306,7 +306,7 @@ fn thread_safe_effect_cleanup_runs_on_state_exit() {
     let exits_for_cleanup = exits.clone();
 
     let _lifecycle = ctx.effect(move |ctx| {
-        let entered = ctx.get_cell(&state);
+        let entered = ctx.get(&state);
         let exits_inner = exits_for_cleanup.clone();
         move || exits_inner.lock().unwrap().push(entered)
     });

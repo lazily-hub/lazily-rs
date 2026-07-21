@@ -701,7 +701,7 @@ where
     /// changed (a redundant merge is a no-op and invalidates nothing).
     pub fn merge_remote(&mut self, ctx: &Context, remote: &C) -> bool {
         if self.crdt.merge_from(remote) {
-            ctx.set_cell(&self.handle, self.crdt.value());
+            ctx.set(&self.handle, self.crdt.value());
             true
         } else {
             false
@@ -719,7 +719,7 @@ where
         mutate(&mut self.crdt);
         let after = self.crdt.value();
         if after != before {
-            ctx.set_cell(&self.handle, after);
+            ctx.set(&self.handle, after);
             true
         } else {
             false
@@ -1202,7 +1202,7 @@ mod tests {
         let rc = recomputes.clone();
         let doubled = ctx.computed(move |ctx| {
             rc.set(rc.get() + 1);
-            ctx.get_cell(&handle) * 2
+            ctx.get(&handle) * 2
         });
         assert_eq!(ctx.get(&doubled), 2);
         assert_eq!(recomputes.get(), 1);
@@ -1249,7 +1249,7 @@ mod tests {
 
         assert_eq!(a.value(), b.value());
         assert_eq!(a.value(), 9, "highest HLC stamp wins on both replicas");
-        assert_eq!(ctx_a.get_cell(&a.handle()), ctx_b.get_cell(&b.handle()));
+        assert_eq!(ctx_a.get(&a.handle()), ctx_b.get(&b.handle()));
     }
 
     // --- #lzcrdtplane1: StampFrontier ---
@@ -1419,7 +1419,7 @@ mod tests {
         let mut cell = ReplicatedCell::lww(&ctx, 1i32, HlcStamp::new(1, 0, peer(1)));
         let doubled = {
             let h = cell.handle();
-            ctx.computed(move |ctx| ctx.get_cell(&h) * 2)
+            ctx.computed(move |ctx| ctx.get(&h) * 2)
         };
         assert_eq!(ctx.get(&doubled), 2);
         // A higher-stamped remote write converges and recomputes downstream.
@@ -1434,7 +1434,7 @@ mod tests {
         cell.update(&ctx, |c| c.increment(peer(1), 3));
         cell.update(&ctx, |c| c.decrement(peer(1), 1));
         assert_eq!(cell.value(), 2);
-        assert_eq!(ctx.get_cell(&cell.handle()), 2);
+        assert_eq!(ctx.get(&cell.handle()), 2);
     }
 
     // --- #lzcrdtplane2: register merge-law property tests (proptest) ---
