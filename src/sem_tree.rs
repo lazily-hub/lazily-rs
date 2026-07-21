@@ -39,7 +39,7 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::Context;
-use crate::cell::FormulaCell;
+use crate::cell::Computed;
 use crate::cell_tree::CellTree;
 
 /// A shared fold `(node value, children derived) -> derived`.
@@ -48,8 +48,8 @@ type FoldFn<V, D> = Rc<dyn Fn(&V, &[D]) -> D>;
 /// A memoized semantic derivation over a [`CellTree`]: one `memo` slot per node,
 /// each folding `(node value, child derived values) -> D`.
 pub struct SemTree<Id, D> {
-    root: FormulaCell<D>,
-    nodes: HashMap<Id, FormulaCell<D>>,
+    root: Computed<D>,
+    nodes: HashMap<Id, Computed<D>>,
 }
 
 impl<Id, D> SemTree<Id, D>
@@ -79,7 +79,7 @@ where
     }
 
     /// The root derived slot.
-    pub fn root(&self) -> FormulaCell<D> {
+    pub fn root(&self) -> Computed<D> {
         self.root
     }
 
@@ -89,7 +89,7 @@ where
     }
 
     /// The derived slot for a node id, if it was present at build time.
-    pub fn node(&self, id: &Id) -> Option<FormulaCell<D>> {
+    pub fn node(&self, id: &Id) -> Option<Computed<D>> {
         self.nodes.get(id).copied()
     }
 
@@ -103,8 +103,8 @@ fn derive<Id, V, D>(
     ctx: &Context,
     node: &CellTree<Id, V>,
     fold: &FoldFn<V, D>,
-    nodes: &mut HashMap<Id, FormulaCell<D>>,
-) -> FormulaCell<D>
+    nodes: &mut HashMap<Id, Computed<D>>,
+) -> Computed<D>
 where
     Id: Eq + Hash + Clone + 'static,
     V: PartialEq + Clone + 'static,
@@ -113,7 +113,7 @@ where
     // Build child derived slots first (current structure; no tracking frame is
     // active here, so reading children does not create a spurious subscription).
     let children = node.children(ctx);
-    let mut child_slots: Vec<(Id, FormulaCell<D>)> = Vec::with_capacity(children.len());
+    let mut child_slots: Vec<(Id, Computed<D>)> = Vec::with_capacity(children.len());
     for c in &children {
         let s = derive(ctx, c, fold, nodes);
         nodes.insert(c.id().clone(), s);

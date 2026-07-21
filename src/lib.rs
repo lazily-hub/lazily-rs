@@ -147,7 +147,7 @@ pub use async_context::{
 pub use async_reactive_family::{AsyncCellMap, AsyncMapHandle, AsyncReactiveMap, AsyncSlotMap};
 #[cfg(feature = "webrtc")]
 pub use bridge::{BridgeHub, HubError};
-pub use cell::{Cell, Formula, FormulaCell, Source, SourceCell};
+pub use cell::{Computed, Source};
 pub use cell_family::{CellMap, EntryKind, MapHandle, ReactiveMap, SlotMap};
 pub use cell_tree::CellTree;
 #[cfg(feature = "ipc")]

@@ -1,4 +1,4 @@
-use lazily::{Context, EffectHandle, FormulaCell, SourceCell};
+use lazily::{Computed, Context, EffectHandle, Source};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseResult;
 use std::cell::RefCell;
@@ -30,13 +30,13 @@ impl Model {
 }
 
 struct Graph {
-    a: SourceCell<i32>,
-    b: SourceCell<i32>,
-    gate: SourceCell<bool>,
-    sum: FormulaCell<i32>,
-    parity: FormulaCell<i32>,
-    branch: FormulaCell<i32>,
-    out: FormulaCell<i32>,
+    a: Source<i32>,
+    b: Source<i32>,
+    gate: Source<bool>,
+    sum: Computed<i32>,
+    parity: Computed<i32>,
+    branch: Computed<i32>,
+    out: Computed<i32>,
 }
 
 impl Graph {

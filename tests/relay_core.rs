@@ -8,7 +8,7 @@
 
 use lazily::{
     BackpressurePolicy, BoundDim, Context, IngressOutcome, KeepLatest, Max, MergePolicy, Overflow,
-    RawFifo, RelayCell, RelayConfigError, SourceCell, Sum,
+    RawFifo, RelayCell, RelayConfigError, Source, Sum,
 };
 
 fn policy(ctx: &Context, high: u64, overflow: Overflow) -> BackpressurePolicy {
@@ -24,7 +24,7 @@ where
     // A generous high_water + Conflate so nothing blocks/drops: pure coalescing.
     let relay: RelayCell<i64, M> =
         RelayCell::new(ctx, policy(ctx, u64::MAX, Overflow::Conflate)).unwrap();
-    let egress: SourceCell<i64, M> = ctx.merge_cell(0);
+    let egress: Source<i64, M> = ctx.merge_cell(0);
 
     let mut drain_at = drain_at.iter().copied().peekable();
     for (i, &op) in ops.iter().enumerate() {

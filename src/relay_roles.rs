@@ -21,7 +21,7 @@
 //! is a chain of relays sharing one `RelayCell` core.
 
 use crate::Context;
-use crate::cell::FormulaCell;
+use crate::cell::Computed;
 use crate::merge::MergePolicy;
 use crate::relay::{
     BackpressurePolicy, BoundDim, IngressOutcome, Overflow, RelayCell, RelayConfigError,
@@ -70,7 +70,7 @@ where
     }
 
     /// The producer-facing backpressure signal (window at/over the watermark).
-    pub fn is_full(&self) -> FormulaCell<bool> {
+    pub fn is_full(&self) -> Computed<bool> {
         self.relay.is_full()
     }
 

@@ -8,7 +8,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use lazily::{Context, FormulaCell, SourceCell, ThreadSafeContext};
+use lazily::{Computed, Context, Source, ThreadSafeContext};
 
 const FAN_OUT_WIDTHS: [usize; 2] = [32, 256];
 const MEMO_CHAIN_DEPTH: usize = 32;
@@ -122,7 +122,7 @@ impl ThreadSafeGraphPropagationCase {
     }
 }
 
-fn setup_context_fan_out(width: usize) -> (Context, SourceCell<usize>, Vec<FormulaCell<usize>>) {
+fn setup_context_fan_out(width: usize) -> (Context, Source<usize>, Vec<Computed<usize>>) {
     let ctx = Context::new();
     let root = ctx.cell(0usize);
     let slots = (0..width)
@@ -138,11 +138,7 @@ fn setup_context_fan_out(width: usize) -> (Context, SourceCell<usize>, Vec<Formu
 
 fn setup_thread_safe_fan_out(
     width: usize,
-) -> (
-    ThreadSafeContext,
-    SourceCell<usize>,
-    Vec<FormulaCell<usize>>,
-) {
+) -> (ThreadSafeContext, Source<usize>, Vec<Computed<usize>>) {
     let ctx = ThreadSafeContext::new();
     let root = ctx.cell(0usize);
     let slots = (0..width)
@@ -156,7 +152,7 @@ fn setup_thread_safe_fan_out(
     (ctx, root, slots)
 }
 
-fn setup_context_memo_chain(depth: usize) -> (Context, SourceCell<usize>, FormulaCell<usize>) {
+fn setup_context_memo_chain(depth: usize) -> (Context, Source<usize>, Computed<usize>) {
     let ctx = Context::new();
     let root = ctx.cell(0usize);
     let mut tail = ctx.memo(move |ctx| ctx.get_cell(&root) % 2);
@@ -172,7 +168,7 @@ fn setup_context_memo_chain(depth: usize) -> (Context, SourceCell<usize>, Formul
 
 fn setup_thread_safe_memo_chain(
     depth: usize,
-) -> (ThreadSafeContext, SourceCell<usize>, FormulaCell<usize>) {
+) -> (ThreadSafeContext, Source<usize>, Computed<usize>) {
     let ctx = ThreadSafeContext::new();
     let root = ctx.cell(0usize);
     let mut tail = ctx.memo(move |ctx| ctx.get_cell(&root) % 2);
@@ -188,7 +184,7 @@ fn setup_thread_safe_memo_chain(
 
 fn setup_context_batch_storm(
     cells_len: usize,
-) -> (Context, Vec<SourceCell<usize>>, Rc<LocalCell<usize>>) {
+) -> (Context, Vec<Source<usize>>, Rc<LocalCell<usize>>) {
     let ctx = Context::new();
     let cells = (0..cells_len).map(|idx| ctx.cell(idx)).collect::<Vec<_>>();
     let sink = Rc::new(LocalCell::new(0usize));
@@ -207,7 +203,7 @@ fn setup_context_batch_storm(
 
 fn setup_thread_safe_batch_storm(
     cells_len: usize,
-) -> (ThreadSafeContext, Vec<SourceCell<usize>>, Arc<AtomicUsize>) {
+) -> (ThreadSafeContext, Vec<Source<usize>>, Arc<AtomicUsize>) {
     let ctx = ThreadSafeContext::new();
     let cells = (0..cells_len).map(|idx| ctx.cell(idx)).collect::<Vec<_>>();
     let sink = Arc::new(AtomicUsize::new(0));
@@ -451,7 +447,7 @@ fn run_thread_safe_fan_in_batched_flush(workers: usize) -> usize {
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<SourceCell<usize>>>();
+        .collect::<Vec<Source<usize>>>();
     let branches = all_cells
         .iter()
         .map(|cell| {
@@ -723,7 +719,7 @@ fn run_thread_safe_batched_write_bursts(workers: usize) -> usize {
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<SourceCell<usize>>>();
+        .collect::<Vec<Source<usize>>>();
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()
@@ -767,7 +763,7 @@ fn run_thread_safe_batched_write_bursts(workers: usize) -> usize {
         .fold(0usize, usize::wrapping_add)
 }
 
-fn effect_worker_cells(ctx: &ThreadSafeContext, workers: usize) -> Vec<Vec<SourceCell<usize>>> {
+fn effect_worker_cells(ctx: &ThreadSafeContext, workers: usize) -> Vec<Vec<Source<usize>>> {
     (0..workers)
         .map(|worker| {
             (0..CONTENTION_BATCH_CELLS_PER_WORKER)
@@ -789,7 +785,7 @@ fn run_thread_safe_effect_queue_coalescing(ctx: &ThreadSafeContext, workers: usi
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<SourceCell<usize>>>();
+        .collect::<Vec<Source<usize>>>();
     let effect_runs = Arc::new(AtomicUsize::new(0));
     let sink = Arc::new(AtomicUsize::new(0));
     let effect_runs_for_effect = Arc::clone(&effect_runs);
@@ -904,7 +900,7 @@ fn run_thread_safe_effect_batch_flush(ctx: &ThreadSafeContext, workers: usize) -
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<SourceCell<usize>>>();
+        .collect::<Vec<Source<usize>>>();
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()
@@ -986,7 +982,7 @@ fn run_thread_safe_batched_set_cell_invalidation(workers: usize) -> usize {
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<SourceCell<usize>>>();
+        .collect::<Vec<Source<usize>>>();
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()

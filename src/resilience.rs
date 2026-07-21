@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use crate::Context;
-use crate::cell::SourceCell;
+use crate::cell::Source;
 
 // ===========================================================================
 // Circuit breaker
@@ -108,7 +108,7 @@ impl CircuitBreakerCore {
 /// Reactive circuit breaker: projects the `state` onto a `Cell`.
 pub struct CircuitBreakerCell {
     core: RefCell<CircuitBreakerCore>,
-    state: SourceCell<BreakerState>,
+    state: Source<BreakerState>,
 }
 
 impl CircuitBreakerCell {
@@ -138,7 +138,7 @@ impl CircuitBreakerCell {
     pub fn state(&self) -> BreakerState {
         self.core.borrow().state()
     }
-    pub fn state_cell(&self) -> SourceCell<BreakerState> {
+    pub fn state_cell(&self) -> Source<BreakerState> {
         self.state
     }
 }
@@ -184,7 +184,7 @@ impl RetryPolicyCore {
 /// Reactive retry policy: projects the current delay onto a `Cell`.
 pub struct RetryPolicyCell {
     core: RefCell<RetryPolicyCore>,
-    delay: SourceCell<u64>,
+    delay: Source<u64>,
 }
 
 impl RetryPolicyCell {
@@ -206,7 +206,7 @@ impl RetryPolicyCell {
     pub fn delay(&self, ctx: &Context) -> u64 {
         self.delay.get(ctx)
     }
-    pub fn delay_cell(&self) -> SourceCell<u64> {
+    pub fn delay_cell(&self) -> Source<u64> {
         self.delay
     }
 }
@@ -250,7 +250,7 @@ impl BulkheadCore {
 /// Reactive bulkhead: projects `permits_in_use` onto a `Cell`.
 pub struct BulkheadCell {
     core: RefCell<BulkheadCore>,
-    in_use: SourceCell<u64>,
+    in_use: Source<u64>,
 }
 
 impl BulkheadCell {
@@ -276,7 +276,7 @@ impl BulkheadCell {
     pub fn permits_in_use(&self, ctx: &Context) -> u64 {
         self.in_use.get(ctx)
     }
-    pub fn permits_in_use_cell(&self) -> SourceCell<u64> {
+    pub fn permits_in_use_cell(&self) -> Source<u64> {
         self.in_use
     }
 }
@@ -330,7 +330,7 @@ impl TimeoutCore {
 /// Reactive timeout: projects `is_timed_out` onto a `Cell`.
 pub struct TimeoutCell {
     core: RefCell<TimeoutCore>,
-    timed_out: SourceCell<bool>,
+    timed_out: Source<bool>,
 }
 
 impl TimeoutCell {
@@ -356,7 +356,7 @@ impl TimeoutCell {
     pub fn is_timed_out(&self, ctx: &Context) -> bool {
         self.timed_out.get(ctx)
     }
-    pub fn is_timed_out_cell(&self) -> SourceCell<bool> {
+    pub fn is_timed_out_cell(&self) -> Source<bool> {
         self.timed_out
     }
 }

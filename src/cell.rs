@@ -1,51 +1,49 @@
-//! The Cell kernel (`#lzcellkernel`) — `SourceCell` / `FormulaCell` over a single
-//! genus `Cell<T, K>`.
+//! The Cell kernel (`#lzcellkernel`) — the two concrete handle structs
+//! [`Source`] and [`Computed`].
 //!
-//! See `tasks/software/lazily-cell-kernel-design.md`. One node type with a
-//! **kind** type parameter `K` replaces the former `SlotHandle` / `CellHandle` /
-//! `SignalHandle` / `MergeCellHandle` handle zoo and the vestigial `Reactive<T>`
-//! / `Source<T>` read/write traits:
+//! See `tasks/software/lazily-cell-kernel-design.md`. **`Cell` is a conceptual
+//! word, not a type**: a *cell* is a value-bearing reactive node, and the two
+//! kinds of cell are named by the two handle structs a caller holds:
 //!
 //! ```text
-//! Cell<T, K>                    genus — a node with a readable value
-//! ├─ SourceCell<T, M>           written from outside; folds under policy M
-//! └─ FormulaCell<T>             computed from upstream
+//! Source<T, M>      handle to a source cell — written from outside; folds under policy M
+//! Computed<T>       handle to a computed cell — computed from upstream
 //! ```
 //!
-//! Both aliases answer the same question — *where does a node's value come
-//! from* — so the pair is exhaustive: `SourceCell` from outside, `FormulaCell`
-//! from upstream. `Effect` stays outside the hierarchy (a sink, no value).
+//! Both answer the same question — *where does a node's value come from* — so
+//! the pair is exhaustive: `Source` from outside, `Computed` from upstream.
+//! `Effect` stays outside the hierarchy (a sink, no value). There is **no
+//! `Cell<T, K>` genus struct**: the former genus dissolves into these two
+//! concrete structs, and the former `Source<M>` / `Formula` *kind markers* are
+//! gone — `M` is now [`Source`]'s own policy parameter.
 //!
 //! ## Write protection without a trait (§3)
 //!
-//! Reads live on `impl<T, K> Cell<T, K>` (every kind reads via [`get`]). Writes
-//! live on `impl<T, M: MergePolicy<T>> Cell<T, Source<M>>` — so `set`/`merge`
-//! exist **only** on the source instantiation, and `formula.set(…)` is a
-//! *"no method found"* compile error with no trait in sight. The merge policy
-//! `M` lives inside `Source<M>`, exactly where writes exist.
+//! Reads (`get`, `subscribe`, `dispose`) exist on both handles. Writes
+//! (`set`/`merge`) exist **only** on [`Source`]. So `computed.set(…)` is a
+//! *"no method found"* compile error with no trait in sight, and the merge
+//! policy `M` lives on `Source<T, M>`, exactly where writes exist.
 //!
-//! A `SourceCell` reads and writes; a `FormulaCell` only reads:
+//! A `Source` reads and writes; a `Computed` only reads:
 //!
 //! ```
 //! use lazily::Context;
 //! let ctx = Context::new();
-//! let n = ctx.source(1i32);                 // SourceCell<i32>
-//! n.set(&ctx, 2);                           // ok — `set` lives on the source kind
-//! let doubled = ctx.formula(move |c| n.get(c) * 2).drive(&ctx);
+//! let n = ctx.source(1i32);                 // Source<i32>
+//! n.set(&ctx, 2);                           // ok — `set` lives on the source handle
+//! let doubled = ctx.computed(move |c| n.get(c) * 2).drive(&ctx);
 //! assert_eq!(doubled.get(&ctx), 4);
 //! ```
 //!
-//! Writing a formula is a compile error — no trait involved, just a missing
-//! method on `Cell<T, Formula>`:
+//! Writing a computed cell is a compile error — no trait involved, just a
+//! missing method on [`Computed`]:
 //!
 //! ```compile_fail
 //! use lazily::Context;
 //! let ctx = Context::new();
-//! let f = ctx.formula(|_| 1i32);            // FormulaCell<i32>
+//! let f = ctx.computed(|_| 1i32);           // Computed<i32>
 //! f.set(&ctx, 2);                           // ERROR[E0599]: no method named `set`
 //! ```
-//!
-//! [`get`]: Cell::get
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -58,49 +56,24 @@ use crate::effect::EffectHandle;
 use crate::merge::MergePolicy;
 
 // ---------------------------------------------------------------------------
-// Kind markers
+// Source — the source-cell handle
 // ---------------------------------------------------------------------------
 
-/// Kind marker for a **source** cell — a node written from outside, folding
-/// accumulated writes under merge policy `M`. Carries the policy so it exists
-/// exactly where writes exist (`set`/`merge` on `Cell<T, Source<M>>`).
+/// A typed handle to a **source cell** within a [`Context`] — a node written
+/// from outside, folding accumulated writes under merge policy `M` (default
+/// [`KeepLatest`], i.e. last-writer-wins replace). `Source<T>` is a plain input
+/// cell; `Source<T, Sum>` folds additively; etc.
 ///
-/// This is the marker that reuses the name of the former `Source<T>` *trait*
-/// (now deleted): a `Source` is graph-theoretically a node with no incoming
-/// edges, and API-wise the writable kind.
-pub struct Source<M>(PhantomData<M>);
-
-/// Kind marker for a **formula** cell — a node computed from upstream. A driven
-/// formula (`formula().drive()`) is still this kind; drivenness is graph state,
-/// not a distinct type.
-pub struct Formula;
-
-// ---------------------------------------------------------------------------
-// The genus
-// ---------------------------------------------------------------------------
-
-/// A typed handle to a reactive node within a [`Context`] — the genus of the
-/// kernel. Lightweight: just a recycled [`SlotId`] into the arena; the value
-/// lives inside the `Context`.
-///
-/// Two handles are equal when they address the same underlying node — the
-/// observable cell-identity contract behind atomic moves (`#lzcellmove`) and
-/// keyed reconciliation.
-pub struct Cell<T, K> {
+/// Lightweight: just a recycled [`SlotId`] into the arena; the value lives
+/// inside the `Context`. Two handles are equal when they address the same
+/// underlying node — the observable cell-identity contract behind atomic moves
+/// (`#lzcellmove`) and keyed reconciliation.
+pub struct Source<T, M = KeepLatest> {
     pub(crate) id: SlotId,
-    pub(crate) _marker: PhantomData<(T, K)>,
+    pub(crate) _marker: PhantomData<(T, M)>,
 }
 
-/// A cell written from outside, folding writes under policy `M`
-/// (default [`KeepLatest`], i.e. last-writer-wins replace). `SourceCell<T>` is a
-/// plain input cell; `SourceCell<T, Sum>` folds additively; etc.
-pub type SourceCell<T, M = KeepLatest> = Cell<T, Source<M>>;
-
-/// A cell computed from upstream. Lazy by default; `formula().drive()` makes it
-/// eager (a driven formula).
-pub type FormulaCell<T> = Cell<T, Formula>;
-
-impl<T, K> Cell<T, K> {
+impl<T, M> Source<T, M> {
     pub(crate) fn from_id(id: SlotId) -> Self {
         Self {
             id,
@@ -110,8 +83,8 @@ impl<T, K> Cell<T, K> {
 
     /// Read this cell's current value through its owning context.
     ///
-    /// Every kind reads the same way. Registers a dependency when called inside
-    /// a reactive computation (a formula compute or an effect run).
+    /// Registers a dependency when called inside a reactive computation (a
+    /// computed-cell compute or an effect run).
     pub fn get(&self, ctx: &Context) -> T
     where
         T: Clone + 'static,
@@ -120,8 +93,7 @@ impl<T, K> Cell<T, K> {
     }
 
     /// Tear this node down: detach both edge directions, invalidate surviving
-    /// readers, and recycle the id. Kind-agnostic — dispatches on the node's own
-    /// kind. Disposing a driven formula also tears down its puller.
+    /// readers, and recycle the id.
     pub fn dispose(&self, ctx: &Context)
     where
         T: 'static,
@@ -131,8 +103,6 @@ impl<T, K> Cell<T, K> {
 
     /// Run `on_change` now and again on every change to this value. Returns the
     /// backing [`EffectHandle`]; dispose it to unsubscribe.
-    ///
-    /// Replaces the former `Reactive::subscribe` default method.
     pub fn subscribe(
         &self,
         ctx: &Context,
@@ -140,7 +110,7 @@ impl<T, K> Cell<T, K> {
     ) -> EffectHandle
     where
         T: Clone + 'static,
-        K: 'static,
+        M: 'static,
     {
         let this = *self;
         let cb = RefCell::new(on_change);
@@ -153,9 +123,9 @@ impl<T, K> Cell<T, K> {
 
 // -- Source-only writes (§3) ------------------------------------------------
 
-impl<T, M: MergePolicy<T>> Cell<T, Source<M>> {
-    /// Replace the value outright (the keep-latest write). Only a `SourceCell`
-    /// has this method; `formula.set(…)` does not compile.
+impl<T, M: MergePolicy<T>> Source<T, M> {
+    /// Replace the value outright (the keep-latest write). Only a [`Source`]
+    /// has this method; `computed.set(…)` does not compile.
     pub fn set(&self, ctx: &Context, value: T)
     where
         T: PartialEq + 'static,
@@ -164,7 +134,7 @@ impl<T, M: MergePolicy<T>> Cell<T, Source<M>> {
     }
 
     /// Fold `op` into the current value under policy `M`. For `KeepLatest` this
-    /// is a replace (`Cell ≡ MergeCell<KeepLatest>`).
+    /// is a replace (`Source ≡ Source<T, KeepLatest>`).
     pub fn merge(&self, ctx: &Context, op: T)
     where
         T: PartialEq + Clone + 'static,
@@ -174,22 +144,72 @@ impl<T, M: MergePolicy<T>> Cell<T, Source<M>> {
 
     /// The plain (keep-latest) view of this source cell, for wiring into derived
     /// readers that want a policy-erased handle. Same underlying node.
-    ///
-    /// Compatibility shim for the former `MergeCellHandle::cell()`.
-    pub fn cell(&self) -> SourceCell<T> {
-        Cell::from_id(self.id)
+    pub fn cell(&self) -> Source<T> {
+        Source::from_id(self.id)
     }
 
-    /// Clear all dependent formulas without changing this cell's value.
+    /// Clear all dependent computed cells without changing this cell's value.
     pub fn clear_dependents(&self, ctx: &Context) {
         ctx.clear_cell_dependents(self.id);
     }
 }
 
-// -- Formula-only lifecycle -------------------------------------------------
+impl<T, M> Clone for Source<T, M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
 
-impl<T> Cell<T, Formula> {
-    /// Read this formula's current value as `Rc<T>`, avoiding a deep clone.
+impl<T, M> Copy for Source<T, M> {}
+
+impl<T, M> PartialEq for Source<T, M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<T, M> Eq for Source<T, M> {}
+
+impl<T, M> std::fmt::Debug for Source<T, M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Source").field("id", &self.id).finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Computed — the computed-cell handle
+// ---------------------------------------------------------------------------
+
+/// A typed handle to a **computed cell** within a [`Context`] — a node computed
+/// from upstream. Lazy by default; `computed().drive()` makes it eager (a driven
+/// computed cell).
+///
+/// Lightweight: just a recycled [`SlotId`] into the arena. Two handles are equal
+/// when they address the same underlying node.
+pub struct Computed<T> {
+    pub(crate) id: SlotId,
+    pub(crate) _marker: PhantomData<T>,
+}
+
+impl<T> Computed<T> {
+    pub(crate) fn from_id(id: SlotId) -> Self {
+        Self {
+            id,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Read this computed cell's current value through its owning context.
+    ///
+    /// Registers a dependency when called inside a reactive computation.
+    pub fn get(&self, ctx: &Context) -> T
+    where
+        T: Clone + 'static,
+    {
+        ctx.read_value::<T>(self.id)
+    }
+
+    /// Read this computed cell's current value as `Rc<T>`, avoiding a deep clone.
     pub fn get_rc(&self, ctx: &Context) -> Rc<T>
     where
         T: 'static,
@@ -197,22 +217,50 @@ impl<T> Cell<T, Formula> {
         ctx.get_rc(self)
     }
 
-    /// Clear this formula's cached value and recursively clear all dependents.
-    /// It will recompute on the next read.
+    /// Tear this node down: detach both edge directions, invalidate surviving
+    /// readers, and recycle the id. Disposing a driven computed cell also tears
+    /// down its puller.
+    pub fn dispose(&self, ctx: &Context)
+    where
+        T: 'static,
+    {
+        ctx.dispose_node(self.id);
+    }
+
+    /// Run `on_change` now and again on every change to this value. Returns the
+    /// backing [`EffectHandle`]; dispose it to unsubscribe.
+    pub fn subscribe(
+        &self,
+        ctx: &Context,
+        on_change: impl FnMut(&Context, &T) + 'static,
+    ) -> EffectHandle
+    where
+        T: Clone + 'static,
+    {
+        let this = *self;
+        let cb = RefCell::new(on_change);
+        ctx.effect(move |c| {
+            let v = this.get(c);
+            (cb.borrow_mut())(c, &v);
+        })
+    }
+
+    /// Clear this computed cell's cached value and recursively clear all
+    /// dependents. It will recompute on the next read.
     pub fn clear(&self, ctx: &Context) {
         ctx.clear_slot(self.id);
         ctx.flush_effects_after_invalidation();
     }
 
-    /// **Drive** this formula: make it eager. Attaches a puller [`Effect`] that
-    /// re-materializes the formula after every invalidation, so the value goes
+    /// **Drive** this computed cell: make it eager. Attaches a puller [`Effect`]
+    /// that re-materializes it after every invalidation, so the value goes
     /// directly `v1 -> v2` with no intermediate unset state.
     ///
     /// Idempotent — a second `drive` is a no-op — and returns the **same**
-    /// handle (mutated graph state), so the caller keeps reading the formula it
-    /// already holds. This is the eager construction that retires the former
-    /// `Signal`; the coalescing comes from the scheduler (effects are scheduled,
-    /// not inline), so a per-write puller cannot be built.
+    /// handle (mutated graph state), so the caller keeps reading the computed
+    /// cell it already holds. This is the eager construction that retires the
+    /// former `Signal`; the coalescing comes from the scheduler (effects are
+    /// scheduled, not inline), so a per-write puller cannot be built.
     ///
     /// [`Effect`]: crate::EffectHandle
     pub fn drive(&self, ctx: &Context) -> Self
@@ -223,39 +271,37 @@ impl<T> Cell<T, Formula> {
         *self
     }
 
-    /// Reverse of [`drive`](Cell::drive): stop eager recomputation and dispose
-    /// the puller. The value remains readable and reverts to lazy (recomputed on
-    /// next read). No-op if the formula is not driven.
+    /// Reverse of [`drive`](Computed::drive): stop eager recomputation and
+    /// dispose the puller. The value remains readable and reverts to lazy
+    /// (recomputed on next read). No-op if the computed cell is not driven.
     pub fn undrive(&self, ctx: &Context) {
         ctx.undrive_formula(self.id);
     }
 
-    /// Whether this formula is currently driven (has an active puller).
+    /// Whether this computed cell is currently driven (has an active puller).
     pub fn is_driven(&self, ctx: &Context) -> bool {
         ctx.is_driven(self.id)
     }
 }
 
-// -- Shared value-independent trait impls (defined once on the genus) --------
-
-impl<T, K> Clone for Cell<T, K> {
+impl<T> Clone for Computed<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T, K> Copy for Cell<T, K> {}
+impl<T> Copy for Computed<T> {}
 
-impl<T, K> PartialEq for Cell<T, K> {
+impl<T> PartialEq for Computed<T> {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
-impl<T, K> Eq for Cell<T, K> {}
+impl<T> Eq for Computed<T> {}
 
-impl<T, K> std::fmt::Debug for Cell<T, K> {
+impl<T> std::fmt::Debug for Computed<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cell").field("id", &self.id).finish()
+        f.debug_struct("Computed").field("id", &self.id).finish()
     }
 }

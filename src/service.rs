@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::Context;
-use crate::cell::SourceCell;
+use crate::cell::Source;
 
 // ===========================================================================
 // Health
@@ -56,7 +56,7 @@ impl HealthCore {
 /// Reactive health: projects the aggregate onto a `Cell` for `/health`.
 pub struct HealthCell {
     core: RefCell<HealthCore>,
-    health: SourceCell<Health>,
+    health: Source<Health>,
 }
 
 impl HealthCell {
@@ -77,7 +77,7 @@ impl HealthCell {
     pub fn health(&self) -> Health {
         self.core.borrow().health()
     }
-    pub fn health_cell(&self) -> SourceCell<Health> {
+    pub fn health_cell(&self) -> Source<Health> {
         self.health
     }
 }
@@ -107,7 +107,7 @@ impl ReadinessCore {
 /// Reactive readiness: projects `ready` onto a `Cell` for `/ready`.
 pub struct ReadinessCell {
     core: RefCell<ReadinessCore>,
-    ready: SourceCell<bool>,
+    ready: Source<bool>,
 }
 
 impl ReadinessCell {
@@ -128,7 +128,7 @@ impl ReadinessCell {
     pub fn ready(&self) -> bool {
         self.core.borrow().ready()
     }
-    pub fn ready_cell(&self) -> SourceCell<bool> {
+    pub fn ready_cell(&self) -> Source<bool> {
         self.ready
     }
 }
@@ -175,7 +175,7 @@ impl<P: Clone + PartialEq> DiscoveryCore<P> {
 /// Reactive service discovery.
 pub struct DiscoveryCell<P> {
     core: RefCell<DiscoveryCore<P>>,
-    discovery: SourceCell<BTreeMap<String, String>>,
+    discovery: Source<BTreeMap<String, String>>,
 }
 
 impl<P: Clone + PartialEq + 'static> DiscoveryCell<P> {
@@ -213,7 +213,7 @@ impl<P: Clone + PartialEq + 'static> DiscoveryCell<P> {
     pub fn discovery(&self, ctx: &Context) -> BTreeMap<String, String> {
         self.discovery.get(ctx)
     }
-    pub fn discovery_cell(&self) -> SourceCell<BTreeMap<String, String>> {
+    pub fn discovery_cell(&self) -> Source<BTreeMap<String, String>> {
         self.discovery
     }
 }
@@ -285,7 +285,7 @@ impl ServiceRegistryCore {
 /// Reactive durable service registry.
 pub struct ServiceRegistry {
     core: RefCell<ServiceRegistryCore>,
-    projection: SourceCell<BTreeMap<String, String>>,
+    projection: Source<BTreeMap<String, String>>,
 }
 
 impl ServiceRegistry {
@@ -314,7 +314,7 @@ impl ServiceRegistry {
     pub fn projection(&self, ctx: &Context) -> BTreeMap<String, String> {
         self.projection.get(ctx)
     }
-    pub fn projection_cell(&self) -> SourceCell<BTreeMap<String, String>> {
+    pub fn projection_cell(&self) -> Source<BTreeMap<String, String>> {
         self.projection
     }
 }

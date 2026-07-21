@@ -17,8 +17,8 @@ use std::fs;
 use std::rc::Rc;
 
 use lazily::{
-    Block, CellMap, CellTree, Context, DiffOp, Match, SemTree, SourceCell, TextCrdt,
-    TextVersionVector, align, apply_to_map, assign_stable_keys, block_key, reconcile,
+    Block, CellMap, CellTree, Context, DiffOp, Match, SemTree, Source, TextCrdt, TextVersionVector,
+    align, apply_to_map, assign_stable_keys, block_key, reconcile,
 };
 use serde_json::Value;
 
@@ -59,11 +59,7 @@ fn build_initial(ctx: &Context, initial: &Value) -> CellMap<String, V> {
     map
 }
 
-fn value_reader(
-    ctx: &Context,
-    map: &CellMap<String, V>,
-    key: &str,
-) -> lazily::FormulaCell<Option<V>> {
+fn value_reader(ctx: &Context, map: &CellMap<String, V>, key: &str) -> lazily::Computed<Option<V>> {
     let map = map.clone();
     let key = key.to_string();
     ctx.computed(move |ctx| map.get(ctx, &key))
@@ -159,9 +155,9 @@ fn assert_state(ctx: &Context, map: &CellMap<String, V>, expected: &Value) {
 /// `membership`; the order reader matches `order`.
 fn assert_invalidation(
     ctx: &Context,
-    value_readers: &HashMap<String, lazily::FormulaCell<Option<V>>>,
-    membership_reader: &lazily::FormulaCell<usize>,
-    order_reader: &lazily::FormulaCell<Vec<String>>,
+    value_readers: &HashMap<String, lazily::Computed<Option<V>>>,
+    membership_reader: &lazily::Computed<usize>,
+    order_reader: &lazily::Computed<Vec<String>>,
     invalidates: &Value,
     survivors: &HashSet<String>,
 ) {
@@ -227,7 +223,7 @@ fn assert_invalidation(
 fn assert_handle_stable(
     map: &CellMap<String, V>,
     expected: &Value,
-    handle_before: &HashMap<String, Option<SourceCell<V>>>,
+    handle_before: &HashMap<String, Option<Source<V>>>,
 ) {
     let Some(hs) = expected.get("handle_stable").and_then(|v| v.as_object()) else {
         return;
@@ -274,7 +270,7 @@ fn run_steps_fixture(name: &str) {
         // Build + prime value/membership/order readers from the CURRENT key set
         // so each step's invalidation is measured in isolation.
         let current_keys = map.keys(&ctx);
-        let mut value_readers: HashMap<String, lazily::FormulaCell<Option<V>>> = HashMap::new();
+        let mut value_readers: HashMap<String, lazily::Computed<Option<V>>> = HashMap::new();
         for key in &current_keys {
             value_readers.insert(key.clone(), value_reader(&ctx, &map, key));
         }
@@ -293,7 +289,7 @@ fn run_steps_fixture(name: &str) {
         ctx.get(&order_reader);
 
         // Snapshot handles (node identities) before the op for handle_stable.
-        let handle_before: HashMap<String, Option<SourceCell<V>>> = current_keys
+        let handle_before: HashMap<String, Option<Source<V>>> = current_keys
             .iter()
             .map(|k| (k.clone(), map.handle(k)))
             .collect();
@@ -420,7 +416,7 @@ fn run_reconcile_fixture(name: &str) {
         for (k, v) in &prior {
             map.entry(&ctx, k.clone(), *v);
         }
-        let readers: HashMap<String, lazily::FormulaCell<Option<V>>> = stable
+        let readers: HashMap<String, lazily::Computed<Option<V>>> = stable
             .iter()
             .map(|k| (k.clone(), value_reader(&ctx, &map, k)))
             .collect();

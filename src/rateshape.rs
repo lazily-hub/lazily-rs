@@ -10,13 +10,13 @@
 //!
 //! Each operator is a pure compute **core** — the emit/drop decision over plain
 //! state — split from a thin reactive **cell** that projects the emitted value
-//! onto a `Cell<Option<T>>` so a dropped input never invalidates dependents.
+//! onto a `Computed<Option<T>>` so a dropped input never invalidates dependents.
 //! Time is the same monotone logical clock as `#lztime`.
 
 use std::cell::RefCell;
 
 use crate::Context;
-use crate::cell::SourceCell;
+use crate::cell::Source;
 
 // ===========================================================================
 // Lifted relay policies (formerly `relay_policy.rs`). Relay policies re-export
@@ -146,10 +146,10 @@ impl ExpiryPolicy {
 // ===========================================================================
 
 /// The reactive-cell projection shared by every operator: the last emitted
-/// value on a `Cell<Option<T>>`. A dropped/held input never touches it.
+/// value on a `Computed<Option<T>>`. A dropped/held input never touches it.
 fn set_output<T: Clone + PartialEq + 'static>(
     ctx: &Context,
-    cell: &SourceCell<Option<T>>,
+    cell: &Source<Option<T>>,
     emitted: &Option<T>,
 ) {
     if let Some(v) = emitted {
@@ -200,7 +200,7 @@ impl<T> DebounceCore<T> {
 /// Reactive debounce over any `Reactive<T>` source.
 pub struct DebounceCell<T> {
     core: RefCell<DebounceCore<T>>,
-    output: SourceCell<Option<T>>,
+    output: Source<Option<T>>,
 }
 
 impl<T: Clone + PartialEq + 'static> DebounceCell<T> {
@@ -224,7 +224,7 @@ impl<T: Clone + PartialEq + 'static> DebounceCell<T> {
     pub fn output(&self, ctx: &Context) -> Option<T> {
         self.output.get(ctx)
     }
-    pub fn output_cell(&self) -> SourceCell<Option<T>> {
+    pub fn output_cell(&self) -> Source<Option<T>> {
         self.output
     }
 }
@@ -303,7 +303,7 @@ impl<T> ThrottleCore<T> {
 /// Reactive throttle over any `Reactive<T>` source.
 pub struct ThrottleCell<T> {
     core: RefCell<ThrottleCore<T>>,
-    output: SourceCell<Option<T>>,
+    output: Source<Option<T>>,
 }
 
 impl<T: Clone + PartialEq + 'static> ThrottleCell<T> {
@@ -329,7 +329,7 @@ impl<T: Clone + PartialEq + 'static> ThrottleCell<T> {
     pub fn output(&self, ctx: &Context) -> Option<T> {
         self.output.get(ctx)
     }
-    pub fn output_cell(&self) -> SourceCell<Option<T>> {
+    pub fn output_cell(&self) -> Source<Option<T>> {
         self.output
     }
 }
@@ -409,7 +409,7 @@ impl<T: Clone> SampleCore<T> {
 /// Reactive sampler over any `Reactive<T>` source.
 pub struct SampleCell<T> {
     core: RefCell<SampleCore<T>>,
-    output: SourceCell<Option<T>>,
+    output: Source<Option<T>>,
 }
 
 impl<T: Clone + PartialEq + 'static> SampleCell<T> {
@@ -435,7 +435,7 @@ impl<T: Clone + PartialEq + 'static> SampleCell<T> {
     pub fn output(&self, ctx: &Context) -> Option<T> {
         self.output.get(ctx)
     }
-    pub fn output_cell(&self) -> SourceCell<Option<T>> {
+    pub fn output_cell(&self) -> Source<Option<T>> {
         self.output
     }
 }
@@ -500,7 +500,7 @@ impl ProbabilisticSampleCore {
 pub struct ProbabilisticSampleCell<T, R> {
     core: ProbabilisticSampleCore,
     rng: RefCell<R>,
-    output: SourceCell<Option<T>>,
+    output: Source<Option<T>>,
 }
 
 impl<T: Clone + PartialEq + 'static, R: SampleRng> ProbabilisticSampleCell<T, R> {
@@ -531,7 +531,7 @@ impl<T: Clone + PartialEq + 'static, R: SampleRng> ProbabilisticSampleCell<T, R>
     pub fn output(&self, ctx: &Context) -> Option<T> {
         self.output.get(ctx)
     }
-    pub fn output_cell(&self) -> SourceCell<Option<T>> {
+    pub fn output_cell(&self) -> Source<Option<T>> {
         self.output
     }
 }

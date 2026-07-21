@@ -21,7 +21,7 @@ const WRITES_PER_MEASUREMENT: usize = 10;
 fn make_fanout_graph(
     ctx: &Context,
     fanout: usize,
-) -> (lazily::SourceCell<i32>, Vec<lazily::FormulaCell<i32>>) {
+) -> (lazily::Source<i32>, Vec<lazily::Computed<i32>>) {
     let source = ctx.cell(0);
     let slots: Vec<_> = (0..fanout)
         .map(|_| ctx.computed(move |ctx| ctx.get_cell(&source) + 1))

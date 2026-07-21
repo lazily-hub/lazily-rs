@@ -6,7 +6,7 @@ use std::rc::Rc;
 #[cfg(not(feature = "vec_edges"))]
 use smallvec::SmallVec;
 
-use crate::cell::{Cell, FormulaCell, SourceCell};
+use crate::cell::{Computed, Source};
 use crate::effect::{EffectCallbackResult, EffectHandle};
 use crate::merge::MergePolicy;
 
@@ -397,7 +397,7 @@ pub(crate) fn current_tracking_frame() -> Option<SlotId> {
 // Internal node kinds stored inside Context
 // ---------------------------------------------------------------------------
 
-pub(crate) struct SlotNode {
+pub(crate) struct ComputedNode {
     pub(crate) value: AnyValue,
     pub(crate) type_id: TypeTag,
     pub(crate) compute: Rc<ComputeFn>,
@@ -423,7 +423,7 @@ pub(crate) struct SlotNode {
     pub(crate) verified_at: u64,
 }
 
-pub(crate) struct CellNode {
+pub(crate) struct SourceNode {
     pub(crate) value: AnyValue,
     pub(crate) type_id: TypeTag,
     pub(crate) dependents: EdgeVec,
@@ -441,8 +441,8 @@ pub(crate) struct EffectNode {
 }
 
 pub(crate) enum Node {
-    Slot(SlotNode),
-    Cell(CellNode),
+    Computed(ComputedNode),
+    Source(SourceNode),
     Effect(EffectNode),
 }
 
@@ -557,7 +557,7 @@ struct RefreshGuard<'a> {
 impl Drop for RefreshGuard<'_> {
     fn drop(&mut self) {
         let mut inner = self.ctx.inner.borrow_mut();
-        if let Some(Node::Slot(slot)) = Context::get_node_mut(&mut inner.nodes, self.id) {
+        if let Some(Node::Computed(slot)) = Context::get_node_mut(&mut inner.nodes, self.id) {
             slot.in_progress = false;
         }
     }
@@ -680,10 +680,10 @@ impl Context {
         if let Some(node) = Self::get_node_mut(&mut inner_mut.nodes, dependency_id) {
             let index = &mut inner_mut.dependents_index;
             match node {
-                Node::Slot(s) => {
+                Node::Computed(s) => {
                     edge_insert(&mut s.dependents, dependent_id, dependency_id, index);
                 }
-                Node::Cell(c) => {
+                Node::Source(c) => {
                     edge_insert(&mut c.dependents, dependent_id, dependency_id, index);
                 }
                 Node::Effect(_) => {}
@@ -693,7 +693,7 @@ impl Context {
         if let Some(node) = Self::get_node_mut(&mut inner_mut.nodes, dependent_id) {
             let index = &mut inner_mut.dependencies_index;
             match node {
-                Node::Slot(parent) => {
+                Node::Computed(parent) => {
                     #[cfg(feature = "instrumentation")]
                     {
                         edge_added = edge_insert(
@@ -723,7 +723,7 @@ impl Context {
                         edge_insert(&mut parent.dependencies, dependency_id, dependent_id, index);
                     }
                 }
-                Node::Cell(_) => {}
+                Node::Source(_) => {}
             }
         }
 
@@ -753,7 +753,7 @@ impl Context {
             if let Some(node) = Self::get_node_mut(&mut inner_mut.nodes, *dependent_id) {
                 let index = &mut inner_mut.dependencies_index;
                 match node {
-                    Node::Slot(slot) => {
+                    Node::Computed(slot) => {
                         edge_remove(&mut slot.dependencies, dependency_id, *dependent_id, index);
                     }
                     Node::Effect(effect) => {
@@ -764,7 +764,7 @@ impl Context {
                             index,
                         );
                     }
-                    Node::Cell(_) => {}
+                    Node::Source(_) => {}
                 }
             }
         }
@@ -795,7 +795,7 @@ impl Context {
             if let Some(dep_node) = Self::get_node_mut(&mut inner_mut.nodes, *dependency_id) {
                 let index = &mut inner_mut.dependents_index;
                 match dep_node {
-                    Node::Slot(s) => {
+                    Node::Computed(s) => {
                         #[cfg(feature = "instrumentation")]
                         {
                             edge_removed =
@@ -806,7 +806,7 @@ impl Context {
                             edge_remove(&mut s.dependents, dependent_id, *dependency_id, index);
                         }
                     }
-                    Node::Cell(c) => {
+                    Node::Source(c) => {
                         #[cfg(feature = "instrumentation")]
                         {
                             edge_removed =
@@ -830,7 +830,7 @@ impl Context {
     // -- Slot API ----------------------------------------------------------
 
     /// Create a new lazily-computed slot.
-    pub fn slot<T, F>(&self, compute: F) -> FormulaCell<T>
+    pub fn slot<T, F>(&self, compute: F) -> Computed<T>
     where
         T: 'static,
         F: Fn(&Context) -> T + 'static,
@@ -838,10 +838,15 @@ impl Context {
         self.slot_with_equals(compute, None)
     }
 
-    /// Create a derived lazily-computed value.
+    /// Create a **computed cell** — a value computed from upstream, returned as
+    /// a [`Computed`] handle. This is the primary derived constructor.
     ///
-    /// This is an ergonomic alias for [`Context::slot`].
-    pub fn computed<T, F>(&self, compute: F) -> FormulaCell<T>
+    /// Unguarded (no `PartialEq` bound): every recompute propagates. Use
+    /// [`memo`](Context::memo) for the guarded variant that suppresses
+    /// equal-value propagation, and [`signal`](Context::signal) for the eager
+    /// (driven, guarded) construction. Lazy until
+    /// [`Computed::drive`](crate::Computed::drive) makes it eager.
+    pub fn computed<T, F>(&self, compute: F) -> Computed<T>
     where
         T: 'static,
         F: Fn(&Context) -> T + 'static,
@@ -850,7 +855,7 @@ impl Context {
     }
 
     /// Create a new lazily-computed slot with a `PartialEq` memoization guard.
-    pub fn memo<T, F>(&self, compute: F) -> FormulaCell<T>
+    pub fn memo<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + 'static,
         F: Fn(&Context) -> T + 'static,
@@ -872,7 +877,7 @@ impl Context {
     /// handles in wrapper structs; the context memoizes one handle per factory
     /// key. Later calls with the same key return the same slot handle and ignore
     /// the supplied compute callback.
-    pub fn memoized_slot<K, T, F>(&self, compute: F) -> FormulaCell<T>
+    pub fn memoized_slot<K, T, F>(&self, compute: F) -> Computed<T>
     where
         K: 'static,
         T: 'static,
@@ -882,7 +887,7 @@ impl Context {
             kind: FactoryKind::Slot,
             factory_type: TypeId::of::<K>(),
         };
-        if let Some(handle) = self.factory_handle::<FormulaCell<T>>(key, TypeId::of::<T>()) {
+        if let Some(handle) = self.factory_handle::<Computed<T>>(key, TypeId::of::<T>()) {
             return handle;
         }
 
@@ -891,13 +896,13 @@ impl Context {
         handle
     }
 
-    fn slot_with_equals<T, F>(&self, compute: F, equals: Option<Box<EqualsFn>>) -> FormulaCell<T>
+    fn slot_with_equals<T, F>(&self, compute: F, equals: Option<Box<EqualsFn>>) -> Computed<T>
     where
         T: 'static,
         F: Fn(&Context) -> T + 'static,
     {
         let id = self.alloc_id();
-        let node = SlotNode {
+        let node = ComputedNode {
             value: AnyValue::None,
             type_id: node_type_tag::<T>(),
             compute: Rc::new(move |ctx| AnyValue::from_value(compute(ctx))),
@@ -910,12 +915,12 @@ impl Context {
             driven: false,
             verified_at: 0,
         };
-        self.insert_node(id, Node::Slot(node));
-        FormulaCell::from_id(id)
+        self.insert_node(id, Node::Computed(node));
+        Computed::from_id(id)
     }
 
     /// Get the value of a slot, computing it if necessary.
-    pub fn get<T: Clone + 'static>(&self, handle: &FormulaCell<T>) -> T {
+    pub fn get<T: Clone + 'static>(&self, handle: &Computed<T>) -> T {
         self.get_slot(handle.id)
     }
 
@@ -923,7 +928,7 @@ impl Context {
     ///
     /// Returns a reference-counted pointer to the stored value. Use this when
     /// you only need to read the value without owning a separate copy.
-    pub fn get_rc<T: 'static>(&self, handle: &FormulaCell<T>) -> Rc<T> {
+    pub fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
@@ -931,7 +936,7 @@ impl Context {
         self.refresh_slot(handle.id);
 
         let inner = self.inner.borrow();
-        if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id)
+        if let Some(Node::Computed(slot)) = Self::get_node(&inner.nodes, handle.id)
             && !slot.value.is_none()
         {
             assert!(
@@ -953,7 +958,7 @@ impl Context {
         self.refresh_slot(id);
 
         let inner = self.inner.borrow();
-        if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, id)
+        if let Some(Node::Computed(slot)) = Self::get_node(&inner.nodes, id)
             && !slot.value.is_none()
         {
             assert!(
@@ -981,7 +986,7 @@ impl Context {
     fn enter_refresh(&self, id: SlotId) -> Option<RefreshGuard<'_>> {
         let mut inner = self.inner.borrow_mut();
         match Self::get_node_mut(&mut inner.nodes, id) {
-            Some(Node::Slot(slot)) => {
+            Some(Node::Computed(slot)) => {
                 if slot.in_progress {
                     drop(inner);
                     panic!(
@@ -1014,7 +1019,7 @@ impl Context {
         {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
-                Some(Node::Slot(slot)) => {
+                Some(Node::Computed(slot)) => {
                     if inner.revision_mode {
                         // #lzspecrevisionengine: staleness = verified_at < revision.
                         // Clean (verified_at == revision) and has a value → cache hit.
@@ -1040,7 +1045,7 @@ impl Context {
         let dependencies = {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
-                Some(Node::Slot(slot)) => slot.dependencies.clone(),
+                Some(Node::Computed(slot)) => slot.dependencies.clone(),
                 _ => return false,
             }
         };
@@ -1059,7 +1064,7 @@ impl Context {
         let needs_recompute = {
             let inner = self.inner.borrow();
             let slot = match Self::get_node(&inner.nodes, id) {
-                Some(Node::Slot(slot)) => slot,
+                Some(Node::Computed(slot)) => slot,
                 _ => return false,
             };
             if inner.revision_mode {
@@ -1084,12 +1089,12 @@ impl Context {
 
     fn is_slot_node(&self, id: SlotId) -> bool {
         let inner = self.inner.borrow();
-        matches!(Self::get_node(&inner.nodes, id), Some(Node::Slot(_)))
+        matches!(Self::get_node(&inner.nodes, id), Some(Node::Computed(_)))
     }
 
     fn clear_slot_dirty_flags(&self, id: SlotId) {
         let mut inner = self.inner.borrow_mut();
-        if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
+        if let Some(Node::Computed(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
             slot.dirty = false;
             slot.force_recompute = false;
         }
@@ -1105,7 +1110,7 @@ impl Context {
                 inner.instrumentation.record_slot_recompute();
             }
             let slot = match Self::get_node_mut(&mut inner.nodes, id) {
-                Some(Node::Slot(s)) => s,
+                Some(Node::Computed(s)) => s,
                 _ => panic!("get_slot called on non-slot id"),
             };
             old_deps = std::mem::take(&mut slot.dependencies);
@@ -1128,7 +1133,7 @@ impl Context {
             let mut inner = self.inner.borrow_mut();
             let (rev_mode, rev) = (inner.revision_mode, inner.revision);
             let slot = match Self::get_node_mut(&mut inner.nodes, id) {
-                Some(Node::Slot(slot)) => slot,
+                Some(Node::Computed(slot)) => slot,
                 _ => return false,
             };
             let had_value = !slot.value.is_none();
@@ -1157,13 +1162,13 @@ impl Context {
     }
 
     /// Get the value of a cell.
-    pub fn get_cell<T: Clone + 'static>(&self, handle: &SourceCell<T>) -> T {
+    pub fn get_cell<T: Clone + 'static>(&self, handle: &Source<T>) -> T {
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
 
         let inner = self.inner.borrow();
-        if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
+        if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, handle.id) {
             assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
             unsafe { c.value.as_t_ref_unchecked::<T>() }.clone()
         } else {
@@ -1172,13 +1177,13 @@ impl Context {
     }
 
     /// Get the value of a cell as `Rc<T>`, avoiding a deep clone.
-    pub fn get_cell_rc<T: 'static>(&self, handle: &SourceCell<T>) -> Rc<T> {
+    pub fn get_cell_rc<T: 'static>(&self, handle: &Source<T>) -> Rc<T> {
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
 
         let inner = self.inner.borrow();
-        if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
+        if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, handle.id) {
             assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
             unsafe { c.value.rc_clone_unchecked::<T>() }
         } else {
@@ -1189,7 +1194,7 @@ impl Context {
     /// `#lzcellkernel` — read any node's value by id, dispatching on its kind:
     /// a formula (Slot node) is refreshed then read; a source (Cell node) is
     /// read directly. Registers a dependency when called inside a reactive
-    /// computation. Backs `Cell::<T, K>::get` uniformly across kinds.
+    /// computation. Backs `Source::get` / `Computed::get` uniformly across kinds.
     pub(crate) fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T {
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(id, parent_id);
@@ -1198,14 +1203,14 @@ impl Context {
         self.refresh_slot(id);
         let inner = self.inner.borrow();
         match Self::get_node(&inner.nodes, id) {
-            Some(Node::Slot(slot)) if !slot.value.is_none() => {
+            Some(Node::Computed(slot)) if !slot.value.is_none() => {
                 assert!(
                     slot.type_id == node_type_tag::<T>(),
                     "type mismatch in read"
                 );
                 unsafe { slot.value.as_t_ref_unchecked::<T>() }.clone()
             }
-            Some(Node::Cell(c)) => {
+            Some(Node::Source(c)) => {
                 assert!(c.type_id == node_type_tag::<T>(), "type mismatch in read");
                 unsafe { c.value.as_t_ref_unchecked::<T>() }.clone()
             }
@@ -1218,12 +1223,12 @@ impl Context {
     /// Create a **source cell** — a value written from outside under the default
     /// [`KeepLatest`](crate::KeepLatest) policy (last-writer-wins replace). This
     /// is the old `cell(v)`. For another merge policy use
-    /// [`source_with`](Context::source_with). Only a `SourceCell` has `set`/`merge`.
+    /// [`source_with`](Context::source_with). Only a `Source` has `set`/`merge`.
     ///
     /// (The design's single `source::<M>(v)` form is not expressible in Rust —
     /// functions cannot carry a default type parameter — so the policy variant is
     /// the separate `source_with::<M>(v)`.)
-    pub fn source<T>(&self, value: T) -> SourceCell<T>
+    pub fn source<T>(&self, value: T) -> Source<T>
     where
         T: PartialEq + 'static,
     {
@@ -1232,29 +1237,13 @@ impl Context {
 
     /// Create a **source cell** whose write folds under merge policy `M`
     /// (`source_with::<Sum>(v)` is the old `merge_cell::<Sum>(v)`). A
-    /// `SourceCell<T, M>` with `M != KeepLatest`.
-    pub fn source_with<M, T>(&self, value: T) -> SourceCell<T, M>
+    /// `Source<T, M>` with `M != KeepLatest`.
+    pub fn source_with<M, T>(&self, value: T) -> Source<T, M>
     where
         T: PartialEq + 'static,
         M: MergePolicy<T>,
     {
-        Cell::from_id(self.cell(value).id)
-    }
-
-    /// Create a **formula cell** — a value computed from upstream, **guarded by
-    /// default** (`PartialEq` memoization: a recompute that yields an equal value
-    /// does not propagate). Replaces `computed` / `memo` / `slot`. Lazy until
-    /// [`FormulaCell::drive`](crate::FormulaCell::drive) makes it eager.
-    ///
-    /// Behaviour note (`#lzcellkernel`): the old `computed()` was *unguarded*;
-    /// `formula` picks the guard (the efficient default), so code moving from
-    /// `computed` to `formula` gains equal-value suppression it did not have.
-    pub fn formula<T, F>(&self, compute: F) -> FormulaCell<T>
-    where
-        T: PartialEq + 'static,
-        F: Fn(&Context) -> T + 'static,
-    {
-        self.memo(compute)
+        Source::from_id(self.cell(value).id)
     }
 
     /// `#lzcellkernel` — drive a formula (make it eager) by id. Idempotent: a
@@ -1265,18 +1254,18 @@ impl Context {
         {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
-                Some(Node::Slot(slot)) if slot.driven => return,
-                Some(Node::Slot(_)) => {}
+                Some(Node::Computed(slot)) if slot.driven => return,
+                Some(Node::Computed(_)) => {}
                 _ => return,
             }
         }
         // Eager puller: re-materializes the formula after every invalidation.
         // `get_rc` refreshes and registers the dependency without deep-cloning.
         let effect = self.effect(move |ctx| {
-            let _ = ctx.get_rc::<T>(&FormulaCell::<T>::from_id(id));
+            let _ = ctx.get_rc::<T>(&Computed::<T>::from_id(id));
         });
         let mut inner = self.inner.borrow_mut();
-        if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
+        if let Some(Node::Computed(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
             slot.driven = true;
         }
         inner.driven_by.insert(id, effect.id);
@@ -1289,7 +1278,7 @@ impl Context {
         let effect_id = {
             let mut inner = self.inner.borrow_mut();
             match Self::get_node_mut(&mut inner.nodes, id) {
-                Some(Node::Slot(slot)) if slot.driven => slot.driven = false,
+                Some(Node::Computed(slot)) if slot.driven => slot.driven = false,
                 _ => return,
             }
             inner.driven_by.remove(&id)
@@ -1304,12 +1293,12 @@ impl Context {
         let inner = self.inner.borrow();
         matches!(
             Self::get_node(&inner.nodes, id),
-            Some(Node::Slot(slot)) if slot.driven
+            Some(Node::Computed(slot)) if slot.driven
         )
     }
 
     /// `#lzcellkernel` — tear down a node by id, dispatching on its own kind.
-    /// Backs the kind-agnostic `Cell::<T, K>::dispose`.
+    /// Backs the kind-agnostic `Source::dispose` / `Computed::dispose`.
     pub(crate) fn dispose_node(&self, id: SlotId) {
         self.dispose_id(id);
     }
@@ -1317,29 +1306,29 @@ impl Context {
     // -- Cell API ----------------------------------------------------------
 
     /// Create a new mutable cell with an initial value.
-    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> SourceCell<T> {
+    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
         let id = self.alloc_id();
-        let node = CellNode {
+        let node = SourceNode {
             value: AnyValue::from_value(value),
             type_id: node_type_tag::<T>(),
             dependents: EdgeVec::new(),
         };
-        self.insert_node(id, Node::Cell(node));
-        SourceCell::from_id(id)
+        self.insert_node(id, Node::Source(node));
+        Source::from_id(id)
     }
 
-    /// Create a [`SourceCell`] — a cell whose write is a *merge* under
+    /// Create a [`Source`] — a cell whose write is a *merge* under
     /// policy `M`, rather than a replace. `Cell ≡ MergeCell<KeepLatest>`
     /// (relaycell-backpressure-analysis.md §4.0). Backed by an ordinary cell
     /// node, so it inherits the store-without-cascade write fast path.
-    pub fn merge_cell<T, M>(&self, initial: T) -> SourceCell<T, M>
+    pub fn merge_cell<T, M>(&self, initial: T) -> Source<T, M>
     where
         T: PartialEq + 'static,
         M: MergePolicy<T>,
     {
-        // A merge cell is just a `SourceCell<T, M>` over an ordinary cell node —
-        // same node as a plain cell, the policy lives in the `Source<M>` marker.
-        Cell::from_id(self.cell(initial).id)
+        // A merge cell is just a `Source<T, M>` over an ordinary cell node —
+        // same node as a plain cell, the policy lives in `Source<T, M>`'s param.
+        Source::from_id(self.cell(initial).id)
     }
 
     /// Fold `op` into a cell's value under policy `M` (the merge write). Reads
@@ -1347,7 +1336,7 @@ impl Context {
     /// through [`set_cell`](Context::set_cell) so the `PartialEq` store-guard
     /// (free dedup when `⊕(old, op) == old`), batching, and
     /// store-without-cascade all apply unchanged.
-    pub fn apply_merge<T, M>(&self, handle: &SourceCell<T>, op: T)
+    pub fn apply_merge<T, M>(&self, handle: &Source<T>, op: T)
     where
         T: PartialEq + Clone + 'static,
         M: MergePolicy<T>,
@@ -1355,7 +1344,7 @@ impl Context {
         self.merge_source::<T, M>(handle.id, op);
     }
 
-    /// `#lzcellkernel` — the merge write by node id, backing `SourceCell::merge`
+    /// `#lzcellkernel` — the merge write by node id, backing `Source::merge`
     /// and `Context::apply_merge`. Reads the current value untracked, folds
     /// `M::merge(old, op)`, then routes through [`set_source`](Context::set_source)
     /// so the `PartialEq` store-guard, batching, and store-without-cascade all
@@ -1367,7 +1356,7 @@ impl Context {
     {
         let merged = {
             let inner = self.inner.borrow();
-            if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, id) {
+            if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, id) {
                 assert!(
                     c.type_id == node_type_tag::<T>(),
                     "type mismatch in apply_merge"
@@ -1386,8 +1375,8 @@ impl Context {
     ///
     /// The initializer belongs to the factory. It runs only when this context
     /// has not seen `K` before; callers should mutate the returned cell handle
-    /// with [`SourceCell::set`] / [`Context::set_cell`].
-    pub fn memoized_cell<K, T, F>(&self, init: F) -> SourceCell<T>
+    /// with [`Source::set`] / [`Context::set_cell`].
+    pub fn memoized_cell<K, T, F>(&self, init: F) -> Source<T>
     where
         K: 'static,
         T: PartialEq + 'static,
@@ -1397,7 +1386,7 @@ impl Context {
             kind: FactoryKind::Cell,
             factory_type: TypeId::of::<K>(),
         };
-        if let Some(handle) = self.factory_handle::<SourceCell<T>>(key, TypeId::of::<T>()) {
+        if let Some(handle) = self.factory_handle::<Source<T>>(key, TypeId::of::<T>()) {
             return handle;
         }
 
@@ -1409,17 +1398,17 @@ impl Context {
 
     /// Set the value of a cell. If the value differs (via PartialEq),
     /// dependent slots are marked dirty for memoized validation.
-    pub fn set_cell<T: PartialEq + 'static>(&self, handle: &SourceCell<T>, new_value: T) {
+    pub fn set_cell<T: PartialEq + 'static>(&self, handle: &Source<T>, new_value: T) {
         self.set_source::<T>(handle.id, new_value);
     }
 
-    /// `#lzcellkernel` — the source write by node id, backing `SourceCell::set`
+    /// `#lzcellkernel` — the source write by node id, backing `Source::set`
     /// and `Context::set_cell`.
     pub(crate) fn set_source<T: PartialEq + 'static>(&self, id: SlotId, new_value: T) {
         let handle_id = id;
         let changed = {
             let inner = self.inner.borrow();
-            if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle_id) {
+            if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, handle_id) {
                 assert!(
                     c.type_id == node_type_tag::<T>(),
                     "type mismatch in cell set"
@@ -1434,7 +1423,7 @@ impl Context {
         if changed {
             {
                 let mut inner = self.inner.borrow_mut();
-                if let Some(Node::Cell(c)) = Self::get_node_mut(&mut inner.nodes, handle_id) {
+                if let Some(Node::Source(c)) = Self::get_node_mut(&mut inner.nodes, handle_id) {
                     c.value = AnyValue::from_value(new_value);
                 }
             }
@@ -1536,7 +1525,7 @@ impl Context {
             // Collect invalidation roots from all changed cells.
             let mut roots: Vec<SlotId> = Vec::new();
             for cell_id in &cells {
-                if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, *cell_id) {
+                if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, *cell_id) {
                     roots.extend_from_slice(&c.dependents);
                 }
             }
@@ -1545,7 +1534,7 @@ impl Context {
             // Collect clear roots from all cleared cells.
             let mut clear_roots: Vec<SlotId> = Vec::new();
             for cell_id in &cell_clears {
-                if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, *cell_id) {
+                if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, *cell_id) {
                     clear_roots.extend_from_slice(&c.dependents);
                 }
             }
@@ -1633,7 +1622,7 @@ impl Context {
     /// Tear down a derived slot: detach both edge directions, clear the node,
     /// and recycle its id.
     ///
-    /// Without this a slot is permanent. `FormulaCell` is `Copy` — an id, not an
+    /// Without this a slot is permanent. `Computed` is `Copy` — an id, not an
     /// owner — so dropping every handle reclaims nothing, and the node and its
     /// edge on each dependency survive for the life of the context. Under
     /// subscribe/unsubscribe churn that is unbounded growth in both memory and
@@ -1643,7 +1632,7 @@ impl Context {
     /// Callers must ensure nothing still reads the slot in a live compute.
     /// Reading a disposed node throws on the next recompute — the same contract
     /// as [`Context::dispose_effect`] and the JS binding's `disposeSlot`.
-    pub fn dispose_slot<T>(&self, handle: &FormulaCell<T>) {
+    pub fn dispose_slot<T>(&self, handle: &Computed<T>) {
         // `#lzcellkernel` — disposing a driven formula tears down its puller
         // first, so no poisoned effect is stranded and the `driven_by` side
         // table never aliases a recycled id.
@@ -1652,10 +1641,13 @@ impl Context {
             let mut inner = self.inner.borrow_mut();
             // Check the kind BEFORE taking: a stale handle whose id has been
             // recycled must not tear down whatever now owns it.
-            if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Slot(_))) {
+            if !matches!(
+                Self::get_node(&inner.nodes, handle.id),
+                Some(Node::Computed(_))
+            ) {
                 return;
             }
-            let Some(Node::Slot(slot)) = Self::take_node(&mut inner.nodes, handle.id) else {
+            let Some(Node::Computed(slot)) = Self::take_node(&mut inner.nodes, handle.id) else {
                 return;
             };
             Self::remove_dependent_edges_locked(&mut inner, handle.id, &slot.dependencies);
@@ -1677,12 +1669,15 @@ impl Context {
     ///
     /// Cells are pure sources with no dependencies, so only downstream edges
     /// need detaching. Same contract as [`Context::dispose_slot`].
-    pub fn dispose_cell<T>(&self, handle: &SourceCell<T>) {
+    pub fn dispose_cell<T>(&self, handle: &Source<T>) {
         let mut inner = self.inner.borrow_mut();
-        if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Cell(_))) {
+        if !matches!(
+            Self::get_node(&inner.nodes, handle.id),
+            Some(Node::Source(_))
+        ) {
             return;
         }
-        let Some(Node::Cell(cell)) = Self::take_node(&mut inner.nodes, handle.id) else {
+        let Some(Node::Source(cell)) = Self::take_node(&mut inner.nodes, handle.id) else {
             return;
         };
         Self::remove_dependency_edges_locked(&mut inner, handle.id, &cell.dependents);
@@ -1733,14 +1728,14 @@ impl Context {
     /// a teardown scope stores 8 bytes per node and no tag.
     fn dispose_id(&self, id: SlotId) {
         let kind = match Self::get_node(&self.inner.borrow().nodes, id) {
-            Some(Node::Slot(_)) => 0u8,
-            Some(Node::Cell(_)) => 1,
+            Some(Node::Computed(_)) => 0u8,
+            Some(Node::Source(_)) => 1,
             Some(Node::Effect(_)) => 2,
             None => return,
         };
         match kind {
-            0 => self.dispose_slot(&FormulaCell::<()>::from_id(id)),
-            1 => self.dispose_cell(&SourceCell::<()>::from_id(id)),
+            0 => self.dispose_slot(&Computed::<()>::from_id(id)),
+            1 => self.dispose_cell(&Source::<()>::from_id(id)),
             _ => self.dispose_effect(&EffectHandle::new(id)),
         }
     }
@@ -1763,8 +1758,8 @@ impl Context {
     pub fn dependent_count(&self, node: &impl GraphNode) -> usize {
         let inner = self.inner.borrow();
         match Self::get_node(&inner.nodes, node.node_id()) {
-            Some(Node::Slot(slot)) => slot.dependents.len(),
-            Some(Node::Cell(cell)) => cell.dependents.len(),
+            Some(Node::Computed(slot)) => slot.dependents.len(),
+            Some(Node::Source(cell)) => cell.dependents.len(),
             // Effects are pure sinks: nothing can read one.
             Some(Node::Effect(_)) | None => 0,
         }
@@ -1782,10 +1777,10 @@ impl Context {
     pub fn dependency_count(&self, node: &impl GraphNode) -> usize {
         let inner = self.inner.borrow();
         match Self::get_node(&inner.nodes, node.node_id()) {
-            Some(Node::Slot(slot)) => slot.dependencies.len(),
+            Some(Node::Computed(slot)) => slot.dependencies.len(),
             Some(Node::Effect(effect)) => effect.dependencies.len(),
             // Cells are pure sources.
-            Some(Node::Cell(_)) | None => 0,
+            Some(Node::Source(_)) | None => 0,
         }
     }
 
@@ -2025,7 +2020,7 @@ impl Context {
                     Some(Node::Effect(e)) => {
                         e.dependencies.iter().any(|dep| {
                             matches!(Self::get_node(&inner.nodes, *dep),
-                                Some(Node::Slot(s)) if s.verified_at < inner.revision)
+                                Some(Node::Computed(s)) if s.verified_at < inner.revision)
                         }) || e.force_run
                     }
                     _ => false,
@@ -2117,40 +2112,40 @@ impl Context {
     /// dependents. Recomputation is pull-based and therefore glitch-free: a
     /// signal that reads other signals/slots always observes values consistent
     /// with the current inputs.
-    pub fn signal<T, F>(&self, compute: F) -> FormulaCell<T>
+    pub fn signal<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + 'static,
         F: Fn(&Context) -> T + 'static,
     {
-        // `#lzcellkernel` — the eager construction is a guarded formula that is
-        // then driven: `formula(f).drive()`. Retires the former two-node
+        // `#lzcellkernel` — the eager construction is a guarded computed cell
+        // that is then driven: `memo(f).drive()`. Retires the former two-node
         // `Signal` (memo slot + puller effect); the coalescing comes from the
         // scheduler, so a per-write puller cannot be built.
-        let formula = self.formula(compute);
-        self.drive_formula::<T>(formula.id);
-        formula
+        let computed = self.memo(compute);
+        self.drive_formula::<T>(computed.id);
+        computed
     }
 
     /// Read a driven formula's current value. Always returns a materialized
     /// value. (Was `get_signal`; a driven formula reads with ordinary `get`.)
-    pub fn get_signal<T: Clone + 'static>(&self, handle: &FormulaCell<T>) -> T {
+    pub fn get_signal<T: Clone + 'static>(&self, handle: &Computed<T>) -> T {
         self.get(handle)
     }
 
     /// Read a driven formula's current value as `Rc<T>`, avoiding a deep clone.
-    pub fn get_signal_rc<T: 'static>(&self, handle: &FormulaCell<T>) -> Rc<T> {
+    pub fn get_signal_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
         self.get_rc(handle)
     }
 
     /// Undrive a formula (revert to lazy). Stops eager recomputation; the backing
     /// value remains readable and recomputes on next read. (Was `dispose_signal`;
     /// now the `undrive` reverse transition.)
-    pub fn dispose_signal<T>(&self, handle: &FormulaCell<T>) {
+    pub fn dispose_signal<T>(&self, handle: &Computed<T>) {
         self.undrive_formula(handle.id);
     }
 
     /// Check whether a formula is currently driven.
-    pub fn is_signal_active<T>(&self, handle: &FormulaCell<T>) -> bool {
+    pub fn is_signal_active<T>(&self, handle: &Computed<T>) -> bool {
         self.is_driven(handle.id)
     }
 
@@ -2242,7 +2237,7 @@ impl Context {
         let effects_to_schedule = {
             let mut inner = self.inner.borrow_mut();
             let roots = match Self::get_node(&inner.nodes, id) {
-                Some(Node::Cell(c)) => c.dependents.clone(),
+                Some(Node::Source(c)) => c.dependents.clone(),
                 _ => return,
             };
             inner.effects_scratch.clear();
@@ -2270,12 +2265,12 @@ impl Context {
             // nothing downstream was read. The graph is acyclic, so marking
             // cannot reach `id` again and observe the borrowed-out list.
             match Self::get_node_mut(&mut inner_mut.nodes, id) {
-                Some(Node::Cell(c)) if c.dependents.is_empty() => return false,
-                Some(Node::Slot(s)) if s.dependents.is_empty() => return false,
-                Some(Node::Cell(c)) => {
+                Some(Node::Source(c)) if c.dependents.is_empty() => return false,
+                Some(Node::Computed(s)) if s.dependents.is_empty() => return false,
+                Some(Node::Source(c)) => {
                     std::mem::swap(&mut c.dependents, &mut inner_mut.roots_scratch)
                 }
-                Some(Node::Slot(s)) => {
+                Some(Node::Computed(s)) => {
                     std::mem::swap(&mut s.dependents, &mut inner_mut.roots_scratch)
                 }
                 _ => return false,
@@ -2287,10 +2282,10 @@ impl Context {
             // put the list back on its node
             let inner_mut = &mut *inner;
             match Self::get_node_mut(&mut inner_mut.nodes, id) {
-                Some(Node::Cell(c)) => {
+                Some(Node::Source(c)) => {
                     std::mem::swap(&mut c.dependents, &mut inner_mut.roots_scratch)
                 }
-                Some(Node::Slot(s)) => {
+                Some(Node::Computed(s)) => {
                     std::mem::swap(&mut s.dependents, &mut inner_mut.roots_scratch)
                 }
                 _ => {}
@@ -2346,7 +2341,7 @@ impl Context {
         }
         while let Some((id, force)) = stack.pop() {
             match Self::get_node_mut(nodes, id) {
-                Some(Node::Slot(slot)) => {
+                Some(Node::Computed(slot)) => {
                     let should_propagate = !slot.dirty || (force && !slot.force_recompute);
                     slot.dirty = true;
                     if force {
@@ -2378,7 +2373,7 @@ impl Context {
         }
         while let Some((id, _)) = stack.pop() {
             match Self::get_node_mut(nodes, id) {
-                Some(Node::Slot(slot)) => {
+                Some(Node::Computed(slot)) => {
                     if slot.value.is_none() && !slot.dirty {
                         continue;
                     }
@@ -2409,9 +2404,9 @@ impl Context {
     }
 
     /// Check whether a slot currently has a cached, fresh value (for testing).
-    pub fn is_set<T: 'static>(&self, handle: &FormulaCell<T>) -> bool {
+    pub fn is_set<T: 'static>(&self, handle: &Computed<T>) -> bool {
         let inner = self.inner.borrow();
-        if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id) {
+        if let Some(Node::Computed(slot)) = Self::get_node(&inner.nodes, handle.id) {
             !slot.value.is_none() && !slot.dirty
         } else {
             false
@@ -2475,7 +2470,7 @@ pub(crate) mod sealed {
 
 /// A node in a [`Context`]'s reactive graph, addressed by one of its handles.
 ///
-/// Sealed: implemented for [`FormulaCell`], [`SourceCell`], and [`EffectHandle`]
+/// Sealed: implemented for [`Computed`], [`Source`], and [`EffectHandle`]
 /// only. It exists so the graph-shape accessors take any handle kind without
 /// exposing the internal node id, and cannot be implemented downstream.
 pub trait GraphNode: sealed::Sealed {
@@ -2483,11 +2478,16 @@ pub trait GraphNode: sealed::Sealed {
     fn node_id(&self) -> SlotId;
 }
 
-// `#lzcellkernel` — one blanket impl over the genus replaces the former
-// per-handle-type impls (`FormulaCell`, `SourceCell`). Every `Cell<T, K>` is a
-// graph node addressed by its slot id, regardless of kind.
-impl<T, K> sealed::Sealed for Cell<T, K> {}
-impl<T, K> GraphNode for Cell<T, K> {
+// `#lzcellkernel` — one impl per concrete handle struct. Every cell (a `Source`
+// or a `Computed`) is a graph node addressed by its slot id, regardless of kind.
+impl<T, M> sealed::Sealed for Source<T, M> {}
+impl<T, M> GraphNode for Source<T, M> {
+    fn node_id(&self) -> SlotId {
+        self.id
+    }
+}
+impl<T> sealed::Sealed for Computed<T> {}
+impl<T> GraphNode for Computed<T> {
     fn node_id(&self) -> SlotId {
         self.id
     }
@@ -2512,7 +2512,7 @@ pub struct TeardownScope<'ctx> {
 
 impl TeardownScope<'_> {
     /// Create a lazily-computed slot owned by this scope.
-    pub fn computed<T, F>(&self, compute: F) -> FormulaCell<T>
+    pub fn computed<T, F>(&self, compute: F) -> Computed<T>
     where
         T: 'static,
         F: Fn(&Context) -> T + 'static,
@@ -2523,7 +2523,7 @@ impl TeardownScope<'_> {
     }
 
     /// Create a memoized slot owned by this scope.
-    pub fn memo<T, F>(&self, compute: F) -> FormulaCell<T>
+    pub fn memo<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + 'static,
         F: Fn(&Context) -> T + 'static,
@@ -2534,7 +2534,7 @@ impl TeardownScope<'_> {
     }
 
     /// Create a source cell owned by this scope.
-    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> SourceCell<T> {
+    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
         let handle = self.ctx.cell(value);
         self.owned.borrow_mut().push(handle.id);
         handle
@@ -2605,15 +2605,15 @@ impl crate::reactive_graph::Teardown for TeardownScope<'_> {
 }
 
 impl crate::reactive_graph::ReactiveGraph for Context {
-    type FormulaCell<T> = crate::cell::FormulaCell<T>;
-    type SourceCell<T> = crate::cell::SourceCell<T>;
+    type Computed<T> = crate::cell::Computed<T>;
+    type Source<T> = crate::cell::Source<T>;
     type EffectHandle = crate::effect::EffectHandle;
     type Scope<'a> = TeardownScope<'a>;
 
-    fn dispose_slot<T: 'static>(&self, handle: &Self::FormulaCell<T>) {
+    fn dispose_slot<T: 'static>(&self, handle: &Self::Computed<T>) {
         Context::dispose_slot(self, handle);
     }
-    fn dispose_cell<T: 'static>(&self, handle: &Self::SourceCell<T>) {
+    fn dispose_cell<T: 'static>(&self, handle: &Self::Source<T>) {
         Context::dispose_cell(self, handle);
     }
     fn dispose_effect(&self, handle: &Self::EffectHandle) {
@@ -2634,32 +2634,32 @@ impl crate::reactive_graph::ReactiveGraph for Context {
 }
 
 impl crate::reactive_graph::SyncReactiveGraph for Context {
-    fn cell<T>(&self, value: T) -> Self::SourceCell<T>
+    fn cell<T>(&self, value: T) -> Self::Source<T>
     where
         T: PartialEq + Send + Sync + 'static,
     {
         Context::cell(self, value)
     }
-    fn get_cell<T>(&self, handle: &Self::SourceCell<T>) -> T
+    fn get_cell<T>(&self, handle: &Self::Source<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
         Context::get_cell(self, handle)
     }
-    fn set_cell<T>(&self, handle: &Self::SourceCell<T>, value: T)
+    fn set_cell<T>(&self, handle: &Self::Source<T>, value: T)
     where
         T: PartialEq + Send + Sync + 'static,
     {
         Context::set_cell(self, handle, value);
     }
-    fn computed<T, F>(&self, compute: F) -> Self::FormulaCell<T>
+    fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&Self) -> T + Send + Sync + 'static,
     {
         Context::computed(self, compute)
     }
-    fn get<T>(&self, handle: &Self::FormulaCell<T>) -> T
+    fn get<T>(&self, handle: &Self::Computed<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -2764,13 +2764,13 @@ mod tests {
             probe = a;
             assert_eq!(ctx.get(&probe), 2);
             match Context::get_node(&ctx.inner.borrow().nodes, topic.id) {
-                Some(Node::Cell(c)) => assert!(c.dependents.contains(&probe.id)),
+                Some(Node::Source(c)) => assert!(c.dependents.contains(&probe.id)),
                 _ => panic!("expected cell"),
             }
         }
         let inner = ctx.inner.borrow();
         match Context::get_node(&inner.nodes, topic.id) {
-            Some(Node::Cell(c)) => assert!(
+            Some(Node::Source(c)) => assert!(
                 c.dependents.is_empty(),
                 "the scope's edges must be gone with it"
             ),
@@ -2847,7 +2847,7 @@ mod tests {
             assert_eq!(ctx.get(&slot), cycle);
         }
         match Context::get_node(&ctx.inner.borrow().nodes, topic.id) {
-            Some(Node::Cell(c)) => assert!(
+            Some(Node::Source(c)) => assert!(
                 c.dependents.is_empty(),
                 "every scope must have torn itself down"
             ),
@@ -2869,7 +2869,7 @@ mod tests {
             fn drop(&mut self) {
                 if let Some(ctx) = self.ctx.upgrade() {
                     // any context call that borrows would do
-                    ctx.dispose_slot(&FormulaCell::<u64> {
+                    ctx.dispose_slot(&Computed::<u64> {
                         id: self.victim,
                         _marker: std::marker::PhantomData,
                     });
@@ -2916,7 +2916,7 @@ mod tests {
             let inner = ctx.inner.borrow();
             // upstream: the cell no longer lists the disposed slot
             match Context::get_node(&inner.nodes, src.id) {
-                Some(Node::Cell(c)) => assert!(
+                Some(Node::Source(c)) => assert!(
                     !c.dependents.contains(&recycled),
                     "dependency must drop the disposed dependent"
                 ),
@@ -2924,7 +2924,7 @@ mod tests {
             }
             // downstream: the sink no longer lists the disposed slot
             match Context::get_node(&inner.nodes, sink.id) {
-                Some(Node::Slot(s)) => assert!(
+                Some(Node::Computed(s)) => assert!(
                     !s.dependencies.contains(&recycled),
                     "dependent must drop the disposed dependency"
                 ),
@@ -2953,7 +2953,7 @@ mod tests {
 
         let inner = ctx.inner.borrow();
         match Context::get_node(&inner.nodes, derived.id) {
-            Some(Node::Slot(s)) => assert!(
+            Some(Node::Computed(s)) => assert!(
                 !s.dependencies.contains(&recycled),
                 "dependent must drop the disposed cell"
             ),
@@ -2968,7 +2968,7 @@ mod tests {
         // different kind. Disposing through it must be a no-op, not a teardown.
         let ctx = Context::new();
         let cell = ctx.cell(1usize);
-        let stale: FormulaCell<usize> = FormulaCell {
+        let stale: Computed<usize> = Computed {
             id: cell.id,
             _marker: std::marker::PhantomData,
         };
@@ -3006,7 +3006,7 @@ mod tests {
 
         let inner = ctx.inner.borrow();
         match Context::get_node(&inner.nodes, topic.id) {
-            Some(Node::Cell(c)) => assert_eq!(
+            Some(Node::Source(c)) => assert_eq!(
                 c.dependents.len(),
                 live_width,
                 "dependent list must track live subscribers, not total ever created"
@@ -3044,7 +3044,9 @@ mod tests {
         {
             let inner = ctx.inner.borrow();
             match Context::get_node(&inner.nodes, src.id) {
-                Some(Node::Cell(c)) => assert_eq!(c.dependents.len(), width, "no duplicate edges"),
+                Some(Node::Source(c)) => {
+                    assert_eq!(c.dependents.len(), width, "no duplicate edges")
+                }
                 _ => panic!("expected cell"),
             }
         }
@@ -3153,8 +3155,8 @@ mod tests {
             assert_eq!(inner.nodes.len(), 3);
             assert_eq!(inner.next_id, 3);
             assert!(inner.free_ids.is_empty());
-            assert!(matches!(inner.nodes[0].as_ref(), Some(Node::Cell(_))));
-            assert!(matches!(inner.nodes[1].as_ref(), Some(Node::Slot(_))));
+            assert!(matches!(inner.nodes[0].as_ref(), Some(Node::Source(_))));
+            assert!(matches!(inner.nodes[1].as_ref(), Some(Node::Computed(_))));
             assert!(matches!(inner.nodes[2].as_ref(), Some(Node::Effect(_))));
         }
 
@@ -3174,7 +3176,7 @@ mod tests {
             assert_eq!(inner.nodes.len(), 3);
             assert_eq!(inner.next_id, 3);
             assert!(inner.free_ids.is_empty());
-            assert!(matches!(inner.nodes[2].as_ref(), Some(Node::Slot(_))));
+            assert!(matches!(inner.nodes[2].as_ref(), Some(Node::Computed(_))));
         }
     }
 
@@ -3342,7 +3344,7 @@ mod tests {
     fn two_slot_dependency_cycle_panics_instead_of_overflowing() {
         let ctx = Context::new();
         // `a` reads `b` (wired after both exist); `b` reads `a`.
-        let link: std::rc::Rc<std::cell::RefCell<Option<FormulaCell<i32>>>> =
+        let link: std::rc::Rc<std::cell::RefCell<Option<Computed<i32>>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
         let link_a = std::rc::Rc::clone(&link);
         let a = ctx.computed(move |ctx| match *link_a.borrow() {
@@ -3368,7 +3370,7 @@ mod tests {
         {
             let inner = ctx.inner.borrow();
             for node in inner.nodes.iter().flatten() {
-                if let Node::Slot(slot) = node {
+                if let Node::Computed(slot) = node {
                     assert!(!slot.in_progress, "in_progress must be cleared on unwind");
                 }
             }
@@ -3380,7 +3382,7 @@ mod tests {
     #[test]
     fn self_referential_slot_panics() {
         let ctx = Context::new();
-        let link: std::rc::Rc<std::cell::RefCell<Option<FormulaCell<i32>>>> =
+        let link: std::rc::Rc<std::cell::RefCell<Option<Computed<i32>>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
         let link_self = std::rc::Rc::clone(&link);
         let s = ctx.computed(move |ctx| match *link_self.borrow() {
@@ -3472,32 +3474,35 @@ pub mod audit_probe {
             row!(Option<Box<super::EqualsFn>>),
             row!(std::rc::Rc<super::EffectFn>),
             row!(Option<Box<dyn FnOnce()>>),
-            row!(super::SlotNode),
-            row!(super::CellNode),
+            row!(super::ComputedNode),
+            row!(super::SourceNode),
             row!(super::EffectNode),
             row!(super::Node),
             row!(Option<super::Node>),
         ]
     }
 
-    /// Byte offset of each `SlotNode` field, so the padding and the
+    /// Byte offset of each `ComputedNode` field, so the padding and the
     /// largest-variant tax in `Node` can be attributed rather than guessed.
     pub fn slot_node_field_offsets() -> Vec<(&'static str, usize)> {
         use core::mem::offset_of;
         vec![
-            ("value", offset_of!(super::SlotNode, value)),
-            ("type_id", offset_of!(super::SlotNode, type_id)),
-            ("compute", offset_of!(super::SlotNode, compute)),
-            ("equals", offset_of!(super::SlotNode, equals)),
-            ("dependencies", offset_of!(super::SlotNode, dependencies)),
-            ("dependents", offset_of!(super::SlotNode, dependents)),
-            ("dirty", offset_of!(super::SlotNode, dirty)),
+            ("value", offset_of!(super::ComputedNode, value)),
+            ("type_id", offset_of!(super::ComputedNode, type_id)),
+            ("compute", offset_of!(super::ComputedNode, compute)),
+            ("equals", offset_of!(super::ComputedNode, equals)),
+            (
+                "dependencies",
+                offset_of!(super::ComputedNode, dependencies),
+            ),
+            ("dependents", offset_of!(super::ComputedNode, dependents)),
+            ("dirty", offset_of!(super::ComputedNode, dirty)),
             (
                 "force_recompute",
-                offset_of!(super::SlotNode, force_recompute),
+                offset_of!(super::ComputedNode, force_recompute),
             ),
-            ("in_progress", offset_of!(super::SlotNode, in_progress)),
-            ("verified_at", offset_of!(super::SlotNode, verified_at)),
+            ("in_progress", offset_of!(super::ComputedNode, in_progress)),
+            ("verified_at", offset_of!(super::ComputedNode, verified_at)),
         ]
     }
 

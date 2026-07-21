@@ -66,7 +66,7 @@ pub trait MergePolicy<T> {
 }
 
 /// Keep-latest (right-zero) band: `old ⊕ op = op`. Associative and idempotent,
-/// **not** commutative. This is the merge behind a plain [`Cell`](SourceCell) —
+/// **not** commutative. This is the merge behind a plain [`Cell`](Source) —
 /// `Cell ≡ MergeCell<KeepLatest>` (analysis §4.0). Positional last-writer-wins;
 /// distinct from timestamped [`Lww`](crate::LwwRegister) (which is commutative).
 pub struct KeepLatest;
@@ -186,10 +186,10 @@ where
 // Cell kernel migration (`#lzcellkernel`)
 // ---------------------------------------------------------------------------
 //
-// The former `SourceCell<T, M>` struct and the vestigial `Reactive<T>` /
+// The former `MergeCellHandle<T, M>` struct and the vestigial `Reactive<T>` /
 // `Source<T>` read/write traits are **deleted**. A "merge cell" is now just a
-// `SourceCell<T, M>` (`Cell<T, Source<M>>`) with `M != KeepLatest`, and a plain
-// `Cell` is `SourceCell<T, KeepLatest>` — the identity `Cell ≡ MergeCell<KeepLatest>`
-// is a type alias with a default parameter, not a spec assertion. Write
-// protection lives on the inherent `impl<T, M: MergePolicy<T>> Cell<T, Source<M>>`
-// (see `cell.rs`), so `formula.set(…)` fails to compile with no trait in sight.
+// `Source<T, M>` with `M != KeepLatest`, and a plain source cell is `Source<T>`
+// = `Source<T, KeepLatest>` — the identity `Source ≡ Source<T, KeepLatest>` is a
+// default type parameter, not a spec assertion. Write protection lives on the
+// inherent `impl<T, M: MergePolicy<T>> Source<T, M>` (see `cell.rs`), so
+// `computed.set(…)` fails to compile with no trait in sight.

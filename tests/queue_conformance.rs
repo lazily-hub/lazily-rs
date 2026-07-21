@@ -54,7 +54,7 @@ fn build_initial(ctx: &Context, initial: &Value) -> QueueCell<V> {
 }
 
 /// A reader-kind slot whose invalidation we can observe via `ctx.is_set`.
-type Reader = lazily::FormulaCell<()>;
+type Reader = lazily::Computed<()>;
 
 fn make_readers(ctx: &Context, q: &QueueCell<V>) -> Readers {
     // Each reader subscribes to exactly one reader-kind cell. We wrap the

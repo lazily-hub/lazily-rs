@@ -8,13 +8,13 @@
 //! # One primitive, two specializations
 //!
 //! There is a single keyed primitive, generic over the entry's **handle kind**
-//! `H` (the [`MapHandle`] trait, implemented by [`SourceCell`] for input cells
-//! and [`FormulaCell`] for derived slots):
+//! `H` (the [`MapHandle`] trait, implemented by [`Source`] for input cells
+//! and [`Computed`] for derived slots):
 //!
-//! - **[`CellMap<K, V>`] = `ReactiveMap<K, V, SourceCell<V>>`** — **input-cell**
+//! - **[`CellMap<K, V>`] = `ReactiveMap<K, V, Source<V>>`** — **input-cell**
 //!   entries. Adds cell-only [`set`](ReactiveMap::set) and eager value-minting
 //!   ([`entry`](ReactiveMap::entry) / [`entry_with`](ReactiveMap::entry_with)).
-//! - **[`SlotMap<K, V>`] = `ReactiveMap<K, V, FormulaCell<V>>`** — **derived-slot**
+//! - **[`SlotMap<K, V>`] = `ReactiveMap<K, V, Computed<V>>`** — **derived-slot**
 //!   entries. [`get_or_insert_with`](ReactiveMap::get_or_insert_with) mints a
 //!   slot on first access (**lazy materialization**); a slot's value is derived,
 //!   so `SlotMap` has **no `set`**. Eager materialization is a pre-mint loop over
@@ -68,8 +68,8 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::Context;
-use crate::cell::FormulaCell;
-use crate::cell::SourceCell;
+use crate::cell::Computed;
+use crate::cell::Source;
 
 /// Which kind of reactive node a [`ReactiveMap`] entry is — the handle-kind axis
 /// the map abstracts over.
@@ -77,9 +77,9 @@ use crate::cell::SourceCell;
 /// Mirrors `EntryKind` in `lazily-formal`'s `Materialization` module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
-    /// An **input** cell ([`SourceCell`]) — always materialized on `get`.
+    /// An **input** cell ([`Source`]) — always materialized on `get`.
     Cell,
-    /// A **derived** slot ([`FormulaCell`]) — materialized eagerly (pre-mint) or
+    /// A **derived** slot ([`Computed`]) — materialized eagerly (pre-mint) or
     /// lazily on first read.
     Slot,
 }
@@ -89,10 +89,10 @@ mod sealed {
 }
 
 /// The entry-handle axis a [`ReactiveMap`] abstracts over. Implemented by
-/// [`SourceCell`] (input cells) and [`FormulaCell`] (derived slots) only — the
+/// [`Source`] (input cells) and [`Computed`] (derived slots) only — the
 /// two node kinds of the cell model. Sealed: bindings do not add new kinds.
 pub trait MapHandle<V>: sealed::Sealed + Copy + 'static {
-    /// This handle's entry kind. `SourceCell` is [`EntryKind::Cell`]; `FormulaCell`
+    /// This handle's entry kind. `Source` is [`EntryKind::Cell`]; `Computed`
     /// is [`EntryKind::Slot`].
     const KIND: EntryKind;
 
@@ -114,8 +114,8 @@ pub trait MapHandle<V>: sealed::Sealed + Copy + 'static {
     fn clear_dependents(self, ctx: &Context);
 }
 
-impl<V> sealed::Sealed for SourceCell<V> {}
-impl<V: 'static> MapHandle<V> for SourceCell<V> {
+impl<V> sealed::Sealed for Source<V> {}
+impl<V: 'static> MapHandle<V> for Source<V> {
     const KIND: EntryKind = EntryKind::Cell;
 
     fn materialize(ctx: &Context, compute: impl Fn(&Context) -> V + 'static) -> Self
@@ -134,12 +134,12 @@ impl<V: 'static> MapHandle<V> for SourceCell<V> {
     }
 
     fn clear_dependents(self, ctx: &Context) {
-        SourceCell::clear_dependents(&self, ctx);
+        Source::clear_dependents(&self, ctx);
     }
 }
 
-impl<V> sealed::Sealed for FormulaCell<V> {}
-impl<V: 'static> MapHandle<V> for FormulaCell<V> {
+impl<V> sealed::Sealed for Computed<V> {}
+impl<V: 'static> MapHandle<V> for Computed<V> {
     const KIND: EntryKind = EntryKind::Slot;
 
     fn materialize(ctx: &Context, compute: impl Fn(&Context) -> V + 'static) -> Self
@@ -185,7 +185,7 @@ struct ReactiveMapInner<K, H> {
     /// when the **set** of keys changes (add/remove). Reading it (in
     /// `len`/`contains_key`/`is_empty`) subscribes the caller to membership
     /// changes without coupling to entry values *or to pure reordering*.
-    membership: SourceCell<u64>,
+    membership: Source<u64>,
     /// Plain (untracked) mirror of the membership version so mutators can bump
     /// the reactive cell without registering a spurious dependency.
     version: StdCell<u64>,
@@ -193,7 +193,7 @@ struct ReactiveMapInner<K, H> {
     /// `keys` subscribes here so an atomic ordered move (`#lzcellmove`)
     /// invalidates key-order readers without disturbing `len`/`contains_key`
     /// readers that only care about set identity.
-    order_signal: SourceCell<u64>,
+    order_signal: Source<u64>,
     /// Untracked mirror of the order version.
     order_version: StdCell<u64>,
 }
@@ -435,21 +435,21 @@ where
     }
 }
 
-/// A keyed **input-cell** collection: every entry is a settable [`SourceCell<V>`].
+/// A keyed **input-cell** collection: every entry is a settable [`Source<V>`].
 ///
 /// The `CellMap` specialization of [`ReactiveMap`] adds cell-only `set` and eager
 /// value-minting (`entry` / `entry_with`) on top of the shared reactive keyed
 /// surface.
-pub type CellMap<K, V> = ReactiveMap<K, V, SourceCell<V>>;
+pub type CellMap<K, V> = ReactiveMap<K, V, Source<V>>;
 
-/// A keyed **derived-slot** collection: every entry is a [`FormulaCell<V>`] whose
+/// A keyed **derived-slot** collection: every entry is a [`Computed<V>`] whose
 /// value is derived. `get_or_insert_with` mints a slot on first access (lazy
 /// materialization); [`materialize_all`](ReactiveMap::materialize_all) pre-mints
 /// the keyset (eager). A slot's value is derived, so `SlotMap` has **no `set`**.
-pub type SlotMap<K, V> = ReactiveMap<K, V, FormulaCell<V>>;
+pub type SlotMap<K, V> = ReactiveMap<K, V, Computed<V>>;
 
 /// `CellMap`-only surface: eager value-minting and `set` (an input is settable).
-impl<K, V> ReactiveMap<K, V, SourceCell<V>>
+impl<K, V> ReactiveMap<K, V, Source<V>>
 where
     K: Eq + Hash + Clone + 'static,
     V: PartialEq + Clone + 'static,
@@ -459,7 +459,7 @@ where
     ///
     /// Adding a new key bumps reactive membership; re-fetching an existing key
     /// does not. Cell-only: eager value-minting has no derived-slot analog.
-    pub fn entry_with(&self, ctx: &Context, key: K, default: impl FnOnce() -> V) -> SourceCell<V> {
+    pub fn entry_with(&self, ctx: &Context, key: K, default: impl FnOnce() -> V) -> Source<V> {
         if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
             return handle;
         }
@@ -469,7 +469,7 @@ where
 
     /// Return the value cell for `key`, minting it with `default` on first
     /// access. Convenience wrapper over [`entry_with`](Self::entry_with).
-    pub fn entry(&self, ctx: &Context, key: K, default: V) -> SourceCell<V> {
+    pub fn entry(&self, ctx: &Context, key: K, default: V) -> Source<V> {
         self.entry_with(ctx, key, || default)
     }
 
@@ -489,7 +489,7 @@ where
 
 /// `SlotMap`-only surface: the eager pre-mint helper. Lazy materialization is
 /// [`get_or_insert_with`](ReactiveMap::get_or_insert_with) on the shared surface.
-impl<K, V> ReactiveMap<K, V, FormulaCell<V>>
+impl<K, V> ReactiveMap<K, V, Computed<V>>
 where
     K: Eq + Hash + Clone + 'static,
     V: PartialEq + Clone + 'static,

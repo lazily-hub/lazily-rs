@@ -94,7 +94,7 @@ pub fn replay<'a, M: GraphModel>(
         };
     }
 
-    // Extract the `SourceCell` handle for a merge target / write target by id.
+    // Extract the `Source` handle for a merge target / write target by id.
     macro_rules! cell_of {
         ($id:expr) => {{
             let id: &str = $id;

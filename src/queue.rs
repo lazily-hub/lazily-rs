@@ -99,8 +99,8 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::Context;
-use crate::cell::FormulaCell;
-use crate::cell::SourceCell;
+use crate::cell::Computed;
+use crate::cell::Source;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -377,11 +377,11 @@ struct QueueCellInner<T, S> {
     // shell invalidates only the Slots whose value provably changed on a given
     // op (see the module docs). `closed` stays a `Cell` because it changes only
     // via `close()`, never derived from a mutation transition.
-    head: FormulaCell<Option<T>>,
-    len: FormulaCell<usize>,
-    is_empty: FormulaCell<bool>,
-    is_full: FormulaCell<bool>,
-    closed: SourceCell<bool>,
+    head: Computed<Option<T>>,
+    len: Computed<usize>,
+    is_empty: Computed<bool>,
+    is_full: Computed<bool>,
+    closed: Source<bool>,
 }
 
 /// A reactive FIFO queue — SPSC primitive with an MPSC usage rule
@@ -596,7 +596,7 @@ where
 
     /// Handle to the `head` reader-kind Slot, for wiring derived computeds
     /// directly. Subscribe-to-head semantics: invalidated on head-value change.
-    pub fn head_handle(&self) -> FormulaCell<Option<T>> {
+    pub fn head_handle(&self) -> Computed<Option<T>> {
         self.inner.head
     }
 
@@ -664,20 +664,20 @@ where
 
 /// Handles to all five reader-kinds of a [`QueueCell`], for effects that need to
 /// subscribe to several reader kinds at once. The four derived reader-kinds are
-/// demand-driven [`FormulaCell`]s; `closed` is a [`SourceCell`] because it is a
+/// demand-driven [`Computed`]s; `closed` is a [`Source`] because it is a
 /// direct input (set by [`close`](QueueCell::close)), not a derived value.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueReaderHandles<T> {
     /// The head value (`None` when empty).
-    pub head: FormulaCell<Option<T>>,
+    pub head: Computed<Option<T>>,
     /// The element count.
-    pub len: FormulaCell<usize>,
+    pub len: Computed<usize>,
     /// Whether the queue is empty.
-    pub is_empty: FormulaCell<bool>,
+    pub is_empty: Computed<bool>,
     /// Whether the queue is at capacity (bounded backpressure signal).
-    pub is_full: FormulaCell<bool>,
+    pub is_full: Computed<bool>,
     /// Whether the queue has been closed.
-    pub closed: SourceCell<bool>,
+    pub closed: Source<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -745,7 +745,7 @@ struct TopicCellInner<T, I> {
     // A distinct demand-driven reader per stable subscriber is the essential
     // invalidation boundary: publish fans out to connected readers; advance,
     // disconnect, and reconnect touch only the named reader.
-    readers: std::cell::RefCell<HashMap<I, FormulaCell<Vec<T>>>>,
+    readers: std::cell::RefCell<HashMap<I, Computed<Vec<T>>>>,
 }
 
 /// A broadcast topic: every subscriber receives every published element using
@@ -843,7 +843,7 @@ where
         topic
     }
 
-    fn ensure_reader(&self, ctx: &Context, id: I) -> FormulaCell<Vec<T>> {
+    fn ensure_reader(&self, ctx: &Context, id: I) -> Computed<Vec<T>> {
         if let Some(handle) = self.inner.readers.borrow().get(&id) {
             return *handle;
         }
@@ -1064,7 +1064,7 @@ where
     }
 
     /// Handle to the named subscriber's reactive unread suffix.
-    pub fn reader_handle(&self, id: &I) -> Option<FormulaCell<Vec<T>>> {
+    pub fn reader_handle(&self, id: &I) -> Option<Computed<Vec<T>>> {
         self.inner.readers.borrow().get(id).copied()
     }
 

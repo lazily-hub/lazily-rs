@@ -296,7 +296,7 @@ fn sweep_width(width: usize) -> WidthReport {
 }
 
 fn size_of_handle() -> usize {
-    std::mem::size_of::<lazily::FormulaCell<u64>>()
+    std::mem::size_of::<lazily::Computed<u64>>()
 }
 
 fn print_width_report(report: &WidthReport, previous: Option<&WidthReport>) {
@@ -405,7 +405,7 @@ fn main() {
         for (name, size, align) in lazily::audit_probe::layout_rows() {
             println!("  {name:<44}{size:>8}{align:>8}");
         }
-        println!("\n  SlotNode field offsets (gaps are padding):");
+        println!("\n  ComputedNode field offsets (gaps are padding):");
         let mut offsets = lazily::audit_probe::slot_node_field_offsets();
         offsets.sort_by_key(|(_, offset)| *offset);
         for (name, offset) in &offsets {
@@ -445,7 +445,7 @@ fn main() {
     );
 
     println!(
-        "\n  FormulaCell<u64> (harness-side, not library memory): {} B",
+        "\n  Computed<u64> (harness-side, not library memory): {} B",
         size_of_handle()
     );
 

@@ -13,7 +13,7 @@
 
 #[cfg(feature = "thread-safe")]
 use lazily::ThreadSafeContext;
-use lazily::{Context, EffectHandle, FormulaCell, SourceCell};
+use lazily::{Computed, Context, EffectHandle, Source};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 #[cfg(feature = "thread-safe")]
@@ -207,11 +207,11 @@ mod threading_contract {
     /// not itself shareable.
     #[test]
     fn handles_are_copy_send_sync_ids() {
-        assert_copy::<FormulaCell<i32>>();
-        assert_copy::<SourceCell<i32>>();
+        assert_copy::<Computed<i32>>();
+        assert_copy::<Source<i32>>();
         assert_copy::<EffectHandle>();
-        assert_send_sync::<FormulaCell<i32>>();
-        assert_send_sync::<SourceCell<i32>>();
+        assert_send_sync::<Computed<i32>>();
+        assert_send_sync::<Source<i32>>();
         assert_send_sync::<EffectHandle>();
     }
 
@@ -2377,7 +2377,7 @@ mod dependency_tracking {
 mod invalidation_semantics {
     use super::*;
 
-    /// SPEC: `SourceCell::set()` stores the new value and marks dependent slots dirty.
+    /// SPEC: `Source::set()` stores the new value and marks dependent slots dirty.
     #[test]
     fn cell_set_clears_dependents_not_self() {
         let ctx = Context::new();
@@ -3323,7 +3323,7 @@ mod edge_cases {
         COUNT.with(|cnt| assert_eq!(cnt.get(), 1, "no recompute without access"));
     }
 
-    /// FormulaCell::clear removes cached value and cascades to dependents.
+    /// Computed::clear removes cached value and cascades to dependents.
     #[test]
     fn slot_handle_clear_cascades() {
         let ctx = Context::new();
@@ -3344,7 +3344,7 @@ mod edge_cases {
         assert_eq!(ctx.get(&c), 44);
     }
 
-    /// FormulaCell::clear on an already-cleared slot is a no-op.
+    /// Computed::clear on an already-cleared slot is a no-op.
     #[test]
     fn slot_handle_clear_idempotent() {
         thread_local! {
@@ -3369,7 +3369,7 @@ mod edge_cases {
         COUNT.with(|c| assert_eq!(c.get(), 2, "only one recompute after multiple clears"));
     }
 
-    /// FormulaCell::clear on a slot that was never accessed is a no-op.
+    /// Computed::clear on a slot that was never accessed is a no-op.
     #[test]
     fn slot_handle_clear_on_unset_slot() {
         let ctx = Context::new();
@@ -3380,7 +3380,7 @@ mod edge_cases {
         assert_eq!(ctx.get(&s), 42);
     }
 
-    /// SourceCell::clear_dependents clears downstream slots without changing the cell value.
+    /// Source::clear_dependents clears downstream slots without changing the cell value.
     #[test]
     fn cell_handle_clear_dependents() {
         thread_local! {
@@ -3406,7 +3406,7 @@ mod edge_cases {
         COUNT.with(|cnt| assert_eq!(cnt.get(), 2, "slot recomputed after clear_dependents"));
     }
 
-    /// SourceCell::clear_dependents cascades through transitive dependents.
+    /// Source::clear_dependents cascades through transitive dependents.
     #[test]
     fn cell_handle_clear_dependents_cascades() {
         let ctx = Context::new();
@@ -3429,7 +3429,7 @@ mod edge_cases {
         assert_eq!(ctx.get(&d), 112);
     }
 
-    /// SourceCell::set updates the cell through its owning context.
+    /// Source::set updates the cell through its owning context.
     #[test]
     fn cell_handle_set_updates_and_invalidates_dependents() {
         let ctx = Context::new();

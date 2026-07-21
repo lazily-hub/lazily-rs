@@ -10,14 +10,14 @@
 //! Each source is a pure [`TimelineSource`] **compute core** (a side-effect-free
 //! state machine over plain integers — the C++-eligible, `BytesPayload` part)
 //! split from a thin reactive **cell** that projects the core's fire edge onto a
-//! [`Cell`](crate::SourceCell) so dependents invalidate *only on an actual fire*
+//! [`Cell`](crate::Source) so dependents invalidate *only on an actual fire*
 //! (the backend-portability rule). `DeadlineCell<T>` is `PyObjectPayload` — it
 //! carries an opaque user value alongside a bytes-eligible deadline core.
 
 use std::cell::RefCell;
 
 use crate::Context;
-use crate::cell::SourceCell;
+use crate::cell::Source;
 
 /// A pure temporal compute core driven by a monotone logical clock.
 ///
@@ -96,7 +96,7 @@ impl TimelineSource for TimerCore {
 /// `has_fired`/`value` dependents invalidate only on the fire (idempotent).
 pub struct TimerCell {
     core: RefCell<TimerCore>,
-    fired: SourceCell<bool>,
+    fired: Source<bool>,
 }
 
 impl TimerCell {
@@ -129,7 +129,7 @@ impl TimerCell {
     }
 
     /// The backing cell, for dependents that want to subscribe directly.
-    pub fn fired_cell(&self) -> SourceCell<bool> {
+    pub fn fired_cell(&self) -> Source<bool> {
         self.fired
     }
 
@@ -194,7 +194,7 @@ impl TimelineSource for IntervalCore {
 /// (invalidates only when `count` changes).
 pub struct IntervalCell {
     core: RefCell<IntervalCore>,
-    count: SourceCell<u64>,
+    count: Source<u64>,
 }
 
 impl IntervalCell {
@@ -221,7 +221,7 @@ impl IntervalCell {
         self.count.get(ctx)
     }
 
-    pub fn count_cell(&self) -> SourceCell<u64> {
+    pub fn count_cell(&self) -> Source<u64> {
         self.count
     }
 
@@ -321,7 +321,7 @@ impl TimelineSource for CronCore {
 /// Reactive cron source: same reactive contract as [`IntervalCell`].
 pub struct CronCell {
     core: RefCell<CronCore>,
-    count: SourceCell<u64>,
+    count: Source<u64>,
 }
 
 impl CronCell {
@@ -345,7 +345,7 @@ impl CronCell {
         self.count.get(ctx)
     }
 
-    pub fn count_cell(&self) -> SourceCell<u64> {
+    pub fn count_cell(&self) -> Source<u64> {
         self.count
     }
 
@@ -414,7 +414,7 @@ impl TimelineSource for DeadlineCore {
 pub struct DeadlineCell<T> {
     core: RefCell<DeadlineCore>,
     value: T,
-    expired: SourceCell<bool>,
+    expired: Source<bool>,
 }
 
 impl<T> DeadlineCell<T>
@@ -451,7 +451,7 @@ where
         self.expired.get(ctx)
     }
 
-    pub fn expired_cell(&self) -> SourceCell<bool> {
+    pub fn expired_cell(&self) -> Source<bool> {
         self.expired
     }
 

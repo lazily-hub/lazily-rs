@@ -29,7 +29,7 @@ pub fn quiet<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
 
 mod basic {
     use super::*;
-    use lazily::{Context, EffectHandle, FormulaCell, SourceCell, TeardownScope};
+    use lazily::{Computed, Context, EffectHandle, Source, TeardownScope};
 
     pub struct BasicModel {
         pub ctx: Context,
@@ -108,7 +108,7 @@ mod basic {
     /// `target`; it is an argument, not a dependency (§9.2.3).
     fn feed_body(
         reads: &[Ref<Context>],
-        target: SourceCell<i64>,
+        target: Source<i64>,
         poison: &Poison,
         merges: &Merges,
     ) -> impl Fn(&Context) + 'static {
@@ -145,7 +145,7 @@ mod basic {
     ///
     /// The external `set_cell(counter, 1)` moves off the fixed point and the
     /// loop diverges under `KeepLatest` — the step-2 exhaustion.
-    fn diverge_body(own: SourceCell<i64>) -> impl Fn(&Context) + 'static {
+    fn diverge_body(own: Source<i64>) -> impl Fn(&Context) + 'static {
         move |c: &Context| {
             let v = c.get_cell(&own);
             let next = if v == 0 { 0 } else { v.wrapping_add(1) };
@@ -156,7 +156,7 @@ mod basic {
     pub struct BasicScope<'a>(TeardownScope<'a>, Log, Log, Poison);
 
     impl ScopeModel<BasicModel> for BasicScope<'_> {
-        fn cell(&self, value: i64) -> SourceCell<i64> {
+        fn cell(&self, value: i64) -> Source<i64> {
             self.0.cell(value)
         }
         fn computed(
@@ -164,7 +164,7 @@ mod basic {
             reads: &[Ref<Context>],
             offset: i64,
             computes: &Computes,
-        ) -> FormulaCell<i64> {
+        ) -> Computed<i64> {
             self.0.computed(compute(reads, offset, &self.3, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<Context>]) -> EffectHandle {
@@ -182,7 +182,7 @@ mod basic {
     impl GraphModel for BasicModel {
         type Graph = Context;
         type Scope<'a> = BasicScope<'a>;
-        type Signal = FormulaCell<i64>;
+        type Signal = Computed<i64>;
 
         const NAME: &'static str = "Context";
 
@@ -199,7 +199,7 @@ mod basic {
             &self.ctx
         }
 
-        fn cell(&self, value: i64) -> SourceCell<i64> {
+        fn cell(&self, value: i64) -> Source<i64> {
             self.ctx.cell(value)
         }
         fn computed(
@@ -207,7 +207,7 @@ mod basic {
             reads: &[Ref<Self::Graph>],
             offset: i64,
             computes: &Computes,
-        ) -> FormulaCell<i64> {
+        ) -> Computed<i64> {
             self.ctx
                 .computed(compute(reads, offset, &self.poison, computes))
         }
@@ -225,7 +225,7 @@ mod basic {
             reads: &[Ref<Self::Graph>],
             offset: i64,
             computes: &Computes,
-        ) -> FormulaCell<i64> {
+        ) -> Computed<i64> {
             self.ctx
                 .signal(compute(reads, offset, &self.poison, computes))
         }
@@ -235,7 +235,7 @@ mod basic {
         fn dispose_signal(&self, signal: &Self::Signal) {
             self.ctx.dispose_signal(signal);
         }
-        fn batch(&self, writes: &[(SourceCell<i64>, i64)], merges: &[(SourceCell<i64>, i64)]) {
+        fn batch(&self, writes: &[(Source<i64>, i64)], merges: &[(Source<i64>, i64)]) {
             self.ctx.batch(|c| {
                 for (h, v) in writes {
                     c.set_cell(h, *v);
@@ -245,20 +245,20 @@ mod basic {
                 }
             });
         }
-        fn merge(&self, cell: SourceCell<i64>, op: i64) {
+        fn merge(&self, cell: Source<i64>, op: i64) {
             self.ctx.apply_merge::<i64, Sum>(&cell, op);
         }
         fn feed_effect(
             &self,
             _name: &str,
             reads: &[Ref<Self::Graph>],
-            target: SourceCell<i64>,
+            target: Source<i64>,
             merges: &Merges,
         ) -> EffectHandle {
             self.ctx
                 .effect(feed_body(reads, target, &self.poison, merges))
         }
-        fn diverge_effect(&self, _name: &str, own: SourceCell<i64>) -> EffectHandle {
+        fn diverge_effect(&self, _name: &str, own: Source<i64>) -> EffectHandle {
             // Only the divergent fixture builds this, so lowering the drain
             // budget here keeps the exhausting loop fast without affecting any
             // other fixture's model.
@@ -274,7 +274,7 @@ mod basic {
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
         }
-        fn set_cell(&self, cell: SourceCell<i64>, value: i64) {
+        fn set_cell(&self, cell: Source<i64>, value: i64) {
             self.ctx.set_cell(&cell, value);
         }
         fn is_effect_active(&self, effect: EffectHandle) -> bool {
@@ -308,7 +308,7 @@ pub use basic::BasicModel;
 mod threadsafe {
     use super::*;
     use lazily::{
-        EffectHandle, FormulaCell, SourceCell, ThreadSafeContext, ThreadSafeSignalHandle,
+        Computed, EffectHandle, Source, ThreadSafeContext, ThreadSafeSignalHandle,
         ThreadSafeTeardownScope,
     };
 
@@ -384,7 +384,7 @@ mod threadsafe {
     /// `feed_body`; the only difference is the `Send + Sync` closure bound.
     fn feed_body(
         reads: &[Ref<ThreadSafeContext>],
-        target: SourceCell<i64>,
+        target: Source<i64>,
         poison: &Poison,
         merges: &Merges,
     ) -> impl Fn(&ThreadSafeContext) + Send + Sync + 'static {
@@ -405,7 +405,7 @@ mod threadsafe {
     /// reschedules the effect onto the outer drain, which the bounded
     /// `flush_effects` cuts short. Holds `0` as a fixed point and uses
     /// `wrapping_add` — see the basic module's `diverge_body` for why.
-    fn diverge_body(own: SourceCell<i64>) -> impl Fn(&ThreadSafeContext) + Send + Sync + 'static {
+    fn diverge_body(own: Source<i64>) -> impl Fn(&ThreadSafeContext) + Send + Sync + 'static {
         move |c: &ThreadSafeContext| {
             let v = c.get_cell(&own);
             let next = if v == 0 { 0 } else { v.wrapping_add(1) };
@@ -419,7 +419,7 @@ mod threadsafe {
     pub struct ThreadSafeScope(ThreadSafeTeardownScope, Log, Log, Poison);
 
     impl ScopeModel<ThreadSafeModel> for ThreadSafeScope {
-        fn cell(&self, value: i64) -> SourceCell<i64> {
+        fn cell(&self, value: i64) -> Source<i64> {
             self.0.cell(value)
         }
         fn computed(
@@ -427,7 +427,7 @@ mod threadsafe {
             reads: &[Ref<ThreadSafeContext>],
             offset: i64,
             computes: &Computes,
-        ) -> FormulaCell<i64> {
+        ) -> Computed<i64> {
             self.0.computed(compute(reads, offset, &self.3, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<ThreadSafeContext>]) -> EffectHandle {
@@ -462,7 +462,7 @@ mod threadsafe {
             &self.ctx
         }
 
-        fn cell(&self, value: i64) -> SourceCell<i64> {
+        fn cell(&self, value: i64) -> Source<i64> {
             self.ctx.cell(value)
         }
         fn computed(
@@ -470,7 +470,7 @@ mod threadsafe {
             reads: &[Ref<Self::Graph>],
             offset: i64,
             computes: &Computes,
-        ) -> FormulaCell<i64> {
+        ) -> Computed<i64> {
             self.ctx
                 .computed(compute(reads, offset, &self.poison, computes))
         }
@@ -498,7 +498,7 @@ mod threadsafe {
         fn dispose_signal(&self, signal: &Self::Signal) {
             self.ctx.dispose_signal(signal);
         }
-        fn batch(&self, writes: &[(SourceCell<i64>, i64)], merges: &[(SourceCell<i64>, i64)]) {
+        fn batch(&self, writes: &[(Source<i64>, i64)], merges: &[(Source<i64>, i64)]) {
             self.ctx.batch(|c| {
                 for (h, v) in writes {
                     c.set_cell(h, *v);
@@ -508,20 +508,20 @@ mod threadsafe {
                 }
             });
         }
-        fn merge(&self, cell: SourceCell<i64>, op: i64) {
+        fn merge(&self, cell: Source<i64>, op: i64) {
             self.ctx.apply_merge::<i64, Sum>(&cell, op);
         }
         fn feed_effect(
             &self,
             _name: &str,
             reads: &[Ref<Self::Graph>],
-            target: SourceCell<i64>,
+            target: Source<i64>,
             merges: &Merges,
         ) -> EffectHandle {
             self.ctx
                 .effect(feed_body(reads, target, &self.poison, merges))
         }
-        fn diverge_effect(&self, _name: &str, own: SourceCell<i64>) -> EffectHandle {
+        fn diverge_effect(&self, _name: &str, own: Source<i64>) -> EffectHandle {
             self.ctx.set_drain_budget(256);
             self.ctx.effect(diverge_body(own))
         }
@@ -534,7 +534,7 @@ mod threadsafe {
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
         }
-        fn set_cell(&self, cell: SourceCell<i64>, value: i64) {
+        fn set_cell(&self, cell: Source<i64>, value: i64) {
             self.ctx.set_cell(&cell, value);
         }
         fn is_effect_active(&self, effect: EffectHandle) -> bool {

@@ -3,7 +3,7 @@
 //! Integration tests for the `ThreadSafeStateMachine` primitive.
 //!
 //! Mirrors `tests/state_machine.rs` over the lock-backed `ThreadSafeContext`.
-//! A `ThreadSafeStateMachine` wraps a `SourceCell<S>` + `Send + Sync` transition
+//! A `ThreadSafeStateMachine` wraps a `Source<S>` + `Send + Sync` transition
 //! function, exposing `send(event)`, `state()`, `on_transition()`, and
 //! `state_is()`.
 

@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 use std::hash::Hash;
 
 use crate::Context;
-use crate::cell::SourceCell;
+use crate::cell::Source;
 use crate::distributed::PeerId;
 use crate::seq_crdt::SeqCrdt;
 use crate::text_crdt::{OpId, TextCrdt};
@@ -659,14 +659,14 @@ impl RegisterCrdt for PnCounter {
 
 /// A multi-write **root** cell backed by a CRDT (`merge: crdt`).
 ///
-/// It owns a CRDT replica and a reactive [`SourceCell`]. A local write or a
+/// It owns a CRDT replica and a reactive [`Source`]. A local write or a
 /// remote-op ingress merge updates the CRDT, then pushes the converged value
 /// into the reactive graph via [`Context::set_cell`](crate::Context::set_cell)
 /// — so downstream derived slots recompute through the ordinary direct
 /// mechanism, and an equal merge invalidates nothing.
 pub struct ReplicatedCell<C: CellCrdt> {
     crdt: C,
-    handle: SourceCell<C::Value>,
+    handle: Source<C::Value>,
 }
 
 impl<C> ReplicatedCell<C>
@@ -682,7 +682,7 @@ where
     }
 
     /// The reactive cell handle derived slots depend on.
-    pub fn handle(&self) -> SourceCell<C::Value> {
+    pub fn handle(&self) -> Source<C::Value> {
         self.handle
     }
 

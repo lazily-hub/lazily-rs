@@ -7,7 +7,7 @@
 
 use lazily::{
     BackpressurePolicy, BoundDim, Context, FramedTransport, InProcTransport, KeepLatest, Max,
-    MergePolicy, Overflow, RelayCell, SourceCell, Sum, Transport,
+    MergePolicy, Overflow, RelayCell, Source, Sum, Transport,
 };
 
 /// Drive a relay by pumping `ops` through `transport`: deliver everything, then
@@ -23,7 +23,7 @@ where
         BackpressurePolicy::new(ctx, BoundDim::Count, u64::MAX, 1, Overflow::Conflate),
     )
     .unwrap();
-    let egress: SourceCell<i64, M> = ctx.merge_cell(0);
+    let egress: Source<i64, M> = ctx.merge_cell(0);
 
     for &op in ops {
         transport.deliver(op);

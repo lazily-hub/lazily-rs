@@ -7,7 +7,7 @@
 //! [`BackpressurePolicy`], and lets a slow egress **drain** the coalesced window.
 //!
 //! It is a *composite*, not a new node (analysis §4.2): the hot head is a cell,
-//! its `depth`/`is_full`/`is_empty` reads are demand-driven [`FormulaCell`]s, so an
+//! its `depth`/`is_full`/`is_empty` reads are demand-driven [`Computed`]s, so an
 //! unobserved relay costs `N·⊕` and no more (the merge cost law). The **converged
 //! egress state is independent of the drain schedule** whenever `⊕` is associative
 //! — the invariant pinned by `LazilyFormal.Relay.relay_converges`.
@@ -15,8 +15,8 @@
 use std::marker::PhantomData;
 
 use crate::Context;
-use crate::cell::FormulaCell;
-use crate::cell::SourceCell;
+use crate::cell::Computed;
+use crate::cell::Source;
 use crate::merge::MergePolicy;
 
 /// What a bound measures (analysis §4.4). The Phase-2 core meters `Count`; the
@@ -49,10 +49,10 @@ pub enum Overflow {
 /// operator or an adaptive controller retunes it live and dependent relays react.
 /// Hysteresis (`high_water` ≠ `low_water`) prevents flapping.
 pub struct BackpressurePolicy {
-    pub dimension: SourceCell<BoundDim>,
-    pub high_water: SourceCell<u64>,
-    pub low_water: SourceCell<u64>,
-    pub overflow: SourceCell<Overflow>,
+    pub dimension: Source<BoundDim>,
+    pub high_water: Source<u64>,
+    pub low_water: Source<u64>,
+    pub overflow: Source<Overflow>,
 }
 
 impl BackpressurePolicy {
@@ -95,16 +95,16 @@ pub enum IngressOutcome {
 /// The algebra-typed conflating relay (Phase 2, in-proc core).
 pub struct RelayCell<T, M> {
     /// Hot head: the current window's coalesced value (`None` = empty window).
-    head: SourceCell<Option<T>>,
+    head: Source<Option<T>>,
     /// Ops merged into the current window since the last drain (the `Count` bound).
-    pending: SourceCell<u64>,
+    pending: Source<u64>,
     policy: BackpressurePolicy,
     /// Demand-driven reader: current window depth.
-    depth: FormulaCell<u64>,
+    depth: Computed<u64>,
     /// Demand-driven reader: depth ≥ `high_water`.
-    is_full: FormulaCell<bool>,
+    is_full: Computed<bool>,
     /// Demand-driven reader: the window is empty.
-    is_empty: FormulaCell<bool>,
+    is_empty: Computed<bool>,
     _marker: PhantomData<M>,
 }
 
@@ -120,7 +120,7 @@ where
         if policy.overflow.get(ctx) == Overflow::Conflate && !M::CONFLATES {
             return Err(RelayConfigError::ConflateNotBounding);
         }
-        let head: SourceCell<Option<T>> = ctx.cell(None);
+        let head: Source<Option<T>> = ctx.cell(None);
         let pending = ctx.cell(0u64);
         let depth = ctx.computed(move |c| pending.get(c));
         let high_water = policy.high_water;
@@ -144,15 +144,15 @@ where
     }
 
     /// Demand-driven reader: current window depth (`Count`).
-    pub fn depth(&self) -> FormulaCell<u64> {
+    pub fn depth(&self) -> Computed<u64> {
         self.depth
     }
     /// Demand-driven reader: window is at/over `high_water`.
-    pub fn is_full(&self) -> FormulaCell<bool> {
+    pub fn is_full(&self) -> Computed<bool> {
         self.is_full
     }
     /// Demand-driven reader: window is empty (nothing to drain).
-    pub fn is_empty(&self) -> FormulaCell<bool> {
+    pub fn is_empty(&self) -> Computed<bool> {
         self.is_empty
     }
 

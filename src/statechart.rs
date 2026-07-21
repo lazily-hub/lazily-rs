@@ -3,7 +3,7 @@
 //!
 //! A chart is **compute, not protocol**: it is never serialized as a distinct
 //! wire kind. In this reactive binding the active configuration lives in a
-//! [`SourceCell`], so any slot/signal/effect reading [`StateChart::configuration`],
+//! [`Source`], so any slot/signal/effect reading [`StateChart::configuration`],
 //! [`StateChart::active_leaves`], or [`StateChart::matches`] is invalidated on a
 //! real transition; a no-op self-transition is suppressed by the cell's
 //! `PartialEq` guard (see the spec's "Self-transitions" section).
@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::ThreadSafeContext;
 #[cfg(feature = "async")]
 use crate::{AsyncCellHandle, AsyncContext};
-use crate::{Context, SourceCell};
+use crate::{Context, Source};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -79,7 +79,7 @@ enum Recording {
 /// A reactive full-Harel state chart backed by a configuration cell.
 pub struct StateChart {
     def: ChartDef,
-    config: SourceCell<BTreeSet<String>>,
+    config: Source<BTreeSet<String>>,
     history: RefCell<HashMap<String, Recording>>,
     last_actions: RefCell<Vec<String>>,
 }
@@ -579,7 +579,7 @@ impl StateChart {
 #[cfg(feature = "thread-safe")]
 pub struct ThreadSafeStateChart {
     def: ChartDef,
-    config: SourceCell<BTreeSet<String>>,
+    config: Source<BTreeSet<String>>,
     history: parking_lot::Mutex<HashMap<String, Recording>>,
     last_actions: parking_lot::Mutex<Vec<String>>,
 }

@@ -6,8 +6,8 @@
 //! policy. Also drives a `RelayCell` under `Spill` overflow into a `SpillStore`.
 
 use lazily::{
-    BackpressurePolicy, BoundDim, Context, Max, MergePolicy, Overflow, RelayCell, SetUnion,
-    SourceCell, SpillMode, SpillStore, Sum,
+    BackpressurePolicy, BoundDim, Context, Max, MergePolicy, Overflow, RelayCell, SetUnion, Source,
+    SpillMode, SpillStore, Sum,
 };
 use std::collections::BTreeSet;
 
@@ -127,7 +127,7 @@ fn relay_spills_full_windows_losslessly() {
     assert_eq!(store.reconstruct(0, hot), flat);
 
     // The egress accumulates cold pages then the hot head — same converged value.
-    let egress: SourceCell<i64, Sum> = ctx.merge_cell(0);
+    let egress: Source<i64, Sum> = ctx.merge_cell(0);
     for page in store.pending_pages() {
         egress.merge(&ctx, page.summary);
     }

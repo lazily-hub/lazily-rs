@@ -1,5 +1,5 @@
 //! Phase 1 law-tests for the merge algebra (`MergePolicy`) and the kernel's
-//! `SourceCell` write surface (`#lzcellkernel`; formerly the `Reactive`/`Source`
+//! `Source` write surface (`#lzcellkernel`; formerly the `Reactive`/`Source`
 //! supertypes).
 //!
 //! See `lazily-spec/docs/relaycell-backpressure-analysis.md` §2 (the algebra
@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use lazily::{Context, KeepLatest, Max, MergePolicy, RawFifo, SetUnion, SourceCell, Sum};
+use lazily::{Context, KeepLatest, Max, MergePolicy, RawFifo, SetUnion, Source, Sum};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ fn sum_flag_is_honest() {
 fn cell_is_merge_cell_keep_latest() {
     let ctx = Context::new();
     let cell = ctx.cell(0i64);
-    let mc: SourceCell<i64, KeepLatest> = ctx.merge_cell(0i64);
+    let mc: Source<i64, KeepLatest> = ctx.merge_cell(0i64);
 
     for v in [3i64, 3, 7, 7, 1] {
         ctx.set_cell(&cell, v);
@@ -150,7 +150,7 @@ fn cell_is_merge_cell_keep_latest() {
 #[test]
 fn merge_cell_sum_accumulates() {
     let ctx = Context::new();
-    let mc: SourceCell<i64, Sum> = ctx.merge_cell(0i64);
+    let mc: Source<i64, Sum> = ctx.merge_cell(0i64);
     for d in [1i64, 2, 3, 4] {
         mc.merge(&ctx, d);
     }
@@ -165,12 +165,12 @@ fn sum_converges_regardless_of_order() {
     let ctx = Context::new();
     let ops = [5i64, -3, 8, 2, -1];
 
-    let a: SourceCell<i64, Sum> = ctx.merge_cell(0);
+    let a: Source<i64, Sum> = ctx.merge_cell(0);
     for &d in &ops {
         a.merge(&ctx, d);
     }
 
-    let b: SourceCell<i64, Sum> = ctx.merge_cell(0);
+    let b: Source<i64, Sum> = ctx.merge_cell(0);
     for &d in ops.iter().rev() {
         b.merge(&ctx, d);
     }
@@ -189,7 +189,7 @@ fn idempotent_merge_no_ops_via_partial_eq_guard() {
     use std::rc::Rc;
 
     let ctx = Context::new();
-    let mc: SourceCell<i64, Max> = ctx.merge_cell(10i64);
+    let mc: Source<i64, Max> = ctx.merge_cell(10i64);
 
     let runs = Rc::new(StdCell::new(0u32));
     let runs2 = runs.clone();
@@ -216,12 +216,12 @@ fn idempotent_merge_no_ops_via_partial_eq_guard() {
 }
 
 /// The kernel replaces the vestigial `Reactive`/`Source` read/write traits: any
-/// `SourceCell<i64, M>` is driven and observed uniformly through the inherent
-/// `set`/`merge`/`get` on `Cell<i64, Source<M>>`, generic over the policy `M` —
+/// `Source<i64, M>` is driven and observed uniformly through the inherent
+/// `set`/`merge`/`get` on `Source<i64, M>`, generic over the policy `M` —
 /// no supertype needed.
 #[test]
 fn reactive_source_supertype_uniform() {
-    fn drive<M: MergePolicy<i64>>(ctx: &Context, s: SourceCell<i64, M>) -> i64 {
+    fn drive<M: MergePolicy<i64>>(ctx: &Context, s: Source<i64, M>) -> i64 {
         s.set(ctx, 1);
         s.merge(ctx, 2); // for a plain Cell this replaces (KeepLatest)
         s.get(ctx)
@@ -231,7 +231,7 @@ fn reactive_source_supertype_uniform() {
     let cell = ctx.cell(0i64);
     assert_eq!(drive(&ctx, cell), 2); // Cell ≡ MergeCell<KeepLatest>: merge == replace
 
-    let mc: SourceCell<i64, Sum> = ctx.merge_cell(0i64);
+    let mc: Source<i64, Sum> = ctx.merge_cell(0i64);
     // set to 1, then merge(+2) => 3 under Sum.
     assert_eq!(drive(&ctx, mc), 3);
 }

@@ -3,7 +3,7 @@
 //! `cargo run --release --example rc_handle_spike`
 //!
 //! Tests the design WITHOUT refactoring the library. `RcSlot` wraps a plain
-//! `FormulaCell` in an `Rc` whose `Drop` disposes the node, and holds a `Weak`
+//! `Computed` in an `Rc` whose `Drop` disposes the node, and holds a `Weak`
 //! back to the context. That is `'static`, so a compute closure can capture it —
 //! the property a borrowing wrapper could never have (E0597, see 40b36c4).
 //!
@@ -23,7 +23,7 @@ use std::cell::Cell as StdCell;
 use std::rc::{Rc, Weak};
 use std::time::Instant;
 
-use lazily::{Context, FormulaCell, SourceCell};
+use lazily::{Computed, Context, Source};
 
 // Counts disposals so the tests can assert on them.
 thread_local! {
@@ -35,7 +35,7 @@ fn disposed_count() -> usize {
 }
 
 struct RcSlotInner<T> {
-    handle: FormulaCell<T>,
+    handle: Computed<T>,
     ctx: Weak<Context>,
 }
 
@@ -56,7 +56,7 @@ struct RcSlot<T> {
 }
 
 impl<T> RcSlot<T> {
-    fn handle(&self) -> &FormulaCell<T> {
+    fn handle(&self) -> &Computed<T> {
         &self.inner.handle
     }
 
@@ -79,11 +79,7 @@ where
 }
 
 /// Is `id` still listed as a dependent of `cell`?
-fn cell_has_dependent<T>(
-    ctx: &Context,
-    cell: &SourceCell<T>,
-    slot_id_of: &FormulaCell<u64>,
-) -> bool {
+fn cell_has_dependent<T>(ctx: &Context, cell: &Source<T>, slot_id_of: &Computed<u64>) -> bool {
     // No public introspection, so probe behaviourally: a disposed slot cannot be
     // read. `get` on a disposed node panics, so catch it.
     let _ = cell;

@@ -46,9 +46,9 @@ fn exp_inval(step: &Value) -> bool {
     step["expected"]["invalidates"]["output"].as_bool().unwrap()
 }
 
-/// Run a fixture whose emit projection is a `SourceCell<Option<String>>`, given a
+/// Run a fixture whose emit projection is a `Source<Option<String>>`, given a
 /// per-step driver returning the emitted value and the current output.
-fn run<F>(ctx: &Context, fx: &Value, observed: lazily::FormulaCell<Option<String>>, mut drive: F)
+fn run<F>(ctx: &Context, fx: &Value, observed: lazily::Computed<Option<String>>, mut drive: F)
 where
     F: FnMut(&Value) -> (Option<String>, Option<String>),
 {

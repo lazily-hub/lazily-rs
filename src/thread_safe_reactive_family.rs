@@ -1,7 +1,7 @@
 //! Thread-safe keyed reactive collection (`#reactivemap`, thread-safe flavor).
 //!
 //! The `Send + Sync` analog of [`ReactiveMap`](crate::ReactiveMap): keys `K`
-//! map to per-entry reactive nodes ([`SourceCell<V>`] input cells / [`FormulaCell<V>`]
+//! map to per-entry reactive nodes ([`Source<V>`] input cells / [`Computed<V>`]
 //! derived slots) allocated on a [`ThreadSafeContext`]. Where [`ReactiveMap`] is
 //! `Rc`-based and single-threaded, this map keeps its present-set state behind an
 //! `Arc<Mutex<..>>`, so it can live in a `Send` owner shared across threads (for
@@ -30,17 +30,17 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use crate::cell_family::EntryKind;
-use crate::{FormulaCell, SourceCell, ThreadSafeContext};
+use crate::{Computed, Source, ThreadSafeContext};
 
 mod sealed {
     pub trait Sealed {}
 }
 
 /// The node kinds a thread-safe map entry can take — the `Send + Sync` analog of
-/// [`MapHandle`](crate::MapHandle). Sealed to [`SourceCell`] (input cells) and
-/// [`FormulaCell`] (derived slots); bindings do not add new kinds.
+/// [`MapHandle`](crate::MapHandle). Sealed to [`Source`] (input cells) and
+/// [`Computed`] (derived slots); bindings do not add new kinds.
 pub trait ThreadSafeMapHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static {
-    /// This handle's entry kind. `SourceCell` is [`EntryKind::Cell`]; `FormulaCell`
+    /// This handle's entry kind. `Source` is [`EntryKind::Cell`]; `Computed`
     /// is [`EntryKind::Slot`].
     const KIND: EntryKind;
 
@@ -62,8 +62,8 @@ pub trait ThreadSafeMapHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static 
         V: Clone + Send + Sync + 'static;
 }
 
-impl<V> sealed::Sealed for SourceCell<V> {}
-impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for SourceCell<V> {
+impl<V> sealed::Sealed for Source<V> {}
+impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for Source<V> {
     const KIND: EntryKind = EntryKind::Cell;
 
     fn materialize(
@@ -85,8 +85,8 @@ impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for SourceCell<V> {
     }
 }
 
-impl<V> sealed::Sealed for FormulaCell<V> {}
-impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for FormulaCell<V> {
+impl<V> sealed::Sealed for Computed<V> {}
+impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for Computed<V> {
     const KIND: EntryKind = EntryKind::Slot;
 
     fn materialize(
@@ -122,7 +122,7 @@ struct MapInner<K, H> {
 }
 
 /// The thread-safe keyed reactive collection (`#reactivemap`) generic over the
-/// entry handle kind `H` ([`SourceCell<V>`] for input cells, [`FormulaCell<V>`] for
+/// entry handle kind `H` ([`Source<V>`] for input cells, [`Computed<V>`] for
 /// derived slots).
 ///
 /// Cheap to [`Clone`] (an `Arc` to shared inner state) and `Send + Sync`, so it can
@@ -274,7 +274,7 @@ where
 }
 
 /// `ThreadSafeCellMap`-only surface: `set` (an input is settable).
-impl<K, V> ThreadSafeReactiveMap<K, V, SourceCell<V>>
+impl<K, V> ThreadSafeReactiveMap<K, V, Source<V>>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: PartialEq + Clone + Send + Sync + 'static,
@@ -294,7 +294,7 @@ where
 }
 
 /// `ThreadSafeSlotMap`-only surface: the eager pre-mint helper.
-impl<K, V> ThreadSafeReactiveMap<K, V, FormulaCell<V>>
+impl<K, V> ThreadSafeReactiveMap<K, V, Computed<V>>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: PartialEq + Clone + Send + Sync + 'static,
@@ -316,12 +316,12 @@ where
 }
 
 /// A thread-safe **input-cell** map: every entry is an always-materialized
-/// [`SourceCell<V>`]. The `Send + Sync` analog of [`CellMap`](crate::CellMap).
-pub type ThreadSafeCellMap<K, V> = ThreadSafeReactiveMap<K, V, SourceCell<V>>;
+/// [`Source<V>`]. The `Send + Sync` analog of [`CellMap`](crate::CellMap).
+pub type ThreadSafeCellMap<K, V> = ThreadSafeReactiveMap<K, V, Source<V>>;
 
-/// A thread-safe **derived-slot** map: entries are [`FormulaCell<V>`] minted lazily
+/// A thread-safe **derived-slot** map: entries are [`Computed<V>`] minted lazily
 /// on access or eagerly via [`materialize_all`](ThreadSafeReactiveMap::materialize_all).
-pub type ThreadSafeSlotMap<K, V> = ThreadSafeReactiveMap<K, V, FormulaCell<V>>;
+pub type ThreadSafeSlotMap<K, V> = ThreadSafeReactiveMap<K, V, Computed<V>>;
 
 #[cfg(test)]
 mod tests {

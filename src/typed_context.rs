@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::{Context, FormulaCell, SourceCell};
+use crate::{Computed, Context, Source};
 
 #[cfg(feature = "thread-safe")]
 use crate::ThreadSafeContext;
@@ -23,13 +23,13 @@ pub struct TypedContextRef<'a, Schema> {
 
 /// A slot handle bound to a typed context schema.
 pub struct TypedSlotHandle<Schema, T> {
-    raw: FormulaCell<T>,
+    raw: Computed<T>,
     _schema: PhantomData<fn() -> Schema>,
 }
 
 /// A cell handle bound to a typed context schema.
 pub struct TypedCellHandle<Schema, T> {
-    raw: SourceCell<T>,
+    raw: Source<T>,
     _schema: PhantomData<fn() -> Schema>,
 }
 
@@ -117,14 +117,14 @@ pub struct TypedThreadSafeContextRef<'a, Schema> {
 #[cfg(feature = "thread-safe")]
 /// A thread-safe slot handle bound to a typed context schema.
 pub struct TypedThreadSafeSlotHandle<Schema, T> {
-    raw: FormulaCell<T>,
+    raw: Computed<T>,
     _schema: PhantomData<fn() -> Schema>,
 }
 
 #[cfg(feature = "thread-safe")]
 /// A thread-safe cell handle bound to a typed context schema.
 pub struct TypedThreadSafeCellHandle<Schema, T> {
-    raw: SourceCell<T>,
+    raw: Source<T>,
     _schema: PhantomData<fn() -> Schema>,
 }
 
@@ -558,14 +558,14 @@ where
 }
 
 impl<Schema, T> TypedSlotHandle<Schema, T> {
-    fn new(raw: FormulaCell<T>) -> Self {
+    fn new(raw: Computed<T>) -> Self {
         Self {
             raw,
             _schema: PhantomData,
         }
     }
 
-    pub fn raw(&self) -> FormulaCell<T> {
+    pub fn raw(&self) -> Computed<T> {
         self.raw
     }
 
@@ -598,14 +598,14 @@ impl<Schema, T> Clone for TypedSlotHandle<Schema, T> {
 impl<Schema, T> Copy for TypedSlotHandle<Schema, T> {}
 
 impl<Schema, T> TypedCellHandle<Schema, T> {
-    fn new(raw: SourceCell<T>) -> Self {
+    fn new(raw: Source<T>) -> Self {
         Self {
             raw,
             _schema: PhantomData,
         }
     }
 
-    pub fn raw(&self) -> SourceCell<T> {
+    pub fn raw(&self) -> Source<T> {
         self.raw
     }
 
@@ -775,14 +775,14 @@ impl<'a, Schema> TypedThreadSafeContextRef<'a, Schema> {
 
 #[cfg(feature = "thread-safe")]
 impl<Schema, T> TypedThreadSafeSlotHandle<Schema, T> {
-    fn new(raw: FormulaCell<T>) -> Self {
+    fn new(raw: Computed<T>) -> Self {
         Self {
             raw,
             _schema: PhantomData,
         }
     }
 
-    pub fn raw(&self) -> FormulaCell<T> {
+    pub fn raw(&self) -> Computed<T> {
         self.raw
     }
 
@@ -817,14 +817,14 @@ impl<Schema, T> Copy for TypedThreadSafeSlotHandle<Schema, T> {}
 
 #[cfg(feature = "thread-safe")]
 impl<Schema, T> TypedThreadSafeCellHandle<Schema, T> {
-    fn new(raw: SourceCell<T>) -> Self {
+    fn new(raw: Source<T>) -> Self {
         Self {
             raw,
             _schema: PhantomData,
         }
     }
 
-    pub fn raw(&self) -> SourceCell<T> {
+    pub fn raw(&self) -> Source<T> {
         self.raw
     }
 

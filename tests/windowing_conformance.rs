@@ -34,12 +34,7 @@ fn inval(step: &Value) -> bool {
     step["expected"]["invalidates"]["output"].as_bool().unwrap()
 }
 
-fn check(
-    ctx: &Context,
-    observed: &lazily::FormulaCell<Option<u64>>,
-    step: &Value,
-    out: Option<u64>,
-) {
+fn check(ctx: &Context, observed: &lazily::Computed<Option<u64>>, step: &Value, out: Option<u64>) {
     assert_eq!(out, exp_out(step), "output for {step}");
     let was = ctx.is_set(observed);
     let _ = observed.get(ctx);

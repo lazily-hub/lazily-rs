@@ -104,8 +104,8 @@ pub fn merges_seen(merges: &Merges) -> usize {
 /// Parameterised by the *library* trait, not by the test model, so the generic
 /// helpers below are ordinary `ReactiveGraph` code rather than test-only code.
 pub enum Ref<G: ReactiveGraph> {
-    Cell(G::SourceCell<i64>),
-    Slot(G::FormulaCell<i64>),
+    Cell(G::Source<i64>),
+    Slot(G::Computed<i64>),
     Effect(G::EffectHandle),
 }
 
@@ -152,13 +152,13 @@ pub fn dependencies_of<G: ReactiveGraph>(graph: &G, node: Ref<G>) -> usize {
 /// Nodes owned by a teardown scope, created through it rather than through the
 /// context directly.
 pub trait ScopeModel<M: GraphModel> {
-    fn cell(&self, value: i64) -> <M::Graph as ReactiveGraph>::SourceCell<i64>;
+    fn cell(&self, value: i64) -> <M::Graph as ReactiveGraph>::Source<i64>;
     fn computed(
         &self,
         reads: &[Ref<M::Graph>],
         offset: i64,
         computes: &Computes,
-    ) -> <M::Graph as ReactiveGraph>::FormulaCell<i64>;
+    ) -> <M::Graph as ReactiveGraph>::Computed<i64>;
     fn effect(
         &self,
         name: &str,
@@ -216,13 +216,13 @@ pub trait GraphModel: Sized {
     /// The underlying graph, for the trait-generic structural operations.
     fn graph(&self) -> &Self::Graph;
 
-    fn cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::SourceCell<i64>;
+    fn cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::Source<i64>;
     fn computed(
         &self,
         reads: &[Ref<Self::Graph>],
         offset: i64,
         computes: &Computes,
-    ) -> <Self::Graph as ReactiveGraph>::FormulaCell<i64>;
+    ) -> <Self::Graph as ReactiveGraph>::Computed<i64>;
     fn effect(
         &self,
         name: &str,
@@ -242,19 +242,19 @@ pub trait GraphModel: Sized {
     /// reverts to lazy recompute-on-read (`#lzsignaleager` clause 4).
     fn dispose_signal(&self, signal: &Self::Signal);
 
-    /// Create a merge cell (`#lzmergefeed`): a `SourceCell` whose write folds
+    /// Create a merge cell (`#lzmergefeed`): a `Source` whose write folds
     /// under a `MergePolicy` rather than replaces. A merge cell is an ordinary
     /// cell node — the policy lives in how it is written, not in the node — so
-    /// this returns the same `SourceCell<i64>` handle a plain `cell` does, and
+    /// this returns the same `Source<i64>` handle a plain `cell` does, and
     /// [`merge`](Self::merge) / [`feed_effect`](Self::feed_effect) fold into it
     /// under `Sum`. The corpus only ever uses the `Sum` policy here.
-    fn merge_cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::SourceCell<i64> {
+    fn merge_cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::Source<i64> {
         self.cell(value)
     }
 
     /// Fold `op` into a merge cell under `Sum` (an explicit `merge()` call), then
     /// settle. Exact: one fold per call, the caller counting the ops.
-    fn merge(&self, cell: <Self::Graph as ReactiveGraph>::SourceCell<i64>, op: i64);
+    fn merge(&self, cell: <Self::Graph as ReactiveGraph>::Source<i64>, op: i64);
 
     /// An effect that reads `reads` and folds their sum into `target` under
     /// `Sum` — the feed construction (§9.2.3). The edge belongs to the effect
@@ -265,7 +265,7 @@ pub trait GraphModel: Sized {
         &self,
         name: &str,
         reads: &[Ref<Self::Graph>],
-        target: <Self::Graph as ReactiveGraph>::SourceCell<i64>,
+        target: <Self::Graph as ReactiveGraph>::Source<i64>,
         merges: &Merges,
     ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
 
@@ -277,7 +277,7 @@ pub trait GraphModel: Sized {
     fn diverge_effect(
         &self,
         name: &str,
-        own: <Self::Graph as ReactiveGraph>::SourceCell<i64>,
+        own: <Self::Graph as ReactiveGraph>::Source<i64>,
     ) -> <Self::Graph as ReactiveGraph>::EffectHandle;
 
     /// Whether the most recent settle exhausted its effect-drain budget
@@ -297,13 +297,13 @@ pub trait GraphModel: Sized {
     /// downstream cascade (and any feed effect's rerun) defers to batch exit.
     fn batch(
         &self,
-        writes: &[(<Self::Graph as ReactiveGraph>::SourceCell<i64>, i64)],
-        merges: &[(<Self::Graph as ReactiveGraph>::SourceCell<i64>, i64)],
+        writes: &[(<Self::Graph as ReactiveGraph>::Source<i64>, i64)],
+        merges: &[(<Self::Graph as ReactiveGraph>::Source<i64>, i64)],
     );
 
     /// Read a node's value. `Err` is the corpus's `read_after_dispose`.
     fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()>;
-    fn set_cell(&self, cell: <Self::Graph as ReactiveGraph>::SourceCell<i64>, value: i64);
+    fn set_cell(&self, cell: <Self::Graph as ReactiveGraph>::Source<i64>, value: i64);
 
     fn is_effect_active(&self, effect: <Self::Graph as ReactiveGraph>::EffectHandle) -> bool;
 
