@@ -110,10 +110,8 @@ mod sem_tree;
 #[cfg(feature = "distributed")]
 mod seq_crdt;
 mod service;
-mod signal;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
-mod slot;
 mod spill;
 mod stable_id;
 mod state_machine;
@@ -149,7 +147,7 @@ pub use async_context::{
 pub use async_reactive_family::{AsyncCellMap, AsyncMapHandle, AsyncReactiveMap, AsyncSlotMap};
 #[cfg(feature = "webrtc")]
 pub use bridge::{BridgeHub, HubError};
-pub use cell::CellHandle;
+pub use cell::{Cell, Formula, FormulaCell, Source, SourceCell};
 pub use cell_family::{CellMap, EntryKind, MapHandle, ReactiveMap, SlotMap};
 pub use cell_tree::CellTree;
 #[cfg(feature = "ipc")]
@@ -238,9 +236,7 @@ pub use membership::{
 };
 #[cfg(feature = "distributed")]
 pub use merge::CrdtJoin;
-pub use merge::{
-    KeepLatest, Max, MergeCellHandle, MergePolicy, RawFifo, Reactive, SetUnion, Source, Sum,
-};
+pub use merge::{KeepLatest, Max, MergePolicy, RawFifo, SetUnion, Sum};
 #[cfg(feature = "ipc")]
 pub use outbox::{DurableOutbox, InMemoryOutbox, InMemoryStore, OutboxStore};
 #[cfg(feature = "durable-sqlite")]
@@ -289,10 +285,8 @@ pub use service::{
     DiscoveryCell, DiscoveryCore, Health, HealthCell, HealthCore, ReadinessCell, ReadinessCore,
     RegistryOp, ServiceRegistry, ServiceRegistryCore,
 };
-pub use signal::SignalHandle;
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
-pub use slot::SlotHandle;
 pub use spill::{SpillMode, SpillPage, SpillStore};
 pub use stable_id::{
     Alignment, Block, BlockKey, Match, align, assign_stable_keys, block_key, similarity,

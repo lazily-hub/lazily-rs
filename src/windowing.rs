@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 
 use crate::Context;
-use crate::cell::CellHandle;
+use crate::cell::SourceCell;
 use crate::merge::MergePolicy;
 
 /// Fold `v` into an optional accumulator under `M` (identity when empty).
@@ -36,7 +36,7 @@ fn fold_window<T: Clone, M: MergePolicy<T>>(items: impl Iterator<Item = T>) -> O
 
 fn set_output<T: Clone + PartialEq + 'static>(
     ctx: &Context,
-    cell: &CellHandle<Option<T>>,
+    cell: &SourceCell<Option<T>>,
     emitted: &Option<T>,
 ) {
     if let Some(v) = emitted {
@@ -210,14 +210,14 @@ macro_rules! window_cell {
         /// Reactive window over any stream; projects the last emitted aggregate.
         pub struct $cell<T, M> {
             core: RefCell<$core<T, M>>,
-            output: CellHandle<Option<T>>,
+            output: SourceCell<Option<T>>,
         }
 
         impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> $cell<T, M> {
             pub fn output(&self, ctx: &Context) -> Option<T> {
                 self.output.get(ctx)
             }
-            pub fn output_cell(&self) -> CellHandle<Option<T>> {
+            pub fn output_cell(&self) -> SourceCell<Option<T>> {
                 self.output
             }
         }
@@ -258,7 +258,7 @@ impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> SlidingWindow<T, M> {
 /// Reactive time-tumbling window (`push(now, v)` + `tick(now)`).
 pub struct TumblingTimeWindow<T, M> {
     core: RefCell<TumblingTimeCore<T, M>>,
-    output: CellHandle<Option<T>>,
+    output: SourceCell<Option<T>>,
 }
 
 impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> TumblingTimeWindow<T, M> {
@@ -279,7 +279,7 @@ impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> TumblingTimeWindow<T, M>
     pub fn output(&self, ctx: &Context) -> Option<T> {
         self.output.get(ctx)
     }
-    pub fn output_cell(&self) -> CellHandle<Option<T>> {
+    pub fn output_cell(&self) -> SourceCell<Option<T>> {
         self.output
     }
 }
@@ -287,7 +287,7 @@ impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> TumblingTimeWindow<T, M>
 /// Reactive session window (`push(now, v)` + `flush(now)`).
 pub struct SessionWindow<T, M> {
     core: RefCell<SessionCore<T, M>>,
-    output: CellHandle<Option<T>>,
+    output: SourceCell<Option<T>>,
 }
 
 impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> SessionWindow<T, M> {
@@ -310,7 +310,7 @@ impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> SessionWindow<T, M> {
     pub fn output(&self, ctx: &Context) -> Option<T> {
         self.output.get(ctx)
     }
-    pub fn output_cell(&self) -> CellHandle<Option<T>> {
+    pub fn output_cell(&self) -> SourceCell<Option<T>> {
         self.output
     }
 }

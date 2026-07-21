@@ -5,7 +5,7 @@
 //! The formal pin is `get_equiv_push` (lazily-formal); these tests exercise
 //! the concrete implementation.
 
-use lazily::{Context, SlotHandle};
+use lazily::{Context, FormulaCell};
 
 #[test]
 fn revision_basic_cell_slot() {
@@ -53,7 +53,7 @@ fn revision_memo_guard() {
 fn revision_deep_chain() {
     let ctx = Context::with_revision_engine();
     let base = ctx.cell(1u64);
-    let s0: SlotHandle<u64> = ctx.computed(move |ctx| ctx.get_cell(&base) + 1);
+    let s0: FormulaCell<u64> = ctx.computed(move |ctx| ctx.get_cell(&base) + 1);
     let mut prev = s0;
     for _ in 1..50 {
         let p = prev;

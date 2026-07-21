@@ -1,6 +1,6 @@
 //! Integration tests for the `StateMachine` state machine primitive.
 //!
-//! A `StateMachine` wraps a `CellHandle<S>` + transition function, exposing
+//! A `StateMachine` wraps a `SourceCell<S>` + transition function, exposing
 //! `send(event)`, `state()`, `on_transition()`, and `state_is()`.
 
 use std::cell::RefCell;

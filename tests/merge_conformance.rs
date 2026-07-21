@@ -11,7 +11,7 @@ use std::cell::Cell as StdCell;
 use std::fs;
 use std::rc::Rc;
 
-use lazily::{Context, KeepLatest, Max, MergeCellHandle, MergePolicy, Sum};
+use lazily::{Context, KeepLatest, Max, MergePolicy, SourceCell, Sum};
 use serde_json::Value;
 
 const SPEC_DIR: &str = "../lazily-spec/conformance/collections";
@@ -35,7 +35,7 @@ where
 {
     let ctx = Context::new();
     let initial = scenario["initial"].as_i64().expect("initial i64");
-    let mc: MergeCellHandle<i64, M> = ctx.merge_cell(initial);
+    let mc: SourceCell<i64, M> = ctx.merge_cell(initial);
 
     // An active subscriber makes every state change flush a rerun, so the rerun
     // delta observes `invalidates`. subscribe() runs once immediately.

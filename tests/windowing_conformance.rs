@@ -36,7 +36,7 @@ fn inval(step: &Value) -> bool {
 
 fn check(
     ctx: &Context,
-    observed: &lazily::SlotHandle<Option<u64>>,
+    observed: &lazily::FormulaCell<Option<u64>>,
     step: &Value,
     out: Option<u64>,
 ) {

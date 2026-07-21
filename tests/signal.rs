@@ -166,11 +166,11 @@ fn dispose_stops_eager_recomputation() {
         n.get(ctx) + 1
     });
 
-    assert!(sig.is_active(&ctx));
+    assert!(sig.is_driven(&ctx));
     assert_eq!(*computes.borrow(), 1);
 
-    sig.dispose(&ctx);
-    assert!(!sig.is_active(&ctx));
+    sig.undrive(&ctx);
+    assert!(!sig.is_driven(&ctx));
 
     // Eager puller gone: a cell change no longer triggers recomputation...
     n.set(&ctx, 9);

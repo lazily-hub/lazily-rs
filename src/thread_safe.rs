@@ -56,14 +56,12 @@ type StateWriteGuard<'a> = parking_lot::RwLockWriteGuard<'a, ThreadSafeState>;
 #[cfg(feature = "instrumentation")]
 use std::time::Instant;
 
-use crate::cell::CellHandle;
+use crate::cell::{FormulaCell, SourceCell};
 use crate::context::GraphNode;
 use crate::context::SlotId;
 use crate::effect::EffectHandle;
 #[cfg(feature = "instrumentation")]
 use crate::instrumentation::ThreadSafeLockSite;
-use crate::slot::SlotHandle;
-use std::marker::PhantomData;
 
 type ThreadSafeAny = dyn Any + Send + Sync;
 type ThreadSafeComputeFn = dyn Fn(&ThreadSafeContext) -> Box<ThreadSafeAny> + Send + Sync;
@@ -1653,20 +1651,20 @@ where
 
 /// A typed handle to an **eager** derived value within a [`ThreadSafeContext`].
 ///
-/// This is the thread-safe counterpart to [`crate::SignalHandle`]. Like the
+/// This is the thread-safe counterpart to [`crate::FormulaCell`]. Like the
 /// single-threaded handle it is a memoized backing slot plus a small puller
 /// effect that re-materializes the slot after every invalidation, so reading a
 /// signal always returns a materialized, up-to-date value with no observable
 /// intermediate "unset" state. See [`ThreadSafeContext::signal`].
 pub struct ThreadSafeSignalHandle<T> {
     /// Memoized backing slot that holds the derived value.
-    pub(crate) slot: SlotHandle<T>,
+    pub(crate) slot: FormulaCell<T>,
     /// Puller effect that keeps `slot` eagerly materialized.
     pub(crate) effect: EffectHandle,
 }
 
 impl<T> ThreadSafeSignalHandle<T> {
-    pub(crate) fn new(slot: SlotHandle<T>, effect: EffectHandle) -> Self {
+    pub(crate) fn new(slot: FormulaCell<T>, effect: EffectHandle) -> Self {
         Self { slot, effect }
     }
 
@@ -1734,7 +1732,7 @@ impl ThreadSafeTeardownScope {
     }
 
     /// Create a lazily-computed slot owned by this scope.
-    pub fn computed<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn computed<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -1744,7 +1742,7 @@ impl ThreadSafeTeardownScope {
     }
 
     /// Create a memoized slot owned by this scope.
-    pub fn memo<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn memo<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: PartialEq + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -1754,7 +1752,7 @@ impl ThreadSafeTeardownScope {
     }
 
     /// Create a source cell owned by this scope.
-    pub fn cell<T: PartialEq + Send + Sync + 'static>(&self, value: T) -> CellHandle<T> {
+    pub fn cell<T: PartialEq + Send + Sync + 'static>(&self, value: T) -> SourceCell<T> {
         let handle = self.ctx.cell(value);
         self.track(handle, handle.id)
     }
@@ -2196,7 +2194,7 @@ impl ThreadSafeContext {
     }
 
     /// Create a new lazily-computed thread-safe slot.
-    pub fn slot<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn slot<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2207,7 +2205,7 @@ impl ThreadSafeContext {
     /// Create a derived lazily-computed thread-safe value.
     ///
     /// This is an ergonomic alias for [`ThreadSafeContext::slot`].
-    pub fn computed<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn computed<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2216,7 +2214,7 @@ impl ThreadSafeContext {
     }
 
     /// Create a lazily-computed thread-safe slot with a `PartialEq` guard.
-    pub fn memo<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn memo<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: PartialEq + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2242,7 +2240,7 @@ impl ThreadSafeContext {
     /// This is a separate constructor (rather than automatic) because stable
     /// Rust cannot detect `T: Copy` inside the unbounded generic [`slot`]; see
     /// [`inline_spec_for`].
-    pub fn slot_copy<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn slot_copy<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: Copy + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2251,7 +2249,7 @@ impl ThreadSafeContext {
     }
 
     /// Ergonomic alias for [`slot_copy`](Self::slot_copy).
-    pub fn computed_copy<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn computed_copy<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: Copy + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2261,7 +2259,7 @@ impl ThreadSafeContext {
 
     /// Like [`memo`](Self::memo), but opts into the inline small-`Copy` seqlock
     /// fast path (#rdstrat2). See [`slot_copy`](Self::slot_copy).
-    pub fn memo_copy<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn memo_copy<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: Copy + PartialEq + Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2281,7 +2279,7 @@ impl ThreadSafeContext {
         &self,
         compute: F,
         equals: Option<Arc<ThreadSafeEqualsFn>>,
-    ) -> SlotHandle<T>
+    ) -> FormulaCell<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2294,7 +2292,7 @@ impl ThreadSafeContext {
         compute: F,
         equals: Option<Arc<ThreadSafeEqualsFn>>,
         inline: Option<InlineSpec>,
-    ) -> SlotHandle<T>
+    ) -> FormulaCell<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&ThreadSafeContext) -> T + Send + Sync + 'static,
@@ -2327,11 +2325,11 @@ impl ThreadSafeContext {
         slot_fast_paths[idx] = Some(fast_path);
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Slot(node));
-        SlotHandle::new(id)
+        FormulaCell::from_id(id)
     }
 
     /// Get a slot value, computing or validating it if needed.
-    pub fn get<T>(&self, handle: &SlotHandle<T>) -> T
+    pub fn get<T>(&self, handle: &FormulaCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -2349,7 +2347,7 @@ impl ThreadSafeContext {
     /// Prefer [`ThreadSafeContext::get`] for small `Copy` values: those slots use
     /// the inline cached-read fast path, which this method deliberately bypasses
     /// (there is no shared box to share, so `get` is strictly cheaper).
-    pub fn get_arc<T>(&self, handle: &SlotHandle<T>) -> Arc<T>
+    pub fn get_arc<T>(&self, handle: &FormulaCell<T>) -> Arc<T>
     where
         T: Send + Sync + 'static,
     {
@@ -2713,7 +2711,7 @@ impl ThreadSafeContext {
     /// (#lzcellread): concurrent `get_cell` reads take a *shared* `RwLock` read
     /// (or a wait-free seqlock path for `cell_copy`), so readers no longer
     /// serialize through an exclusive lock as they did before v0.23.0.
-    pub fn cell<T>(&self, value: T) -> CellHandle<T>
+    pub fn cell<T>(&self, value: T) -> SourceCell<T>
     where
         T: PartialEq + Send + Sync + 'static,
     {
@@ -2735,7 +2733,7 @@ impl ThreadSafeContext {
         cell_fast_paths[idx] = Some(fast_path);
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Cell(node));
-        CellHandle::new(id)
+        SourceCell::from_id(id)
     }
 
     /// Like [`cell`](Self::cell), but opts the cached-value sidecar into the
@@ -2750,7 +2748,7 @@ impl ThreadSafeContext {
     /// This is a separate constructor (rather than automatic) because stable
     /// Rust cannot detect `T: Copy` inside the unbounded generic [`cell`]; see
     /// [`inline_spec_for`].
-    pub fn cell_copy<T>(&self, value: T) -> CellHandle<T>
+    pub fn cell_copy<T>(&self, value: T) -> SourceCell<T>
     where
         T: Copy + PartialEq + Send + Sync + 'static,
     {
@@ -2772,11 +2770,11 @@ impl ThreadSafeContext {
         cell_fast_paths[idx] = Some(fast_path);
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Cell(node));
-        CellHandle::new(id)
+        SourceCell::from_id(id)
     }
 
     /// Get the value of a thread-safe cell.
-    pub fn get_cell<T>(&self, handle: &CellHandle<T>) -> T
+    pub fn get_cell<T>(&self, handle: &SourceCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -2796,7 +2794,7 @@ impl ThreadSafeContext {
     /// sidecar path acquired 3 per-node Mutexes + 1 RwLock per BFS node. The
     /// state-locked path reads node fields directly under one lock — the same
     /// model lazily-cpp uses (one recursive_mutex, raw-pointer inner loop).
-    pub fn set_cell<T>(&self, handle: &CellHandle<T>, new_value: T)
+    pub fn set_cell<T>(&self, handle: &SourceCell<T>, new_value: T)
     where
         T: PartialEq + Send + Sync + 'static,
     {
@@ -3063,7 +3061,7 @@ impl ThreadSafeContext {
     ///
     /// Same caveat as [`Context::dispose_slot`](crate::Context::dispose_slot):
     /// callers must ensure nothing still reads the slot in a live compute.
-    pub fn dispose_slot<T>(&self, handle: &SlotHandle<T>) {
+    pub fn dispose_slot<T>(&self, handle: &FormulaCell<T>) {
         let torn_down = {
             let mut registry = self.inner.slot_fast_paths.write();
             let mut state = self.lock_state();
@@ -3101,7 +3099,7 @@ impl ThreadSafeContext {
     /// Cells are pure sources with no dependencies, so only downstream edges
     /// need detaching. Same concurrency guarantee and same lock order as
     /// [`Self::dispose_slot`], against the cell registry.
-    pub fn dispose_cell<T>(&self, handle: &CellHandle<T>) {
+    pub fn dispose_cell<T>(&self, handle: &SourceCell<T>) {
         let torn_down = {
             let mut registry = self.inner.cell_fast_paths.write();
             let mut state = self.lock_state();
@@ -3164,20 +3162,10 @@ impl ThreadSafeContext {
             Some(ThreadSafeNode::Effect(_)) => 2,
             None => return,
         };
-        let marker = PhantomData;
         match kind {
-            0 => self.dispose_slot(&SlotHandle::<()> {
-                id,
-                _marker: marker,
-            }),
-            1 => self.dispose_cell(&CellHandle::<()> {
-                id,
-                _marker: marker,
-            }),
-            _ => self.dispose_effect(&EffectHandle {
-                id,
-                _marker: marker,
-            }),
+            0 => self.dispose_slot(&FormulaCell::<()>::from_id(id)),
+            1 => self.dispose_cell(&SourceCell::<()>::from_id(id)),
+            _ => self.dispose_effect(&EffectHandle::new(id)),
         }
     }
 
@@ -3403,7 +3391,7 @@ impl ThreadSafeContext {
     }
 
     /// Hard-clear a slot and recursively clear dependents.
-    pub fn clear<T>(&self, handle: &SlotHandle<T>) {
+    pub fn clear<T>(&self, handle: &FormulaCell<T>) {
         self.clear_slot(handle.id);
         self.flush_effects_after_invalidation();
     }
@@ -3444,7 +3432,7 @@ impl ThreadSafeContext {
     }
 
     /// Clear all dependent slots without changing the cell value.
-    pub fn clear_cell_dependents<T>(&self, handle: &CellHandle<T>) {
+    pub fn clear_cell_dependents<T>(&self, handle: &SourceCell<T>) {
         if self.queue_batched_cell_clear(handle.id) {
             return;
         }
@@ -3521,7 +3509,7 @@ impl ThreadSafeContext {
     }
 
     /// Check whether a slot currently has a cached, fresh value.
-    pub fn is_set<T>(&self, handle: &SlotHandle<T>) -> bool
+    pub fn is_set<T>(&self, handle: &FormulaCell<T>) -> bool
     where
         T: Send + Sync + 'static,
     {
@@ -3583,17 +3571,17 @@ impl crate::reactive_graph::Teardown for ThreadSafeTeardownScope {
 }
 
 impl crate::reactive_graph::ReactiveGraph for ThreadSafeContext {
-    type SlotHandle<T> = crate::slot::SlotHandle<T>;
-    type CellHandle<T> = crate::cell::CellHandle<T>;
+    type FormulaCell<T> = crate::cell::FormulaCell<T>;
+    type SourceCell<T> = crate::cell::SourceCell<T>;
     type EffectHandle = crate::effect::EffectHandle;
     // Owned, so the GAT lifetime is unused: the scope outlives the borrow that
     // produced it and is `Send`.
     type Scope<'a> = ThreadSafeTeardownScope;
 
-    fn dispose_slot<T: 'static>(&self, handle: &Self::SlotHandle<T>) {
+    fn dispose_slot<T: 'static>(&self, handle: &Self::FormulaCell<T>) {
         ThreadSafeContext::dispose_slot(self, handle);
     }
-    fn dispose_cell<T: 'static>(&self, handle: &Self::CellHandle<T>) {
+    fn dispose_cell<T: 'static>(&self, handle: &Self::SourceCell<T>) {
         ThreadSafeContext::dispose_cell(self, handle);
     }
     fn dispose_effect(&self, handle: &Self::EffectHandle) {
@@ -3614,32 +3602,32 @@ impl crate::reactive_graph::ReactiveGraph for ThreadSafeContext {
 }
 
 impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
-    fn cell<T>(&self, value: T) -> Self::CellHandle<T>
+    fn cell<T>(&self, value: T) -> Self::SourceCell<T>
     where
         T: PartialEq + Send + Sync + 'static,
     {
         ThreadSafeContext::cell(self, value)
     }
-    fn get_cell<T>(&self, handle: &Self::CellHandle<T>) -> T
+    fn get_cell<T>(&self, handle: &Self::SourceCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
         ThreadSafeContext::get_cell(self, handle)
     }
-    fn set_cell<T>(&self, handle: &Self::CellHandle<T>, value: T)
+    fn set_cell<T>(&self, handle: &Self::SourceCell<T>, value: T)
     where
         T: PartialEq + Send + Sync + 'static,
     {
         ThreadSafeContext::set_cell(self, handle, value);
     }
-    fn computed<T, F>(&self, compute: F) -> Self::SlotHandle<T>
+    fn computed<T, F>(&self, compute: F) -> Self::FormulaCell<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&Self) -> T + Send + Sync + 'static,
     {
         ThreadSafeContext::computed(self, compute)
     }
-    fn get<T>(&self, handle: &Self::SlotHandle<T>) -> T
+    fn get<T>(&self, handle: &Self::FormulaCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -3725,10 +3713,7 @@ mod tests {
         // Disposing twice is a no-op, not an error.
         ctx.dispose_cell(&topic);
         // A stale *slot* handle over the recycled id must not tear down a cell.
-        let stale = SlotHandle::<i64> {
-            id: topic.id,
-            _marker: PhantomData,
-        };
+        let stale = FormulaCell::<i64>::from_id(topic.id);
         ctx.dispose_slot(&stale);
     }
 
@@ -3860,7 +3845,7 @@ mod tests {
         );
     }
 
-    fn slot_storage_kind<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> &'static str
+    fn slot_storage_kind<T>(ctx: &ThreadSafeContext, handle: &FormulaCell<T>) -> &'static str
     where
         T: Send + Sync + 'static,
     {
@@ -3987,7 +3972,7 @@ mod tests {
         assert_eq!(p.b, 4242);
     }
 
-    fn cell_storage_kind<T>(ctx: &ThreadSafeContext, handle: &CellHandle<T>) -> &'static str
+    fn cell_storage_kind<T>(ctx: &ThreadSafeContext, handle: &SourceCell<T>) -> &'static str
     where
         T: Send + Sync + 'static,
     {
@@ -4126,7 +4111,7 @@ mod tests {
         assert_eq!(ctx.get_cell(&cell), "v999");
     }
 
-    fn slot_revision<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> u64
+    fn slot_revision<T>(ctx: &ThreadSafeContext, handle: &FormulaCell<T>) -> u64
     where
         T: Send + Sync + 'static,
     {
@@ -4137,7 +4122,7 @@ mod tests {
         }
     }
 
-    fn slot_dirty_force<T>(ctx: &ThreadSafeContext, handle: &SlotHandle<T>) -> (bool, bool)
+    fn slot_dirty_force<T>(ctx: &ThreadSafeContext, handle: &FormulaCell<T>) -> (bool, bool)
     where
         T: Send + Sync + 'static,
     {
@@ -4148,7 +4133,7 @@ mod tests {
         }
     }
 
-    fn cell_dependents_len<T>(ctx: &ThreadSafeContext, handle: &CellHandle<T>) -> usize
+    fn cell_dependents_len<T>(ctx: &ThreadSafeContext, handle: &SourceCell<T>) -> usize
     where
         T: Send + Sync + 'static,
     {

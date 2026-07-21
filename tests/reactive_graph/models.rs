@@ -25,7 +25,7 @@ pub fn quiet<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
 
 mod basic {
     use super::*;
-    use lazily::{CellHandle, Context, EffectHandle, SignalHandle, SlotHandle, TeardownScope};
+    use lazily::{Context, EffectHandle, FormulaCell, SourceCell, TeardownScope};
 
     pub struct BasicModel {
         pub ctx: Context,
@@ -101,7 +101,7 @@ mod basic {
     pub struct BasicScope<'a>(TeardownScope<'a>, Log, Log, Poison);
 
     impl ScopeModel<BasicModel> for BasicScope<'_> {
-        fn cell(&self, value: i64) -> CellHandle<i64> {
+        fn cell(&self, value: i64) -> SourceCell<i64> {
             self.0.cell(value)
         }
         fn computed(
@@ -109,7 +109,7 @@ mod basic {
             reads: &[Ref<Context>],
             offset: i64,
             computes: &Computes,
-        ) -> SlotHandle<i64> {
+        ) -> FormulaCell<i64> {
             self.0.computed(compute(reads, offset, &self.3, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<Context>]) -> EffectHandle {
@@ -127,7 +127,7 @@ mod basic {
     impl GraphModel for BasicModel {
         type Graph = Context;
         type Scope<'a> = BasicScope<'a>;
-        type Signal = SignalHandle<i64>;
+        type Signal = FormulaCell<i64>;
 
         const NAME: &'static str = "Context";
 
@@ -144,7 +144,7 @@ mod basic {
             &self.ctx
         }
 
-        fn cell(&self, value: i64) -> CellHandle<i64> {
+        fn cell(&self, value: i64) -> SourceCell<i64> {
             self.ctx.cell(value)
         }
         fn computed(
@@ -152,7 +152,7 @@ mod basic {
             reads: &[Ref<Self::Graph>],
             offset: i64,
             computes: &Computes,
-        ) -> SlotHandle<i64> {
+        ) -> FormulaCell<i64> {
             self.ctx
                 .computed(compute(reads, offset, &self.poison, computes))
         }
@@ -170,7 +170,7 @@ mod basic {
             reads: &[Ref<Self::Graph>],
             offset: i64,
             computes: &Computes,
-        ) -> SignalHandle<i64> {
+        ) -> FormulaCell<i64> {
             self.ctx
                 .signal(compute(reads, offset, &self.poison, computes))
         }
@@ -180,7 +180,7 @@ mod basic {
         fn dispose_signal(&self, signal: &Self::Signal) {
             self.ctx.dispose_signal(signal);
         }
-        fn batch(&self, writes: &[(CellHandle<i64>, i64)]) {
+        fn batch(&self, writes: &[(SourceCell<i64>, i64)]) {
             self.ctx.batch(|c| {
                 for (h, v) in writes {
                     c.set_cell(h, *v);
@@ -190,7 +190,7 @@ mod basic {
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
         }
-        fn set_cell(&self, cell: CellHandle<i64>, value: i64) {
+        fn set_cell(&self, cell: SourceCell<i64>, value: i64) {
             self.ctx.set_cell(&cell, value);
         }
         fn is_effect_active(&self, effect: EffectHandle) -> bool {
@@ -224,7 +224,7 @@ pub use basic::BasicModel;
 mod threadsafe {
     use super::*;
     use lazily::{
-        CellHandle, EffectHandle, SlotHandle, ThreadSafeContext, ThreadSafeSignalHandle,
+        EffectHandle, FormulaCell, SourceCell, ThreadSafeContext, ThreadSafeSignalHandle,
         ThreadSafeTeardownScope,
     };
 
@@ -302,7 +302,7 @@ mod threadsafe {
     pub struct ThreadSafeScope(ThreadSafeTeardownScope, Log, Log, Poison);
 
     impl ScopeModel<ThreadSafeModel> for ThreadSafeScope {
-        fn cell(&self, value: i64) -> CellHandle<i64> {
+        fn cell(&self, value: i64) -> SourceCell<i64> {
             self.0.cell(value)
         }
         fn computed(
@@ -310,7 +310,7 @@ mod threadsafe {
             reads: &[Ref<ThreadSafeContext>],
             offset: i64,
             computes: &Computes,
-        ) -> SlotHandle<i64> {
+        ) -> FormulaCell<i64> {
             self.0.computed(compute(reads, offset, &self.3, computes))
         }
         fn effect(&self, name: &str, reads: &[Ref<ThreadSafeContext>]) -> EffectHandle {
@@ -345,7 +345,7 @@ mod threadsafe {
             &self.ctx
         }
 
-        fn cell(&self, value: i64) -> CellHandle<i64> {
+        fn cell(&self, value: i64) -> SourceCell<i64> {
             self.ctx.cell(value)
         }
         fn computed(
@@ -353,7 +353,7 @@ mod threadsafe {
             reads: &[Ref<Self::Graph>],
             offset: i64,
             computes: &Computes,
-        ) -> SlotHandle<i64> {
+        ) -> FormulaCell<i64> {
             self.ctx
                 .computed(compute(reads, offset, &self.poison, computes))
         }
@@ -381,7 +381,7 @@ mod threadsafe {
         fn dispose_signal(&self, signal: &Self::Signal) {
             self.ctx.dispose_signal(signal);
         }
-        fn batch(&self, writes: &[(CellHandle<i64>, i64)]) {
+        fn batch(&self, writes: &[(SourceCell<i64>, i64)]) {
             self.ctx.batch(|c| {
                 for (h, v) in writes {
                     c.set_cell(h, *v);
@@ -391,7 +391,7 @@ mod threadsafe {
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             read_ref(&self.ctx, node)
         }
-        fn set_cell(&self, cell: CellHandle<i64>, value: i64) {
+        fn set_cell(&self, cell: SourceCell<i64>, value: i64) {
             self.ctx.set_cell(&cell, value);
         }
         fn is_effect_active(&self, effect: EffectHandle) -> bool {

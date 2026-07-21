@@ -21,11 +21,11 @@
 //! is a chain of relays sharing one `RelayCell` core.
 
 use crate::Context;
+use crate::cell::FormulaCell;
 use crate::merge::MergePolicy;
 use crate::relay::{
     BackpressurePolicy, BoundDim, IngressOutcome, Overflow, RelayCell, RelayConfigError,
 };
-use crate::slot::SlotHandle;
 
 /// The app → transport send side (analysis §4.7). Backpressures the local
 /// producer directly via `is_full`.
@@ -70,7 +70,7 @@ where
     }
 
     /// The producer-facing backpressure signal (window at/over the watermark).
-    pub fn is_full(&self) -> SlotHandle<bool> {
+    pub fn is_full(&self) -> FormulaCell<bool> {
         self.relay.is_full()
     }
 

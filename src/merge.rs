@@ -19,18 +19,13 @@
 //! `const` flags so a relay can validate its (overflow, transport) choice
 //! against the algebra at construction (Phase 2+).
 
-use std::cell::RefCell;
 use std::collections::BTreeSet;
+#[cfg(feature = "distributed")]
 use std::marker::PhantomData;
 use std::ops::Add;
 
-use crate::Context;
-use crate::cell::CellHandle;
 #[cfg(feature = "distributed")]
 use crate::crdt::CellCrdt;
-use crate::effect::EffectHandle;
-use crate::signal::SignalHandle;
-use crate::slot::SlotHandle;
 
 /// The coalescence algebra: an associative fold `⊕ : T × T → T`.
 ///
@@ -71,7 +66,7 @@ pub trait MergePolicy<T> {
 }
 
 /// Keep-latest (right-zero) band: `old ⊕ op = op`. Associative and idempotent,
-/// **not** commutative. This is the merge behind a plain [`Cell`](CellHandle) —
+/// **not** commutative. This is the merge behind a plain [`Cell`](SourceCell) —
 /// `Cell ≡ MergeCell<KeepLatest>` (analysis §4.0). Positional last-writer-wins;
 /// distinct from timestamped [`Lww`](crate::LwwRegister) (which is commutative).
 pub struct KeepLatest;
@@ -187,152 +182,14 @@ where
     const IDEMPOTENT: bool = true;
 }
 
-/// A [`Cell`](CellHandle) whose write is a **merge** under policy `M`, rather
-/// than a replace. `Cell ≡ MergeCell<KeepLatest>` (analysis §4.0): a plain cell
-/// is the keep-latest instance of this generalization.
-///
-/// Backed by an ordinary cell node, so it inherits the Phase-0 write fast path:
-/// the `PartialEq` store-guard no-ops when `⊕(old, op) == old` (free dedup for
-/// an idempotent policy), and store-without-cascade skips the effect flush when
-/// no active reactor is downstream (the merge cost law, analysis §5).
-pub struct MergeCellHandle<T, M> {
-    pub(crate) cell: CellHandle<T>,
-    pub(crate) _marker: PhantomData<M>,
-}
-
-impl<T, M> MergeCellHandle<T, M> {
-    pub(crate) fn new(cell: CellHandle<T>) -> Self {
-        Self {
-            cell,
-            _marker: PhantomData,
-        }
-    }
-
-    /// The underlying cell handle, for wiring into derived readers.
-    pub fn cell(&self) -> CellHandle<T> {
-        self.cell
-    }
-
-    /// Read the current converged value (tracks a dependency when read inside a
-    /// reactive computation).
-    pub fn get(&self, ctx: &Context) -> T
-    where
-        T: Clone + 'static,
-    {
-        ctx.get_cell(&self.cell)
-    }
-
-    /// Fold `op` into the current value under policy `M`.
-    pub fn merge(&self, ctx: &Context, op: T)
-    where
-        T: PartialEq + Clone + 'static,
-        M: MergePolicy<T>,
-    {
-        ctx.apply_merge::<T, M>(&self.cell, op);
-    }
-
-    /// Replace the value outright (the `KeepLatest` write), bypassing `M`.
-    pub fn set(&self, ctx: &Context, value: T)
-    where
-        T: PartialEq + 'static,
-    {
-        ctx.set_cell(&self.cell, value);
-    }
-}
-
-impl<T, M> Clone for MergeCellHandle<T, M> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T, M> Copy for MergeCellHandle<T, M> {}
-
-impl<T, M> std::fmt::Debug for MergeCellHandle<T, M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MergeCellHandle")
-            .field("id", &self.cell.id)
-            .finish()
-    }
-}
-
-/// The **read** supertype of every reactive node (analysis §4.0). Exposes only
-/// `get` and `subscribe`; writability is the [`Source`] sub-interface. A
-/// composite reader-kind can be declared `Reactive<T>` and the backend chooses
-/// the impl (pull-Slot / push-Cell / polling-Slot) behind one interface.
-pub trait Reactive<T: Clone + 'static> {
-    /// Read the current value. Registers a dependency when called inside a
-    /// reactive computation (a Slot compute or an Effect run).
-    fn get(&self, ctx: &Context) -> T;
-
-    /// Run `on_change` now and again on every change to this value. Returns the
-    /// backing [`EffectHandle`]; dispose it to unsubscribe.
-    fn subscribe(
-        &self,
-        ctx: &Context,
-        on_change: impl FnMut(&Context, &T) + 'static,
-    ) -> EffectHandle
-    where
-        Self: Copy + 'static,
-    {
-        let this = *self;
-        let cb = RefCell::new(on_change);
-        ctx.effect(move |c| {
-            let v = this.get(c);
-            (cb.borrow_mut())(c, &v);
-        })
-    }
-}
-
-/// A writable [`Reactive`] — adds `set` (replace) and `merge` (fold under the
-/// node's policy). `Cell`/`MergeCell` are `Source`; a derived Slot is not.
-pub trait Source<T: Clone + 'static>: Reactive<T> {
-    /// Replace the value (the keep-latest write).
-    fn set(&self, ctx: &Context, value: T);
-    /// Fold `op` into the value under this source's merge policy. For a plain
-    /// cell this is `set` (`Cell ≡ MergeCell<KeepLatest>`).
-    fn merge(&self, ctx: &Context, op: T);
-}
-
-impl<T: Clone + 'static> Reactive<T> for CellHandle<T> {
-    fn get(&self, ctx: &Context) -> T {
-        ctx.get_cell(self)
-    }
-}
-
-impl<T: PartialEq + Clone + 'static> Source<T> for CellHandle<T> {
-    fn set(&self, ctx: &Context, value: T) {
-        ctx.set_cell(self, value);
-    }
-    fn merge(&self, ctx: &Context, op: T) {
-        // Cell ≡ MergeCell<KeepLatest>: the fold is a replace.
-        ctx.set_cell(self, op);
-    }
-}
-
-impl<T: Clone + 'static> Reactive<T> for SlotHandle<T> {
-    fn get(&self, ctx: &Context) -> T {
-        ctx.get(self)
-    }
-}
-
-impl<T: Clone + 'static> Reactive<T> for SignalHandle<T> {
-    fn get(&self, ctx: &Context) -> T {
-        ctx.get_signal(self)
-    }
-}
-
-impl<T: Clone + 'static, M> Reactive<T> for MergeCellHandle<T, M> {
-    fn get(&self, ctx: &Context) -> T {
-        ctx.get_cell(&self.cell)
-    }
-}
-
-impl<T: PartialEq + Clone + 'static, M: MergePolicy<T>> Source<T> for MergeCellHandle<T, M> {
-    fn set(&self, ctx: &Context, value: T) {
-        ctx.set_cell(&self.cell, value);
-    }
-    fn merge(&self, ctx: &Context, op: T) {
-        ctx.apply_merge::<T, M>(&self.cell, op);
-    }
-}
+// ---------------------------------------------------------------------------
+// Cell kernel migration (`#lzcellkernel`)
+// ---------------------------------------------------------------------------
+//
+// The former `SourceCell<T, M>` struct and the vestigial `Reactive<T>` /
+// `Source<T>` read/write traits are **deleted**. A "merge cell" is now just a
+// `SourceCell<T, M>` (`Cell<T, Source<M>>`) with `M != KeepLatest`, and a plain
+// `Cell` is `SourceCell<T, KeepLatest>` — the identity `Cell ≡ MergeCell<KeepLatest>`
+// is a type alias with a default parameter, not a spec assertion. Write
+// protection lives on the inherent `impl<T, M: MergePolicy<T>> Cell<T, Source<M>>`
+// (see `cell.rs`), so `formula.set(…)` fails to compile with no trait in sight.

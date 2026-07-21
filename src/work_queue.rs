@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::rc::Rc;
 
-use crate::{Context, SlotHandle};
+use crate::{Context, FormulaCell};
 
 /// A stable queued item. `attempts` counts leases already issued for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,10 +49,10 @@ pub struct WorkQueueDeadLetter<T> {
 /// Independent reactive reader kinds for queue lifecycle state.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkQueueReaderHandles {
-    pub pending_len: SlotHandle<usize>,
-    pub is_empty: SlotHandle<bool>,
-    pub in_flight_len: SlotHandle<usize>,
-    pub dead_letter_len: SlotHandle<usize>,
+    pub pending_len: FormulaCell<usize>,
+    pub is_empty: FormulaCell<bool>,
+    pub in_flight_len: FormulaCell<usize>,
+    pub dead_letter_len: FormulaCell<usize>,
 }
 
 struct WorkQueueState<T, I> {

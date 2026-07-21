@@ -11,9 +11,9 @@ use crate::Context;
 use crate::async_context::{
     AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncEffectHandle, AsyncSignalHandle,
 };
-use crate::cell::CellHandle;
+use crate::cell::FormulaCell;
+use crate::cell::SourceCell;
 use crate::effect::EffectHandle;
-use crate::signal::SignalHandle;
 #[cfg(feature = "thread-safe")]
 use crate::thread_safe::{ThreadSafeContext, ThreadSafeSignalHandle};
 
@@ -23,13 +23,13 @@ type ThreadSafeTransitionFn<S, E> = dyn Fn(&S, &E) -> Option<S> + Send + Sync;
 
 /// A finite state machine backed by a reactive [`Context`].
 ///
-/// `StateMachine` wraps a [`CellHandle<S>`] as the current state and a pure
+/// `StateMachine` wraps a [`SourceCell<S>`] as the current state and a pure
 /// transition function `Fn(&S, &E) -> Option<S>`. Sending an event evaluates
 /// the transition function; if it returns `Some(new_state)` the cell is
 /// updated, triggering any dependent slots/signals/effects. If it returns
 /// `None` the transition is rejected (guard).
 ///
-/// Because the state lives in a [`CellHandle`], any `ctx.computed`,
+/// Because the state lives in a [`SourceCell`], any `ctx.computed`,
 /// `ctx.signal`, or `ctx.effect` that reads [`StateMachine::state_handle`]
 /// automatically recomputes or reruns when the machine transitions — no
 /// manual notification wiring is needed.
@@ -66,7 +66,7 @@ where
     S: PartialEq + Clone + 'static,
     E: 'static,
 {
-    state: CellHandle<S>,
+    state: SourceCell<S>,
     transition: Rc<TransitionFn<S, E>>,
 }
 
@@ -119,7 +119,7 @@ where
     /// Any `ctx.computed`, `ctx.memo`, `ctx.signal`, or `ctx.effect` that
     /// reads this handle will automatically recompute or rerun when the
     /// machine transitions to a different state.
-    pub fn state_handle(&self) -> CellHandle<S> {
+    pub fn state_handle(&self) -> SourceCell<S> {
         self.state
     }
 
@@ -158,7 +158,7 @@ where
     /// Useful for conditional rendering, hierarchical guards, or composing
     /// multiple machines. The signal is eager — it always reflects the current
     /// machine state without requiring a manual read.
-    pub fn state_is(&self, ctx: &Context, target: S) -> SignalHandle<bool> {
+    pub fn state_is(&self, ctx: &Context, target: S) -> FormulaCell<bool> {
         let state = self.state;
         ctx.signal(move |ctx| ctx.get_cell(&state) == target)
     }
@@ -167,11 +167,11 @@ where
 /// A finite state machine backed by a reactive [`ThreadSafeContext`].
 ///
 /// This is the thread-safe counterpart to [`StateMachine`]: it mirrors the
-/// same `CellHandle<S>` + pure transition-function design but requires the
+/// same `SourceCell<S>` + pure transition-function design but requires the
 /// transition function and state to be `Send + Sync + 'static`, so the machine
 /// (and the context that backs it) can be shared across OS threads.
 ///
-/// Because the state lives in a [`CellHandle`], any `ctx.computed`,
+/// Because the state lives in a [`SourceCell`], any `ctx.computed`,
 /// `ctx.signal`, or `ctx.effect` that reads [`ThreadSafeStateMachine::state_handle`]
 /// automatically recomputes or reruns when the machine transitions.
 ///
@@ -202,7 +202,7 @@ where
     S: PartialEq + Clone + Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    state: CellHandle<S>,
+    state: SourceCell<S>,
     transition: Arc<ThreadSafeTransitionFn<S, E>>,
 }
 
@@ -272,7 +272,7 @@ where
     /// Any `ctx.computed`, `ctx.memo`, `ctx.signal`, or `ctx.effect` that
     /// reads this handle will automatically recompute or rerun when the
     /// machine transitions to a different state.
-    pub fn state_handle(&self) -> CellHandle<S> {
+    pub fn state_handle(&self) -> SourceCell<S> {
         self.state
     }
 

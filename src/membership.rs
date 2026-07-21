@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::Context;
-use crate::cell::CellHandle;
+use crate::cell::SourceCell;
 
 /// Per-peer liveness state (SWIM).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,7 +280,7 @@ impl<P: Ord + Clone> MembershipCore<P> {
 /// change.
 pub struct MembershipCell<P> {
     core: RefCell<MembershipCore<P>>,
-    peer_set: CellHandle<BTreeSet<P>>,
+    peer_set: SourceCell<BTreeSet<P>>,
 }
 
 impl<P: Ord + Clone + 'static> MembershipCell<P> {
@@ -326,7 +326,7 @@ impl<P: Ord + Clone + 'static> MembershipCell<P> {
     }
 
     /// The backing `PeerSet` cell, for direct subscription.
-    pub fn peer_set_cell(&self) -> CellHandle<BTreeSet<P>> {
+    pub fn peer_set_cell(&self) -> SourceCell<BTreeSet<P>> {
         self.peer_set
     }
 
@@ -337,7 +337,7 @@ impl<P: Ord + Clone + 'static> MembershipCell<P> {
 
 /// The derived reactive alive-peer set — a `Cell<BTreeSet<P>>` handle exposed by
 /// [`MembershipCell::peer_set_cell`].
-pub type PeerSet<P> = CellHandle<BTreeSet<P>>;
+pub type PeerSet<P> = SourceCell<BTreeSet<P>>;
 
 #[cfg(test)]
 mod tests {

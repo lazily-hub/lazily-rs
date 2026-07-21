@@ -42,7 +42,7 @@ use std::marker::PhantomData;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::cell::CellHandle;
+use crate::cell::SourceCell;
 use crate::context::Context;
 use crate::crdt::{
     CellCrdt, CrdtPlane, HlcStamp, LwwRegister, OpLog, ReplicatedCell, StampFrontier,
@@ -154,7 +154,7 @@ pub struct CrdtPlaneRuntime {
     /// derived aggregate over the family reads it so a remote-added key forces a
     /// recompute (a brand-new entry's cell is not yet a dependency; the epoch is).
     /// Created lazily on the first [`register_family_lww`](Self::register_family_lww).
-    membership_epoch: Option<CellHandle<u64>>,
+    membership_epoch: Option<SourceCell<u64>>,
     /// Monotonic allocator for locally-private family entry node ids.
     next_family_node: u64,
 }
@@ -242,7 +242,7 @@ impl CrdtPlaneRuntime {
     /// The reactive membership signal (`#lzfamilysync`): depend on it from a derived
     /// aggregate over a family so a remote-materialized key forces a recompute.
     /// `None` until the first family is registered.
-    pub fn membership_epoch(&self) -> Option<CellHandle<u64>> {
+    pub fn membership_epoch(&self) -> Option<SourceCell<u64>> {
         self.membership_epoch
     }
 
@@ -360,9 +360,9 @@ impl CrdtPlaneRuntime {
         }
     }
 
-    /// The reactive [`CellHandle`] of a registered cell — depend on it from a
+    /// The reactive [`SourceCell`] of a registered cell — depend on it from a
     /// derived slot so the graph recomputes when a remote op converges.
-    pub fn handle<C>(&self, node: NodeId) -> Option<CellHandle<C::Value>>
+    pub fn handle<C>(&self, node: NodeId) -> Option<SourceCell<C::Value>>
     where
         C: CellCrdt + 'static,
         C::Value: PartialEq + Clone + 'static,

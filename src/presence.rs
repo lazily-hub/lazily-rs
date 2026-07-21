@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::Context;
-use crate::cell::CellHandle;
+use crate::cell::SourceCell;
 
 /// Marker: a value on the **ephemeral** plane. MUST NOT be persisted.
 pub trait Ephemeral {}
@@ -82,7 +82,7 @@ impl<T> Ephemeral for EphemeralCore<T> {}
 /// Reactive single-value ephemeral cell.
 pub struct EphemeralCell<T> {
     core: RefCell<EphemeralCore<T>>,
-    value: CellHandle<Option<T>>,
+    value: SourceCell<Option<T>>,
 }
 
 impl<T: Clone + PartialEq + 'static> EphemeralCell<T> {
@@ -107,7 +107,7 @@ impl<T: Clone + PartialEq + 'static> EphemeralCell<T> {
     pub fn value(&self, ctx: &Context) -> Option<T> {
         self.value.get(ctx)
     }
-    pub fn value_cell(&self) -> CellHandle<Option<T>> {
+    pub fn value_cell(&self) -> SourceCell<Option<T>> {
         self.value
     }
 }
@@ -171,7 +171,7 @@ impl<K, V> Ephemeral for EphemeralMapCore<K, V> {}
 /// Reactive per-peer presence: heartbeat-kept, membership- and TTL-evicted.
 pub struct PresenceCell<K, V> {
     core: RefCell<EphemeralMapCore<K, V>>,
-    present: CellHandle<BTreeMap<K, V>>,
+    present: SourceCell<BTreeMap<K, V>>,
     ttl: u64,
 }
 
@@ -204,7 +204,7 @@ impl<K: Ord + Clone + 'static, V: Clone + PartialEq + 'static> PresenceCell<K, V
     pub fn present(&self, ctx: &Context) -> BTreeMap<K, V> {
         self.present.get(ctx)
     }
-    pub fn present_cell(&self) -> CellHandle<BTreeMap<K, V>> {
+    pub fn present_cell(&self) -> SourceCell<BTreeMap<K, V>> {
         self.present
     }
 }
@@ -215,7 +215,7 @@ impl<K, V> Ephemeral for PresenceCell<K, V> {}
 /// with a TTL.
 pub struct AwarenessCell<K, V> {
     core: RefCell<EphemeralMapCore<K, V>>,
-    present: CellHandle<BTreeMap<K, V>>,
+    present: SourceCell<BTreeMap<K, V>>,
     ttl: u64,
 }
 
@@ -246,7 +246,7 @@ impl<K: Ord + Clone + 'static, V: Clone + PartialEq + 'static> AwarenessCell<K, 
     pub fn present(&self, ctx: &Context) -> BTreeMap<K, V> {
         self.present.get(ctx)
     }
-    pub fn present_cell(&self) -> CellHandle<BTreeMap<K, V>> {
+    pub fn present_cell(&self) -> SourceCell<BTreeMap<K, V>> {
         self.present
     }
 }

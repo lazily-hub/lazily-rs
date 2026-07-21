@@ -1,4 +1,4 @@
-use lazily::{CellHandle, Context, EffectHandle, SlotHandle};
+use lazily::{Context, EffectHandle, FormulaCell, SourceCell};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseResult;
 use std::cell::RefCell;
@@ -30,13 +30,13 @@ impl Model {
 }
 
 struct Graph {
-    a: CellHandle<i32>,
-    b: CellHandle<i32>,
-    gate: CellHandle<bool>,
-    sum: SlotHandle<i32>,
-    parity: SlotHandle<i32>,
-    branch: SlotHandle<i32>,
-    out: SlotHandle<i32>,
+    a: SourceCell<i32>,
+    b: SourceCell<i32>,
+    gate: SourceCell<bool>,
+    sum: FormulaCell<i32>,
+    parity: FormulaCell<i32>,
+    branch: FormulaCell<i32>,
+    out: FormulaCell<i32>,
 }
 
 impl Graph {

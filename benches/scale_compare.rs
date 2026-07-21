@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
-use lazily::{CellHandle, Context, SlotHandle};
+use lazily::{Context, FormulaCell, SourceCell};
 use leptos_reactive::{
     Memo, ReadSignal, RuntimeId, SignalGet, SignalGetUntracked, SignalSet, WriteSignal,
     create_memo, create_runtime, create_signal,
@@ -53,15 +53,15 @@ fn viewport_size(n: usize) -> usize {
 // lazily
 // ---------------------------------------------------------------------------
 
-type LazilyGraph = (Context, Vec<CellHandle<i64>>, Vec<SlotHandle<i64>>);
+type LazilyGraph = (Context, Vec<SourceCell<i64>>, Vec<FormulaCell<i64>>);
 
 fn lazily_build(n: usize) -> LazilyGraph {
     let ctx = Context::new();
-    let mut inputs: Vec<CellHandle<i64>> = Vec::with_capacity(n);
+    let mut inputs: Vec<SourceCell<i64>> = Vec::with_capacity(n);
     for i in 0..n {
         inputs.push(ctx.cell(i as i64));
     }
-    let mut formulas: Vec<SlotHandle<i64>> = Vec::with_capacity(n);
+    let mut formulas: Vec<FormulaCell<i64>> = Vec::with_capacity(n);
     for i in 0..n {
         let a = inputs[i];
         let b = inputs[i.saturating_sub(1)];
@@ -70,7 +70,7 @@ fn lazily_build(n: usize) -> LazilyGraph {
     (ctx, inputs, formulas)
 }
 
-fn lazily_read_all(ctx: &Context, formulas: &[SlotHandle<i64>]) -> i64 {
+fn lazily_read_all(ctx: &Context, formulas: &[FormulaCell<i64>]) -> i64 {
     let mut acc = 0i64;
     for f in formulas {
         acc = acc.wrapping_add(ctx.get(f));

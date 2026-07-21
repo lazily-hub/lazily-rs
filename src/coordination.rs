@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use crate::Context;
-use crate::cell::CellHandle;
+use crate::cell::SourceCell;
 
 // ===========================================================================
 // Lease + fencing token
@@ -115,7 +115,7 @@ impl<P: Clone + PartialEq> LeaseCore<P> {
 /// change).
 pub struct LeaseCell<P> {
     core: RefCell<LeaseCore<P>>,
-    holder: CellHandle<Option<P>>,
+    holder: SourceCell<Option<P>>,
 }
 
 impl<P: Clone + PartialEq + 'static> LeaseCell<P> {
@@ -163,7 +163,7 @@ impl<P: Clone + PartialEq + 'static> LeaseCell<P> {
     pub fn fence(&self) -> u64 {
         self.core.borrow().fence()
     }
-    pub fn holder_cell(&self) -> CellHandle<Option<P>> {
+    pub fn holder_cell(&self) -> SourceCell<Option<P>> {
         self.holder
     }
 }
@@ -184,7 +184,7 @@ pub enum LeaderRole {
 pub struct LeaderCell<P> {
     core: RefCell<LeaseCore<P>>,
     me: P,
-    current_leader: CellHandle<Option<P>>,
+    current_leader: SourceCell<Option<P>>,
 }
 
 impl<P: Clone + PartialEq + 'static> LeaderCell<P> {
@@ -233,7 +233,7 @@ impl<P: Clone + PartialEq + 'static> LeaderCell<P> {
         }
     }
 
-    pub fn current_leader_cell(&self) -> CellHandle<Option<P>> {
+    pub fn current_leader_cell(&self) -> SourceCell<Option<P>> {
         self.current_leader
     }
 }
@@ -245,7 +245,7 @@ impl<P: Clone + PartialEq + 'static> LeaderCell<P> {
 /// Reactive distributed mutex over a lease + fencing token.
 pub struct LockCell<P> {
     core: RefCell<LeaseCore<P>>,
-    is_locked: CellHandle<bool>,
+    is_locked: SourceCell<bool>,
 }
 
 impl<P: Clone + PartialEq + 'static> LockCell<P> {
@@ -290,7 +290,7 @@ impl<P: Clone + PartialEq + 'static> LockCell<P> {
     pub fn fence(&self) -> u64 {
         self.core.borrow().fence()
     }
-    pub fn is_locked_cell(&self) -> CellHandle<bool> {
+    pub fn is_locked_cell(&self) -> SourceCell<bool> {
         self.is_locked
     }
 }
@@ -334,7 +334,7 @@ impl SemaphoreCore {
 /// Reactive semaphore: projects `permits_available` onto a `Cell`.
 pub struct SemaphoreCell {
     core: RefCell<SemaphoreCore>,
-    available: CellHandle<u64>,
+    available: SourceCell<u64>,
 }
 
 impl SemaphoreCell {
@@ -364,7 +364,7 @@ impl SemaphoreCell {
     pub fn permits_available(&self, ctx: &Context) -> u64 {
         self.available.get(ctx)
     }
-    pub fn permits_available_cell(&self) -> CellHandle<u64> {
+    pub fn permits_available_cell(&self) -> SourceCell<u64> {
         self.available
     }
 }
@@ -404,7 +404,7 @@ impl<P: Ord + Clone> BarrierCore<P> {
 /// total / 2 + 1`.
 pub struct BarrierCell<P> {
     core: RefCell<BarrierCore<P>>,
-    is_open: CellHandle<bool>,
+    is_open: SourceCell<bool>,
 }
 
 impl<P: Ord + Clone + 'static> BarrierCell<P> {
@@ -440,7 +440,7 @@ impl<P: Ord + Clone + 'static> BarrierCell<P> {
     pub fn is_open(&self, ctx: &Context) -> bool {
         self.is_open.get(ctx)
     }
-    pub fn is_open_cell(&self) -> CellHandle<bool> {
+    pub fn is_open_cell(&self) -> SourceCell<bool> {
         self.is_open
     }
 }

@@ -47,7 +47,7 @@
 //!
 //! ## Handle types are associated
 //!
-//! `Context` and `ThreadSafeContext` share `SlotHandle`/`CellHandle`;
+//! `Context` and `ThreadSafeContext` share `FormulaCell`/`SourceCell`;
 //! `AsyncContext` has its own. So the handle types are associated rather than
 //! concrete, following [`TypedFactoryContext`](crate::TypedFactoryContext)'s
 //! `type Schema`.
@@ -87,7 +87,7 @@ pub trait Teardown {
 /// use lazily::{Context, ReactiveGraph, SyncReactiveGraph};
 ///
 /// // Written once, no value bounds, works for every execution model.
-/// fn leaked_edges<G: ReactiveGraph>(graph: &G, node: &G::CellHandle<i64>) -> usize {
+/// fn leaked_edges<G: ReactiveGraph>(graph: &G, node: &G::SourceCell<i64>) -> usize {
 ///     graph.dependent_count(node)
 /// }
 ///
@@ -106,9 +106,9 @@ pub trait ReactiveGraph {
     /// Bounded by [`GraphNode`] and `Copy` so generic code can take degrees of
     /// any handle and pass handles around freely. Every handle in the crate is
     /// an id, so both hold everywhere.
-    type SlotHandle<T>: GraphNode + Copy;
+    type FormulaCell<T>: GraphNode + Copy;
     /// This graph's source-cell handle.
-    type CellHandle<T>: GraphNode + Copy;
+    type SourceCell<T>: GraphNode + Copy;
     /// This graph's effect handle.
     type EffectHandle: GraphNode + Copy;
     /// This graph's teardown scope.
@@ -118,11 +118,11 @@ pub trait ReactiveGraph {
 
     /// Tear down a derived slot: detach both edge directions, invalidate the
     /// surviving readers, and recycle the id.
-    fn dispose_slot<T: 'static>(&self, handle: &Self::SlotHandle<T>);
+    fn dispose_slot<T: 'static>(&self, handle: &Self::FormulaCell<T>);
 
     /// Tear down a source cell: detach its dependents, invalidate them, and
     /// recycle the id.
-    fn dispose_cell<T: 'static>(&self, handle: &Self::CellHandle<T>);
+    fn dispose_cell<T: 'static>(&self, handle: &Self::SourceCell<T>);
 
     /// Tear down an effect, running its cleanup.
     fn dispose_effect(&self, handle: &Self::EffectHandle);
@@ -171,28 +171,28 @@ impl<T: ReactiveGraph + Send + Sync + 'static> ThreadSafeReactiveGraph for T {}
 /// contexts' inherent methods keep their exact original bounds.
 pub trait SyncReactiveGraph: ReactiveGraph {
     /// Create a source cell.
-    fn cell<T>(&self, value: T) -> Self::CellHandle<T>
+    fn cell<T>(&self, value: T) -> Self::SourceCell<T>
     where
         T: PartialEq + Send + Sync + 'static;
 
     /// Read a source cell.
-    fn get_cell<T>(&self, handle: &Self::CellHandle<T>) -> T
+    fn get_cell<T>(&self, handle: &Self::SourceCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static;
 
     /// Write a source cell, invalidating its dependents.
-    fn set_cell<T>(&self, handle: &Self::CellHandle<T>, value: T)
+    fn set_cell<T>(&self, handle: &Self::SourceCell<T>, value: T)
     where
         T: PartialEq + Send + Sync + 'static;
 
     /// Create a lazily-computed derived slot.
-    fn computed<T, F>(&self, compute: F) -> Self::SlotHandle<T>
+    fn computed<T, F>(&self, compute: F) -> Self::FormulaCell<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&Self) -> T + Send + Sync + 'static;
 
     /// Read a derived slot, computing it if needed.
-    fn get<T>(&self, handle: &Self::SlotHandle<T>) -> T
+    fn get<T>(&self, handle: &Self::FormulaCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static;
 
@@ -216,22 +216,22 @@ pub trait SyncReactiveGraph: ReactiveGraph {
 /// is needed here.
 pub trait AsyncReactiveGraph: ReactiveGraph {
     /// Create a source cell.
-    fn cell<T>(&self, value: T) -> Self::CellHandle<T>
+    fn cell<T>(&self, value: T) -> Self::SourceCell<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static;
 
     /// Read a source cell. Cells resolve synchronously even here.
-    fn get_cell<T>(&self, handle: &Self::CellHandle<T>) -> T
+    fn get_cell<T>(&self, handle: &Self::SourceCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static;
 
     /// Write a source cell, invalidating its dependents.
-    fn set_cell<T>(&self, handle: &Self::CellHandle<T>, value: T)
+    fn set_cell<T>(&self, handle: &Self::SourceCell<T>, value: T)
     where
         T: PartialEq + Clone + Send + Sync + 'static;
 
     /// Read a derived slot, driving its computation if needed.
-    fn get<T>(&self, handle: &Self::SlotHandle<T>) -> impl Future<Output = T> + Send
+    fn get<T>(&self, handle: &Self::FormulaCell<T>) -> impl Future<Output = T> + Send
     where
         T: Clone + Send + Sync + 'static;
 }

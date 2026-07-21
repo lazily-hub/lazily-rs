@@ -6,11 +6,9 @@ use std::rc::Rc;
 #[cfg(not(feature = "vec_edges"))]
 use smallvec::SmallVec;
 
-use crate::cell::CellHandle;
+use crate::cell::{Cell, FormulaCell, SourceCell};
 use crate::effect::{EffectCallbackResult, EffectHandle};
-use crate::merge::{MergeCellHandle, MergePolicy};
-use crate::signal::SignalHandle;
-use crate::slot::SlotHandle;
+use crate::merge::MergePolicy;
 
 /// Type alias for the erased compute function stored in slots.
 type ComputeFn = dyn Fn(&Context) -> AnyValue;
@@ -412,6 +410,13 @@ pub(crate) struct SlotNode {
     /// dependency cycles (a slot that reads itself directly or transitively)
     /// before the pull-based recompute walk overflows the stack.
     pub(crate) in_progress: bool,
+    /// `#lzcellkernel` — whether this formula is **driven** (eager): a puller
+    /// effect keeps it materialized after every invalidation. Lands in the
+    /// existing padding beside `dirty`/`force_recompute`/`in_progress`, so the
+    /// node does not grow. The driving effect's id lives in the `driven_by` side
+    /// table, keyed by this slot's id — off the node, since driven formulas are
+    /// rare (the `EdgeIndex` precedent).
+    pub(crate) driven: bool,
     /// #lzspecrevisionengine: last global revision at which this slot was
     /// verified clean. In revision mode, staleness is `verified_at < revision`
     /// (O(1) write — no dirty walk) rather than the `dirty` flag.
@@ -514,6 +519,14 @@ struct ContextInner {
     /// #lzspecrevisionengine: all effect node ids, for the revision-mode
     /// effect-flush scan (O(effects) per flush, not O(cone) per write).
     all_effect_ids: Vec<SlotId>,
+    /// `#lzcellkernel` — owner-keyed side table mapping a **driven** formula's
+    /// slot id to the id of the puller `Effect` that drives it. One entry per
+    /// driven formula, zero per lazy one (the `EdgeIndex` precedent: per-node
+    /// state for the common case, a side table for the rare one). MUST be
+    /// cleared when a formula is disposed or undriven — it is owner-keyed and
+    /// would otherwise alias a recycled id (the `recycled_id_inherits_nothing`
+    /// hazard).
+    driven_by: HashMap<SlotId, SlotId>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
@@ -592,6 +605,7 @@ impl Context {
                 revision: 0,
                 revision_mode,
                 all_effect_ids: Vec::new(),
+                driven_by: HashMap::new(),
                 #[cfg(feature = "instrumentation")]
                 instrumentation: crate::instrumentation::InstrumentationCounters::default(),
             }),
@@ -816,7 +830,7 @@ impl Context {
     // -- Slot API ----------------------------------------------------------
 
     /// Create a new lazily-computed slot.
-    pub fn slot<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn slot<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: 'static,
         F: Fn(&Context) -> T + 'static,
@@ -827,7 +841,7 @@ impl Context {
     /// Create a derived lazily-computed value.
     ///
     /// This is an ergonomic alias for [`Context::slot`].
-    pub fn computed<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn computed<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: 'static,
         F: Fn(&Context) -> T + 'static,
@@ -836,7 +850,7 @@ impl Context {
     }
 
     /// Create a new lazily-computed slot with a `PartialEq` memoization guard.
-    pub fn memo<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn memo<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: PartialEq + 'static,
         F: Fn(&Context) -> T + 'static,
@@ -858,7 +872,7 @@ impl Context {
     /// handles in wrapper structs; the context memoizes one handle per factory
     /// key. Later calls with the same key return the same slot handle and ignore
     /// the supplied compute callback.
-    pub fn memoized_slot<K, T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn memoized_slot<K, T, F>(&self, compute: F) -> FormulaCell<T>
     where
         K: 'static,
         T: 'static,
@@ -868,7 +882,7 @@ impl Context {
             kind: FactoryKind::Slot,
             factory_type: TypeId::of::<K>(),
         };
-        if let Some(handle) = self.factory_handle::<SlotHandle<T>>(key, TypeId::of::<T>()) {
+        if let Some(handle) = self.factory_handle::<FormulaCell<T>>(key, TypeId::of::<T>()) {
             return handle;
         }
 
@@ -877,7 +891,7 @@ impl Context {
         handle
     }
 
-    fn slot_with_equals<T, F>(&self, compute: F, equals: Option<Box<EqualsFn>>) -> SlotHandle<T>
+    fn slot_with_equals<T, F>(&self, compute: F, equals: Option<Box<EqualsFn>>) -> FormulaCell<T>
     where
         T: 'static,
         F: Fn(&Context) -> T + 'static,
@@ -893,14 +907,15 @@ impl Context {
             dirty: false,
             force_recompute: false,
             in_progress: false,
+            driven: false,
             verified_at: 0,
         };
         self.insert_node(id, Node::Slot(node));
-        SlotHandle::new(id)
+        FormulaCell::from_id(id)
     }
 
     /// Get the value of a slot, computing it if necessary.
-    pub fn get<T: Clone + 'static>(&self, handle: &SlotHandle<T>) -> T {
+    pub fn get<T: Clone + 'static>(&self, handle: &FormulaCell<T>) -> T {
         self.get_slot(handle.id)
     }
 
@@ -908,7 +923,7 @@ impl Context {
     ///
     /// Returns a reference-counted pointer to the stored value. Use this when
     /// you only need to read the value without owning a separate copy.
-    pub fn get_rc<T: 'static>(&self, handle: &SlotHandle<T>) -> Rc<T> {
+    pub fn get_rc<T: 'static>(&self, handle: &FormulaCell<T>) -> Rc<T> {
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
@@ -1142,7 +1157,7 @@ impl Context {
     }
 
     /// Get the value of a cell.
-    pub fn get_cell<T: Clone + 'static>(&self, handle: &CellHandle<T>) -> T {
+    pub fn get_cell<T: Clone + 'static>(&self, handle: &SourceCell<T>) -> T {
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
@@ -1157,7 +1172,7 @@ impl Context {
     }
 
     /// Get the value of a cell as `Rc<T>`, avoiding a deep clone.
-    pub fn get_cell_rc<T: 'static>(&self, handle: &CellHandle<T>) -> Rc<T> {
+    pub fn get_cell_rc<T: 'static>(&self, handle: &SourceCell<T>) -> Rc<T> {
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
@@ -1171,10 +1186,138 @@ impl Context {
         }
     }
 
+    /// `#lzcellkernel` — read any node's value by id, dispatching on its kind:
+    /// a formula (Slot node) is refreshed then read; a source (Cell node) is
+    /// read directly. Registers a dependency when called inside a reactive
+    /// computation. Backs `Cell::<T, K>::get` uniformly across kinds.
+    pub(crate) fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T {
+        if let Some(parent_id) = current_tracking_frame() {
+            self.register_dependency(id, parent_id);
+        }
+        // No-op for non-slot nodes (`refresh_slot` early-returns `false`).
+        self.refresh_slot(id);
+        let inner = self.inner.borrow();
+        match Self::get_node(&inner.nodes, id) {
+            Some(Node::Slot(slot)) if !slot.value.is_none() => {
+                assert!(
+                    slot.type_id == node_type_tag::<T>(),
+                    "type mismatch in read"
+                );
+                unsafe { slot.value.as_t_ref_unchecked::<T>() }.clone()
+            }
+            Some(Node::Cell(c)) => {
+                assert!(c.type_id == node_type_tag::<T>(), "type mismatch in read");
+                unsafe { c.value.as_t_ref_unchecked::<T>() }.clone()
+            }
+            _ => panic!("read_value called on unset or unknown id"),
+        }
+    }
+
+    // -- Cell kernel constructors (`#lzcellkernel`) ------------------------
+
+    /// Create a **source cell** — a value written from outside under the default
+    /// [`KeepLatest`](crate::KeepLatest) policy (last-writer-wins replace). This
+    /// is the old `cell(v)`. For another merge policy use
+    /// [`source_with`](Context::source_with). Only a `SourceCell` has `set`/`merge`.
+    ///
+    /// (The design's single `source::<M>(v)` form is not expressible in Rust —
+    /// functions cannot carry a default type parameter — so the policy variant is
+    /// the separate `source_with::<M>(v)`.)
+    pub fn source<T>(&self, value: T) -> SourceCell<T>
+    where
+        T: PartialEq + 'static,
+    {
+        self.cell(value)
+    }
+
+    /// Create a **source cell** whose write folds under merge policy `M`
+    /// (`source_with::<Sum>(v)` is the old `merge_cell::<Sum>(v)`). A
+    /// `SourceCell<T, M>` with `M != KeepLatest`.
+    pub fn source_with<M, T>(&self, value: T) -> SourceCell<T, M>
+    where
+        T: PartialEq + 'static,
+        M: MergePolicy<T>,
+    {
+        Cell::from_id(self.cell(value).id)
+    }
+
+    /// Create a **formula cell** — a value computed from upstream, **guarded by
+    /// default** (`PartialEq` memoization: a recompute that yields an equal value
+    /// does not propagate). Replaces `computed` / `memo` / `slot`. Lazy until
+    /// [`FormulaCell::drive`](crate::FormulaCell::drive) makes it eager.
+    ///
+    /// Behaviour note (`#lzcellkernel`): the old `computed()` was *unguarded*;
+    /// `formula` picks the guard (the efficient default), so code moving from
+    /// `computed` to `formula` gains equal-value suppression it did not have.
+    pub fn formula<T, F>(&self, compute: F) -> FormulaCell<T>
+    where
+        T: PartialEq + 'static,
+        F: Fn(&Context) -> T + 'static,
+    {
+        self.memo(compute)
+    }
+
+    /// `#lzcellkernel` — drive a formula (make it eager) by id. Idempotent: a
+    /// no-op if the formula is already driven. Attaches a puller effect that
+    /// re-materializes the formula after every invalidation and records it in the
+    /// `driven_by` side table. Non-formula ids are ignored.
+    pub(crate) fn drive_formula<T: 'static>(&self, id: SlotId) {
+        {
+            let inner = self.inner.borrow();
+            match Self::get_node(&inner.nodes, id) {
+                Some(Node::Slot(slot)) if slot.driven => return,
+                Some(Node::Slot(_)) => {}
+                _ => return,
+            }
+        }
+        // Eager puller: re-materializes the formula after every invalidation.
+        // `get_rc` refreshes and registers the dependency without deep-cloning.
+        let effect = self.effect(move |ctx| {
+            let _ = ctx.get_rc::<T>(&FormulaCell::<T>::from_id(id));
+        });
+        let mut inner = self.inner.borrow_mut();
+        if let Some(Node::Slot(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
+            slot.driven = true;
+        }
+        inner.driven_by.insert(id, effect.id);
+    }
+
+    /// `#lzcellkernel` — undrive a formula (revert to lazy): dispose its puller
+    /// effect, clear the driven bit, and remove its `driven_by` entry. No-op if
+    /// not driven. This is the reverse transition that replaces `dispose_signal`.
+    pub(crate) fn undrive_formula(&self, id: SlotId) {
+        let effect_id = {
+            let mut inner = self.inner.borrow_mut();
+            match Self::get_node_mut(&mut inner.nodes, id) {
+                Some(Node::Slot(slot)) if slot.driven => slot.driven = false,
+                _ => return,
+            }
+            inner.driven_by.remove(&id)
+        };
+        if let Some(effect_id) = effect_id {
+            self.dispose_effect(&EffectHandle::new(effect_id));
+        }
+    }
+
+    /// `#lzcellkernel` — whether the formula at `id` is currently driven.
+    pub(crate) fn is_driven(&self, id: SlotId) -> bool {
+        let inner = self.inner.borrow();
+        matches!(
+            Self::get_node(&inner.nodes, id),
+            Some(Node::Slot(slot)) if slot.driven
+        )
+    }
+
+    /// `#lzcellkernel` — tear down a node by id, dispatching on its own kind.
+    /// Backs the kind-agnostic `Cell::<T, K>::dispose`.
+    pub(crate) fn dispose_node(&self, id: SlotId) {
+        self.dispose_id(id);
+    }
+
     // -- Cell API ----------------------------------------------------------
 
     /// Create a new mutable cell with an initial value.
-    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> CellHandle<T> {
+    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> SourceCell<T> {
         let id = self.alloc_id();
         let node = CellNode {
             value: AnyValue::from_value(value),
@@ -1182,19 +1325,21 @@ impl Context {
             dependents: EdgeVec::new(),
         };
         self.insert_node(id, Node::Cell(node));
-        CellHandle::new(id)
+        SourceCell::from_id(id)
     }
 
-    /// Create a [`MergeCellHandle`] — a cell whose write is a *merge* under
+    /// Create a [`SourceCell`] — a cell whose write is a *merge* under
     /// policy `M`, rather than a replace. `Cell ≡ MergeCell<KeepLatest>`
     /// (relaycell-backpressure-analysis.md §4.0). Backed by an ordinary cell
     /// node, so it inherits the store-without-cascade write fast path.
-    pub fn merge_cell<T, M>(&self, initial: T) -> MergeCellHandle<T, M>
+    pub fn merge_cell<T, M>(&self, initial: T) -> SourceCell<T, M>
     where
         T: PartialEq + 'static,
         M: MergePolicy<T>,
     {
-        MergeCellHandle::new(self.cell(initial))
+        // A merge cell is just a `SourceCell<T, M>` over an ordinary cell node —
+        // same node as a plain cell, the policy lives in the `Source<M>` marker.
+        Cell::from_id(self.cell(initial).id)
     }
 
     /// Fold `op` into a cell's value under policy `M` (the merge write). Reads
@@ -1202,14 +1347,27 @@ impl Context {
     /// through [`set_cell`](Context::set_cell) so the `PartialEq` store-guard
     /// (free dedup when `⊕(old, op) == old`), batching, and
     /// store-without-cascade all apply unchanged.
-    pub fn apply_merge<T, M>(&self, handle: &CellHandle<T>, op: T)
+    pub fn apply_merge<T, M>(&self, handle: &SourceCell<T>, op: T)
+    where
+        T: PartialEq + Clone + 'static,
+        M: MergePolicy<T>,
+    {
+        self.merge_source::<T, M>(handle.id, op);
+    }
+
+    /// `#lzcellkernel` — the merge write by node id, backing `SourceCell::merge`
+    /// and `Context::apply_merge`. Reads the current value untracked, folds
+    /// `M::merge(old, op)`, then routes through [`set_source`](Context::set_source)
+    /// so the `PartialEq` store-guard, batching, and store-without-cascade all
+    /// apply unchanged.
+    pub(crate) fn merge_source<T, M>(&self, id: SlotId, op: T)
     where
         T: PartialEq + Clone + 'static,
         M: MergePolicy<T>,
     {
         let merged = {
             let inner = self.inner.borrow();
-            if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
+            if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, id) {
                 assert!(
                     c.type_id == node_type_tag::<T>(),
                     "type mismatch in apply_merge"
@@ -1220,7 +1378,7 @@ impl Context {
                 panic!("apply_merge on non-cell id");
             }
         };
-        self.set_cell(handle, merged);
+        self.set_source::<T>(id, merged);
     }
 
     /// Return the context-local cell handle for factory `K`, creating it on
@@ -1228,8 +1386,8 @@ impl Context {
     ///
     /// The initializer belongs to the factory. It runs only when this context
     /// has not seen `K` before; callers should mutate the returned cell handle
-    /// with [`CellHandle::set`] / [`Context::set_cell`].
-    pub fn memoized_cell<K, T, F>(&self, init: F) -> CellHandle<T>
+    /// with [`SourceCell::set`] / [`Context::set_cell`].
+    pub fn memoized_cell<K, T, F>(&self, init: F) -> SourceCell<T>
     where
         K: 'static,
         T: PartialEq + 'static,
@@ -1239,7 +1397,7 @@ impl Context {
             kind: FactoryKind::Cell,
             factory_type: TypeId::of::<K>(),
         };
-        if let Some(handle) = self.factory_handle::<CellHandle<T>>(key, TypeId::of::<T>()) {
+        if let Some(handle) = self.factory_handle::<SourceCell<T>>(key, TypeId::of::<T>()) {
             return handle;
         }
 
@@ -1251,10 +1409,17 @@ impl Context {
 
     /// Set the value of a cell. If the value differs (via PartialEq),
     /// dependent slots are marked dirty for memoized validation.
-    pub fn set_cell<T: PartialEq + 'static>(&self, handle: &CellHandle<T>, new_value: T) {
+    pub fn set_cell<T: PartialEq + 'static>(&self, handle: &SourceCell<T>, new_value: T) {
+        self.set_source::<T>(handle.id, new_value);
+    }
+
+    /// `#lzcellkernel` — the source write by node id, backing `SourceCell::set`
+    /// and `Context::set_cell`.
+    pub(crate) fn set_source<T: PartialEq + 'static>(&self, id: SlotId, new_value: T) {
+        let handle_id = id;
         let changed = {
             let inner = self.inner.borrow();
-            if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle.id) {
+            if let Some(Node::Cell(c)) = Self::get_node(&inner.nodes, handle_id) {
                 assert!(
                     c.type_id == node_type_tag::<T>(),
                     "type mismatch in cell set"
@@ -1269,12 +1434,12 @@ impl Context {
         if changed {
             {
                 let mut inner = self.inner.borrow_mut();
-                if let Some(Node::Cell(c)) = Self::get_node_mut(&mut inner.nodes, handle.id) {
+                if let Some(Node::Cell(c)) = Self::get_node_mut(&mut inner.nodes, handle_id) {
                     c.value = AnyValue::from_value(new_value);
                 }
             }
             if self.is_batching() {
-                self.inner.borrow_mut().batched_cells.push(handle.id);
+                self.inner.borrow_mut().batched_cells.push(handle_id);
             } else if self.inner.borrow().revision_mode {
                 // #lzspecrevisionengine: O(1) write — bump the global revision
                 // counter; no dependent cone walk. Slot staleness is detected
@@ -1290,7 +1455,7 @@ impl Context {
                 // glitch-free) and marks lazy Slot dependents dirty, but pays no
                 // effect-scheduling flush — the write side of the merge cost law
                 // (relaycell-backpressure-analysis.md §4.0 / §5).
-                if self.invalidate_cell_dependents_now(handle.id) {
+                if self.invalidate_cell_dependents_now(handle_id) {
                     self.flush_effects();
                 }
             }
@@ -1468,7 +1633,7 @@ impl Context {
     /// Tear down a derived slot: detach both edge directions, clear the node,
     /// and recycle its id.
     ///
-    /// Without this a slot is permanent. `SlotHandle` is `Copy` — an id, not an
+    /// Without this a slot is permanent. `FormulaCell` is `Copy` — an id, not an
     /// owner — so dropping every handle reclaims nothing, and the node and its
     /// edge on each dependency survive for the life of the context. Under
     /// subscribe/unsubscribe churn that is unbounded growth in both memory and
@@ -1478,7 +1643,11 @@ impl Context {
     /// Callers must ensure nothing still reads the slot in a live compute.
     /// Reading a disposed node throws on the next recompute — the same contract
     /// as [`Context::dispose_effect`] and the JS binding's `disposeSlot`.
-    pub fn dispose_slot<T>(&self, handle: &SlotHandle<T>) {
+    pub fn dispose_slot<T>(&self, handle: &FormulaCell<T>) {
+        // `#lzcellkernel` — disposing a driven formula tears down its puller
+        // first, so no poisoned effect is stranded and the `driven_by` side
+        // table never aliases a recycled id.
+        self.undrive_formula(handle.id);
         let torn_down = {
             let mut inner = self.inner.borrow_mut();
             // Check the kind BEFORE taking: a stale handle whose id has been
@@ -1508,7 +1677,7 @@ impl Context {
     ///
     /// Cells are pure sources with no dependencies, so only downstream edges
     /// need detaching. Same contract as [`Context::dispose_slot`].
-    pub fn dispose_cell<T>(&self, handle: &CellHandle<T>) {
+    pub fn dispose_cell<T>(&self, handle: &SourceCell<T>) {
         let mut inner = self.inner.borrow_mut();
         if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Cell(_))) {
             return;
@@ -1569,20 +1738,10 @@ impl Context {
             Some(Node::Effect(_)) => 2,
             None => return,
         };
-        let marker = std::marker::PhantomData;
         match kind {
-            0 => self.dispose_slot(&SlotHandle::<()> {
-                id,
-                _marker: marker,
-            }),
-            1 => self.dispose_cell(&CellHandle::<()> {
-                id,
-                _marker: marker,
-            }),
-            _ => self.dispose_effect(&EffectHandle {
-                id,
-                _marker: marker,
-            }),
+            0 => self.dispose_slot(&FormulaCell::<()>::from_id(id)),
+            1 => self.dispose_cell(&SourceCell::<()>::from_id(id)),
+            _ => self.dispose_effect(&EffectHandle::new(id)),
         }
     }
 
@@ -1958,42 +2117,41 @@ impl Context {
     /// dependents. Recomputation is pull-based and therefore glitch-free: a
     /// signal that reads other signals/slots always observes values consistent
     /// with the current inputs.
-    pub fn signal<T, F>(&self, compute: F) -> SignalHandle<T>
+    pub fn signal<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: PartialEq + 'static,
         F: Fn(&Context) -> T + 'static,
     {
-        let slot = self.memo(compute);
-        // Eager puller: re-materializes the slot after every invalidation.
-        // `get_rc` refreshes and registers the dependency without deep-cloning
-        // the value on each refresh.
-        let effect = self.effect(move |ctx| {
-            let _ = ctx.get_rc(&slot);
-        });
-        SignalHandle::new(slot, effect)
+        // `#lzcellkernel` — the eager construction is a guarded formula that is
+        // then driven: `formula(f).drive()`. Retires the former two-node
+        // `Signal` (memo slot + puller effect); the coalescing comes from the
+        // scheduler, so a per-write puller cannot be built.
+        let formula = self.formula(compute);
+        self.drive_formula::<T>(formula.id);
+        formula
     }
 
-    /// Read a signal's current value. Always returns a materialized value.
-    pub fn get_signal<T: Clone + 'static>(&self, handle: &SignalHandle<T>) -> T {
-        self.get(&handle.slot)
+    /// Read a driven formula's current value. Always returns a materialized
+    /// value. (Was `get_signal`; a driven formula reads with ordinary `get`.)
+    pub fn get_signal<T: Clone + 'static>(&self, handle: &FormulaCell<T>) -> T {
+        self.get(handle)
     }
 
-    /// Read a signal's current value as `Rc<T>`, avoiding a deep clone.
-    pub fn get_signal_rc<T: 'static>(&self, handle: &SignalHandle<T>) -> Rc<T> {
-        self.get_rc(&handle.slot)
+    /// Read a driven formula's current value as `Rc<T>`, avoiding a deep clone.
+    pub fn get_signal_rc<T: 'static>(&self, handle: &FormulaCell<T>) -> Rc<T> {
+        self.get_rc(handle)
     }
 
-    /// Dispose a signal's eager puller.
-    ///
-    /// Stops eager recomputation; the backing value remains readable and
-    /// reverts to lazy (recomputed on next read) behavior.
-    pub fn dispose_signal<T>(&self, handle: &SignalHandle<T>) {
-        self.dispose_effect(&handle.effect);
+    /// Undrive a formula (revert to lazy). Stops eager recomputation; the backing
+    /// value remains readable and recomputes on next read. (Was `dispose_signal`;
+    /// now the `undrive` reverse transition.)
+    pub fn dispose_signal<T>(&self, handle: &FormulaCell<T>) {
+        self.undrive_formula(handle.id);
     }
 
-    /// Check whether a signal's eager puller is still active.
-    pub fn is_signal_active<T>(&self, handle: &SignalHandle<T>) -> bool {
-        self.is_effect_active(&handle.effect)
+    /// Check whether a formula is currently driven.
+    pub fn is_signal_active<T>(&self, handle: &FormulaCell<T>) -> bool {
+        self.is_driven(handle.id)
     }
 
     // -- Clearing ----------------------------------------------------------
@@ -2251,7 +2409,7 @@ impl Context {
     }
 
     /// Check whether a slot currently has a cached, fresh value (for testing).
-    pub fn is_set<T: 'static>(&self, handle: &SlotHandle<T>) -> bool {
+    pub fn is_set<T: 'static>(&self, handle: &FormulaCell<T>) -> bool {
         let inner = self.inner.borrow();
         if let Some(Node::Slot(slot)) = Self::get_node(&inner.nodes, handle.id) {
             !slot.value.is_none() && !slot.dirty
@@ -2317,7 +2475,7 @@ pub(crate) mod sealed {
 
 /// A node in a [`Context`]'s reactive graph, addressed by one of its handles.
 ///
-/// Sealed: implemented for [`SlotHandle`], [`CellHandle`], and [`EffectHandle`]
+/// Sealed: implemented for [`FormulaCell`], [`SourceCell`], and [`EffectHandle`]
 /// only. It exists so the graph-shape accessors take any handle kind without
 /// exposing the internal node id, and cannot be implemented downstream.
 pub trait GraphNode: sealed::Sealed {
@@ -2325,15 +2483,11 @@ pub trait GraphNode: sealed::Sealed {
     fn node_id(&self) -> SlotId;
 }
 
-impl<T> sealed::Sealed for SlotHandle<T> {}
-impl<T> GraphNode for SlotHandle<T> {
-    fn node_id(&self) -> SlotId {
-        self.id
-    }
-}
-
-impl<T> sealed::Sealed for CellHandle<T> {}
-impl<T> GraphNode for CellHandle<T> {
+// `#lzcellkernel` — one blanket impl over the genus replaces the former
+// per-handle-type impls (`FormulaCell`, `SourceCell`). Every `Cell<T, K>` is a
+// graph node addressed by its slot id, regardless of kind.
+impl<T, K> sealed::Sealed for Cell<T, K> {}
+impl<T, K> GraphNode for Cell<T, K> {
     fn node_id(&self) -> SlotId {
         self.id
     }
@@ -2358,7 +2512,7 @@ pub struct TeardownScope<'ctx> {
 
 impl TeardownScope<'_> {
     /// Create a lazily-computed slot owned by this scope.
-    pub fn computed<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn computed<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: 'static,
         F: Fn(&Context) -> T + 'static,
@@ -2369,7 +2523,7 @@ impl TeardownScope<'_> {
     }
 
     /// Create a memoized slot owned by this scope.
-    pub fn memo<T, F>(&self, compute: F) -> SlotHandle<T>
+    pub fn memo<T, F>(&self, compute: F) -> FormulaCell<T>
     where
         T: PartialEq + 'static,
         F: Fn(&Context) -> T + 'static,
@@ -2380,7 +2534,7 @@ impl TeardownScope<'_> {
     }
 
     /// Create a source cell owned by this scope.
-    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> CellHandle<T> {
+    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> SourceCell<T> {
         let handle = self.ctx.cell(value);
         self.owned.borrow_mut().push(handle.id);
         handle
@@ -2451,15 +2605,15 @@ impl crate::reactive_graph::Teardown for TeardownScope<'_> {
 }
 
 impl crate::reactive_graph::ReactiveGraph for Context {
-    type SlotHandle<T> = crate::slot::SlotHandle<T>;
-    type CellHandle<T> = crate::cell::CellHandle<T>;
+    type FormulaCell<T> = crate::cell::FormulaCell<T>;
+    type SourceCell<T> = crate::cell::SourceCell<T>;
     type EffectHandle = crate::effect::EffectHandle;
     type Scope<'a> = TeardownScope<'a>;
 
-    fn dispose_slot<T: 'static>(&self, handle: &Self::SlotHandle<T>) {
+    fn dispose_slot<T: 'static>(&self, handle: &Self::FormulaCell<T>) {
         Context::dispose_slot(self, handle);
     }
-    fn dispose_cell<T: 'static>(&self, handle: &Self::CellHandle<T>) {
+    fn dispose_cell<T: 'static>(&self, handle: &Self::SourceCell<T>) {
         Context::dispose_cell(self, handle);
     }
     fn dispose_effect(&self, handle: &Self::EffectHandle) {
@@ -2480,32 +2634,32 @@ impl crate::reactive_graph::ReactiveGraph for Context {
 }
 
 impl crate::reactive_graph::SyncReactiveGraph for Context {
-    fn cell<T>(&self, value: T) -> Self::CellHandle<T>
+    fn cell<T>(&self, value: T) -> Self::SourceCell<T>
     where
         T: PartialEq + Send + Sync + 'static,
     {
         Context::cell(self, value)
     }
-    fn get_cell<T>(&self, handle: &Self::CellHandle<T>) -> T
+    fn get_cell<T>(&self, handle: &Self::SourceCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
         Context::get_cell(self, handle)
     }
-    fn set_cell<T>(&self, handle: &Self::CellHandle<T>, value: T)
+    fn set_cell<T>(&self, handle: &Self::SourceCell<T>, value: T)
     where
         T: PartialEq + Send + Sync + 'static,
     {
         Context::set_cell(self, handle, value);
     }
-    fn computed<T, F>(&self, compute: F) -> Self::SlotHandle<T>
+    fn computed<T, F>(&self, compute: F) -> Self::FormulaCell<T>
     where
         T: Send + Sync + 'static,
         F: Fn(&Self) -> T + Send + Sync + 'static,
     {
         Context::computed(self, compute)
     }
-    fn get<T>(&self, handle: &Self::SlotHandle<T>) -> T
+    fn get<T>(&self, handle: &Self::FormulaCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -2715,7 +2869,7 @@ mod tests {
             fn drop(&mut self) {
                 if let Some(ctx) = self.ctx.upgrade() {
                     // any context call that borrows would do
-                    ctx.dispose_slot(&SlotHandle::<u64> {
+                    ctx.dispose_slot(&FormulaCell::<u64> {
                         id: self.victim,
                         _marker: std::marker::PhantomData,
                     });
@@ -2814,7 +2968,7 @@ mod tests {
         // different kind. Disposing through it must be a no-op, not a teardown.
         let ctx = Context::new();
         let cell = ctx.cell(1usize);
-        let stale: SlotHandle<usize> = SlotHandle {
+        let stale: FormulaCell<usize> = FormulaCell {
             id: cell.id,
             _marker: std::marker::PhantomData,
         };
@@ -3188,7 +3342,7 @@ mod tests {
     fn two_slot_dependency_cycle_panics_instead_of_overflowing() {
         let ctx = Context::new();
         // `a` reads `b` (wired after both exist); `b` reads `a`.
-        let link: std::rc::Rc<std::cell::RefCell<Option<SlotHandle<i32>>>> =
+        let link: std::rc::Rc<std::cell::RefCell<Option<FormulaCell<i32>>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
         let link_a = std::rc::Rc::clone(&link);
         let a = ctx.computed(move |ctx| match *link_a.borrow() {
@@ -3226,7 +3380,7 @@ mod tests {
     #[test]
     fn self_referential_slot_panics() {
         let ctx = Context::new();
-        let link: std::rc::Rc<std::cell::RefCell<Option<SlotHandle<i32>>>> =
+        let link: std::rc::Rc<std::cell::RefCell<Option<FormulaCell<i32>>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
         let link_self = std::rc::Rc::clone(&link);
         let s = ctx.computed(move |ctx| match *link_self.borrow() {

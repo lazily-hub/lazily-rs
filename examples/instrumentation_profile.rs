@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use lazily::{
-    CellHandle, Context, InstrumentationSnapshot, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeContext,
+    Context, InstrumentationSnapshot, SourceCell, THREAD_SAFE_LOCK_SITE_COUNT, ThreadSafeContext,
     ThreadSafeLockSiteSnapshot,
 };
 
@@ -625,7 +625,7 @@ fn run_thread_safe_fan_in_batched_flush(ctx: &ThreadSafeContext, workers: usize)
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<CellHandle<usize>>>();
+        .collect::<Vec<SourceCell<usize>>>();
     let branches = all_cells
         .iter()
         .map(|cell| {
@@ -784,7 +784,7 @@ fn run_thread_safe_batched_set_cell_invalidation(ctx: &ThreadSafeContext, worker
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<CellHandle<usize>>>();
+        .collect::<Vec<SourceCell<usize>>>();
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()
@@ -960,7 +960,7 @@ fn run_thread_safe_batched_write_bursts(ctx: &ThreadSafeContext, workers: usize)
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<CellHandle<usize>>>();
+        .collect::<Vec<SourceCell<usize>>>();
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()
@@ -1004,7 +1004,7 @@ fn run_thread_safe_batched_write_bursts(ctx: &ThreadSafeContext, workers: usize)
         .fold(0usize, usize::wrapping_add)
 }
 
-fn effect_worker_cells(ctx: &ThreadSafeContext, workers: usize) -> Vec<Vec<CellHandle<usize>>> {
+fn effect_worker_cells(ctx: &ThreadSafeContext, workers: usize) -> Vec<Vec<SourceCell<usize>>> {
     (0..workers)
         .map(|worker| {
             (0..CONTENTION_BATCH_CELLS_PER_WORKER)
@@ -1026,7 +1026,7 @@ fn run_thread_safe_effect_queue_coalescing(ctx: &ThreadSafeContext, workers: usi
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<CellHandle<usize>>>();
+        .collect::<Vec<SourceCell<usize>>>();
     let effect_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sink = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let effect_runs_for_effect = Arc::clone(&effect_runs);
@@ -1141,7 +1141,7 @@ fn run_thread_safe_effect_batch_flush(ctx: &ThreadSafeContext, workers: usize) -
         .iter()
         .flatten()
         .copied()
-        .collect::<Vec<CellHandle<usize>>>();
+        .collect::<Vec<SourceCell<usize>>>();
     let total = ctx.computed(move |ctx| {
         all_cells
             .iter()

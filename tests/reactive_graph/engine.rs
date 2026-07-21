@@ -189,7 +189,12 @@ pub fn replay<'a, M: GraphModel>(
                 stale.insert(id.clone(), h);
                 poisoned.remove(&id);
             }
-            "signal" => {
+            // `#lzcellkernel` dual-accept (design §8 / Step 3): the eager
+            // construction is now `formula().drive()`, so the corpus op is
+            // renamed `signal` -> `drive`. Accept BOTH names for the same
+            // behaviour — the model's `signal` is a driven formula under the
+            // hood — so runners accept before any fixture emits the new name.
+            "signal" | "drive" => {
                 let id = op["id"].as_str().unwrap().to_owned();
                 let reads: Vec<Ref<M::Graph>> = reads_of!(op);
                 let offset = op["offset"].as_i64().unwrap_or(0);
@@ -197,7 +202,8 @@ pub fn replay<'a, M: GraphModel>(
                 signals.insert(id.clone(), model.signal(&reads, offset, &counter));
                 poisoned.remove(&id);
             }
-            "dispose_signal" => {
+            // `#lzcellkernel` dual-accept: `dispose_signal` -> `undrive`.
+            "dispose_signal" | "undrive" => {
                 let id = op["id"].as_str().unwrap();
                 let sig = signals
                     .get(id)

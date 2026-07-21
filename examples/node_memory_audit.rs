@@ -296,7 +296,7 @@ fn sweep_width(width: usize) -> WidthReport {
 }
 
 fn size_of_handle() -> usize {
-    std::mem::size_of::<lazily::SlotHandle<u64>>()
+    std::mem::size_of::<lazily::FormulaCell<u64>>()
 }
 
 fn print_width_report(report: &WidthReport, previous: Option<&WidthReport>) {
@@ -445,7 +445,7 @@ fn main() {
     );
 
     println!(
-        "\n  SlotHandle<u64> (harness-side, not library memory): {} B",
+        "\n  FormulaCell<u64> (harness-side, not library memory): {} B",
         size_of_handle()
     );
 

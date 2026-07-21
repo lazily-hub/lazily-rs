@@ -8,7 +8,7 @@
 //! Each node is `(kind/id, value_cell, ordered children)`:
 //!
 //! - **`id: Id`** — a *stable* identity that survives reorder and value edits.
-//! - **`value: CellHandle<V>`** — the node's own value cell. Editing node `X`'s
+//! - **`value: SourceCell<V>`** — the node's own value cell. Editing node `X`'s
 //!   value invalidates only readers of `X` (fine-grained), never a sibling.
 //! - **ordered children** — a [`CellMap`] of child id → child node, so child
 //!   *membership* and *order* are reactive **per level**: a reader of one node's
@@ -50,7 +50,7 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::Context;
-use crate::cell::CellHandle;
+use crate::cell::SourceCell;
 use crate::cell_family::CellMap;
 
 /// A node in an ordered, stably-keyed reactive tree (`#lzordtree`).
@@ -65,7 +65,7 @@ pub struct CellTree<Id, V> {
 
 struct CellTreeNode<Id, V> {
     id: Id,
-    value: CellHandle<V>,
+    value: SourceCell<V>,
     /// Reactive ordered membership of this node's direct children (the keys are
     /// child ids; values are unit). Supplies per-level `child_ids`/`len`/order
     /// reactivity and atomic move (`#lzcellmove`).
@@ -106,7 +106,7 @@ where
     }
 
     /// This node's value cell handle (for wiring derived computeds directly).
-    pub fn value(&self) -> CellHandle<V> {
+    pub fn value(&self) -> SourceCell<V> {
         self.inner.value
     }
 

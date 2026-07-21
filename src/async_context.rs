@@ -535,7 +535,7 @@ impl Copy for AsyncEffectHandle {}
 
 /// A typed handle to an **eager** derived value within an [`AsyncContext`].
 ///
-/// This is the async counterpart to [`crate::SignalHandle`]. It is a memoized
+/// This is the async counterpart to [`crate::FormulaCell`]. It is a memoized
 /// backing slot ([`AsyncContext::memo_async`]) plus a small puller effect
 /// ([`AsyncContext::effect_async`]) that awaits the slot after every
 /// invalidation, so an upstream change eagerly drives the async recompute to
@@ -1799,15 +1799,15 @@ impl crate::reactive_graph::Teardown for AsyncTeardownScope {
 }
 
 impl crate::reactive_graph::ReactiveGraph for AsyncContext {
-    type SlotHandle<T> = AsyncSlotHandle<T>;
-    type CellHandle<T> = AsyncCellHandle<T>;
+    type FormulaCell<T> = AsyncSlotHandle<T>;
+    type SourceCell<T> = AsyncCellHandle<T>;
     type EffectHandle = AsyncEffectHandle;
     type Scope<'a> = AsyncTeardownScope;
 
-    fn dispose_slot<T: 'static>(&self, handle: &Self::SlotHandle<T>) {
+    fn dispose_slot<T: 'static>(&self, handle: &Self::FormulaCell<T>) {
         AsyncContext::dispose_slot(self, handle);
     }
-    fn dispose_cell<T: 'static>(&self, handle: &Self::CellHandle<T>) {
+    fn dispose_cell<T: 'static>(&self, handle: &Self::SourceCell<T>) {
         AsyncContext::dispose_cell(self, handle);
     }
     fn dispose_effect(&self, handle: &Self::EffectHandle) {
@@ -1828,25 +1828,25 @@ impl crate::reactive_graph::ReactiveGraph for AsyncContext {
 }
 
 impl crate::reactive_graph::AsyncReactiveGraph for AsyncContext {
-    fn cell<T>(&self, value: T) -> Self::CellHandle<T>
+    fn cell<T>(&self, value: T) -> Self::SourceCell<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
         AsyncContext::cell(self, value)
     }
-    fn get_cell<T>(&self, handle: &Self::CellHandle<T>) -> T
+    fn get_cell<T>(&self, handle: &Self::SourceCell<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
         AsyncContext::get_cell(self, handle)
     }
-    fn set_cell<T>(&self, handle: &Self::CellHandle<T>, value: T)
+    fn set_cell<T>(&self, handle: &Self::SourceCell<T>, value: T)
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
         AsyncContext::set_cell(self, handle, value);
     }
-    fn get<T>(&self, handle: &Self::SlotHandle<T>) -> impl Future<Output = T> + Send
+    fn get<T>(&self, handle: &Self::FormulaCell<T>) -> impl Future<Output = T> + Send
     where
         T: Clone + Send + Sync + 'static,
     {

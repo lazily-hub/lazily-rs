@@ -83,8 +83,8 @@ pub fn computes_seen(computes: &Computes) -> usize {
 /// Parameterised by the *library* trait, not by the test model, so the generic
 /// helpers below are ordinary `ReactiveGraph` code rather than test-only code.
 pub enum Ref<G: ReactiveGraph> {
-    Cell(G::CellHandle<i64>),
-    Slot(G::SlotHandle<i64>),
+    Cell(G::SourceCell<i64>),
+    Slot(G::FormulaCell<i64>),
     Effect(G::EffectHandle),
 }
 
@@ -131,13 +131,13 @@ pub fn dependencies_of<G: ReactiveGraph>(graph: &G, node: Ref<G>) -> usize {
 /// Nodes owned by a teardown scope, created through it rather than through the
 /// context directly.
 pub trait ScopeModel<M: GraphModel> {
-    fn cell(&self, value: i64) -> <M::Graph as ReactiveGraph>::CellHandle<i64>;
+    fn cell(&self, value: i64) -> <M::Graph as ReactiveGraph>::SourceCell<i64>;
     fn computed(
         &self,
         reads: &[Ref<M::Graph>],
         offset: i64,
         computes: &Computes,
-    ) -> <M::Graph as ReactiveGraph>::SlotHandle<i64>;
+    ) -> <M::Graph as ReactiveGraph>::FormulaCell<i64>;
     fn effect(
         &self,
         name: &str,
@@ -195,13 +195,13 @@ pub trait GraphModel: Sized {
     /// The underlying graph, for the trait-generic structural operations.
     fn graph(&self) -> &Self::Graph;
 
-    fn cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::CellHandle<i64>;
+    fn cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::SourceCell<i64>;
     fn computed(
         &self,
         reads: &[Ref<Self::Graph>],
         offset: i64,
         computes: &Computes,
-    ) -> <Self::Graph as ReactiveGraph>::SlotHandle<i64>;
+    ) -> <Self::Graph as ReactiveGraph>::FormulaCell<i64>;
     fn effect(
         &self,
         name: &str,
@@ -225,11 +225,11 @@ pub trait GraphModel: Sized {
     ///
     /// The corpus's `batch` op carries its whole write list, so no nesting
     /// state is needed and the outermost-exit flush is the only flush.
-    fn batch(&self, writes: &[(<Self::Graph as ReactiveGraph>::CellHandle<i64>, i64)]);
+    fn batch(&self, writes: &[(<Self::Graph as ReactiveGraph>::SourceCell<i64>, i64)]);
 
     /// Read a node's value. `Err` is the corpus's `read_after_dispose`.
     fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()>;
-    fn set_cell(&self, cell: <Self::Graph as ReactiveGraph>::CellHandle<i64>, value: i64);
+    fn set_cell(&self, cell: <Self::Graph as ReactiveGraph>::SourceCell<i64>, value: i64);
 
     fn is_effect_active(&self, effect: <Self::Graph as ReactiveGraph>::EffectHandle) -> bool;
 

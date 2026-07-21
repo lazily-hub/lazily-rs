@@ -25,9 +25,9 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use lazily::{CellHandle, Context, SlotHandle};
+use lazily::{Context, FormulaCell, SourceCell};
 
-type Graph = (Context, Vec<CellHandle<i64>>, Vec<SlotHandle<i64>>);
+type Graph = (Context, Vec<SourceCell<i64>>, Vec<FormulaCell<i64>>);
 
 fn scale_n() -> usize {
     std::env::var("LAZILY_SCALE_N")
@@ -47,11 +47,11 @@ fn viewport_size(n: usize) -> usize {
 /// Build the spreadsheet-shaped graph (cells not yet computed).
 fn build_graph(n: usize) -> Graph {
     let ctx = Context::new();
-    let mut inputs: Vec<CellHandle<i64>> = Vec::with_capacity(n);
+    let mut inputs: Vec<SourceCell<i64>> = Vec::with_capacity(n);
     for i in 0..n {
         inputs.push(ctx.cell(i as i64));
     }
-    let mut formulas: Vec<SlotHandle<i64>> = Vec::with_capacity(n);
+    let mut formulas: Vec<FormulaCell<i64>> = Vec::with_capacity(n);
     for i in 0..n {
         let a = inputs[i];
         let b = inputs[i.saturating_sub(1)];
@@ -61,7 +61,7 @@ fn build_graph(n: usize) -> Graph {
 }
 
 /// Read every formula once, returning a folded accumulator.
-fn read_all(ctx: &Context, formulas: &[SlotHandle<i64>]) -> i64 {
+fn read_all(ctx: &Context, formulas: &[FormulaCell<i64>]) -> i64 {
     let mut acc = 0i64;
     for f in formulas {
         acc = acc.wrapping_add(ctx.get(f));
