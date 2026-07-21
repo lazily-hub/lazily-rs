@@ -31,7 +31,7 @@
 //! let ctx = Context::new();
 //! let n = ctx.source(1i32);                 // Source<i32>
 //! n.set(&ctx, 2);                           // ok — `set` lives on the source handle
-//! let doubled = ctx.computed(move |c| n.get(c) * 2).drive(&ctx);
+//! let doubled = ctx.computed(move |c| n.get(c) * 2).eager(&ctx);
 //! assert_eq!(doubled.get(&ctx), 4);
 //! ```
 //!
@@ -181,7 +181,7 @@ impl<T, M> std::fmt::Debug for Source<T, M> {
 // ---------------------------------------------------------------------------
 
 /// A typed handle to a **computed cell** within a [`Context`] — a node computed
-/// from upstream. Lazy by default; `computed().drive()` makes it eager (a driven
+/// from upstream. Lazy by default; `computed().eager()` makes it eager (an eager
 /// computed cell).
 ///
 /// Lightweight: just a recycled [`SlotId`] into the arena. Two handles are equal
@@ -218,7 +218,7 @@ impl<T> Computed<T> {
     }
 
     /// Tear this node down: detach both edge directions, invalidate surviving
-    /// readers, and recycle the id. Disposing a driven computed cell also tears
+    /// readers, and recycle the id. Disposing an eager computed cell also tears
     /// down its puller.
     pub fn dispose(&self, ctx: &Context)
     where
@@ -252,35 +252,35 @@ impl<T> Computed<T> {
         ctx.flush_effects_after_invalidation();
     }
 
-    /// **Drive** this computed cell: make it eager. Attaches a puller [`Effect`]
+    /// Transition this computed cell to **eager**. Attaches a puller [`Effect`]
     /// that re-materializes it after every invalidation, so the value goes
     /// directly `v1 -> v2` with no intermediate unset state.
     ///
-    /// Idempotent — a second `drive` is a no-op — and returns the **same**
+    /// Idempotent — a second `eager` is a no-op — and returns the **same**
     /// handle (mutated graph state), so the caller keeps reading the computed
     /// cell it already holds. This is the eager construction that retires the
     /// former `Signal`; the coalescing comes from the scheduler (effects are
     /// scheduled, not inline), so a per-write puller cannot be built.
     ///
     /// [`Effect`]: crate::EffectHandle
-    pub fn drive(&self, ctx: &Context) -> Self
+    pub fn eager(&self, ctx: &Context) -> Self
     where
         T: 'static,
     {
-        ctx.drive_formula::<T>(self.id);
+        ctx.make_eager::<T>(self.id);
         *self
     }
 
-    /// Reverse of [`drive`](Computed::drive): stop eager recomputation and
+    /// Reverse of [`eager`](Computed::eager): stop eager recomputation and
     /// dispose the puller. The value remains readable and reverts to lazy
-    /// (recomputed on next read). No-op if the computed cell is not driven.
-    pub fn undrive(&self, ctx: &Context) {
-        ctx.undrive_formula(self.id);
+    /// (recomputed on next read). No-op if the computed cell is not eager.
+    pub fn lazy(&self, ctx: &Context) {
+        ctx.make_lazy(self.id);
     }
 
-    /// Whether this computed cell is currently driven (has an active puller).
-    pub fn is_driven(&self, ctx: &Context) -> bool {
-        ctx.is_driven(self.id)
+    /// Whether this computed cell is currently eager (has an active puller).
+    pub fn is_eager(&self, ctx: &Context) -> bool {
+        ctx.is_eager(self.id)
     }
 }
 

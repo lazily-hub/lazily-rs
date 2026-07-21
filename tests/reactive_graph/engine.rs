@@ -249,9 +249,9 @@ pub fn replay<'a, M: GraphModel>(
                 poisoned.remove(&id);
             }
             // `#lzcellkernel` dual-accept (design §8 / Step 3): the eager
-            // construction is now `formula().drive()`, so the corpus op is
+            // construction is now `formula().eager()`, so the corpus op is
             // renamed `signal` -> `drive`. Accept BOTH names for the same
-            // behaviour — the model's `signal` is a driven formula under the
+            // behaviour — the model's `signal` is an eager formula under the
             // hood — so runners accept before any fixture emits the new name.
             "signal" | "drive" => {
                 let id = op["id"].as_str().unwrap().to_owned();

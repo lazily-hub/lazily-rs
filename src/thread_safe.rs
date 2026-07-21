@@ -493,7 +493,7 @@ fn current_thread_safe_lock_site() -> ThreadSafeLockSite {
     })
 }
 
-struct ThreadSafeSlotNode {
+struct ThreadSafeComputedNode {
     value: Option<Arc<ThreadSafeAny>>,
     equals: Option<Arc<ThreadSafeEqualsFn>>,
     dependencies: HybridSet,
@@ -1150,7 +1150,7 @@ struct ThreadSafeRecomputeStart {
     was_unset: bool,
 }
 
-struct ThreadSafeCellNode {
+struct ThreadSafeSourceNode {
     dependents: HybridSet,
     fast_path: Arc<ThreadSafeCellFastPath>,
 }
@@ -1209,8 +1209,8 @@ struct ThreadSafeEffectNode {
 }
 
 enum ThreadSafeNode {
-    Slot(ThreadSafeSlotNode),
-    Cell(ThreadSafeCellNode),
+    Computed(ThreadSafeComputedNode),
+    Source(ThreadSafeSourceNode),
     Effect(ThreadSafeEffectNode),
 }
 
@@ -1258,7 +1258,7 @@ impl ThreadSafeInvalidationPlan {
             };
 
             let dependents = match state.get_node(root.id) {
-                Some(ThreadSafeNode::Slot(slot)) => {
+                Some(ThreadSafeNode::Computed(slot)) => {
                     let (dirty, force_state) = match simulated_slots.get(root.id) {
                         Some(s) => *s,
                         None => (slot.dirty, slot.force_recompute),
@@ -1282,7 +1282,7 @@ impl ThreadSafeInvalidationPlan {
                     plan.add_effect_schedule(root.id, force_recompute);
                     Vec::new()
                 }
-                Some(ThreadSafeNode::Cell(_)) | None => Vec::new(),
+                Some(ThreadSafeNode::Source(_)) | None => Vec::new(),
             };
 
             for dependent_id in dependents {
@@ -1310,7 +1310,7 @@ impl ThreadSafeInvalidationPlan {
 
         while let Some(id) = queue.pop_front() {
             match state.get_node(id) {
-                Some(ThreadSafeNode::Slot(slot)) => {
+                Some(ThreadSafeNode::Computed(slot)) => {
                     if visited_slots.contains(id) {
                         continue;
                     }
@@ -1326,7 +1326,7 @@ impl ThreadSafeInvalidationPlan {
                 Some(ThreadSafeNode::Effect(_)) => {
                     plan.add_effect_schedule(id, true);
                 }
-                Some(ThreadSafeNode::Cell(_)) | None => {}
+                Some(ThreadSafeNode::Source(_)) | None => {}
             }
         }
 
@@ -1340,7 +1340,7 @@ impl ThreadSafeInvalidationPlan {
         let clear_set: SlotIdSet = slot_clears.iter().copied().collect();
 
         for id in &slot_clears {
-            let Some(ThreadSafeNode::Slot(slot)) = state.get_node_mut(*id) else {
+            let Some(ThreadSafeNode::Computed(slot)) = state.get_node_mut(*id) else {
                 continue;
             };
             slot.value = None;
@@ -1356,7 +1356,7 @@ impl ThreadSafeInvalidationPlan {
             if clear_set.contains(id) {
                 continue;
             }
-            let Some(ThreadSafeNode::Slot(slot)) = state.get_node_mut(*id) else {
+            let Some(ThreadSafeNode::Computed(slot)) = state.get_node_mut(*id) else {
                 continue;
             };
             slot.revision = slot.revision.wrapping_add(1);
@@ -1537,8 +1537,8 @@ impl ThreadSafeState {
         // A promoted edge list is not contiguous, so materialise rather than
         // borrow a slice.
         let deps: Vec<SlotId> = match self.nodes.get(idx).and_then(|opt| opt.as_ref()) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.to_vec(),
-            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.to_vec(),
+            Some(ThreadSafeNode::Computed(slot)) => slot.dependents.to_vec(),
+            Some(ThreadSafeNode::Source(cell)) => cell.dependents.to_vec(),
             _ => return,
         };
         self.dependent_scratch.extend_from_slice(&deps);
@@ -2039,9 +2039,9 @@ impl ThreadSafeContext {
         dependent_id: SlotId,
     ) -> Option<ThreadSafeDependentKind> {
         match state.get_node(dependent_id) {
-            Some(ThreadSafeNode::Slot(_)) => Some(ThreadSafeDependentKind::Slot),
+            Some(ThreadSafeNode::Computed(_)) => Some(ThreadSafeDependentKind::Slot),
             Some(ThreadSafeNode::Effect(_)) => Some(ThreadSafeDependentKind::Effect),
-            Some(ThreadSafeNode::Cell(_)) | None => None,
+            Some(ThreadSafeNode::Source(_)) | None => None,
         }
     }
 
@@ -2052,11 +2052,11 @@ impl ThreadSafeContext {
         dependent_kind: ThreadSafeDependentKind,
     ) {
         match state.get_node(dependency_id) {
-            Some(ThreadSafeNode::Slot(slot)) => {
+            Some(ThreadSafeNode::Computed(slot)) => {
                 slot.fast_path
                     .insert_dependent(dependent_id, dependent_kind);
             }
-            Some(ThreadSafeNode::Cell(cell)) => {
+            Some(ThreadSafeNode::Source(cell)) => {
                 cell.fast_path
                     .insert_dependent(dependent_id, dependent_kind);
             }
@@ -2070,10 +2070,10 @@ impl ThreadSafeContext {
         dependent_id: SlotId,
     ) {
         match state.get_node(dependency_id) {
-            Some(ThreadSafeNode::Slot(slot)) => {
+            Some(ThreadSafeNode::Computed(slot)) => {
                 slot.fast_path.remove_dependent(dependent_id);
             }
-            Some(ThreadSafeNode::Cell(cell)) => {
+            Some(ThreadSafeNode::Source(cell)) => {
                 cell.fast_path.remove_dependent(dependent_id);
             }
             Some(ThreadSafeNode::Effect(_)) | None => {}
@@ -2090,15 +2090,17 @@ impl ThreadSafeContext {
         #[cfg(feature = "instrumentation")]
         let mut edge_added = false;
         let mut state = self.lock_state();
-        let dependency_is_slot =
-            matches!(state.get_node(dependency_id), Some(ThreadSafeNode::Slot(_)));
+        let dependency_is_slot = matches!(
+            state.get_node(dependency_id),
+            Some(ThreadSafeNode::Computed(_))
+        );
         let dependent_kind = Self::dependent_kind_locked(&state, dependent_id);
         if let Some(node) = state.get_node_mut(dependency_id) {
             match node {
-                ThreadSafeNode::Slot(slot) => {
+                ThreadSafeNode::Computed(slot) => {
                     edge_insert(&mut slot.dependents, dependent_id);
                 }
-                ThreadSafeNode::Cell(cell) => {
+                ThreadSafeNode::Source(cell) => {
                     edge_insert(&mut cell.dependents, dependent_id);
                 }
                 ThreadSafeNode::Effect(_) => {}
@@ -2107,7 +2109,7 @@ impl ThreadSafeContext {
 
         if let Some(node) = state.get_node_mut(dependent_id) {
             match node {
-                ThreadSafeNode::Slot(parent) => {
+                ThreadSafeNode::Computed(parent) => {
                     let inserted = edge_insert(&mut parent.dependencies, dependency_id);
                     if inserted {
                         parent
@@ -2129,7 +2131,7 @@ impl ThreadSafeContext {
                         edge_insert(&mut parent.dependencies, dependency_id);
                     }
                 }
-                ThreadSafeNode::Cell(_) => {}
+                ThreadSafeNode::Source(_) => {}
             }
         }
         if let Some(dependent_kind) = dependent_kind {
@@ -2172,10 +2174,12 @@ impl ThreadSafeContext {
         dependent_id: SlotId,
         dependency_id: SlotId,
     ) -> bool {
-        let dependency_is_slot =
-            matches!(state.get_node(dependency_id), Some(ThreadSafeNode::Slot(_)));
+        let dependency_is_slot = matches!(
+            state.get_node(dependency_id),
+            Some(ThreadSafeNode::Computed(_))
+        );
         match state.get_node_mut(dependent_id) {
-            Some(ThreadSafeNode::Slot(slot)) => {
+            Some(ThreadSafeNode::Computed(slot)) => {
                 let removed = edge_remove(&mut slot.dependencies, dependency_id);
                 if removed {
                     slot.fast_path
@@ -2186,7 +2190,7 @@ impl ThreadSafeContext {
             Some(ThreadSafeNode::Effect(effect)) => {
                 edge_remove(&mut effect.dependencies, dependency_id)
             }
-            Some(ThreadSafeNode::Cell(_)) | None => false,
+            Some(ThreadSafeNode::Source(_)) | None => false,
         }
     }
 
@@ -2196,8 +2200,8 @@ impl ThreadSafeContext {
         dependent_id: SlotId,
     ) {
         let _edge_removed = match state.get_node_mut(dependency_id) {
-            Some(ThreadSafeNode::Slot(slot)) => edge_remove(&mut slot.dependents, dependent_id),
-            Some(ThreadSafeNode::Cell(cell)) => edge_remove(&mut cell.dependents, dependent_id),
+            Some(ThreadSafeNode::Computed(slot)) => edge_remove(&mut slot.dependents, dependent_id),
+            Some(ThreadSafeNode::Source(cell)) => edge_remove(&mut cell.dependents, dependent_id),
             Some(ThreadSafeNode::Effect(_)) | None => false,
         };
         if _edge_removed {
@@ -2324,7 +2328,7 @@ impl ThreadSafeContext {
             self.inner.read_strategy,
             inline,
         ));
-        let node = ThreadSafeSlotNode {
+        let node = ThreadSafeComputedNode {
             value: None,
             equals,
             dependencies: HybridSet::default(),
@@ -2341,7 +2345,7 @@ impl ThreadSafeContext {
         }
         slot_fast_paths[idx] = Some(fast_path);
         self.lock_state()
-            .insert_node(id, ThreadSafeNode::Slot(node));
+            .insert_node(id, ThreadSafeNode::Computed(node));
         Computed::from_id(id)
     }
 
@@ -2415,7 +2419,7 @@ impl ThreadSafeContext {
 
         let state = self.read_state();
         match state.get_node(id) {
-            Some(ThreadSafeNode::Slot(slot)) => {
+            Some(ThreadSafeNode::Computed(slot)) => {
                 if !slot.fast_path.needs_refresh()
                     && let (false, false, Some(value)) =
                         (slot.dirty, slot.force_recompute, &slot.value)
@@ -2436,7 +2440,7 @@ impl ThreadSafeContext {
                             .filter(|dependency_id| {
                                 matches!(
                                     state.get_node(*dependency_id),
-                                    Some(ThreadSafeNode::Slot(_))
+                                    Some(ThreadSafeNode::Computed(_))
                                 )
                             })
                             .collect(),
@@ -2487,7 +2491,7 @@ impl ThreadSafeContext {
 
         let state = self.read_state();
         match state.get_node(id) {
-            Some(ThreadSafeNode::Slot(slot)) => {
+            Some(ThreadSafeNode::Computed(slot)) => {
                 if !slot.fast_path.needs_refresh()
                     && let (false, false, Some(value)) =
                         (slot.dirty, slot.force_recompute, &slot.value)
@@ -2506,7 +2510,7 @@ impl ThreadSafeContext {
                             .filter(|dependency_id| {
                                 matches!(
                                     state.get_node(*dependency_id),
-                                    Some(ThreadSafeNode::Slot(_))
+                                    Some(ThreadSafeNode::Computed(_))
                                 )
                             })
                             .collect(),
@@ -2537,13 +2541,13 @@ impl ThreadSafeContext {
         let dependencies = {
             let state = self.read_state();
             match state.get_node(id) {
-                Some(ThreadSafeNode::Slot(slot)) => slot
+                Some(ThreadSafeNode::Computed(slot)) => slot
                     .dependencies
                     .iter()
                     .filter(|dependency_id| {
                         matches!(
                             state.get_node(*dependency_id),
-                            Some(ThreadSafeNode::Slot(_))
+                            Some(ThreadSafeNode::Computed(_))
                         )
                     })
                     .collect(),
@@ -2567,7 +2571,7 @@ impl ThreadSafeContext {
             let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::GetRefresh);
             let mut state = self.lock_state();
             let slot = match state.get_node_mut(id) {
-                Some(ThreadSafeNode::Slot(slot)) => slot,
+                Some(ThreadSafeNode::Computed(slot)) => slot,
                 _ => return false,
             };
 
@@ -2635,7 +2639,7 @@ impl ThreadSafeContext {
             }
             {
                 let slot = match state.get_node_mut(id) {
-                    Some(ThreadSafeNode::Slot(slot)) => slot,
+                    Some(ThreadSafeNode::Computed(slot)) => slot,
                     _ => {
                         recompute_guard.active = false;
                         fast_path.finish_recompute();
@@ -2659,7 +2663,7 @@ impl ThreadSafeContext {
 
             let (publish_fast_path, duplicate_speculative, notify_dependents, changed) = {
                 let slot = match state.get_node_mut(id) {
-                    Some(ThreadSafeNode::Slot(slot)) => slot,
+                    Some(ThreadSafeNode::Computed(slot)) => slot,
                     _ => {
                         recompute_guard.active = false;
                         fast_path.finish_recompute();
@@ -2738,7 +2742,7 @@ impl ThreadSafeContext {
             self.inner.read_strategy,
             None,
         ));
-        let node = ThreadSafeCellNode {
+        let node = ThreadSafeSourceNode {
             dependents: HybridSet::default(),
             fast_path: Arc::clone(&fast_path),
         };
@@ -2749,7 +2753,7 @@ impl ThreadSafeContext {
         }
         cell_fast_paths[idx] = Some(fast_path);
         self.lock_state()
-            .insert_node(id, ThreadSafeNode::Cell(node));
+            .insert_node(id, ThreadSafeNode::Source(node));
         Source::from_id(id)
     }
 
@@ -2775,7 +2779,7 @@ impl ThreadSafeContext {
             self.inner.read_strategy,
             inline_spec_for::<T>(),
         ));
-        let node = ThreadSafeCellNode {
+        let node = ThreadSafeSourceNode {
             dependents: HybridSet::default(),
             fast_path: Arc::clone(&fast_path),
         };
@@ -2786,7 +2790,7 @@ impl ThreadSafeContext {
         }
         cell_fast_paths[idx] = Some(fast_path);
         self.lock_state()
-            .insert_node(id, ThreadSafeNode::Cell(node));
+            .insert_node(id, ThreadSafeNode::Source(node));
         Source::from_id(id)
     }
 
@@ -2862,7 +2866,7 @@ impl ThreadSafeContext {
         let _lock_site = push_thread_safe_lock_site(ThreadSafeLockSite::SetCellInvalidation);
         let mut state = self.lock_state();
         match state.get_node(id) {
-            Some(ThreadSafeNode::Cell(_)) => {}
+            Some(ThreadSafeNode::Source(_)) => {}
             _ => panic!("set_cell on non-cell id"),
         }
         let batching = state.batch_depth > 0;
@@ -3035,8 +3039,8 @@ impl ThreadSafeContext {
     pub fn dependent_count(&self, node: &impl GraphNode) -> usize {
         let state = self.read_state();
         match state.get_node(node.node_id()) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.len(),
-            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.len(),
+            Some(ThreadSafeNode::Computed(slot)) => slot.dependents.len(),
+            Some(ThreadSafeNode::Source(cell)) => cell.dependents.len(),
             // Effects are pure sinks: nothing can read one.
             Some(ThreadSafeNode::Effect(_)) | None => 0,
         }
@@ -3047,10 +3051,10 @@ impl ThreadSafeContext {
     pub fn dependency_count(&self, node: &impl GraphNode) -> usize {
         let state = self.read_state();
         match state.get_node(node.node_id()) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependencies.len(),
+            Some(ThreadSafeNode::Computed(slot)) => slot.dependencies.len(),
             Some(ThreadSafeNode::Effect(effect)) => effect.dependencies.len(),
             // Cells are pure sources.
-            Some(ThreadSafeNode::Cell(_)) | None => 0,
+            Some(ThreadSafeNode::Source(_)) | None => 0,
         }
     }
 
@@ -3108,10 +3112,10 @@ impl ThreadSafeContext {
             let mut state = self.lock_state();
             // Check the kind BEFORE removing: a stale handle whose id has been
             // recycled must not tear down whatever now owns it.
-            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Slot(_))) {
+            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Computed(_))) {
                 return;
             }
-            let Some(ThreadSafeNode::Slot(slot)) = state.remove_node(handle.id) else {
+            let Some(ThreadSafeNode::Computed(slot)) = state.remove_node(handle.id) else {
                 return;
             };
             for dependency_id in slot.dependencies.iter() {
@@ -3144,10 +3148,10 @@ impl ThreadSafeContext {
         let torn_down = {
             let mut registry = self.inner.cell_fast_paths.write();
             let mut state = self.lock_state();
-            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Cell(_))) {
+            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Source(_))) {
                 return;
             }
-            let Some(ThreadSafeNode::Cell(cell)) = state.remove_node(handle.id) else {
+            let Some(ThreadSafeNode::Source(cell)) = state.remove_node(handle.id) else {
                 return;
             };
             for dependent_id in cell.dependents.iter() {
@@ -3198,8 +3202,8 @@ impl ThreadSafeContext {
     /// Tear down whatever node `id` names, dispatching on its own kind.
     fn dispose_id(&self, id: SlotId) {
         let kind = match self.read_state().get_node(id) {
-            Some(ThreadSafeNode::Slot(_)) => 0u8,
-            Some(ThreadSafeNode::Cell(_)) => 1,
+            Some(ThreadSafeNode::Computed(_)) => 0u8,
+            Some(ThreadSafeNode::Source(_)) => 1,
             Some(ThreadSafeNode::Effect(_)) => 2,
             None => return,
         };
@@ -3616,8 +3620,8 @@ impl ThreadSafeContext {
     #[cfg(test)]
     fn dependents_locked(state: &ThreadSafeState, id: SlotId) -> EdgeVec {
         match state.get_node(id) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.dependents.iter().collect(),
-            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.iter().collect(),
+            Some(ThreadSafeNode::Computed(slot)) => slot.dependents.iter().collect(),
+            Some(ThreadSafeNode::Source(cell)) => cell.dependents.iter().collect(),
             Some(ThreadSafeNode::Effect(_)) | None => EdgeVec::new(),
         }
     }
@@ -3642,7 +3646,7 @@ impl ThreadSafeContext {
         T: Send + Sync + 'static,
     {
         let state = self.read_state();
-        if let Some(ThreadSafeNode::Slot(slot)) = state.get_node(handle.id) {
+        if let Some(ThreadSafeNode::Computed(slot)) = state.get_node(handle.id) {
             slot.value.is_some() && !slot.dirty && !slot.fast_path.needs_refresh()
         } else {
             false
@@ -3979,7 +3983,7 @@ mod tests {
     {
         let state = ctx.lock_state();
         match state.get_node(handle.id) {
-            Some(ThreadSafeNode::Slot(slot)) => match &slot.fast_path.value {
+            Some(ThreadSafeNode::Computed(slot)) => match &slot.fast_path.value {
                 CachedReadStorage::Locked(_) => "locked",
                 CachedReadStorage::LockFree(_) => "lockfree",
                 CachedReadStorage::Inline(_) => "inline",
@@ -4106,7 +4110,7 @@ mod tests {
     {
         let state = ctx.lock_state();
         match state.get_node(handle.id) {
-            Some(ThreadSafeNode::Cell(cell)) => match &cell.fast_path.value {
+            Some(ThreadSafeNode::Source(cell)) => match &cell.fast_path.value {
                 CellCachedReadStorage::Locked(_) => "locked",
                 CellCachedReadStorage::Inline { .. } => "inline",
             },
@@ -4245,7 +4249,7 @@ mod tests {
     {
         let state = ctx.lock_state();
         match state.get_node(handle.id) {
-            Some(ThreadSafeNode::Slot(slot)) => slot.revision,
+            Some(ThreadSafeNode::Computed(slot)) => slot.revision,
             _ => panic!("slot_revision called on non-slot id"),
         }
     }
@@ -4256,7 +4260,7 @@ mod tests {
     {
         let state = ctx.lock_state();
         match state.get_node(handle.id) {
-            Some(ThreadSafeNode::Slot(slot)) => (slot.dirty, slot.force_recompute),
+            Some(ThreadSafeNode::Computed(slot)) => (slot.dirty, slot.force_recompute),
             _ => panic!("slot_dirty_force called on non-slot id"),
         }
     }
@@ -4267,7 +4271,7 @@ mod tests {
     {
         let state = ctx.lock_state();
         match state.get_node(handle.id) {
-            Some(ThreadSafeNode::Cell(cell)) => cell.dependents.len(),
+            Some(ThreadSafeNode::Source(cell)) => cell.dependents.len(),
             _ => panic!("cell_dependents_len called on non-cell id"),
         }
     }
@@ -4342,7 +4346,7 @@ mod tests {
                 Some(false)
             );
             match state.get_node(joined.id) {
-                Some(ThreadSafeNode::Slot(slot)) => {
+                Some(ThreadSafeNode::Computed(slot)) => {
                     assert!(!slot.dirty);
                     assert!(!slot.force_recompute);
                 }
@@ -4399,7 +4403,7 @@ mod tests {
                 Some(true)
             );
             match state.get_node(labeled.id) {
-                Some(ThreadSafeNode::Slot(slot)) => {
+                Some(ThreadSafeNode::Computed(slot)) => {
                     assert!(slot.value.is_some());
                     assert!(!slot.dirty);
                 }

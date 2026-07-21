@@ -99,7 +99,7 @@ pub(crate) enum InvalidationResult {
     AlreadyEmpty,
 }
 
-pub(crate) struct AsyncSlotNode {
+pub(crate) struct AsyncComputedNode {
     pub(crate) state: AsyncSlotState,
     pub(crate) value: Option<Arc<AsyncAny>>,
     pub(crate) error: Option<Arc<dyn Error + Send + Sync>>,
@@ -118,7 +118,7 @@ pub(crate) enum AsyncCompletion {
     Error(Arc<dyn Error + Send + Sync>),
 }
 
-impl AsyncSlotNode {
+impl AsyncComputedNode {
     pub(crate) fn transition_to_computing(
         &mut self,
         handle: JoinHandle<()>,
@@ -205,7 +205,7 @@ impl AsyncSlotNode {
     }
 }
 
-pub(crate) struct AsyncCellNode {
+pub(crate) struct AsyncSourceNode {
     pub(crate) value: Arc<AsyncAny>,
     pub(crate) dependents: EdgeVec,
 }
@@ -221,8 +221,8 @@ pub(crate) struct AsyncEffectNode {
 
 #[allow(dead_code)]
 pub(crate) enum AsyncNode {
-    Slot(AsyncSlotNode),
-    Cell(AsyncCellNode),
+    Computed(AsyncComputedNode),
+    Source(AsyncSourceNode),
     Effect(AsyncEffectNode),
 }
 
@@ -344,21 +344,21 @@ fn register_dependency_locked(
     }
     if let Some(node) = inner.get_node_mut(dependent_id) {
         match node {
-            AsyncNode::Slot(s) => {
+            AsyncNode::Computed(s) => {
                 edge_insert(&mut s.dependencies, dependency_id);
             }
             AsyncNode::Effect(e) => {
                 edge_insert(&mut e.dependencies, dependency_id);
             }
-            AsyncNode::Cell(_) => {}
+            AsyncNode::Source(_) => {}
         }
     }
     if let Some(node) = inner.get_node_mut(dependency_id) {
         match node {
-            AsyncNode::Slot(s) => {
+            AsyncNode::Computed(s) => {
                 edge_insert(&mut s.dependents, dependent_id);
             }
-            AsyncNode::Cell(c) => {
+            AsyncNode::Source(c) => {
                 edge_insert(&mut c.dependents, dependent_id);
             }
             AsyncNode::Effect(_) => {}
@@ -612,7 +612,7 @@ impl AsyncComputeContext {
             register_dependency_locked(&mut inner, handle.id, self._node_id);
         }
         match inner.get_node(handle.id) {
-            Some(AsyncNode::Cell(cell)) => cell
+            Some(AsyncNode::Source(cell)) => cell
                 .value
                 .as_ref()
                 .downcast_ref::<T>()
@@ -712,7 +712,7 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
     let mut inner = inner_arc.lock();
 
     let (compute, context_id, spawn_revision) = match inner.get_node(slot_id) {
-        Some(AsyncNode::Slot(slot)) => {
+        Some(AsyncNode::Computed(slot)) => {
             if let AsyncSlotState::Computing { .. } = &slot.state {
                 return slot
                     .notifier
@@ -749,7 +749,7 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
         {
             let mut inner = inner_for_compute.lock();
             let current_revision = match inner.get_node(slot_id) {
-                Some(AsyncNode::Slot(s)) => s.revision,
+                Some(AsyncNode::Computed(s)) => s.revision,
                 _ => {
                     inner.recycle_deps(deps_for_extract, deps);
                     drop(inner);
@@ -765,14 +765,14 @@ fn spawn_async_compute(ctx: &AsyncContext, slot_id: SlotId) -> watch::Receiver<A
             }
             AsyncContext::update_dependencies(&mut inner, slot_id, &deps);
             inner.recycle_deps(deps_for_extract, deps);
-            if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(slot_id) {
+            if let Some(AsyncNode::Computed(slot)) = inner.get_node_mut(slot_id) {
                 slot.transition_to_resolved(spawn_revision, result.clone());
             }
         }
         let _ = tx_clone.send(AsyncCompletion::Resolved(result));
     });
 
-    if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(slot_id) {
+    if let Some(AsyncNode::Computed(slot)) = inner.get_node_mut(slot_id) {
         slot.transition_to_computing(join_handle);
         slot.notifier = Some(tx);
     }
@@ -833,11 +833,11 @@ impl AsyncContext {
         {
             let mut inner = self.inner.lock();
             id = inner.alloc_id();
-            let node = AsyncCellNode {
+            let node = AsyncSourceNode {
                 value: Arc::new(value),
                 dependents: EdgeVec::new(),
             };
-            inner.insert_node(id, AsyncNode::Cell(node));
+            inner.insert_node(id, AsyncNode::Source(node));
         }
         AsyncCellHandle {
             id,
@@ -851,7 +851,7 @@ impl AsyncContext {
     {
         let inner = self.inner.lock();
         match inner.get_node(handle.id) {
-            Some(AsyncNode::Cell(cell)) => cell
+            Some(AsyncNode::Source(cell)) => cell
                 .value
                 .as_ref()
                 .downcast_ref::<T>()
@@ -871,7 +871,7 @@ impl AsyncContext {
             let mut inner = self.inner.lock();
             is_batching = inner.batch_depth > 0;
             match inner.get_node_mut(handle.id) {
-                Some(AsyncNode::Cell(cell)) => {
+                Some(AsyncNode::Source(cell)) => {
                     let changed = !(*cell
                         .value
                         .as_ref()
@@ -918,7 +918,7 @@ impl AsyncContext {
     pub(crate) fn get_slot_state(&self, id: SlotId) -> AsyncSlotStateView {
         let inner = self.inner.lock();
         match inner.get_node(id) {
-            Some(AsyncNode::Slot(slot)) => match &slot.state {
+            Some(AsyncNode::Computed(slot)) => match &slot.state {
                 AsyncSlotState::Empty => AsyncSlotStateView::Empty,
                 AsyncSlotState::Computing { revision, .. } => AsyncSlotStateView::Computing {
                     revision: *revision,
@@ -933,7 +933,7 @@ impl AsyncContext {
     pub(crate) fn get_slot_revision(&self, id: SlotId) -> Option<u64> {
         let inner = self.inner.lock();
         match inner.get_node(id) {
-            Some(AsyncNode::Slot(slot)) => Some(slot.revision),
+            Some(AsyncNode::Computed(slot)) => Some(slot.revision),
             _ => None,
         }
     }
@@ -949,25 +949,25 @@ impl AsyncContext {
         new_deps: &HashSet<SlotId>,
     ) {
         let old_deps = match inner.get_node(node_id) {
-            Some(AsyncNode::Slot(s)) => s.dependencies.iter().copied().collect::<HashSet<_>>(),
+            Some(AsyncNode::Computed(s)) => s.dependencies.iter().copied().collect::<HashSet<_>>(),
             _ => return,
         };
         for old_id in old_deps.difference(new_deps) {
-            if let Some(AsyncNode::Slot(s)) = inner.get_node_mut(*old_id) {
+            if let Some(AsyncNode::Computed(s)) = inner.get_node_mut(*old_id) {
                 edge_remove(&mut s.dependents, node_id);
             }
-            if let Some(AsyncNode::Cell(c)) = inner.get_node_mut(*old_id) {
+            if let Some(AsyncNode::Source(c)) = inner.get_node_mut(*old_id) {
                 edge_remove(&mut c.dependents, node_id);
             }
         }
-        if let Some(AsyncNode::Slot(s)) = inner.get_node_mut(node_id) {
+        if let Some(AsyncNode::Computed(s)) = inner.get_node_mut(node_id) {
             s.dependencies = new_deps.iter().copied().collect();
         }
         for new_id in new_deps {
-            if let Some(AsyncNode::Slot(s)) = inner.get_node_mut(*new_id) {
+            if let Some(AsyncNode::Computed(s)) = inner.get_node_mut(*new_id) {
                 edge_insert(&mut s.dependents, node_id);
             }
-            if let Some(AsyncNode::Cell(c)) = inner.get_node_mut(*new_id) {
+            if let Some(AsyncNode::Source(c)) = inner.get_node_mut(*new_id) {
                 edge_insert(&mut c.dependents, node_id);
             }
         }
@@ -1025,7 +1025,7 @@ impl AsyncContext {
                     continue;
                 }
                 match inner.get_node_mut(id) {
-                    Some(AsyncNode::Slot(slot)) => {
+                    Some(AsyncNode::Computed(slot)) => {
                         if let InvalidationResult::HadInFlight(handle) = slot.invalidate() {
                             in_flight_handles.push(handle);
                         }
@@ -1108,7 +1108,7 @@ impl AsyncContext {
         {
             let mut inner = self.inner.lock();
             id = inner.alloc_id();
-            let node = AsyncSlotNode {
+            let node = AsyncComputedNode {
                 state: AsyncSlotState::Empty,
                 value: None,
                 error: None,
@@ -1119,7 +1119,7 @@ impl AsyncContext {
                 dependents: EdgeVec::new(),
                 notifier: None,
             };
-            inner.insert_node(id, AsyncNode::Slot(node));
+            inner.insert_node(id, AsyncNode::Computed(node));
         }
         AsyncSlotHandle {
             id,
@@ -1133,7 +1133,7 @@ impl AsyncContext {
     {
         let inner = self.inner.lock();
         match inner.get_node(handle.id) {
-            Some(AsyncNode::Slot(slot)) => match &slot.state {
+            Some(AsyncNode::Computed(slot)) => match &slot.state {
                 AsyncSlotState::Resolved => {
                     let val = slot.value.as_ref().expect("resolved without value");
                     Some(
@@ -1184,7 +1184,7 @@ impl AsyncContext {
             let mut recv = {
                 let inner = self.inner.lock();
                 match inner.get_node(handle.id) {
-                    Some(AsyncNode::Slot(slot)) => match &slot.state {
+                    Some(AsyncNode::Computed(slot)) => match &slot.state {
                         AsyncSlotState::Computing { .. } => slot
                             .notifier
                             .as_ref()
@@ -1255,7 +1255,7 @@ impl AsyncContext {
                 let mut roots: EdgeVec = EdgeVec::new();
                 for cell_id in &batched {
                     let inner = self.inner.lock();
-                    if let Some(AsyncNode::Cell(c)) = inner.get_node(*cell_id) {
+                    if let Some(AsyncNode::Source(c)) = inner.get_node(*cell_id) {
                         roots.extend_from_slice(&c.dependents);
                     }
                 }
@@ -1302,8 +1302,8 @@ impl AsyncContext {
     pub fn dependent_count(&self, node: &impl GraphNode) -> usize {
         let inner = self.inner.lock();
         match inner.get_node(node.node_id()) {
-            Some(AsyncNode::Slot(slot)) => slot.dependents.len(),
-            Some(AsyncNode::Cell(cell)) => cell.dependents.len(),
+            Some(AsyncNode::Computed(slot)) => slot.dependents.len(),
+            Some(AsyncNode::Source(cell)) => cell.dependents.len(),
             // Effects are pure sinks: nothing can read one.
             Some(AsyncNode::Effect(_)) | None => 0,
         }
@@ -1314,10 +1314,10 @@ impl AsyncContext {
     pub fn dependency_count(&self, node: &impl GraphNode) -> usize {
         let inner = self.inner.lock();
         match inner.get_node(node.node_id()) {
-            Some(AsyncNode::Slot(slot)) => slot.dependencies.len(),
+            Some(AsyncNode::Computed(slot)) => slot.dependencies.len(),
             Some(AsyncNode::Effect(effect)) => effect.dependencies.len(),
             // Cells are pure sources.
-            Some(AsyncNode::Cell(_)) | None => 0,
+            Some(AsyncNode::Source(_)) | None => 0,
         }
     }
 
@@ -1330,17 +1330,17 @@ impl AsyncContext {
     /// Detach `id` from both edge directions of everything it touches.
     fn detach_edges_locked(inner: &mut AsyncContextInner, id: SlotId, node: &AsyncNode) {
         let (dependencies, dependents) = match node {
-            AsyncNode::Slot(s) => (s.dependencies.clone(), s.dependents.clone()),
-            AsyncNode::Cell(c) => (EdgeVec::new(), c.dependents.clone()),
+            AsyncNode::Computed(s) => (s.dependencies.clone(), s.dependents.clone()),
+            AsyncNode::Source(c) => (EdgeVec::new(), c.dependents.clone()),
             AsyncNode::Effect(e) => (e.dependencies.clone(), EdgeVec::new()),
         };
         // Upstream: the sources no longer list this node as a dependent.
         for dep_id in &dependencies {
             match inner.get_node_mut(*dep_id) {
-                Some(AsyncNode::Slot(s)) => {
+                Some(AsyncNode::Computed(s)) => {
                     edge_remove(&mut s.dependents, id);
                 }
-                Some(AsyncNode::Cell(c)) => {
+                Some(AsyncNode::Source(c)) => {
                     edge_remove(&mut c.dependents, id);
                 }
                 _ => {}
@@ -1349,7 +1349,7 @@ impl AsyncContext {
         // Downstream: the readers no longer list this node as a dependency.
         for dependent_id in &dependents {
             match inner.get_node_mut(*dependent_id) {
-                Some(AsyncNode::Slot(s)) => {
+                Some(AsyncNode::Computed(s)) => {
                     edge_remove(&mut s.dependencies, id);
                 }
                 Some(AsyncNode::Effect(e)) => {
@@ -1409,7 +1409,7 @@ impl AsyncContext {
                 if !edge_insert(&mut visited, id) {
                     continue;
                 }
-                if let Some(AsyncNode::Slot(slot)) = inner.get_node_mut(id) {
+                if let Some(AsyncNode::Computed(slot)) = inner.get_node_mut(id) {
                     if let InvalidationResult::HadInFlight(handle) = slot.invalidate() {
                         in_flight_handles.push(handle);
                     }
@@ -1452,7 +1452,7 @@ impl AsyncContext {
             let mut inner = self.inner.lock();
             // Check the kind BEFORE removing: a stale handle whose id has been
             // recycled must not tear down whatever now owns it.
-            if !matches!(inner.get_node(handle.id), Some(AsyncNode::Slot(_))) {
+            if !matches!(inner.get_node(handle.id), Some(AsyncNode::Computed(_))) {
                 return;
             }
             let Some(idx) = AsyncContextInner::node_index(handle.id) else {
@@ -1462,7 +1462,7 @@ impl AsyncContext {
                 return;
             };
             Self::detach_edges_locked(&mut inner, handle.id, &node);
-            let AsyncNode::Slot(mut slot) = node else {
+            let AsyncNode::Computed(mut slot) = node else {
                 return;
             };
             let stale = slot.dependents.clone();
@@ -1486,7 +1486,7 @@ impl AsyncContext {
     pub fn dispose_cell<T>(&self, handle: &AsyncCellHandle<T>) {
         let stale = {
             let mut inner = self.inner.lock();
-            if !matches!(inner.get_node(handle.id), Some(AsyncNode::Cell(_))) {
+            if !matches!(inner.get_node(handle.id), Some(AsyncNode::Source(_))) {
                 return;
             }
             let Some(idx) = AsyncContextInner::node_index(handle.id) else {
@@ -1496,7 +1496,7 @@ impl AsyncContext {
                 return;
             };
             Self::detach_edges_locked(&mut inner, handle.id, &node);
-            let AsyncNode::Cell(cell) = node else {
+            let AsyncNode::Source(cell) = node else {
                 return;
             };
             let stale = cell.dependents.clone();
@@ -1509,8 +1509,8 @@ impl AsyncContext {
     /// Tear down whatever node `id` names, dispatching on its own kind.
     fn dispose_id(&self, id: SlotId) {
         let kind = match self.inner.lock().get_node(id) {
-            Some(AsyncNode::Slot(_)) => 0u8,
-            Some(AsyncNode::Cell(_)) => 1,
+            Some(AsyncNode::Computed(_)) => 0u8,
+            Some(AsyncNode::Source(_)) => 1,
             Some(AsyncNode::Effect(_)) => 2,
             None => return,
         };
@@ -1574,10 +1574,10 @@ impl AsyncContext {
                     let prior_in_flight = e.in_flight.take();
                     for dep_id in &deps {
                         match inner.get_node_mut(*dep_id) {
-                            Some(AsyncNode::Slot(s)) => {
+                            Some(AsyncNode::Computed(s)) => {
                                 edge_remove(&mut s.dependents, handle.id);
                             }
-                            Some(AsyncNode::Cell(c)) => {
+                            Some(AsyncNode::Source(c)) => {
                                 edge_remove(&mut c.dependents, handle.id);
                             }
                             _ => {}
@@ -1820,10 +1820,10 @@ impl AsyncContext {
         };
         for old_id in old_deps.difference(new_deps) {
             match inner.get_node_mut(*old_id) {
-                Some(AsyncNode::Slot(s)) => {
+                Some(AsyncNode::Computed(s)) => {
                     edge_remove(&mut s.dependents, effect_id);
                 }
-                Some(AsyncNode::Cell(c)) => {
+                Some(AsyncNode::Source(c)) => {
                     edge_remove(&mut c.dependents, effect_id);
                 }
                 _ => {}
@@ -1834,10 +1834,10 @@ impl AsyncContext {
         }
         for new_id in new_deps {
             match inner.get_node_mut(*new_id) {
-                Some(AsyncNode::Slot(s)) => {
+                Some(AsyncNode::Computed(s)) => {
                     edge_insert(&mut s.dependents, effect_id);
                 }
-                Some(AsyncNode::Cell(c)) => {
+                Some(AsyncNode::Source(c)) => {
                     edge_insert(&mut c.dependents, effect_id);
                 }
                 _ => {}
@@ -2035,8 +2035,8 @@ mod tests {
         Box::pin(async { Arc::new(()) as Arc<AsyncAny> })
     }
 
-    fn make_slot_node(revision: u64) -> AsyncSlotNode {
-        AsyncSlotNode {
+    fn make_slot_node(revision: u64) -> AsyncComputedNode {
+        AsyncComputedNode {
             state: AsyncSlotState::Empty,
             value: None,
             error: None,
@@ -2049,8 +2049,8 @@ mod tests {
         }
     }
 
-    fn make_slot_node_with_memo(revision: u64, value: Option<Arc<AsyncAny>>) -> AsyncSlotNode {
-        AsyncSlotNode {
+    fn make_slot_node_with_memo(revision: u64, value: Option<Arc<AsyncAny>>) -> AsyncComputedNode {
+        AsyncComputedNode {
             state: AsyncSlotState::Empty,
             value,
             error: None,
@@ -2077,7 +2077,7 @@ mod tests {
         {
             let mut inner = ctx.inner.lock();
             id = inner.alloc_id();
-            inner.insert_node(id, AsyncNode::Slot(make_slot_node(0)));
+            inner.insert_node(id, AsyncNode::Computed(make_slot_node(0)));
         }
         let state = ctx.get_slot_state(id);
         assert!(matches!(state, AsyncSlotStateView::Empty));
@@ -2168,7 +2168,7 @@ mod tests {
 
     #[test]
     fn error_to_computing_via_invalidation() {
-        let mut node = AsyncSlotNode {
+        let mut node = AsyncComputedNode {
             state: AsyncSlotState::Error,
             value: None,
             error: Some(Arc::new(std::io::Error::other("test"))),
@@ -2413,13 +2413,13 @@ mod tests {
         let _ = ctx.get_async(&slot).await;
         {
             let inner = ctx.inner.lock();
-            if let Some(AsyncNode::Slot(s)) = inner.get_node(slot.id) {
+            if let Some(AsyncNode::Computed(s)) = inner.get_node(slot.id) {
                 assert!(s.dependencies.contains(&cell.id));
             }
         }
         {
             let inner = ctx.inner.lock();
-            if let Some(AsyncNode::Cell(c)) = inner.get_node(cell.id) {
+            if let Some(AsyncNode::Source(c)) = inner.get_node(cell.id) {
                 assert!(c.dependents.contains(&slot.id));
             }
         }
@@ -2443,7 +2443,7 @@ mod tests {
         assert_eq!(ctx.get_async(&slot).await, 1);
         {
             let inner = ctx.inner.lock();
-            if let Some(AsyncNode::Slot(s)) = inner.get_node(slot.id) {
+            if let Some(AsyncNode::Computed(s)) = inner.get_node(slot.id) {
                 assert!(s.dependencies.contains(&cell_a.id));
                 assert!(!s.dependencies.contains(&cell_b.id));
             }
@@ -2452,7 +2452,7 @@ mod tests {
         assert_eq!(ctx.get_async(&slot).await, 100);
         {
             let inner = ctx.inner.lock();
-            if let Some(AsyncNode::Slot(s)) = inner.get_node(slot.id) {
+            if let Some(AsyncNode::Computed(s)) = inner.get_node(slot.id) {
                 assert!(!s.dependencies.contains(&cell_a.id));
                 assert!(s.dependencies.contains(&cell_b.id));
             }
@@ -2630,7 +2630,7 @@ mod tests {
             }
             _ => panic!("recycled node should be B's effect"),
         }
-        if let Some(AsyncNode::Cell(c)) = inner.get_node(cell.id) {
+        if let Some(AsyncNode::Source(c)) = inner.get_node(cell.id) {
             assert!(
                 !c.dependents.contains(&a_id),
                 "`cell` must not gain a phantom dependent via the stale write",

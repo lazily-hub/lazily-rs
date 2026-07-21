@@ -28,7 +28,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 <!-- coverage-table:start -->
 | Feature | Rust | Python | Kotlin | JS | Dart | Zig | Go | C++ |
 | --------- | :----: | :------: | :------: | :--: | :----: | :---: | :--: | :---: |
-| Reactive graph — kernel handles `Source` / `Computed` / `Effect` + driven `Computed` (`computed().drive()`) / guarded computed cells / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Reactive graph — kernel handles `Source` / `Computed` / `Effect` + eager `Computed` (`computed().eager()`) / guarded computed cells / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Keyed-map materialization (`SlotMap`) — mint-on-access derived slots: transparency + deferral (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Thread-safe keyed map (`ThreadSafeSlotMap`) — `Send + Sync` + materialization confluence (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Async keyed map (`AsyncSlotMap`) — eventual transparency (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

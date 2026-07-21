@@ -410,13 +410,13 @@ pub(crate) struct ComputedNode {
     /// dependency cycles (a slot that reads itself directly or transitively)
     /// before the pull-based recompute walk overflows the stack.
     pub(crate) in_progress: bool,
-    /// `#lzcellkernel` — whether this formula is **driven** (eager): a puller
+    /// `#lzcellkernel` — whether this formula is **eager**: a puller
     /// effect keeps it materialized after every invalidation. Lands in the
     /// existing padding beside `dirty`/`force_recompute`/`in_progress`, so the
-    /// node does not grow. The driving effect's id lives in the `driven_by` side
-    /// table, keyed by this slot's id — off the node, since driven formulas are
+    /// node does not grow. The pulling effect's id lives in the `eager_by` side
+    /// table, keyed by this slot's id — off the node, since eager formulas are
     /// rare (the `EdgeIndex` precedent).
-    pub(crate) driven: bool,
+    pub(crate) eager: bool,
     /// #lzspecrevisionengine: last global revision at which this slot was
     /// verified clean. In revision mode, staleness is `verified_at < revision`
     /// (O(1) write — no dirty walk) rather than the `dirty` flag.
@@ -519,14 +519,14 @@ struct ContextInner {
     /// #lzspecrevisionengine: all effect node ids, for the revision-mode
     /// effect-flush scan (O(effects) per flush, not O(cone) per write).
     all_effect_ids: Vec<SlotId>,
-    /// `#lzcellkernel` — owner-keyed side table mapping a **driven** formula's
+    /// `#lzcellkernel` — owner-keyed side table mapping an **eager** formula's
     /// slot id to the id of the puller `Effect` that drives it. One entry per
-    /// driven formula, zero per lazy one (the `EdgeIndex` precedent: per-node
+    /// eager formula, zero per lazy one (the `EdgeIndex` precedent: per-node
     /// state for the common case, a side table for the rare one). MUST be
-    /// cleared when a formula is disposed or undriven — it is owner-keyed and
+    /// cleared when a formula is disposed or made lazy — it is owner-keyed and
     /// would otherwise alias a recycled id (the `recycled_id_inherits_nothing`
     /// hazard).
-    driven_by: HashMap<SlotId, SlotId>,
+    eager_by: HashMap<SlotId, SlotId>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
@@ -605,7 +605,7 @@ impl Context {
                 revision: 0,
                 revision_mode,
                 all_effect_ids: Vec::new(),
-                driven_by: HashMap::new(),
+                eager_by: HashMap::new(),
                 #[cfg(feature = "instrumentation")]
                 instrumentation: crate::instrumentation::InstrumentationCounters::default(),
             }),
@@ -844,8 +844,8 @@ impl Context {
     /// Unguarded (no `PartialEq` bound): every recompute propagates. Use
     /// [`memo`](Context::memo) for the guarded variant that suppresses
     /// equal-value propagation, and [`signal`](Context::signal) for the eager
-    /// (driven, guarded) construction. Lazy until
-    /// [`Computed::drive`](crate::Computed::drive) makes it eager.
+    /// (eager, guarded) construction. Lazy until
+    /// [`Computed::eager`](crate::Computed::eager) makes it eager.
     pub fn computed<T, F>(&self, compute: F) -> Computed<T>
     where
         T: 'static,
@@ -912,7 +912,7 @@ impl Context {
             dirty: false,
             force_recompute: false,
             in_progress: false,
-            driven: false,
+            eager: false,
             verified_at: 0,
         };
         self.insert_node(id, Node::Computed(node));
@@ -1246,15 +1246,15 @@ impl Context {
         Source::from_id(self.cell(value).id)
     }
 
-    /// `#lzcellkernel` — drive a formula (make it eager) by id. Idempotent: a
-    /// no-op if the formula is already driven. Attaches a puller effect that
+    /// `#lzcellkernel` — make a formula eager by id. Idempotent: a
+    /// no-op if the formula is already eager. Attaches a puller effect that
     /// re-materializes the formula after every invalidation and records it in the
-    /// `driven_by` side table. Non-formula ids are ignored.
-    pub(crate) fn drive_formula<T: 'static>(&self, id: SlotId) {
+    /// `eager_by` side table. Non-formula ids are ignored.
+    pub(crate) fn make_eager<T: 'static>(&self, id: SlotId) {
         {
             let inner = self.inner.borrow();
             match Self::get_node(&inner.nodes, id) {
-                Some(Node::Computed(slot)) if slot.driven => return,
+                Some(Node::Computed(slot)) if slot.eager => return,
                 Some(Node::Computed(_)) => {}
                 _ => return,
             }
@@ -1266,34 +1266,34 @@ impl Context {
         });
         let mut inner = self.inner.borrow_mut();
         if let Some(Node::Computed(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
-            slot.driven = true;
+            slot.eager = true;
         }
-        inner.driven_by.insert(id, effect.id);
+        inner.eager_by.insert(id, effect.id);
     }
 
-    /// `#lzcellkernel` — undrive a formula (revert to lazy): dispose its puller
-    /// effect, clear the driven bit, and remove its `driven_by` entry. No-op if
-    /// not driven. This is the reverse transition that replaces `dispose_signal`.
-    pub(crate) fn undrive_formula(&self, id: SlotId) {
+    /// `#lzcellkernel` — make a formula lazy (revert from eager): dispose its
+    /// puller effect, clear the eager bit, and remove its `eager_by` entry. No-op
+    /// if not eager. This is the reverse transition that replaces `dispose_signal`.
+    pub(crate) fn make_lazy(&self, id: SlotId) {
         let effect_id = {
             let mut inner = self.inner.borrow_mut();
             match Self::get_node_mut(&mut inner.nodes, id) {
-                Some(Node::Computed(slot)) if slot.driven => slot.driven = false,
+                Some(Node::Computed(slot)) if slot.eager => slot.eager = false,
                 _ => return,
             }
-            inner.driven_by.remove(&id)
+            inner.eager_by.remove(&id)
         };
         if let Some(effect_id) = effect_id {
             self.dispose_effect(&EffectHandle::new(effect_id));
         }
     }
 
-    /// `#lzcellkernel` — whether the formula at `id` is currently driven.
-    pub(crate) fn is_driven(&self, id: SlotId) -> bool {
+    /// `#lzcellkernel` — whether the formula at `id` is currently eager.
+    pub(crate) fn is_eager(&self, id: SlotId) -> bool {
         let inner = self.inner.borrow();
         matches!(
             Self::get_node(&inner.nodes, id),
-            Some(Node::Computed(slot)) if slot.driven
+            Some(Node::Computed(slot)) if slot.eager
         )
     }
 
@@ -1633,10 +1633,10 @@ impl Context {
     /// Reading a disposed node throws on the next recompute — the same contract
     /// as [`Context::dispose_effect`] and the JS binding's `disposeSlot`.
     pub fn dispose_slot<T>(&self, handle: &Computed<T>) {
-        // `#lzcellkernel` — disposing a driven formula tears down its puller
-        // first, so no poisoned effect is stranded and the `driven_by` side
+        // `#lzcellkernel` — disposing an eager formula tears down its puller
+        // first, so no poisoned effect is stranded and the `eager_by` side
         // table never aliases a recycled id.
-        self.undrive_formula(handle.id);
+        self.make_lazy(handle.id);
         let torn_down = {
             let mut inner = self.inner.borrow_mut();
             // Check the kind BEFORE taking: a stale handle whose id has been
@@ -2118,35 +2118,35 @@ impl Context {
         F: Fn(&Context) -> T + 'static,
     {
         // `#lzcellkernel` — the eager construction is a guarded computed cell
-        // that is then driven: `memo(f).drive()`. Retires the former two-node
+        // that is then made eager: `memo(f).eager()`. Retires the former two-node
         // `Signal` (memo slot + puller effect); the coalescing comes from the
         // scheduler, so a per-write puller cannot be built.
         let computed = self.memo(compute);
-        self.drive_formula::<T>(computed.id);
+        self.make_eager::<T>(computed.id);
         computed
     }
 
-    /// Read a driven formula's current value. Always returns a materialized
-    /// value. (Was `get_signal`; a driven formula reads with ordinary `get`.)
+    /// Read an eager formula's current value. Always returns a materialized
+    /// value. (Was `get_signal`; an eager formula reads with ordinary `get`.)
     pub fn get_signal<T: Clone + 'static>(&self, handle: &Computed<T>) -> T {
         self.get(handle)
     }
 
-    /// Read a driven formula's current value as `Rc<T>`, avoiding a deep clone.
+    /// Read an eager formula's current value as `Rc<T>`, avoiding a deep clone.
     pub fn get_signal_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
         self.get_rc(handle)
     }
 
-    /// Undrive a formula (revert to lazy). Stops eager recomputation; the backing
-    /// value remains readable and recomputes on next read. (Was `dispose_signal`;
-    /// now the `undrive` reverse transition.)
+    /// Make a formula lazy (revert from eager). Stops eager recomputation; the
+    /// backing value remains readable and recomputes on next read. (Was
+    /// `dispose_signal`; now the `lazy` reverse transition.)
     pub fn dispose_signal<T>(&self, handle: &Computed<T>) {
-        self.undrive_formula(handle.id);
+        self.make_lazy(handle.id);
     }
 
-    /// Check whether a formula is currently driven.
+    /// Check whether a formula is currently eager.
     pub fn is_signal_active<T>(&self, handle: &Computed<T>) -> bool {
-        self.is_driven(handle.id)
+        self.is_eager(handle.id)
     }
 
     // -- Clearing ----------------------------------------------------------
