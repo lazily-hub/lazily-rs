@@ -29,7 +29,7 @@ pub fn quiet<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
 
 mod basic {
     use super::*;
-    use lazily::{Computed, Context, Effect, Source, TeardownScope};
+    use lazily::{Compute, ComputeOps, Computed, Context, Effect, Source, TeardownScope};
 
     pub struct BasicModel {
         pub ctx: Context,
@@ -38,16 +38,16 @@ mod basic {
         poison: Poison,
     }
 
-    fn read_ref(ctx: &Context, node: Ref<Context>) -> Result<i64, ()> {
+    fn read_ref<C: ComputeOps>(ctx: &C, node: Ref<Context>) -> Result<i64, ()> {
         match node {
-            Ref::Cell(h) => quiet(|| ctx.get(&h)),
-            Ref::Slot(h) => quiet(|| ctx.get(&h)),
+            Ref::Cell(h) => quiet(|| h.get(ctx)),
+            Ref::Slot(h) => quiet(|| h.get(ctx)),
             Ref::Effect(_) => Err(()),
         }
     }
 
     /// A read from inside a callback: never unwinds, records the failure.
-    fn tracked(ctx: &Context, node: Ref<Context>, poison: &Poison) -> i64 {
+    fn tracked<C: ComputeOps>(ctx: &C, node: Ref<Context>, poison: &Poison) -> i64 {
         match read_ref(ctx, node) {
             Ok(v) => v,
             Err(()) => {
@@ -62,11 +62,11 @@ mod basic {
         offset: i64,
         poison: &Poison,
         computes: &Computes,
-    ) -> impl Fn(&Context) -> i64 + 'static {
+    ) -> impl Fn(&Compute) -> i64 + 'static {
         let reads = reads.to_vec();
         let poison = poison.clone();
         let computes = computes.clone();
-        move |c: &Context| {
+        move |c: &Compute| {
             // Counted here, inside the body the runtime invokes — see
             // `Computes`. Counting at the construction site instead would make
             // a lazy memo indistinguishable from an eager signal.
@@ -85,13 +85,13 @@ mod basic {
         runs: &Log,
         cleanups: &Log,
         poison: &Poison,
-    ) -> impl Fn(&Context) -> Box<dyn FnOnce()> + 'static {
+    ) -> impl Fn(&Compute) -> Box<dyn FnOnce()> + 'static {
         let reads = reads.to_vec();
         let name = name.to_owned();
         let runs = runs.clone();
         let cleanups = cleanups.clone();
         let poison = poison.clone();
-        move |c: &Context| {
+        move |c: &Compute| {
             for r in &reads {
                 tracked(c, *r, &poison);
             }
@@ -111,17 +111,19 @@ mod basic {
         target: Source<i64>,
         poison: &Poison,
         merges: &Merges,
-    ) -> impl Fn(&Context) + 'static {
+    ) -> impl Fn(&Compute) + 'static {
         let reads = reads.to_vec();
         let poison = poison.clone();
         let merges = merges.clone();
-        move |c: &Context| {
+        move |c: &Compute| {
             let mut acc = 0i64;
             for r in &reads {
                 acc += tracked(c, *r, &poison);
             }
             count_merge(&merges);
-            c.apply_merge::<i64, Sum>(&target, acc);
+            // The reads above are tracked (the effect owns the edge); the merge
+            // write is an argument, not a dependency — via the untracked escape.
+            c.untracked().apply_merge::<i64, Sum>(&target, acc);
         }
     }
 
@@ -145,8 +147,8 @@ mod basic {
     ///
     /// The external `set_cell(counter, 1)` moves off the fixed point and the
     /// loop diverges under `KeepLatest` — the step-2 exhaustion.
-    fn diverge_body(own: Source<i64>) -> impl Fn(&Context) + 'static {
-        move |c: &Context| {
+    fn diverge_body(own: Source<i64>) -> impl Fn(&Compute) + 'static {
+        move |c: &Compute| {
             let v = c.get(&own);
             let next = if v == 0 { 0 } else { v.wrapping_add(1) };
             c.set(&own, next);

@@ -131,7 +131,9 @@ fn dispose_during_flush_rung(width: usize) -> f64 {
                     let victim_a: Vec<_> = all_inner.borrow().clone();
                     for (j, victim) in victim_a.iter().enumerate() {
                         if j != i {
-                            ctx.dispose_effect(victim);
+                            // Teardown from inside a compute uses the explicit
+                            // untracked escape to reach the owning `Context`.
+                            ctx.untracked().dispose_effect(victim);
                         }
                     }
                 }

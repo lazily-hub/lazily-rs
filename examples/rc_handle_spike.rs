@@ -23,7 +23,7 @@ use std::cell::Cell as StdCell;
 use std::rc::{Rc, Weak};
 use std::time::Instant;
 
-use lazily::{Computed, Context, Source};
+use lazily::{Compute, Computed, Context, Source};
 
 // Counts disposals so the tests can assert on them.
 thread_local! {
@@ -68,7 +68,7 @@ impl<T> RcSlot<T> {
 fn rc_slot<T, F>(ctx: &Rc<Context>, compute: F) -> RcSlot<T>
 where
     T: Clone + PartialEq + 'static,
-    F: Fn(&Context) -> T + 'static,
+    F: Fn(&Compute) -> T + 'static,
 {
     RcSlot {
         inner: Rc::new(RcSlotInner {

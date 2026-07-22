@@ -82,7 +82,9 @@ impl CounterActor {
                 // next empty → non-empty push reruns us. Drain fully to empty so
                 // one wake handles a whole batch of messages.
                 while !mailbox.is_empty(ctx) {
-                    let Ok(request) = mailbox.try_pop(ctx) else {
+                    // `is_empty` above is a tracked read (subscribes the effect);
+                    // the pop/push are writes, reached via the untracked escape.
+                    let Ok(request) = mailbox.try_pop(ctx.untracked()) else {
                         break;
                     };
                     match request {
@@ -95,7 +97,7 @@ impl CounterActor {
                                 total: total.get(),
                             };
                             // Outbox is unbounded; a push only fails if closed.
-                            let _ = outbox.try_push(ctx, reply);
+                            let _ = outbox.try_push(ctx.untracked(), reply);
                         }
                     }
                 }
