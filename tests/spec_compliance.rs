@@ -104,13 +104,18 @@ mod context {
         assert_eq!(ctx.get(&tripled), 6);
     }
 
+    // #lzrsgetarc: these cases pin the implementation to the shared-read
+    // parity proved by Reactive.readShared_eq_readCell,
+    // Reactive.trackedSharedRead_eq_trackedRead, and
+    // Reactive.trackedSharedRead_registers_edge in lazily-formal.
     #[test]
-    fn get_rc_returns_reference_counted_slot_value() {
+    fn get_rc_returns_reference_counted_computed_value() {
         let ctx = Context::new();
-        let slot = ctx.slot(|_| "hello".to_string());
-        let rc1 = ctx.get_rc(&slot);
-        let rc2 = ctx.get_rc(&slot);
+        let computed = ctx.computed(|_| "hello".to_string());
+        let rc1 = ctx.get_rc(&computed);
+        let rc2 = ctx.get_rc(&computed);
         assert_eq!(&*rc1, "hello");
+        assert_eq!(*rc1, ctx.get(&computed));
         assert_eq!(&*rc2, "hello");
         assert!(
             Rc::ptr_eq(&rc1, &rc2),
@@ -130,6 +135,7 @@ mod context {
         let rc1 = ctx.get_rc(&cell);
         let rc2 = ctx.get_rc(&cell);
         assert_eq!(*rc1, [42u64; 4]);
+        assert_eq!(*rc1, ctx.get(&cell));
         assert!(
             Rc::ptr_eq(&rc1, &rc2),
             "both Rc should point to the same allocation"
@@ -137,13 +143,13 @@ mod context {
     }
 
     #[test]
-    fn get_rc_avoids_clone_for_non_clone_type() {
+    fn get_rc_avoids_clone_for_non_clone_computed() {
         #[derive(Debug, PartialEq)]
         struct NoClone(i32);
 
         let ctx = Context::new();
-        let slot = ctx.slot(|_| NoClone(99));
-        let rc = ctx.get_rc(&slot);
+        let computed = ctx.computed(|_| NoClone(99));
+        let rc = ctx.get_rc(&computed);
         assert_eq!(rc.0, 99);
     }
 
@@ -159,11 +165,11 @@ mod context {
     }
 
     #[test]
-    fn get_rc_tracks_dependencies() {
+    fn get_rc_computed_tracks_dependencies() {
         let ctx = Context::new();
         let a = ctx.source(1i32);
-        let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
-        let c = ctx.slot(move |ctx| *ctx.get_rc(&b) + 100);
+        let b = ctx.computed(move |ctx| ctx.get(&a) + 10);
+        let c = ctx.computed(move |ctx| *ctx.get_rc(&b) + 100);
 
         assert_eq!(*ctx.get_rc(&c), 111);
         ctx.set(&a, 2);
@@ -174,7 +180,7 @@ mod context {
     fn get_rc_source_tracks_dependencies() {
         let ctx = Context::new();
         let a = ctx.source(1i32);
-        let b = ctx.slot(move |ctx| *ctx.get_rc(&a) + 10);
+        let b = ctx.computed(move |ctx| *ctx.get_rc(&a) + 10);
 
         assert_eq!(*ctx.get_rc(&b), 11);
         ctx.set(&a, 5);
