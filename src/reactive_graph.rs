@@ -93,7 +93,7 @@ pub trait Teardown {
 ///
 /// let ctx = Context::new();
 /// let topic = SyncReactiveGraph::cell(&ctx, 1i64);
-/// let derived = SyncReactiveGraph::computed(&ctx, move |c: &Context| c.get(&topic) + 1);
+/// let derived = SyncReactiveGraph::computed(&ctx, move |c| c.get(&topic) + 1);
 /// assert_eq!(SyncReactiveGraph::get(&ctx, &derived), 2);
 /// assert_eq!(leaked_edges(&ctx, &topic), 1);
 ///
@@ -170,6 +170,19 @@ impl<T: ReactiveGraph + Send + Sync + 'static> ThreadSafeReactiveGraph for T {}
 /// own. The cost is confined to generic callers that construct or read; both
 /// contexts' inherent methods keep their exact original bounds.
 pub trait SyncReactiveGraph: ReactiveGraph {
+    /// The per-recompute **compute view** handed to `computed`/`effect`
+    /// closures (`#lzcellkernel`). This is the associated type that lets those
+    /// closures receive a *value-threaded* view instead of relying on an ambient
+    /// thread-local: [`Context`](crate::Context) projects its fortified
+    /// [`Compute`](crate::Compute), whose recomputing-node id travels as a value,
+    /// while [`ThreadSafeContext`](crate::ThreadSafeContext) — which keeps its own
+    /// ambient engine — projects itself. The GAT lifetime `'a` binds the view to
+    /// the recompute call; `Context::Compute<'a>` borrows the context for `'a`,
+    /// so the `where Self: 'a` bound is load-bearing.
+    type Compute<'a>
+    where
+        Self: 'a;
+
     /// Create a source cell.
     fn cell<T>(&self, value: T) -> Self::Source<T>
     where
@@ -190,7 +203,7 @@ pub trait SyncReactiveGraph: ReactiveGraph {
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
         T: PartialEq + Send + Sync + 'static,
-        F: Fn(&Self) -> T + Send + Sync + 'static;
+        F: Fn(&Self::Compute<'_>) -> T + Send + Sync + 'static;
 
     /// Read a derived slot, computing it if needed.
     fn get<T>(&self, handle: &Self::Computed<T>) -> T
@@ -205,7 +218,7 @@ pub trait SyncReactiveGraph: ReactiveGraph {
     /// `FnOnce() + ... + 'static`, so one bound satisfies both.
     fn effect<F, C>(&self, run: F) -> Self::Effect
     where
-        F: Fn(&Self) -> C + Send + Sync + 'static,
+        F: Fn(&Self::Compute<'_>) -> C + Send + Sync + 'static,
         C: FnOnce() + Send + Sync + 'static;
 }
 

@@ -3733,6 +3733,12 @@ impl crate::reactive_graph::ReactiveGraph for ThreadSafeContext {
 }
 
 impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
+    // `ThreadSafeContext` keeps its own ambient tracking engine
+    // (`THREAD_SAFE_TRACKING_STACK`), so its per-recompute view is the context
+    // itself: `computed`/`effect` closures receive `&ThreadSafeContext`, exactly
+    // as its inherent API expects. The GAT lifetime is unused here.
+    type Compute<'a> = ThreadSafeContext;
+
     fn cell<T>(&self, value: T) -> Self::Source<T>
     where
         T: PartialEq + Send + Sync + 'static,
@@ -3754,7 +3760,7 @@ impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
         T: PartialEq + Send + Sync + 'static,
-        F: Fn(&Self) -> T + Send + Sync + 'static,
+        F: Fn(&Self::Compute<'_>) -> T + Send + Sync + 'static,
     {
         ThreadSafeContext::computed(self, compute)
     }
@@ -3766,7 +3772,7 @@ impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
     }
     fn effect<F, C>(&self, run: F) -> Self::Effect
     where
-        F: Fn(&Self) -> C + Send + Sync + 'static,
+        F: Fn(&Self::Compute<'_>) -> C + Send + Sync + 'static,
         C: FnOnce() + Send + Sync + 'static,
     {
         ThreadSafeContext::effect(self, run)

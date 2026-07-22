@@ -358,59 +358,18 @@ impl AnyValue {
 // Dependency discovery (`#lzcellkernel`)
 // ---------------------------------------------------------------------------
 //
-// The **primary** surface threads the recomputing node id as a *value* through
-// the fortified [`Compute`] view handed to every compute/effect closure (see
-// `ComputeOps` / `Compute`): a tracked read registers against `Compute::slot_id`
-// and a bare `&Context` read registers nothing. The primary recompute/effect
-// sites push **no** thread-local frame, so `Compute::untracked()` is genuinely
-// untracked and the whole class of stranded-frame bugs is structurally gone.
+// Dependency tracking is threaded **entirely as a value**: the recomputing node
+// id travels through the fortified [`Compute`] view handed to every
+// compute/effect closure (see `ComputeOps` / `Compute`). A tracked read
+// registers against `Compute::slot_id`; a bare `&Context` read registers
+// nothing and is genuinely untracked. There is **no** ambient thread-local
+// tracking frame — the whole class of stranded-frame bugs is structurally gone,
+// and the last compatibility bridge (the `SyncReactiveGraph` capability trait's
+// compute/effect closures) is retired now that the trait threads a value-carried
+// `Self::Compute<'_>` view via a GAT (`src/reactive_graph.rs`).
 //
-// The thread-local frame below survives as a **narrow compatibility bridge** for
-// exactly one caller: the `SyncReactiveGraph` capability trait's `Fn(&Self)`
-// compute/effect closures (`src/reactive_graph.rs`), whose closure shape is
-// shared with the still-thread-local `ThreadSafeContext` / `AsyncContext` and so
-// cannot yet be migrated to `&Compute` without a cross-context GAT change. Those
-// impls (`SyncReactiveGraph for Context`) adapt an old-style `Fn(&Context)`
-// closure by pushing a frame for its duration; bare `&Context` reads made inside
-// it then attribute to the recomputing node via `current_tracking_frame`. No
-// other path consults it — it is vestigial for the entire public cell/kernel
-// API.
-
-thread_local! {
-    static TRACKING_STACK: RefCell<Vec<SlotId>> = const { RefCell::new(Vec::new()) };
-}
-
-fn push_tracking_frame(id: SlotId) {
-    TRACKING_STACK.with(|stack| stack.borrow_mut().push(id));
-}
-
-fn pop_tracking_frame() {
-    TRACKING_STACK.with(|stack| stack.borrow_mut().pop());
-}
-
-/// RAII guard around a bridge tracking frame (see the module note above). The
-/// pop runs on the unwind path too, so a panic out of a bridged `Fn(&Context)`
-/// closure cannot strand the frame.
-struct TrackingFrame;
-
-impl TrackingFrame {
-    fn push(id: SlotId) -> Self {
-        push_tracking_frame(id);
-        Self
-    }
-}
-
-impl Drop for TrackingFrame {
-    fn drop(&mut self) {
-        pop_tracking_frame();
-    }
-}
-
-/// The id of the node whose bridged `Fn(&Context)` closure is currently running,
-/// if any. `None` on the primary [`Compute`]-threaded path and at top level.
-fn current_tracking_frame() -> Option<SlotId> {
-    TRACKING_STACK.with(|stack| stack.borrow().last().copied())
-}
+// `ThreadSafeContext` / `AsyncContext` keep their *own* ambient engines; this
+// removal is confined to the single-threaded `Context`.
 
 // ---------------------------------------------------------------------------
 // Internal node kinds stored inside Context
@@ -1005,12 +964,8 @@ impl Context {
     /// Returns a reference-counted pointer to the stored value. Use this when
     /// you only need to read the value without owning a separate copy.
     pub fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
-        // Primary tracked reads go through `Compute::get_rc` (value-threaded).
-        // A bare `&Context` read tracks only under an active capability-trait
-        // bridge frame (module note); otherwise it is untracked.
-        if let Some(parent_id) = current_tracking_frame() {
-            self.register_dependency(handle.id, parent_id);
-        }
+        // A bare `&Context` read is untracked; tracked reads go through
+        // `Compute::get_rc` (value-threaded), which registers its own edge.
         self.get_rc_untracked(handle)
     }
 
@@ -1046,11 +1001,7 @@ impl Context {
     /// Internal: get a slot value by id, performing computation if unset and
     /// registering dependency tracking.
     fn get_slot<T: Clone + 'static>(&self, id: SlotId) -> T {
-        // Tracks only under an active capability-trait bridge frame (module
-        // note); the primary path tracks via `Compute`, not here.
-        if let Some(parent_id) = current_tracking_frame() {
-            self.register_dependency(id, parent_id);
-        }
+        // A bare `&Context` read is untracked; the tracking path is `Compute`.
         self.get_slot_untracked(id)
     }
 
@@ -1273,11 +1224,8 @@ impl Context {
 
     /// Get the value of a cell as `Rc<T>`, avoiding a deep clone.
     pub fn get_cell_rc<T: 'static>(&self, handle: &Source<T>) -> Rc<T> {
-        // Tracks only under an active capability-trait bridge frame (module
-        // note); the primary path tracks via `Compute`, not here.
-        if let Some(parent_id) = current_tracking_frame() {
-            self.register_dependency(handle.id, parent_id);
-        }
+        // A bare `&Context` read is untracked; the tracking path is
+        // `Compute::get_cell_rc`, which registers its own edge.
         let inner = self.inner.borrow();
         if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, handle.id) {
             assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
@@ -1292,12 +1240,9 @@ impl Context {
     /// read directly. Registers a dependency when called inside a reactive
     /// computation. Backs `Source::get` / `Computed::get` uniformly across kinds.
     pub(crate) fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T {
-        // Tracks only under an active capability-trait bridge frame (module
-        // note); the primary path tracks via `Compute::read_value`, which
-        // registers against its threaded node id and calls the untracked base.
-        if let Some(parent_id) = current_tracking_frame() {
-            self.register_dependency(id, parent_id);
-        }
+        // A bare `&Context` read is untracked; the primary path tracks via
+        // `Compute::read_value`, which registers against its threaded node id and
+        // calls the untracked base.
         self.read_value_untracked(id)
     }
 
@@ -2741,6 +2686,11 @@ impl crate::reactive_graph::ReactiveGraph for Context {
 }
 
 impl crate::reactive_graph::SyncReactiveGraph for Context {
+    // The value-threaded per-recompute view (`#lzcellkernel`): the capability
+    // trait now hands its `computed`/`effect` closures a `&Compute` directly, so
+    // there is no ambient thread-local frame to bridge.
+    type Compute<'a> = Compute<'a>;
+
     fn cell<T>(&self, value: T) -> Self::Source<T>
     where
         T: PartialEq + Send + Sync + 'static,
@@ -2762,18 +2712,13 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
         T: PartialEq + Send + Sync + 'static,
-        F: Fn(&Self) -> T + Send + Sync + 'static,
+        F: Fn(&Self::Compute<'_>) -> T + Send + Sync + 'static,
     {
-        // Bridge (module note): this capability trait hands an old-style
-        // `Fn(&Context)` closure, a shape shared with the still-thread-local
-        // `ThreadSafeContext` / `AsyncContext`. Adapt it to the primary
-        // `Fn(&Compute)` surface by pushing a tracking frame for its duration so
-        // its bare `&Context` reads attribute to this node. The primary
-        // `Context::computed` / `Compute` API never pushes a frame.
-        Context::computed(self, move |cx: &Compute| {
-            let _frame = TrackingFrame::push(cx.slot_id());
-            compute(cx.untracked())
-        })
+        // Value-threaded (`#lzcellkernel`): the closure receives the fortified
+        // `&Compute` view directly, so its tracked reads attribute to the
+        // recomputing node with no ambient frame. The old thread-local bridge is
+        // gone.
+        Context::computed(self, compute)
     }
     fn get<T>(&self, handle: &Self::Computed<T>) -> T
     where
@@ -2783,14 +2728,11 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
     }
     fn effect<F, C>(&self, run: F) -> Self::Effect
     where
-        F: Fn(&Self) -> C + Send + Sync + 'static,
+        F: Fn(&Self::Compute<'_>) -> C + Send + Sync + 'static,
         C: FnOnce() + Send + Sync + 'static,
     {
-        // Same bridge as `computed` above.
-        Context::effect(self, move |cx: &Compute| {
-            let _frame = TrackingFrame::push(cx.slot_id());
-            run(cx.untracked())
-        })
+        // Same value-threaded view as `computed` above.
+        Context::effect(self, run)
     }
 }
 
@@ -2827,11 +2769,8 @@ impl<T: Clone + 'static> Read<Context> for Computed<T> {
 impl<T: Clone + 'static, M> Read<Context> for Source<T, M> {
     type Output = T;
     fn read(&self, ctx: &Context) -> T {
-        // Tracks only under an active capability-trait bridge frame (module
-        // note); the primary path tracks via `Read<Compute>`.
-        if let Some(parent_id) = current_tracking_frame() {
-            ctx.register_dependency(self.id, parent_id);
-        }
+        // A bare `&Context` read is untracked; the primary path tracks via
+        // `Read<Compute>`.
         ctx.read_source_untracked(self.id)
     }
 }
@@ -2941,8 +2880,8 @@ impl<'a> Compute<'a> {
     /// recompute's node. The `Compute`-side of [`Context::get_cell_rc`].
     pub fn get_cell_rc<T: 'static>(&self, handle: &Source<T>) -> Rc<T> {
         self.ctx.register_dependency(handle.id, self.slot_id);
-        // No bridge frame is ever active on the primary `Compute` path, so the
-        // delegate registers nothing further.
+        // The `&Context` delegate is untracked, so this registers exactly one
+        // edge — against this recompute's node.
         self.ctx.get_cell_rc(handle)
     }
 
@@ -3178,7 +3117,7 @@ impl ComputeOps for Compute<'_> {
     fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T {
         self.ctx.register_dependency(id, self.slot_id);
         // Untracked base: the edge is already threaded via `slot_id` above, so
-        // never consult the bridge frame here (would double-register).
+        // the delegate must not register again (would double-register).
         self.ctx.read_value_untracked::<T>(id)
     }
 
