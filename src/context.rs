@@ -829,7 +829,17 @@ impl Context {
 
     // -- Slot API ----------------------------------------------------------
 
-    /// Create a new lazily-computed slot.
+    /// Create a **pass-through** computed cell — a derived value with **no
+    /// guard** (`#lzcellkernel`).
+    ///
+    /// Every recompute propagates downstream (no equality suppression). Use it
+    /// for a `T` that has no cheap equality and that you're fine re-firing (a
+    /// value without `PartialEq`, or one where a compare would cost more than a
+    /// downstream recompute). When you *do* want change-suppression, prefer
+    /// [`computed`](Self::computed) (natural equality) or
+    /// [`computed_ripple_when`](Self::computed_ripple_when) (custom change predicate).
+    /// `T` needs no `PartialEq` bound, which is why this is the escape for
+    /// non-equatable derived values.
     pub fn slot<T, F>(&self, compute: F) -> Computed<T>
     where
         T: 'static,
@@ -860,6 +870,46 @@ impl Context {
                 let old = unsafe { old.as_t_ref_unchecked::<T>() };
                 let new = unsafe { new.as_t_ref_unchecked::<T>() };
                 old == new
+            })),
+        )
+    }
+
+    /// Create a **guarded computed cell** with an explicit change predicate
+    /// (`#lzcellkernel`).
+    ///
+    /// Like [`computed`](Self::computed), but propagation is gated by
+    /// `changed(old, new)` instead of the value's natural `PartialEq`:
+    /// `changed` returns `true` to **propagate** the recompute downstream, and
+    /// `false` to **suppress** it (treat it as "no meaningful change"). So
+    /// `computed(f)` is exactly `computed_ripple_when(f, |o, n| o != n)`, and
+    /// [`slot`](Self::slot) is `computed_ripple_when(f, |_, _| true)` (always
+    /// propagate).
+    ///
+    /// Use it for a **custom significance policy** — dedup a large value by a
+    /// version/hash field, epsilon float compare, hysteresis, a monotonic gate,
+    /// or "propagate every N" when the counter lives in the value — or for a
+    /// `T` that has no `PartialEq`.
+    ///
+    /// The value is **always computed** (the predicate needs `new`); `when`
+    /// gates only the downstream cascade, not the computation. `changed` MUST
+    /// be a pure function of `(old, new)` — reading value-carried state
+    /// (version/counter/sequence) is fine and stays deterministic; capturing
+    /// external mutable state is not (it keys off recompute/read frequency
+    /// under laziness and breaks determinism).
+    pub fn computed_ripple_when<T, F, C>(&self, compute: F, changed: C) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Context) -> T + 'static,
+        C: Fn(&T, &T) -> bool + 'static,
+    {
+        self.slot_with_equals(
+            compute,
+            // Internal engine guards on equality (true = equal = suppress);
+            // `changed` is its negation (true = propagate).
+            Some(Box::new(move |old: &AnyValue, new: &AnyValue| {
+                let old = unsafe { old.as_t_ref_unchecked::<T>() };
+                let new = unsafe { new.as_t_ref_unchecked::<T>() };
+                !changed(old, new)
             })),
         )
     }
