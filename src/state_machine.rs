@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use crate::Context;
 #[cfg(feature = "async")]
 use crate::async_context::{
-    AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncEffectHandle, AsyncSignalHandle,
+    AsyncComputeContext, AsyncContext, AsyncEffectHandle, AsyncSignalHandle, AsyncSource,
 };
 use crate::cell::Computed;
 use crate::cell::Source;
@@ -85,7 +85,7 @@ where
         F: Fn(&S, &E) -> Option<S> + 'static,
     {
         Self {
-            state: ctx.cell(initial),
+            state: ctx.source(initial),
             transition: Rc::new(transition),
         }
     }
@@ -238,7 +238,7 @@ where
         F: Fn(&S, &E) -> Option<S> + Send + Sync + 'static,
     {
         Self {
-            state: ctx.cell(initial),
+            state: ctx.source(initial),
             transition: Arc::new(transition),
         }
     }
@@ -320,7 +320,7 @@ where
 /// A finite state machine backed by a reactive [`AsyncContext`].
 ///
 /// This is the async (Tokio) counterpart to [`StateMachine`]. The state lives
-/// in an [`AsyncCellHandle<S>`]; because cells are the synchronous input layer
+/// in an [`AsyncSource<S>`]; because cells are the synchronous input layer
 /// of [`AsyncContext`], [`AsyncStateMachine::send`] and
 /// [`AsyncStateMachine::state`] are synchronous. Reactive observers
 /// ([`AsyncStateMachine::on_transition`], [`AsyncStateMachine::state_is`]) use
@@ -354,7 +354,7 @@ where
     S: PartialEq + Clone + Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    state: AsyncCellHandle<S>,
+    state: AsyncSource<S>,
     transition: Arc<ThreadSafeTransitionFn<S, E>>,
 }
 
@@ -390,7 +390,7 @@ where
         F: Fn(&S, &E) -> Option<S> + Send + Sync + 'static,
     {
         Self {
-            state: ctx.cell(initial),
+            state: ctx.source(initial),
             transition: Arc::new(transition),
         }
     }
@@ -434,7 +434,7 @@ where
     /// Any `ctx.computed_async`, `ctx.signal_async`, or
     /// `ctx.effect_async` that reads this handle will automatically recompute
     /// or rerun when the machine transitions to a different state.
-    pub fn state_handle(&self) -> AsyncCellHandle<S> {
+    pub fn state_handle(&self) -> AsyncSource<S> {
         self.state
     }
 

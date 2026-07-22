@@ -152,7 +152,7 @@ pub fn dependencies_of<G: ReactiveGraph>(graph: &G, node: Ref<G>) -> usize {
 /// Nodes owned by a teardown scope, created through it rather than through the
 /// context directly.
 pub trait ScopeModel<M: GraphModel> {
-    fn cell(&self, value: i64) -> <M::Graph as ReactiveGraph>::Source<i64>;
+    fn source(&self, value: i64) -> <M::Graph as ReactiveGraph>::Source<i64>;
     fn computed(
         &self,
         reads: &[Ref<M::Graph>],
@@ -212,7 +212,7 @@ pub trait GraphModel: Sized {
     /// The underlying graph, for the trait-generic structural operations.
     fn graph(&self) -> &Self::Graph;
 
-    fn cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::Source<i64>;
+    fn source(&self, value: i64) -> <Self::Graph as ReactiveGraph>::Source<i64>;
     fn computed(
         &self,
         reads: &[Ref<Self::Graph>],
@@ -245,7 +245,7 @@ pub trait GraphModel: Sized {
     /// [`merge`](Self::merge) / [`feed_effect`](Self::feed_effect) fold into it
     /// under `Sum`. The corpus only ever uses the `Sum` policy here.
     fn merge_cell(&self, value: i64) -> <Self::Graph as ReactiveGraph>::Source<i64> {
-        self.cell(value)
+        self.source(value)
     }
 
     /// Fold `op` into a merge cell under `Sum` (an explicit `merge()` call), then

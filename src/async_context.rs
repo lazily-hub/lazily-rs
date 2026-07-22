@@ -375,15 +375,15 @@ pub type Window1Hook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> 
 
 // The async handles address nodes in the same way the sync ones do, so they join
 // the same sealed `GraphNode` trait rather than growing a parallel accessor set.
-impl<T> crate::context::sealed::Sealed for AsyncSlotHandle<T> {}
-impl<T> GraphNode for AsyncSlotHandle<T> {
+impl<T> crate::context::sealed::Sealed for AsyncComputed<T> {}
+impl<T> GraphNode for AsyncComputed<T> {
     fn node_id(&self) -> SlotId {
         self.id
     }
 }
 
-impl<T> crate::context::sealed::Sealed for AsyncCellHandle<T> {}
-impl<T> GraphNode for AsyncCellHandle<T> {
+impl<T> crate::context::sealed::Sealed for AsyncSource<T> {}
+impl<T> GraphNode for AsyncSource<T> {
     fn node_id(&self) -> SlotId {
         self.id
     }
@@ -410,7 +410,7 @@ pub struct AsyncTeardownScope {
 
 impl AsyncTeardownScope {
     /// Create a guarded async computed cell owned by this scope.
-    pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
+    pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncComputed<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
         F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
@@ -422,13 +422,22 @@ impl AsyncTeardownScope {
     }
 
     /// Create a source cell owned by this scope.
-    pub fn cell<T>(&self, value: T) -> AsyncCellHandle<T>
+    pub fn source<T>(&self, value: T) -> AsyncSource<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
-        let handle = self.ctx.cell(value);
+        let handle = self.ctx.source(value);
         self.owned.lock().push(handle.id);
         handle
+    }
+
+    /// Compatibility constructor for the pre-Cell-kernel API.
+    #[deprecated(note = "use `AsyncTeardownScope::source`")]
+    pub fn cell<T>(&self, value: T) -> AsyncSource<T>
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+    {
+        self.source(value)
     }
 
     /// Register an async effect owned by this scope.
@@ -487,29 +496,37 @@ pub struct AsyncContext {
     window1_resolved_hits: AtomicU64,
 }
 
-pub struct AsyncSlotHandle<T> {
+pub struct AsyncComputed<T> {
     pub(crate) id: SlotId,
     pub(crate) _marker: PhantomData<T>,
 }
 
-impl<T> Clone for AsyncSlotHandle<T> {
+impl<T> Clone for AsyncComputed<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T> Copy for AsyncSlotHandle<T> {}
+impl<T> Copy for AsyncComputed<T> {}
 
-pub struct AsyncCellHandle<T> {
+/// Compatibility name for [`AsyncComputed`].
+#[deprecated(note = "use `AsyncComputed`")]
+pub type AsyncSlotHandle<T> = AsyncComputed<T>;
+
+pub struct AsyncSource<T> {
     pub(crate) id: SlotId,
     pub(crate) _marker: PhantomData<T>,
 }
 
-impl<T> Clone for AsyncCellHandle<T> {
+impl<T> Clone for AsyncSource<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T> Copy for AsyncCellHandle<T> {}
+impl<T> Copy for AsyncSource<T> {}
+
+/// Compatibility name for [`AsyncSource`].
+#[deprecated(note = "use `AsyncSource`")]
+pub type AsyncCellHandle<T> = AsyncSource<T>;
 
 pub struct AsyncEffectHandle {
     pub(crate) id: SlotId,
@@ -532,7 +549,7 @@ impl Copy for AsyncEffectHandle {}
 /// [`AsyncContext::signal_async`].
 pub struct AsyncSignalHandle<T> {
     /// Memoized backing slot that holds the derived value.
-    pub(crate) slot: AsyncSlotHandle<T>,
+    pub(crate) slot: AsyncComputed<T>,
     /// Puller effect that keeps `slot` eagerly materialized.
     pub(crate) effect: AsyncEffectHandle,
 }
@@ -591,7 +608,7 @@ pub struct AsyncComputeContext {
 
 impl AsyncComputeContext {
     #[deprecated(note = "use `AsyncComputeContext::get` — the unified cell read (#lzcellkernel)")]
-    pub fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T
+    pub fn get_cell<T>(&self, handle: &AsyncSource<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -604,7 +621,7 @@ impl AsyncComputeContext {
         handle.read(self)
     }
 
-    fn read_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T
+    fn read_source<T>(&self, handle: &AsyncSource<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -620,7 +637,7 @@ impl AsyncComputeContext {
                 .downcast_ref::<T>()
                 .expect("type mismatch in async compute get")
                 .clone(),
-            _ => panic!("AsyncCellHandle does not point to a Cell node"),
+            _ => panic!("AsyncSource does not point to a Cell node"),
         }
     }
 
@@ -643,7 +660,7 @@ impl AsyncComputeContext {
     /// Write a cell from inside a compute/effect callback (untracked — a write
     /// is an argument, never a dependency, §9.2.3).
     #[deprecated(note = "use `AsyncComputeContext::set` — the unified cell write (#lzcellkernel)")]
-    pub fn set_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)
+    pub fn set_cell<T>(&self, handle: &AsyncSource<T>, value: T)
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
@@ -657,7 +674,7 @@ impl AsyncComputeContext {
         handle.write(self, value)
     }
 
-    fn write_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)
+    fn write_source<T>(&self, handle: &AsyncSource<T>, value: T)
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
@@ -669,7 +686,7 @@ impl AsyncComputeContext {
     /// supported shape for feeding a merge cell from an async effect (§9.1): the
     /// effect reads its upstream through the tracking context, then folds the
     /// result in synchronously here, and the merge cell acquires no edge.
-    pub fn apply_merge<T, M>(&self, handle: &AsyncCellHandle<T>, op: T)
+    pub fn apply_merge<T, M>(&self, handle: &AsyncSource<T>, op: T)
     where
         T: PartialEq + Clone + Send + Sync + 'static,
         M: MergePolicy<T>,
@@ -677,10 +694,7 @@ impl AsyncComputeContext {
         self.owning_context().apply_merge::<T, M>(handle, op);
     }
 
-    pub fn get_async<T>(
-        &self,
-        handle: &AsyncSlotHandle<T>,
-    ) -> impl Future<Output = T> + Send + use<T>
+    pub fn get_async<T>(&self, handle: &AsyncComputed<T>) -> impl Future<Output = T> + Send + use<T>
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -842,7 +856,8 @@ impl AsyncContext {
         self.window1_resolved_hits.load(Ordering::Relaxed)
     }
 
-    pub fn cell<T>(&self, value: T) -> AsyncCellHandle<T>
+    /// Create a mutable async source.
+    pub fn source<T>(&self, value: T) -> AsyncSource<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
@@ -856,21 +871,30 @@ impl AsyncContext {
             };
             inner.insert_node(id, AsyncNode::Source(node));
         }
-        AsyncCellHandle {
+        AsyncSource {
             id,
             _marker: PhantomData,
         }
     }
 
+    /// Compatibility constructor for the pre-Cell-kernel API.
+    #[deprecated(note = "use `AsyncContext::source`")]
+    pub fn cell<T>(&self, value: T) -> AsyncSource<T>
+    where
+        T: PartialEq + Clone + Send + Sync + 'static,
+    {
+        self.source(value)
+    }
+
     #[deprecated(note = "use `AsyncContext::get` — the unified cell read (#lzcellkernel)")]
-    pub fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T
+    pub fn get_cell<T>(&self, handle: &AsyncSource<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
         self.get(handle)
     }
 
-    fn read_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T
+    fn read_source<T>(&self, handle: &AsyncSource<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -882,19 +906,19 @@ impl AsyncContext {
                 .downcast_ref::<T>()
                 .expect("type mismatch in AsyncContext::get")
                 .clone(),
-            _ => panic!("AsyncCellHandle does not point to a Cell node"),
+            _ => panic!("AsyncSource does not point to a Cell node"),
         }
     }
 
     #[deprecated(note = "use `AsyncContext::set` — the unified cell write (#lzcellkernel)")]
-    pub fn set_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)
+    pub fn set_cell<T>(&self, handle: &AsyncSource<T>, value: T)
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
-        self.write_cell(handle, value)
+        self.write_source(handle, value)
     }
 
-    fn write_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)
+    fn write_source<T>(&self, handle: &AsyncSource<T>, value: T)
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
@@ -922,7 +946,7 @@ impl AsyncContext {
                         return;
                     }
                 }
-                _ => panic!("AsyncCellHandle does not point to a Cell node"),
+                _ => panic!("AsyncSource does not point to a Cell node"),
             }
         }
         self.invalidate_frontier_async(&dependents);
@@ -938,7 +962,7 @@ impl AsyncContext {
     /// through [`set_cell`](Self::set_cell). §7's "merge folds synchronously
     /// inside a batch" holds verbatim; only the timing of a *feeding effect*
     /// differs, and that lives in the effect, not the fold.
-    pub fn apply_merge<T, M>(&self, handle: &AsyncCellHandle<T>, op: T)
+    pub fn apply_merge<T, M>(&self, handle: &AsyncSource<T>, op: T)
     where
         T: PartialEq + Clone + Send + Sync + 'static,
         M: MergePolicy<T>,
@@ -1101,7 +1125,7 @@ impl AsyncContext {
     /// recompute suppresses downstream invalidation, so `T: PartialEq`. This is
     /// the primary async derived constructor; the former `memo_async`
     /// constructor is retired because `computed_async` now *is* the guarded form.
-    pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>
+    pub fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncComputed<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
         F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
@@ -1122,7 +1146,7 @@ impl AsyncContext {
         &self,
         compute: F,
         equals: Option<Arc<AsyncEqualsFn>>,
-    ) -> AsyncSlotHandle<T>
+    ) -> AsyncComputed<T>
     where
         T: Clone + Send + Sync + 'static,
         F: Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static,
@@ -1149,27 +1173,27 @@ impl AsyncContext {
             };
             inner.insert_node(id, AsyncNode::Computed(node));
         }
-        AsyncSlotHandle {
+        AsyncComputed {
             id,
             _marker: PhantomData,
         }
     }
 
     /// Read the current value of a cell (`#lzcellkernel`). A [`Computed`]
-    /// ([`AsyncSlotHandle`]) yields `Option<T>` (`None` while pending); a
-    /// [`Source`] ([`AsyncCellHandle`]) yields `T`. Unified read superseding the
+    /// ([`AsyncComputed`]) yields `Option<T>` (`None` while pending); a
+    /// [`Source`] ([`AsyncSource`]) yields `T`. Unified read superseding the
     /// deprecated `get_cell`.
     pub fn get<H: Read<Self>>(&self, handle: &H) -> <H as Read<Self>>::Output {
         handle.read(self)
     }
 
-    /// Write a new value to a source cell ([`AsyncCellHandle`], `#lzcellkernel`).
+    /// Write a new value to a source cell ([`AsyncSource`], `#lzcellkernel`).
     /// Unified write superseding the deprecated `set_cell`.
     pub fn set<H: Write<Self>>(&self, handle: &H, value: <H as Write<Self>>::Value) {
         handle.write(self, value)
     }
 
-    fn read_slot<T>(&self, handle: &AsyncSlotHandle<T>) -> Option<T>
+    fn read_slot<T>(&self, handle: &AsyncComputed<T>) -> Option<T>
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -1190,7 +1214,7 @@ impl AsyncContext {
         }
     }
 
-    pub async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T
+    pub async fn get_async<T>(&self, handle: &AsyncComputed<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -1247,7 +1271,7 @@ impl AsyncContext {
                                 .clone();
                         }
                     },
-                    _ => panic!("AsyncSlotHandle does not point to a Slot node"),
+                    _ => panic!("AsyncComputed does not point to a Slot node"),
                 }
             };
 
@@ -1489,7 +1513,7 @@ impl AsyncContext {
     /// generation counter is bumped before the id is recycled, so even a task
     /// that wins the race against `abort` fails its generation re-check and
     /// cannot write into whatever node later reuses the id.
-    pub fn dispose_slot<T>(&self, handle: &AsyncSlotHandle<T>) {
+    pub fn dispose_slot<T>(&self, handle: &AsyncComputed<T>) {
         let (in_flight, notifier, stale) = {
             let mut inner = self.inner.lock();
             // Check the kind BEFORE removing: a stale handle whose id has been
@@ -1525,7 +1549,7 @@ impl AsyncContext {
     ///
     /// Cells are pure sources with no dependencies and no in-flight state, so
     /// only downstream edges need detaching.
-    pub fn dispose_cell<T>(&self, handle: &AsyncCellHandle<T>) {
+    pub fn dispose_cell<T>(&self, handle: &AsyncSource<T>) {
         let stale = {
             let mut inner = self.inner.lock();
             if !matches!(inner.get_node(handle.id), Some(AsyncNode::Source(_))) {
@@ -1558,11 +1582,11 @@ impl AsyncContext {
         };
         let marker = std::marker::PhantomData;
         match kind {
-            0 => self.dispose_slot(&AsyncSlotHandle::<()> {
+            0 => self.dispose_slot(&AsyncComputed::<()> {
                 id,
                 _marker: marker,
             }),
-            1 => self.dispose_cell(&AsyncCellHandle::<()> {
+            1 => self.dispose_cell(&AsyncSource::<()> {
                 id,
                 _marker: marker,
             }),
@@ -1900,8 +1924,8 @@ impl crate::reactive_graph::Teardown for AsyncTeardownScope {
 }
 
 impl crate::reactive_graph::ReactiveGraph for AsyncContext {
-    type Computed<T> = AsyncSlotHandle<T>;
-    type Source<T> = AsyncCellHandle<T>;
+    type Computed<T> = AsyncComputed<T>;
+    type Source<T> = AsyncSource<T>;
     type Effect = AsyncEffectHandle;
     type Scope<'a> = AsyncTeardownScope;
 
@@ -1929,25 +1953,13 @@ impl crate::reactive_graph::ReactiveGraph for AsyncContext {
 }
 
 impl crate::reactive_graph::AsyncReactiveGraph for AsyncContext {
-    fn cell<T>(&self, value: T) -> Self::Source<T>
+    fn source<T>(&self, value: T) -> Self::Source<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
-        AsyncContext::cell(self, value)
+        AsyncContext::source(self, value)
     }
-    fn get_cell<T>(&self, handle: &Self::Source<T>) -> T
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        AsyncContext::get(self, handle)
-    }
-    fn set_cell<T>(&self, handle: &Self::Source<T>, value: T)
-    where
-        T: PartialEq + Clone + Send + Sync + 'static,
-    {
-        AsyncContext::set(self, handle, value);
-    }
-    fn get<T>(&self, handle: &Self::Computed<T>) -> impl Future<Output = T> + Send
+    fn get_async<T>(&self, handle: &Self::Computed<T>) -> impl Future<Output = T> + Send
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -1955,40 +1967,38 @@ impl crate::reactive_graph::AsyncReactiveGraph for AsyncContext {
     }
 }
 
-impl<T: Clone + Send + Sync + 'static> Read<AsyncContext> for AsyncSlotHandle<T> {
+impl<T: Clone + Send + Sync + 'static> Read<AsyncContext> for AsyncComputed<T> {
     type Output = Option<T>;
     fn read(&self, ctx: &AsyncContext) -> Option<T> {
         ctx.read_slot(self)
     }
 }
 
-impl<T: Clone + Send + Sync + 'static> Read<AsyncContext> for AsyncCellHandle<T> {
+impl<T: Clone + Send + Sync + 'static> Read<AsyncContext> for AsyncSource<T> {
     type Output = T;
     fn read(&self, ctx: &AsyncContext) -> T {
-        ctx.read_cell(self)
+        ctx.read_source(self)
     }
 }
 
-impl<T: PartialEq + Clone + Send + Sync + 'static> Write<AsyncContext> for AsyncCellHandle<T> {
+impl<T: PartialEq + Clone + Send + Sync + 'static> Write<AsyncContext> for AsyncSource<T> {
     type Value = T;
     fn write(&self, ctx: &AsyncContext, value: T) {
-        ctx.write_cell(self, value)
+        ctx.write_source(self, value)
     }
 }
 
-impl<T: Clone + Send + Sync + 'static> Read<AsyncComputeContext> for AsyncCellHandle<T> {
+impl<T: Clone + Send + Sync + 'static> Read<AsyncComputeContext> for AsyncSource<T> {
     type Output = T;
     fn read(&self, ctx: &AsyncComputeContext) -> T {
-        ctx.read_cell(self)
+        ctx.read_source(self)
     }
 }
 
-impl<T: PartialEq + Clone + Send + Sync + 'static> Write<AsyncComputeContext>
-    for AsyncCellHandle<T>
-{
+impl<T: PartialEq + Clone + Send + Sync + 'static> Write<AsyncComputeContext> for AsyncSource<T> {
     type Value = T;
     fn write(&self, ctx: &AsyncComputeContext, value: T) {
-        ctx.write_cell(self, value)
+        ctx.write_source(self, value)
     }
 }
 
@@ -2052,7 +2062,7 @@ mod tests {
         let rt = Runtime::new().unwrap();
         let _guard = rt.enter();
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i64);
+        let cell = ctx.source(1i64);
         let id = cell.id;
         let before = ctx.inner.lock().generation(id);
 
@@ -2070,7 +2080,7 @@ mod tests {
         let rt = Runtime::new().unwrap();
         let _guard = rt.enter();
         let ctx = AsyncContext::new();
-        let src = ctx.cell(4i64);
+        let src = ctx.source(4i64);
         let derived = ctx.computed_async(move |c| {
             Box::pin(async move { c.get(&src) })
                 as std::pin::Pin<Box<dyn Future<Output = i64> + Send>>
@@ -2084,7 +2094,7 @@ mod tests {
         assert_eq!(ctx.dependency_count(&derived), 0);
         // Idempotent, and kind-checked against a recycled id.
         ctx.dispose_slot(&derived);
-        let stale = AsyncCellHandle::<i64> {
+        let stale = AsyncSource::<i64> {
             id: derived.id,
             _marker: std::marker::PhantomData,
         };
@@ -2096,7 +2106,7 @@ mod tests {
         let rt = Runtime::new().unwrap();
         let _guard = rt.enter();
         let ctx = AsyncContext::new();
-        let topic = ctx.cell(1i64);
+        let topic = ctx.source(1i64);
         {
             let scope = ctx.scope();
             let a = scope.computed_async(move |c| {
@@ -2291,7 +2301,7 @@ mod tests {
     #[test]
     fn async_context_cell_basic() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(10i32);
+        let cell = ctx.source(10i32);
         assert_eq!(ctx.get(&cell), 10);
         ctx.set(&cell, 20);
         assert_eq!(ctx.get(&cell), 20);
@@ -2300,7 +2310,7 @@ mod tests {
     #[test]
     fn async_context_cell_noop_on_equal() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(10i32);
+        let cell = ctx.source(10i32);
         ctx.set(&cell, 10);
         assert_eq!(ctx.get(&cell), 10);
     }
@@ -2325,7 +2335,7 @@ mod tests {
     #[tokio::test]
     async fn computed_async_reads_cell() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(10i32);
+        let cell = ctx.source(10i32);
         let slot = ctx.computed_async(move |ctx| {
             let val = ctx.get(&cell);
             async move { val + 1 }
@@ -2356,7 +2366,7 @@ mod tests {
     #[tokio::test]
     async fn computed_async_invalidation() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let slot = ctx.computed_async(move |ctx| {
             let val = ctx.get(&cell);
             async move { val * 2 }
@@ -2369,7 +2379,7 @@ mod tests {
     #[tokio::test]
     async fn memo_async_suppresses_equal() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let count = Arc::new(AtomicU64::new(0));
         let count_clone = count.clone();
         let slot = ctx.computed_async(move |ctx| {
@@ -2389,7 +2399,7 @@ mod tests {
     #[tokio::test]
     async fn batch_defers_invalidation() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let slot = ctx.computed_async(move |ctx| {
             let val = ctx.get(&cell);
             async move { val * 10 }
@@ -2424,7 +2434,7 @@ mod tests {
     #[tokio::test]
     async fn async_slot_reads_async_slot() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(5i32);
+        let cell = ctx.source(5i32);
         let base = ctx.computed_async(move |ctx| {
             let v = ctx.get(&cell);
             async move { v + 10 }
@@ -2442,7 +2452,7 @@ mod tests {
     #[tokio::test]
     async fn async_chain_invalidation() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let cell_clone = cell;
         let base = ctx.computed_async(move |ctx| {
             let v = ctx.get(&cell_clone);
@@ -2463,7 +2473,7 @@ mod tests {
     #[tokio::test]
     async fn async_chain_three_levels() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let a = ctx.computed_async(move |ctx| {
             let v = ctx.get(&cell);
             async move { v + 1 }
@@ -2484,7 +2494,7 @@ mod tests {
     #[tokio::test]
     async fn async_dependency_tracks_slot_edges() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(3i32);
+        let cell = ctx.source(3i32);
         let slot = ctx.computed_async(move |ctx| {
             let v = ctx.get(&cell);
             async move { v * 2 }
@@ -2507,9 +2517,9 @@ mod tests {
     #[tokio::test]
     async fn async_dependency_updates_on_rerun() {
         let ctx = AsyncContext::new();
-        let cell_a = ctx.cell(1i32);
-        let cell_b = ctx.cell(100i32);
-        let flag = ctx.cell(true);
+        let cell_a = ctx.source(1i32);
+        let cell_b = ctx.source(100i32);
+        let flag = ctx.source(true);
         let slot = ctx.computed_async(move |ctx| {
             let f = ctx.get(&flag);
             let v = if f {
@@ -2546,7 +2556,7 @@ mod tests {
     #[tokio::test]
     async fn dependency_trackers_are_pooled_and_reused() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(0i32);
+        let cell = ctx.source(0i32);
         let slot = ctx.computed_async(move |cctx| {
             let v = cctx.get(&cell);
             async move { v }
@@ -2589,7 +2599,7 @@ mod tests {
     #[tokio::test]
     async fn leaked_dependency_tracker_is_not_recycled() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         type LeakedTrackers = Arc<Mutex<Vec<Arc<Mutex<HashSet<SlotId>>>>>>;
         let leaked: LeakedTrackers = Arc::new(Mutex::new(Vec::new()));
         let leaked_for_compute = leaked.clone();
@@ -2614,7 +2624,7 @@ mod tests {
     #[tokio::test]
     async fn dispose_bumps_generation_then_id_recycles_fresh() {
         let ctx = Arc::new(AsyncContext::new());
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let effect_a = ctx.effect_async(move |c| {
             let _v = c.get(&cell);
             async move { None::<fn()> }
@@ -2625,7 +2635,7 @@ mod tests {
 
         // Allocate B's dependency BEFORE dispose so the recycled id goes to the
         // effect (free_ids LIFO), not to this cell.
-        let cell_b = ctx.cell(2i32);
+        let cell_b = ctx.source(2i32);
         ctx.dispose_async_effect(&effect_a);
         let g1 = ctx.inner.lock().generation(a_id);
         assert_eq!(g1, g0 + 1, "dispose must bump the node generation");
@@ -2656,7 +2666,7 @@ mod tests {
     #[tokio::test]
     async fn stale_generation_context_does_not_alias_recycled_effect() {
         let ctx = Arc::new(AsyncContext::new());
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let effect_a = ctx.effect_async(move |c| {
             let _v = c.get(&cell);
             async move { None::<fn()> }
@@ -2679,7 +2689,7 @@ mod tests {
 
         // Allocate B's dependency BEFORE dispose so the recycled id (free_ids
         // LIFO) goes to the effect, then dispose A and allocate B reusing the id.
-        let cell_b = ctx.cell(99i32);
+        let cell_b = ctx.source(99i32);
         ctx.dispose_async_effect(&effect_a);
         let effect_b = ctx.effect_async(move |c| {
             let _v = c.get(&cell_b);
@@ -2720,7 +2730,7 @@ mod tests {
     #[tokio::test]
     async fn invalidation_aborts_in_flight() {
         let ctx = Arc::new(AsyncContext::new());
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let compute_count = Arc::new(AtomicU64::new(0));
         let count_clone = compute_count.clone();
         let slot = ctx.computed_async(move |ctx| {
@@ -2745,7 +2755,7 @@ mod tests {
     #[tokio::test]
     async fn stale_revision_prevents_publish() {
         let ctx = Arc::new(AsyncContext::new());
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let slot = ctx.computed_async(move |ctx| {
             let v = ctx.get(&cell);
             async move { v + 1 }
@@ -2785,7 +2795,7 @@ mod tests {
     #[tokio::test]
     async fn effect_async_runs_on_creation() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(10i32);
+        let cell = ctx.source(10i32);
         let result = Arc::new(Mutex::new(0i32));
         let result_clone = result.clone();
         ctx.effect_async(move |ctx| {
@@ -2803,7 +2813,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn effect_async_reruns_on_cell_change() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let count = Arc::new(AtomicU64::new(0));
         let count_clone = count.clone();
         ctx.effect_async(move |ctx| {
@@ -2824,7 +2834,7 @@ mod tests {
     #[tokio::test]
     async fn effect_async_cleanup_runs_on_rerun() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let cleanup_count = Arc::new(AtomicU64::new(0));
         let cleanup_clone = cleanup_count.clone();
         ctx.effect_async(move |ctx| {
@@ -2851,7 +2861,7 @@ mod tests {
         // abort: the effect body completed twice and the overwritten run's
         // cleanup was leaked (never invoked).
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let done_count = Arc::new(AtomicU64::new(0));
         let cleanup_count = Arc::new(AtomicU64::new(0));
         let done_clone = done_count.clone();
@@ -2898,7 +2908,7 @@ mod tests {
     #[tokio::test]
     async fn dispose_async_effect_removes_it() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let count = Arc::new(AtomicU64::new(0));
         let count_clone = count.clone();
         let handle = ctx.effect_async(move |ctx| {
@@ -2937,7 +2947,7 @@ mod tests {
     #[tokio::test]
     async fn sync_get_returns_none_after_invalidation() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(1i32);
+        let cell = ctx.source(1i32);
         let slot = ctx.computed_async(move |ctx| {
             let v = ctx.get(&cell);
             async move { v * 2 }
@@ -2971,7 +2981,7 @@ mod tests {
     #[tokio::test]
     async fn sync_get_with_memo_returns_cached() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(3i32);
+        let cell = ctx.source(3i32);
         let slot = ctx.computed_async(move |ctx| {
             let v = ctx.get(&cell);
             async move { v.abs() }
@@ -2983,7 +2993,7 @@ mod tests {
     #[tokio::test]
     async fn get_async_uses_sync_fast_path() {
         let ctx = AsyncContext::new();
-        let cell = ctx.cell(10i32);
+        let cell = ctx.source(10i32);
         let count = Arc::new(AtomicU64::new(0));
         let count_clone = count.clone();
         let slot = ctx.computed_async(move |ctx| {
@@ -3007,7 +3017,7 @@ mod tests {
         let ctx = AsyncContext::new();
         let rt = Runtime::new().unwrap();
         let _guard = rt.enter();
-        let cell = ctx.cell(0i32);
+        let cell = ctx.source(0i32);
         let effect = ctx.effect_async(move |ctx| {
             let _ = ctx.get(&cell);
             async { None::<fn()> }

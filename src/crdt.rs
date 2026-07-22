@@ -677,7 +677,7 @@ where
     /// Bind a CRDT replica to a fresh reactive root cell in `ctx`, seeded with
     /// the replica's current value.
     pub fn bind(ctx: &Context, crdt: C) -> Self {
-        let handle = ctx.cell(crdt.value());
+        let handle = ctx.source(crdt.value());
         Self { crdt, handle }
     }
 

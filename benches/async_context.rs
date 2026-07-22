@@ -30,7 +30,7 @@ fn bench_async_cached_resolve(c: &mut Criterion) {
         let rt = rt();
         let (ctx, slot) = rt.block_on(async {
             let ctx = AsyncContext::new();
-            let cell = ctx.cell(21usize);
+            let cell = ctx.source(21usize);
             let slot = ctx.computed_async(move |ctx| {
                 let v = ctx.get(&cell);
                 async move { v * 2 }
@@ -46,7 +46,7 @@ fn bench_async_cached_resolve(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = AsyncContext::new();
-                let cell = ctx.cell(21usize);
+                let cell = ctx.source(21usize);
                 let slot = ctx.computed_async(move |ctx| {
                     let v = ctx.get(&cell);
                     async move { v * 2 }
@@ -60,7 +60,7 @@ fn bench_async_cached_resolve(c: &mut Criterion) {
     group.bench_function("sync_context_baseline", |b| {
         b.iter(|| {
             let ctx = Context::new();
-            let root = ctx.cell(21usize);
+            let root = ctx.source(21usize);
             let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
             black_box(ctx.get(&doubled));
         });
@@ -69,7 +69,7 @@ fn bench_async_cached_resolve(c: &mut Criterion) {
     group.bench_function("thread_safe_context_baseline", |b| {
         b.iter(|| {
             let ctx = ThreadSafeContext::new();
-            let root = ctx.cell(21usize);
+            let root = ctx.source(21usize);
             let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
             black_box(ctx.get(&doubled));
         });
@@ -86,7 +86,7 @@ fn bench_async_cold_resolve(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = AsyncContext::new();
-                let cell = ctx.cell(21usize);
+                let cell = ctx.source(21usize);
                 let slot = ctx.computed_async(move |ctx| {
                     let v = ctx.get(&cell);
                     async move { v * 2 }
@@ -100,7 +100,7 @@ fn bench_async_cold_resolve(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let ctx = Context::new();
-                let root = ctx.cell(21usize);
+                let root = ctx.source(21usize);
                 let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
                 (ctx, doubled)
             },
@@ -113,7 +113,7 @@ fn bench_async_cold_resolve(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let ctx = ThreadSafeContext::new();
-                let root = ctx.cell(21usize);
+                let root = ctx.source(21usize);
                 let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
                 (ctx, doubled)
             },
@@ -133,7 +133,7 @@ fn bench_async_invalidation_throughput(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = AsyncContext::new();
-                let cell = ctx.cell(0usize);
+                let cell = ctx.source(0usize);
                 let slot = ctx.computed_async(move |ctx| {
                     let v = ctx.get(&cell);
                     async move { v.wrapping_add(1) }
@@ -152,7 +152,7 @@ fn bench_async_invalidation_throughput(c: &mut Criterion) {
     group.bench_function("sync_context_baseline", |b| {
         b.iter(|| {
             let ctx = Context::new();
-            let root = ctx.cell(0usize);
+            let root = ctx.source(0usize);
             let doubled = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
             black_box(ctx.get(&doubled));
             let mut sum = 0usize;
@@ -167,7 +167,7 @@ fn bench_async_invalidation_throughput(c: &mut Criterion) {
     group.bench_function("thread_safe_context_baseline", |b| {
         b.iter(|| {
             let ctx = ThreadSafeContext::new();
-            let root = ctx.cell(0usize);
+            let root = ctx.source(0usize);
             let doubled = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
             black_box(ctx.get(&doubled));
             let mut sum = 0usize;
@@ -192,7 +192,7 @@ fn bench_async_cancellation_throughput(c: &mut Criterion) {
             rt.block_on(async {
                 for i in 0..ASYNC_CANCELLATION_BURST {
                     let ctx = Arc::new(AsyncContext::new());
-                    let cell = ctx.cell(i);
+                    let cell = ctx.source(i);
                     let slot = ctx.computed_async(move |ctx| {
                         let _v = ctx.get(&cell);
                         async move {
@@ -224,7 +224,7 @@ fn bench_async_concurrent_contention(c: &mut Criterion) {
                 b.iter(move || {
                     rt.block_on(async move {
                         let ctx = Arc::new(AsyncContext::new());
-                        let cell = ctx.cell(0usize);
+                        let cell = ctx.source(0usize);
                         let slot = ctx.computed_async(move |ctx| {
                             let v = ctx.get(&cell);
                             async move { v.wrapping_add(1) }
@@ -262,7 +262,7 @@ fn bench_async_concurrent_contention(c: &mut Criterion) {
             |b, &workers| {
                 b.iter(move || {
                     let ctx = Arc::new(ThreadSafeContext::new());
-                    let root = ctx.cell(0usize);
+                    let root = ctx.source(0usize);
                     let doubled = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
                     black_box(ctx.get(&doubled));
                     let mut handles = Vec::with_capacity(workers);
@@ -301,7 +301,7 @@ fn bench_async_effect_throughput(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = AsyncContext::new();
-                let cell = ctx.cell(0usize);
+                let cell = ctx.source(0usize);
                 let sink = Arc::new(AtomicUsize::new(0));
                 let sink_clone = sink.clone();
                 ctx.effect_async(move |ctx| {
@@ -335,7 +335,7 @@ fn bench_async_batch_throughput(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = AsyncContext::new();
-                let cells: Vec<_> = (0..ASYNC_BATCH_CELLS).map(|i| ctx.cell(i)).collect();
+                let cells: Vec<_> = (0..ASYNC_BATCH_CELLS).map(|i| ctx.source(i)).collect();
                 let cells_clone = cells.clone();
                 let slot = ctx.computed_async(move |ctx| {
                     let sum = cells_clone
@@ -362,7 +362,7 @@ fn bench_async_batch_throughput(c: &mut Criterion) {
     group.bench_function("sync_context_baseline", |b| {
         b.iter(|| {
             let ctx = Context::new();
-            let cells: Vec<_> = (0..ASYNC_BATCH_CELLS).map(|i| ctx.cell(i)).collect();
+            let cells: Vec<_> = (0..ASYNC_BATCH_CELLS).map(|i| ctx.source(i)).collect();
             let cells_clone = cells.clone();
             let slot = ctx.computed(move |ctx| {
                 cells_clone

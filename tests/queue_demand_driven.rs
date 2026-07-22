@@ -84,7 +84,7 @@ fn burst_writes_coalesce_to_one_recompute() {
 #[test]
 fn store_without_cascade_skips_flush_but_stays_glitch_free() {
     let ctx = Context::new();
-    let cell = ctx.cell(0i32);
+    let cell = ctx.source(0i32);
 
     // A lazy Slot dependent (no Effect in the cone).
     let doubled = ctx.computed(move |ctx| ctx.get(&cell) * 2);

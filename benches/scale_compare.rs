@@ -59,7 +59,7 @@ fn lazily_build(n: usize) -> LazilyGraph {
     let ctx = Context::new();
     let mut inputs: Vec<Source<i64>> = Vec::with_capacity(n);
     for i in 0..n {
-        inputs.push(ctx.cell(i as i64));
+        inputs.push(ctx.source(i as i64));
     }
     let mut formulas: Vec<Computed<i64>> = Vec::with_capacity(n);
     for i in 0..n {

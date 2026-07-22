@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn thread_safe_context_crosses_tokio_spawn_boundaries() {
     let ctx = ThreadSafeContext::new();
-    let input = ctx.cell(1usize);
+    let input = ctx.source(1usize);
     let doubled = ctx.computed(move |ctx| ctx.get(&input) * 2);
 
     let reader_ctx = ctx.clone();
@@ -29,7 +29,7 @@ async fn thread_safe_context_crosses_tokio_spawn_boundaries() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn spawn_blocking_preserves_batch_effect_flush_order() {
     let ctx = ThreadSafeContext::new();
-    let input = ctx.cell(0i32);
+    let input = ctx.source(0i32);
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_for_effect = Arc::clone(&seen);
 

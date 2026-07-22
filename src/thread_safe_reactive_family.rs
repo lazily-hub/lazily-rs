@@ -74,7 +74,7 @@ impl<V: Send + Sync + 'static> ThreadSafeMapHandle<V> for Source<V> {
         V: PartialEq + Clone + Send + Sync + 'static,
     {
         // An input has no derivation: materialize by setting its value directly.
-        ctx.cell(compute(ctx))
+        ctx.source(compute(ctx))
     }
 
     fn observe(self, ctx: &ThreadSafeContext) -> V

@@ -287,7 +287,7 @@ impl<P: Ord + Clone + 'static> MembershipCell<P> {
     pub fn new(ctx: &Context, config: MembershipConfig) -> Self {
         Self {
             core: RefCell::new(MembershipCore::new(config)),
-            peer_set: ctx.cell(BTreeSet::new()),
+            peer_set: ctx.source(BTreeSet::new()),
         }
     }
 

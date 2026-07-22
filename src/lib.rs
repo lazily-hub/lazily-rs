@@ -139,9 +139,11 @@ mod work_queue;
 mod ws_backend;
 
 #[cfg(feature = "async")]
+#[allow(deprecated)]
 pub use async_context::{
-    AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncContextId, AsyncEffectHandle,
-    AsyncSignalHandle, AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView, AsyncTeardownScope,
+    AsyncCellHandle, AsyncComputeContext, AsyncComputed, AsyncContext, AsyncContextId,
+    AsyncEffectHandle, AsyncSignalHandle, AsyncSlotHandle, AsyncSlotState, AsyncSlotStateView,
+    AsyncSource, AsyncTeardownScope,
 };
 #[cfg(feature = "async")]
 pub use async_reactive_family::{AsyncCellMap, AsyncMapHandle, AsyncReactiveMap, AsyncSlotMap};

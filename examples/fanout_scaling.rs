@@ -33,7 +33,7 @@ fn median(mut sample_a: Vec<f64>) -> f64 {
 /// One cell, `n` dependents reading it.
 fn wide(n: usize) -> f64 {
     let ctx = Context::new();
-    let src = ctx.cell(0_usize);
+    let src = ctx.source(0_usize);
     let dep_a: Vec<_> = (0..n)
         .map(|i| {
             let slot = ctx.computed(move |ctx| ctx.get(&src) + i);
@@ -56,7 +56,7 @@ fn narrow(n: usize) -> f64 {
     let ctx = Context::new();
     let pair_a: Vec<_> = (0..n)
         .map(|i| {
-            let src = ctx.cell(0_usize);
+            let src = ctx.source(0_usize);
             let slot = ctx.computed(move |ctx| ctx.get(&src) + i);
             ctx.get(&slot);
             (src, slot)

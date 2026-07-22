@@ -1,6 +1,6 @@
 #![cfg(feature = "async")]
 
-use lazily::{AsyncCellHandle, AsyncContext, AsyncEffectHandle, AsyncSlotHandle};
+use lazily::{AsyncComputed, AsyncContext, AsyncEffectHandle, AsyncSource};
 use std::sync::Mutex;
 use std::sync::{
     Arc,
@@ -10,7 +10,7 @@ use std::sync::{
 #[tokio::test]
 async fn async_context_public_api_cell_round_trip() {
     let ctx = AsyncContext::new();
-    let cell: AsyncCellHandle<i32> = ctx.cell(42);
+    let cell: AsyncSource<i32> = ctx.source(42);
     assert_eq!(ctx.get(&cell), 42);
     ctx.set(&cell, 99);
     assert_eq!(ctx.get(&cell), 99);
@@ -19,7 +19,7 @@ async fn async_context_public_api_cell_round_trip() {
 #[tokio::test]
 async fn async_context_computed_async_resolves() {
     let ctx = AsyncContext::new();
-    let slot: AsyncSlotHandle<i32> = ctx.computed_async(|_ctx| async { 7 });
+    let slot: AsyncComputed<i32> = ctx.computed_async(|_ctx| async { 7 });
     let val = ctx.get_async(&slot).await;
     assert_eq!(val, 7);
 }
@@ -27,7 +27,7 @@ async fn async_context_computed_async_resolves() {
 #[tokio::test]
 async fn async_context_memo_async_deduplicates_equal() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(5i32);
+    let cell = ctx.source(5i32);
     let invocations = Arc::new(AtomicU64::new(0));
     let inv_clone = invocations.clone();
     let slot = ctx.computed_async(move |ctx| {
@@ -47,7 +47,7 @@ async fn async_context_memo_async_deduplicates_equal() {
 #[tokio::test]
 async fn async_context_batch_defers_and_applies() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(1i32);
+    let cell = ctx.source(1i32);
     let slot = ctx.computed_async(move |ctx| {
         let v = ctx.get(&cell);
         async move { v + 100 }
@@ -63,7 +63,7 @@ async fn async_context_batch_defers_and_applies() {
 #[tokio::test]
 async fn async_context_effect_async_lifecycle() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(0i32);
+    let cell = ctx.source(0i32);
     let observations = Arc::new(Mutex::new(Vec::new()));
     let obs_clone = observations.clone();
     let handle: AsyncEffectHandle = ctx.effect_async(move |ctx| {
@@ -88,7 +88,7 @@ async fn async_context_effect_async_lifecycle() {
 #[tokio::test]
 async fn async_context_effect_async_cleanup_before_rerun() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(10i32);
+    let cell = ctx.source(10i32);
     let cleanup_ran = Arc::new(AtomicBool::new(false));
     let cleanup_clone = cleanup_ran.clone();
     ctx.effect_async(move |ctx| {
@@ -110,7 +110,7 @@ async fn async_context_effect_async_cleanup_before_rerun() {
 #[tokio::test]
 async fn async_context_effect_async_cleanup_runs_on_dispose() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(0i32);
+    let cell = ctx.source(0i32);
     let cleanup_ran = Arc::new(AtomicBool::new(false));
     let cleanup_clone = cleanup_ran.clone();
     let handle: AsyncEffectHandle = ctx.effect_async(move |ctx| {
@@ -134,7 +134,7 @@ async fn async_context_effect_async_cleanup_runs_on_dispose() {
 #[tokio::test]
 async fn async_context_dispose_aborts_in_flight_effect_rerun() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(0i32);
+    let cell = ctx.source(0i32);
 
     let park = Arc::new(tokio::sync::Notify::new());
     let a_cleanup = Arc::new(AtomicU64::new(0));
@@ -210,7 +210,7 @@ async fn async_context_concurrent_reads_dedup() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn async_context_invalidation_aborts_in_flight_across_tasks() {
     let ctx = Arc::new(AsyncContext::new());
-    let cell = ctx.cell(1i32);
+    let cell = ctx.source(1i32);
     let compute_count = Arc::new(AtomicU64::new(0));
     let count_clone = compute_count.clone();
     let slot = ctx.computed_async(move |ctx| {
@@ -235,7 +235,7 @@ async fn async_context_invalidation_aborts_in_flight_across_tasks() {
 #[tokio::test]
 async fn async_context_chain_propagation() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(1i32);
+    let cell = ctx.source(1i32);
     let a = ctx.computed_async(move |ctx| {
         let v = ctx.get(&cell);
         async move { v * 10 }
@@ -262,7 +262,7 @@ async fn async_context_chain_propagation() {
 #[tokio::test]
 async fn async_context_memo_blocks_downstream_on_equal() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(2i32);
+    let cell = ctx.source(2i32);
     let inner_invocations = Arc::new(AtomicU64::new(0));
     let inner_clone = inner_invocations.clone();
     let memo_slot = ctx.computed_async(move |ctx| {
@@ -298,9 +298,9 @@ async fn async_context_memo_blocks_downstream_on_equal() {
 #[tokio::test]
 async fn async_context_dynamic_dependency_switch() {
     let ctx = AsyncContext::new();
-    let cell_a = ctx.cell(10i32);
-    let cell_b = ctx.cell(20i32);
-    let flag = ctx.cell(true);
+    let cell_a = ctx.source(10i32);
+    let cell_b = ctx.source(20i32);
+    let flag = ctx.source(true);
     let slot = ctx.computed_async(move |ctx| {
         let f = ctx.get(&flag);
         let v = if f {
@@ -321,7 +321,7 @@ async fn async_context_dynamic_dependency_switch() {
 #[tokio::test]
 async fn async_context_cell_noop_set_no_invalidation() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(5i32);
+    let cell = ctx.source(5i32);
     let compute_count = Arc::new(AtomicU64::new(0));
     let count_clone = compute_count.clone();
     let slot = ctx.computed_async(move |ctx| {
@@ -341,8 +341,8 @@ async fn async_context_cell_noop_set_no_invalidation() {
 #[tokio::test]
 async fn async_context_batch_multiple_cells() {
     let ctx = AsyncContext::new();
-    let cell_x = ctx.cell(1i32);
-    let cell_y = ctx.cell(10i32);
+    let cell_x = ctx.source(1i32);
+    let cell_y = ctx.source(10i32);
     let slot = ctx.computed_async(move |ctx| {
         let x = ctx.get(&cell_x);
         let y = ctx.get(&cell_y);
@@ -359,7 +359,7 @@ async fn async_context_batch_multiple_cells() {
 #[tokio::test]
 async fn async_context_dispose_effect_prevents_rerun() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(1i32);
+    let cell = ctx.source(1i32);
     let run_count = Arc::new(AtomicU64::new(0));
     let count_clone = run_count.clone();
     let effect = ctx.effect_async(move |ctx| {
@@ -388,7 +388,7 @@ async fn async_context_dispose_effect_prevents_rerun() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn async_context_shared_across_tokio_tasks() {
     let ctx = Arc::new(AsyncContext::new());
-    let cell = ctx.cell(0i32);
+    let cell = ctx.source(0i32);
     let slot = ctx.computed_async(move |ctx| {
         let v = ctx.get(&cell);
         async move { v * 3 }
@@ -406,7 +406,7 @@ async fn async_context_shared_across_tokio_tasks() {
 #[tokio::test]
 async fn async_context_handles_are_copy() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(1i32);
+    let cell = ctx.source(1i32);
     let cell_copy = cell;
     let slot = ctx.computed_async(move |ctx| {
         let v = ctx.get(&cell_copy);
@@ -434,7 +434,7 @@ async fn async_context_sync_get_returns_resolved_value() {
 #[tokio::test]
 async fn async_context_sync_get_invalidated_returns_none() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(1i32);
+    let cell = ctx.source(1i32);
     let slot = ctx.computed_async(move |ctx| {
         let v = ctx.get(&cell);
         async move { v * 3 }
@@ -450,7 +450,7 @@ async fn async_context_sync_get_invalidated_returns_none() {
 #[tokio::test]
 async fn async_context_sync_get_with_chain() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(2i32);
+    let cell = ctx.source(2i32);
     let a = ctx.computed_async(move |ctx| {
         let v = ctx.get(&cell);
         async move { v + 10 }
@@ -470,7 +470,7 @@ async fn async_context_sync_get_with_chain() {
 #[tokio::test]
 async fn async_context_sync_get_across_tokio_tasks() {
     let ctx = Arc::new(AsyncContext::new());
-    let cell = ctx.cell(10i32);
+    let cell = ctx.source(10i32);
     let slot = ctx.computed_async(move |ctx| {
         let v = ctx.get(&cell);
         async move { v + 1 }
@@ -497,8 +497,8 @@ async fn async_context_concurrent_set_and_get_async_never_panics_k03k() {
     //     without a final `Resolved` send.
     // Both must now re-resolve from authoritative slot state, not panic.
     let ctx = Arc::new(AsyncContext::new());
-    let cell = ctx.cell(0usize);
-    let slot: AsyncSlotHandle<usize> = ctx.computed_async(move |ctx| {
+    let cell = ctx.source(0usize);
+    let slot: AsyncComputed<usize> = ctx.computed_async(move |ctx| {
         let v = ctx.get(&cell);
         async move { v.wrapping_add(1) }
     });
@@ -543,7 +543,7 @@ use std::time::Duration;
 #[tokio::test]
 async fn async_signal_materializes_eagerly_without_a_read() {
     let ctx = AsyncContext::new();
-    let n = ctx.cell(2i32);
+    let n = ctx.source(2i32);
     let computes = Arc::new(AtomicU64::new(0));
     let c = computes.clone();
     let sig: AsyncSignalHandle<i32> = ctx.signal_async(move |ctx| {
@@ -565,7 +565,7 @@ async fn async_signal_materializes_eagerly_without_a_read() {
 #[tokio::test]
 async fn async_signal_recomputes_eagerly_without_a_read() {
     let ctx = AsyncContext::new();
-    let n = ctx.cell(1i32);
+    let n = ctx.source(1i32);
     let computes = Arc::new(AtomicU64::new(0));
     let c = computes.clone();
     let sig = ctx.signal_async(move |ctx| {
@@ -595,7 +595,7 @@ async fn async_signal_value_is_glitch_free_but_propagation_is_not_suppressed() {
     // dependents on every upstream change. This mirrors the documented
     // `async_context_memo_blocks_downstream_on_equal` behavior.
     let ctx = AsyncContext::new();
-    let n = ctx.cell(4i32);
+    let n = ctx.source(4i32);
     let parity = ctx.signal_async(move |ctx| {
         let v = ctx.get(&n);
         async move { v % 2 }
@@ -638,7 +638,7 @@ async fn async_signal_value_is_glitch_free_but_propagation_is_not_suppressed() {
 #[tokio::test]
 async fn async_chained_signals_propagate_eagerly() {
     let ctx = AsyncContext::new();
-    let n = ctx.cell(1i32);
+    let n = ctx.source(1i32);
     let a = ctx.signal_async(move |ctx| {
         let v = ctx.get(&n);
         async move { v + 1 }
@@ -661,7 +661,7 @@ async fn async_chained_signals_propagate_eagerly() {
 #[tokio::test]
 async fn async_signal_dispose_stops_eager_recomputation() {
     let ctx = AsyncContext::new();
-    let n = ctx.cell(1i32);
+    let n = ctx.source(1i32);
     let computes = Arc::new(AtomicU64::new(0));
     let c = computes.clone();
     let sig = ctx.signal_async(move |ctx| {
@@ -692,7 +692,7 @@ async fn async_signal_dispose_stops_eager_recomputation() {
 #[tokio::test]
 async fn async_signal_get_async_awaits_up_to_date_value() {
     let ctx = AsyncContext::new();
-    let n = ctx.cell(3i32);
+    let n = ctx.source(3i32);
     let sig = ctx.signal_async(move |ctx| {
         let v = ctx.get(&n);
         async move { v * 2 }

@@ -64,10 +64,10 @@ impl BackpressurePolicy {
         overflow: Overflow,
     ) -> Self {
         Self {
-            dimension: ctx.cell(dimension),
-            high_water: ctx.cell(high_water),
-            low_water: ctx.cell(low_water),
-            overflow: ctx.cell(overflow),
+            dimension: ctx.source(dimension),
+            high_water: ctx.source(high_water),
+            low_water: ctx.source(low_water),
+            overflow: ctx.source(overflow),
         }
     }
 }
@@ -120,8 +120,8 @@ where
         if policy.overflow.get(ctx) == Overflow::Conflate && !M::CONFLATES {
             return Err(RelayConfigError::ConflateNotBounding);
         }
-        let head: Source<Option<T>> = ctx.cell(None);
-        let pending = ctx.cell(0u64);
+        let head: Source<Option<T>> = ctx.source(None);
+        let pending = ctx.source(0u64);
         let depth = ctx.computed(move |c| pending.get(c));
         let high_water = policy.high_water;
         let is_full = ctx.computed(move |c| depth.get(c) >= high_water.get(c));

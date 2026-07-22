@@ -260,7 +260,7 @@ fn sweep_width(width: usize) -> WidthReport {
     let hist_base = hist_capture();
 
     let ctx = Context::new();
-    let topic = ctx.cell(0u64);
+    let topic = ctx.source(0u64);
     let ctx_only = snapshot().since(base);
     let hist_ctx = hist_capture();
 
@@ -383,7 +383,7 @@ fn sweep_heap_valued(width: usize) -> (i64, i64) {
     let mut subscriber_a: Vec<_> = Vec::with_capacity(width);
     let base = snapshot();
     let ctx = Context::new();
-    let topic = ctx.cell(0u64);
+    let topic = ctx.source(0u64);
     subscriber_a
         .extend((0..width).map(|i| ctx.computed(move |ctx| format!("{}-{}", ctx.get(&topic), i))));
     for slot in &subscriber_a {

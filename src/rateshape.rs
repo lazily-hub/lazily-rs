@@ -207,7 +207,7 @@ impl<T: Clone + PartialEq + 'static> DebounceCell<T> {
     pub fn new(ctx: &Context, quiet: u64) -> Self {
         Self {
             core: RefCell::new(DebounceCore::new(quiet)),
-            output: ctx.cell(None),
+            output: ctx.source(None),
         }
     }
 
@@ -310,7 +310,7 @@ impl<T: Clone + PartialEq + 'static> ThrottleCell<T> {
     pub fn new(ctx: &Context, edge: ThrottleEdge, window: u64) -> Self {
         Self {
             core: RefCell::new(ThrottleCore::new(edge, window)),
-            output: ctx.cell(None),
+            output: ctx.source(None),
         }
     }
 
@@ -416,7 +416,7 @@ impl<T: Clone + PartialEq + 'static> SampleCell<T> {
     pub fn new(ctx: &Context, mode: SampleMode) -> Self {
         Self {
             core: RefCell::new(SampleCore::new(mode)),
-            output: ctx.cell(None),
+            output: ctx.source(None),
         }
     }
 
@@ -508,7 +508,7 @@ impl<T: Clone + PartialEq + 'static, R: SampleRng> ProbabilisticSampleCell<T, R>
         Self {
             core: ProbabilisticSampleCore::new(rate),
             rng: RefCell::new(rng),
-            output: ctx.cell(None),
+            output: ctx.source(None),
         }
     }
 

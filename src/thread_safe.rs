@@ -1760,9 +1760,15 @@ impl ThreadSafeTeardownScope {
     }
 
     /// Create a source cell owned by this scope.
-    pub fn cell<T: PartialEq + Send + Sync + 'static>(&self, value: T) -> Source<T> {
-        let handle = self.ctx.cell(value);
+    pub fn source<T: PartialEq + Send + Sync + 'static>(&self, value: T) -> Source<T> {
+        let handle = self.ctx.source(value);
         self.track(handle, handle.id)
+    }
+
+    /// Compatibility constructor for the pre-Cell-kernel API.
+    #[deprecated(note = "use `ThreadSafeTeardownScope::source`")]
+    pub fn cell<T: PartialEq + Send + Sync + 'static>(&self, value: T) -> Source<T> {
+        self.source(value)
     }
 
     /// Register an effect owned by this scope.
@@ -2707,13 +2713,13 @@ impl ThreadSafeContext {
             .unwrap_or(ThreadSafeRecomputeResult::Fresh(false))
     }
 
-    /// Create a mutable thread-safe cell.
+    /// Create a mutable thread-safe source.
     ///
     /// The cell's cached value is stored behind a read-scaling sidecar
-    /// (#lzcellread): concurrent `get_cell` reads take a *shared* `RwLock` read
-    /// (or a wait-free seqlock path for `cell_copy`), so readers no longer
+    /// (#lzcellread): concurrent `get` reads take a *shared* `RwLock` read
+    /// (or a wait-free seqlock path for `source_copy`), so readers no longer
     /// serialize through an exclusive lock as they did before v0.23.0.
-    pub fn cell<T>(&self, value: T) -> Source<T>
+    pub fn source<T>(&self, value: T) -> Source<T>
     where
         T: PartialEq + Send + Sync + 'static,
     {
@@ -2738,7 +2744,16 @@ impl ThreadSafeContext {
         Source::from_id(id)
     }
 
-    /// Like [`cell`](Self::cell), but opts the cached-value sidecar into the
+    /// Compatibility constructor for the pre-Cell-kernel API.
+    #[deprecated(note = "use `ThreadSafeContext::source`")]
+    pub fn cell<T>(&self, value: T) -> Source<T>
+    where
+        T: PartialEq + Send + Sync + 'static,
+    {
+        self.source(value)
+    }
+
+    /// Like [`source`](Self::source), but opts the cached-value sidecar into the
     /// inline small-`Copy` seqlock fast path (#lzcellread / #rdstrat2): when `T`
     /// is `Copy` and fits the inline buffer (`size_of::<T>() <= 24`,
     /// `align <= 16`), the value is stored inline behind a wait-free seqlock —
@@ -2748,9 +2763,9 @@ impl ThreadSafeContext {
     /// `Mutex<()>`; readers never contend on it.
     ///
     /// This is a separate constructor (rather than automatic) because stable
-    /// Rust cannot detect `T: Copy` inside the unbounded generic [`cell`]; see
+    /// Rust cannot detect `T: Copy` inside the unbounded generic [`source`]; see
     /// [`inline_spec_for`].
-    pub fn cell_copy<T>(&self, value: T) -> Source<T>
+    pub fn source_copy<T>(&self, value: T) -> Source<T>
     where
         T: Copy + PartialEq + Send + Sync + 'static,
     {
@@ -2773,6 +2788,15 @@ impl ThreadSafeContext {
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Source(node));
         Source::from_id(id)
+    }
+
+    /// Compatibility constructor for the pre-Cell-kernel API.
+    #[deprecated(note = "use `ThreadSafeContext::source_copy`")]
+    pub fn cell_copy<T>(&self, value: T) -> Source<T>
+    where
+        T: Copy + PartialEq + Send + Sync + 'static,
+    {
+        self.source_copy(value)
     }
 
     /// Get the value of a thread-safe cell.
@@ -3174,7 +3198,7 @@ impl ThreadSafeContext {
     /// ```
     /// # use lazily::ThreadSafeContext;
     /// let ctx = ThreadSafeContext::new();
-    /// let topic = ctx.cell(0u64);
+    /// let topic = ctx.source(0u64);
     /// {
     ///     let conn = ctx.scope();
     ///     let a = conn.computed(move |c| c.get(&topic) + 1);
@@ -3739,23 +3763,11 @@ impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
     // as its inherent API expects. The GAT lifetime is unused here.
     type Compute<'a> = ThreadSafeContext;
 
-    fn cell<T>(&self, value: T) -> Self::Source<T>
+    fn source<T>(&self, value: T) -> Self::Source<T>
     where
         T: PartialEq + Send + Sync + 'static,
     {
-        ThreadSafeContext::cell(self, value)
-    }
-    fn get_cell<T>(&self, handle: &Self::Source<T>) -> T
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        ThreadSafeContext::get(self, handle)
-    }
-    fn set_cell<T>(&self, handle: &Self::Source<T>, value: T)
-    where
-        T: PartialEq + Send + Sync + 'static,
-    {
-        ThreadSafeContext::set(self, handle, value);
+        ThreadSafeContext::source(self, value)
     }
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
@@ -3763,12 +3775,6 @@ impl crate::reactive_graph::SyncReactiveGraph for ThreadSafeContext {
         F: Fn(&Self::Compute<'_>) -> T + Send + Sync + 'static,
     {
         ThreadSafeContext::computed(self, compute)
-    }
-    fn get<T>(&self, handle: &Self::Computed<T>) -> T
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        ThreadSafeContext::get(self, handle)
     }
     fn effect<F, C>(&self, run: F) -> Self::Effect
     where
@@ -3810,7 +3816,7 @@ mod tests {
     #[test]
     fn dispose_slot_detaches_both_directions_and_invalidates_readers() {
         let ctx = ThreadSafeContext::new();
-        let src = ctx.cell(4i64);
+        let src = ctx.source(4i64);
         let derived = ctx.computed(move |c| c.get(&src));
         let reader = ctx.computed(move |c| c.get(&derived) + 1);
         assert_eq!(ctx.get(&reader), 5);
@@ -3834,7 +3840,7 @@ mod tests {
         // The registry is an index-keyed side table; a stale entry would alias
         // onto whatever next claims the recycled id.
         let ctx = ThreadSafeContext::new();
-        let topic = ctx.cell(1i64);
+        let topic = ctx.source(1i64);
         let wide = ctx.computed(move |c| c.get(&topic));
         assert_eq!(ctx.get(&wide), 1);
         let wide_idx = node_index(wide.id).unwrap();
@@ -3861,7 +3867,7 @@ mod tests {
     #[test]
     fn dispose_cell_detaches_dependents_and_is_kind_checked() {
         let ctx = ThreadSafeContext::new();
-        let topic = ctx.cell(1i64);
+        let topic = ctx.source(1i64);
         let reader = ctx.computed(move |c| c.get(&topic) + 1);
         assert_eq!(ctx.get(&reader), 2);
         assert_eq!(ctx.dependent_count(&topic), 1);
@@ -3878,7 +3884,7 @@ mod tests {
     #[test]
     fn teardown_scope_disposes_in_reverse_creation_order_and_disarm_cancels() {
         let ctx = ThreadSafeContext::new();
-        let topic = ctx.cell(1i64);
+        let topic = ctx.source(1i64);
         {
             let scope = ctx.scope();
             let a = scope.computed(move |c| c.get(&topic) + 1);
@@ -3906,7 +3912,7 @@ mod tests {
         // The owned-handle design exists so a scope can move to another thread;
         // a borrow-based scope could not.
         let ctx = ThreadSafeContext::new();
-        let topic = ctx.cell(1i64);
+        let topic = ctx.source(1i64);
         let scope = ctx.scope();
         let a = scope.computed(move |c| c.get(&topic) + 1);
         assert_eq!(ctx.get(&a), 2);
@@ -3930,7 +3936,7 @@ mod tests {
     fn both_read_strategies_cache_and_invalidate_correctly() {
         for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
             let ctx = ThreadSafeContext::with_read_strategy(strategy);
-            let cell = ctx.cell(2_i32);
+            let cell = ctx.source(2_i32);
             let doubled = ctx.computed(move |c| c.get(&cell) * 10);
             // cold compute + cached read
             assert_eq!(ctx.get(&doubled), 20, "{strategy:?}");
@@ -3948,7 +3954,7 @@ mod tests {
     fn get_arc_shares_one_allocation_across_reads() {
         for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
             let ctx = ThreadSafeContext::with_read_strategy(strategy);
-            let cell = ctx.cell(3_usize);
+            let cell = ctx.source(3_usize);
             let text = ctx.computed(move |c| "ab".repeat(c.get(&cell)));
 
             let first = ctx.get_arc(&text);
@@ -3969,7 +3975,7 @@ mod tests {
     #[test]
     fn get_arc_recomputes_after_invalidation() {
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell(1_usize);
+        let cell = ctx.source(1_usize);
         let text = ctx.computed(move |c| "x".repeat(c.get(&cell)));
 
         let stale = ctx.get_arc(&text);
@@ -3990,7 +3996,7 @@ mod tests {
     #[test]
     fn get_arc_tracks_dependencies_like_get() {
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell(2_usize);
+        let cell = ctx.source(2_usize);
         let inner = ctx.computed(move |c| "y".repeat(c.get(&cell)));
         let outer = ctx.computed(move |c| c.get_arc(&inner).len());
 
@@ -4022,7 +4028,7 @@ mod tests {
     fn slot_copy_uses_inline_storage_in_both_strategies(/* #rdstrat2 */) {
         for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
             let ctx = ThreadSafeContext::with_read_strategy(strategy);
-            let cell = ctx.cell(2_i32);
+            let cell = ctx.source(2_i32);
             let doubled = ctx.computed_copy(move |c| c.get(&cell) * 10);
             // The inline seqlock subsumes the read-strategy tradeoff for small
             // `Copy` values, so it is selected regardless of `strategy`.
@@ -4039,7 +4045,7 @@ mod tests {
         // 32 bytes > INLINE_CAP (24) → not inline-eligible; uses the strategy
         // path (RwLock for the default LowConcurrency).
         let ctx = ThreadSafeContext::with_read_strategy(ReadStrategy::LowConcurrency);
-        let cell = ctx.cell(7u8);
+        let cell = ctx.source(7u8);
         let big = ctx.slot_copy(move |c| [c.get(&cell); 32]);
         assert_eq!(slot_storage_kind(&ctx, &big), "locked");
         assert_eq!(ctx.get(&big), [7u8; 32]);
@@ -4056,7 +4062,7 @@ mod tests {
             z: i32,
         }
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell(1_i32);
+        let cell = ctx.source(1_i32);
         let p = ctx.computed_copy(move |c| {
             let v = c.get(&cell);
             Point {
@@ -4090,7 +4096,7 @@ mod tests {
             b: u64,
         }
         let ctx = Arc::new(ThreadSafeContext::new());
-        let cell = ctx.cell(0u64);
+        let cell = ctx.source(0u64);
         let pair = ctx.slot_copy(move |c| {
             let v = c.get(&cell);
             Pair { a: v, b: v }
@@ -4148,7 +4154,7 @@ mod tests {
     fn cell_uses_locked_storage_in_both_strategies(/* #lzcellread */) {
         for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
             let ctx = ThreadSafeContext::with_read_strategy(strategy);
-            let cell = ctx.cell(42_i32);
+            let cell = ctx.source(42_i32);
             assert_eq!(cell_storage_kind(&ctx, &cell), "locked", "{strategy:?}");
             assert_eq!(ctx.get(&cell), 42, "{strategy:?}");
             ctx.set(&cell, 7);
@@ -4160,7 +4166,7 @@ mod tests {
     fn cell_copy_uses_inline_storage_for_small_copy_value(/* #lzcellread */) {
         for strategy in [ReadStrategy::LowConcurrency, ReadStrategy::HighConcurrency] {
             let ctx = ThreadSafeContext::with_read_strategy(strategy);
-            let cell = ctx.cell_copy(42_i32);
+            let cell = ctx.source_copy(42_i32);
             // The inline seqlock subsumes the read-strategy tradeoff for small
             // `Copy` values, so it is selected regardless of `strategy`.
             assert_eq!(cell_storage_kind(&ctx, &cell), "inline", "{strategy:?}");
@@ -4181,7 +4187,7 @@ mod tests {
         // 32 bytes > INLINE_CAP (24) → not inline-eligible; uses the Locked
         // (RwLock) path.
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell_copy([0u8; 32]);
+        let cell = ctx.source_copy([0u8; 32]);
         assert_eq!(cell_storage_kind(&ctx, &cell), "locked");
         ctx.set(&cell, [9u8; 32]);
         assert_eq!(ctx.get(&cell), [9u8; 32]);
@@ -4196,7 +4202,7 @@ mod tests {
             z: i32,
         }
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell_copy(Point { x: 1, y: 2, z: 3 });
+        let cell = ctx.source_copy(Point { x: 1, y: 2, z: 3 });
         assert_eq!(cell_storage_kind(&ctx, &cell), "inline");
         assert_eq!(ctx.get(&cell), Point { x: 1, y: 2, z: 3 });
         ctx.set(&cell, Point { x: 4, y: 8, z: 12 });
@@ -4215,7 +4221,7 @@ mod tests {
             b: u64,
         }
         let ctx = Arc::new(ThreadSafeContext::new());
-        let cell = ctx.cell_copy(Pair { a: 0, b: 0 });
+        let cell = ctx.source_copy(Pair { a: 0, b: 0 });
         let stop = Arc::new(AtomicBool::new(false));
         let readers: Vec<_> = (0..4)
             .map(|_| {
@@ -4246,7 +4252,7 @@ mod tests {
         // shared read lock (not an exclusive Mutex). Asserts correctness under
         // concurrent reads + writes for a non-Copy value (String).
         let ctx = Arc::new(ThreadSafeContext::new());
-        let cell = ctx.cell("init".to_string());
+        let cell = ctx.source("init".to_string());
         let stop = Arc::new(AtomicBool::new(false));
         let readers: Vec<_> = (0..4)
             .map(|_| {
@@ -4314,7 +4320,7 @@ mod tests {
     #[test]
     fn invalidation_plan_snapshots_frontier_before_apply() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(0usize);
+        let root = ctx.source(0usize);
         let left = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
         let right = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(2));
         let joined = ctx.computed(move |ctx| ctx.get(&left).wrapping_add(ctx.get(&right)));
@@ -4398,7 +4404,7 @@ mod tests {
     #[test]
     fn invalidation_plan_snapshots_hard_clears_before_apply() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(1usize);
+        let root = ctx.source(1usize);
         let doubled = ctx.computed(move |ctx| ctx.get(&root).wrapping_mul(2));
         let labeled = ctx.computed(move |ctx| ctx.get(&doubled).wrapping_add(1));
         let runs = Arc::new(AtomicUsize::new(0));
@@ -4456,10 +4462,10 @@ mod tests {
     fn batched_cell_invalidations_mark_shared_dependent_once() {
         let ctx = ThreadSafeContext::new();
         let cells = [
-            ctx.cell(0usize),
-            ctx.cell(0usize),
-            ctx.cell(0usize),
-            ctx.cell(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
         ];
         let total = ctx.computed(move |ctx| {
             cells
@@ -4493,8 +4499,8 @@ mod tests {
     #[test]
     fn batched_cell_invalidations_schedule_shared_effect_once() {
         let ctx = ThreadSafeContext::new();
-        let left = ctx.cell(0usize);
-        let right = ctx.cell(0usize);
+        let left = ctx.source(0usize);
+        let right = ctx.source(0usize);
         let runs = Arc::new(AtomicUsize::new(0));
         let runs_for_effect = Arc::clone(&runs);
         let effect = ctx.effect(move |ctx| {

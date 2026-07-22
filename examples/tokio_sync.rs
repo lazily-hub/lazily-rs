@@ -5,7 +5,7 @@ use lazily::ThreadSafeContext;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let ctx = ThreadSafeContext::new();
-    let input = ctx.cell(20usize);
+    let input = ctx.source(20usize);
     let doubled = ctx.computed(move |ctx| ctx.get(&input) * 2);
 
     let worker_ctx = ctx.clone();

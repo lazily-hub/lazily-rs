@@ -52,7 +52,7 @@
 //! concrete, following [`TypedFactoryContext`](crate::TypedFactoryContext)'s
 //! `type Schema`.
 
-use crate::context::GraphNode;
+use crate::context::{GraphNode, Read, Write};
 
 /// A scope that disposes what it owns when it ends.
 ///
@@ -81,7 +81,8 @@ pub trait Teardown {
 /// Everything here — disposal, scopes, batching, degree introspection — is
 /// about graph *structure*, so generic code over this trait pays for nothing it
 /// does not use. Construction and reads live in [`SyncReactiveGraph`] /
-/// [`AsyncReactiveGraph`].
+/// [`AsyncReactiveGraph`]. Both capability traits expose the Cell-kernel
+/// vocabulary: `source`, `get`, and `set`.
 ///
 /// ```
 /// use lazily::{Context, ReactiveGraph, SyncReactiveGraph};
@@ -92,7 +93,7 @@ pub trait Teardown {
 /// }
 ///
 /// let ctx = Context::new();
-/// let topic = SyncReactiveGraph::cell(&ctx, 1i64);
+/// let topic = SyncReactiveGraph::source(&ctx, 1i64);
 /// let derived = SyncReactiveGraph::computed(&ctx, move |c| c.get(&topic) + 1);
 /// assert_eq!(SyncReactiveGraph::get(&ctx, &derived), 2);
 /// assert_eq!(leaked_edges(&ctx, &topic), 1);
@@ -184,19 +185,60 @@ pub trait SyncReactiveGraph: ReactiveGraph {
         Self: 'a;
 
     /// Create a source cell.
+    fn source<T>(&self, value: T) -> Self::Source<T>
+    where
+        T: PartialEq + Send + Sync + 'static;
+
+    /// Read any handle supported by this graph.
+    fn get<H>(&self, handle: &H) -> <H as Read<Self>>::Output
+    where
+        Self: Sized,
+        H: Read<Self> + ?Sized,
+    {
+        handle.read(self)
+    }
+
+    /// Write any handle supported by this graph. In the Cell kernel only
+    /// [`Source`](crate::Source) implements [`Write`].
+    fn set<H>(&self, handle: &H, value: <H as Write<Self>>::Value)
+    where
+        Self: Sized,
+        H: Write<Self> + ?Sized,
+    {
+        handle.write(self, value);
+    }
+
+    /// Compatibility constructor for the pre-Cell-kernel API.
+    #[deprecated(note = "use `SyncReactiveGraph::source`")]
     fn cell<T>(&self, value: T) -> Self::Source<T>
     where
-        T: PartialEq + Send + Sync + 'static;
+        Self: Sized,
+        T: PartialEq + Send + Sync + 'static,
+    {
+        self.source(value)
+    }
 
-    /// Read a source cell.
+    /// Compatibility source read for the pre-Cell-kernel API.
+    #[deprecated(note = "use `SyncReactiveGraph::get`")]
     fn get_cell<T>(&self, handle: &Self::Source<T>) -> T
     where
-        T: Clone + Send + Sync + 'static;
+        Self: Sized,
+        T: Clone + Send + Sync + 'static,
+        Self::Source<T>: Read<Self, Output = T>,
+    {
+        self.get(handle)
+    }
 
-    /// Write a source cell, invalidating its dependents.
+    /// Compatibility source write for the pre-Cell-kernel API.
+    #[deprecated(note = "use `SyncReactiveGraph::set`")]
     fn set_cell<T>(&self, handle: &Self::Source<T>, value: T)
     where
-        T: PartialEq + Send + Sync + 'static;
+        Self: Sized,
+        T: PartialEq + Send + Sync + 'static,
+        Self::Source<T>: Write<Self, Value = T>,
+    {
+        self.set(handle, value);
+    }
 
     /// Create a lazily-computed derived slot. Guarded (`#lzcellkernel`): an
     /// equal recompute suppresses downstream invalidation, so `T: PartialEq`.
@@ -204,11 +246,6 @@ pub trait SyncReactiveGraph: ReactiveGraph {
     where
         T: PartialEq + Send + Sync + 'static,
         F: Fn(&Self::Compute<'_>) -> T + Send + Sync + 'static;
-
-    /// Read a derived slot, computing it if needed.
-    fn get<T>(&self, handle: &Self::Computed<T>) -> T
-    where
-        T: Clone + Send + Sync + 'static;
 
     /// Register an effect. The callback returns its cleanup, which runs before
     /// each rerun and on disposal.
@@ -230,22 +267,64 @@ pub trait SyncReactiveGraph: ReactiveGraph {
 /// is needed here.
 pub trait AsyncReactiveGraph: ReactiveGraph {
     /// Create a source cell.
-    fn cell<T>(&self, value: T) -> Self::Source<T>
+    fn source<T>(&self, value: T) -> Self::Source<T>
     where
         T: PartialEq + Clone + Send + Sync + 'static;
 
-    /// Read a source cell. Cells resolve synchronously even here.
-    fn get_cell<T>(&self, handle: &Self::Source<T>) -> T
+    /// Read the currently materialized value of any handle supported by this
+    /// graph. Sources return `T`; async computeds return `Option<T>`.
+    fn get<H>(&self, handle: &H) -> <H as Read<Self>>::Output
     where
-        T: Clone + Send + Sync + 'static;
+        Self: Sized,
+        H: Read<Self> + ?Sized,
+    {
+        handle.read(self)
+    }
 
-    /// Write a source cell, invalidating its dependents.
-    fn set_cell<T>(&self, handle: &Self::Source<T>, value: T)
+    /// Write any handle supported by this graph. Only async sources implement
+    /// [`Write`].
+    fn set<H>(&self, handle: &H, value: <H as Write<Self>>::Value)
     where
-        T: PartialEq + Clone + Send + Sync + 'static;
+        Self: Sized,
+        H: Write<Self> + ?Sized,
+    {
+        handle.write(self, value);
+    }
 
     /// Read a derived slot, driving its computation if needed.
-    fn get<T>(&self, handle: &Self::Computed<T>) -> impl Future<Output = T> + Send
+    fn get_async<T>(&self, handle: &Self::Computed<T>) -> impl Future<Output = T> + Send
     where
         T: Clone + Send + Sync + 'static;
+
+    /// Compatibility constructor for the pre-Cell-kernel API.
+    #[deprecated(note = "use `AsyncReactiveGraph::source`")]
+    fn cell<T>(&self, value: T) -> Self::Source<T>
+    where
+        Self: Sized,
+        T: PartialEq + Clone + Send + Sync + 'static,
+    {
+        self.source(value)
+    }
+
+    /// Compatibility source read for the pre-Cell-kernel API.
+    #[deprecated(note = "use `AsyncReactiveGraph::get`")]
+    fn get_cell<T>(&self, handle: &Self::Source<T>) -> T
+    where
+        Self: Sized,
+        T: Clone + Send + Sync + 'static,
+        Self::Source<T>: Read<Self, Output = T>,
+    {
+        self.get(handle)
+    }
+
+    /// Compatibility source write for the pre-Cell-kernel API.
+    #[deprecated(note = "use `AsyncReactiveGraph::set`")]
+    fn set_cell<T>(&self, handle: &Self::Source<T>, value: T)
+    where
+        Self: Sized,
+        T: PartialEq + Clone + Send + Sync + 'static,
+        Self::Source<T>: Write<Self, Value = T>,
+    {
+        self.set(handle, value);
+    }
 }

@@ -1,8 +1,8 @@
 //! Async keyed reactive collection (`#reactivemap`, async flavor).
 //!
 //! The [`AsyncContext`] analog of [`ReactiveMap`](crate::ReactiveMap): keys `K`
-//! map to per-entry async reactive nodes ([`AsyncCellHandle<V>`] input cells /
-//! [`AsyncSlotHandle<V>`] derived slots). Like
+//! map to per-entry async reactive nodes ([`AsyncSource<V>`] input cells /
+//! [`AsyncComputed<V>`] derived slots). Like
 //! [`ThreadSafeReactiveMap`](crate::ThreadSafeReactiveMap) it keeps its present-set
 //! state behind an `Arc<Mutex<..>>` (the [`AsyncContext`] is itself `Send + Sync`),
 //! so it can live in a cross-task owner.
@@ -27,18 +27,18 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use crate::cell_family::EntryKind;
-use crate::{AsyncCellHandle, AsyncContext, AsyncSlotHandle};
+use crate::{AsyncComputed, AsyncContext, AsyncSource};
 
 mod sealed {
     pub trait Sealed {}
 }
 
 /// The node kinds an async map entry can take — the [`AsyncContext`] analog of
-/// [`MapHandle`](crate::MapHandle). Sealed to [`AsyncCellHandle`] (input cells)
-/// and [`AsyncSlotHandle`] (derived slots).
+/// [`MapHandle`](crate::MapHandle). Sealed to [`AsyncSource`] (input cells)
+/// and [`AsyncComputed`] (derived slots).
 pub trait AsyncMapHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static {
-    /// This handle's entry kind. `AsyncCellHandle` is [`EntryKind::Cell`] (always
-    /// resolved); `AsyncSlotHandle` is [`EntryKind::Slot`] (resolves asynchronously).
+    /// This handle's entry kind. `AsyncSource` is [`EntryKind::Cell`] (always
+    /// resolved); `AsyncComputed` is [`EntryKind::Slot`] (resolves asynchronously).
     const KIND: EntryKind;
 
     /// Allocate the node for one entry on `ctx`. `compute` is the per-key value
@@ -56,15 +56,15 @@ pub trait AsyncMapHandle<V>: sealed::Sealed + Copy + Send + Sync + 'static {
         V: Clone + Send + Sync + 'static;
 }
 
-impl<V> sealed::Sealed for AsyncCellHandle<V> {}
-impl<V: Send + Sync + 'static> AsyncMapHandle<V> for AsyncCellHandle<V> {
+impl<V> sealed::Sealed for AsyncSource<V> {}
+impl<V: Send + Sync + 'static> AsyncMapHandle<V> for AsyncSource<V> {
     const KIND: EntryKind = EntryKind::Cell;
 
     fn materialize(ctx: &AsyncContext, compute: Arc<dyn Fn() -> V + Send + Sync>) -> Self
     where
         V: PartialEq + Clone + Send + Sync + 'static,
     {
-        ctx.cell(compute())
+        ctx.source(compute())
     }
 
     fn observe(self, ctx: &AsyncContext) -> Option<V>
@@ -75,8 +75,8 @@ impl<V: Send + Sync + 'static> AsyncMapHandle<V> for AsyncCellHandle<V> {
     }
 }
 
-impl<V> sealed::Sealed for AsyncSlotHandle<V> {}
-impl<V: Send + Sync + 'static> AsyncMapHandle<V> for AsyncSlotHandle<V> {
+impl<V> sealed::Sealed for AsyncComputed<V> {}
+impl<V: Send + Sync + 'static> AsyncMapHandle<V> for AsyncComputed<V> {
     const KIND: EntryKind = EntryKind::Slot;
 
     fn materialize(ctx: &AsyncContext, compute: Arc<dyn Fn() -> V + Send + Sync>) -> Self
@@ -109,7 +109,7 @@ struct MapInner<K, H> {
 }
 
 /// The async keyed reactive collection (`#reactivemap`) generic over the entry
-/// handle kind `H` ([`AsyncCellHandle<V>`] input cells, [`AsyncSlotHandle<V>`]
+/// handle kind `H` ([`AsyncSource<V>`] input cells, [`AsyncComputed<V>`]
 /// derived slots).
 ///
 /// Cheap to [`Clone`] (an `Arc` to shared inner state) and `Send + Sync`. See the
@@ -172,7 +172,7 @@ where
     }
 
     /// Get the entry handle for `key`, minting it via `factory(&key)` on first
-    /// access and caching it. For a slot map this is the [`AsyncSlotHandle`] to
+    /// access and caching it. For a slot map this is the [`AsyncComputed`] to
     /// drive with [`AsyncContext::get_async`].
     pub fn get_or_insert_handle(
         &self,
@@ -243,7 +243,7 @@ where
 }
 
 /// `AsyncCellMap`-only surface: `set` (an input is settable).
-impl<K, V> AsyncReactiveMap<K, V, AsyncCellHandle<V>>
+impl<K, V> AsyncReactiveMap<K, V, AsyncSource<V>>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: PartialEq + Clone + Send + Sync + 'static,
@@ -263,7 +263,7 @@ where
 }
 
 /// `AsyncSlotMap`-only surface: the eager pre-mint helper.
-impl<K, V> AsyncReactiveMap<K, V, AsyncSlotHandle<V>>
+impl<K, V> AsyncReactiveMap<K, V, AsyncComputed<V>>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: PartialEq + Clone + Send + Sync + 'static,
@@ -284,13 +284,13 @@ where
 }
 
 /// An async **input-cell** map: every entry is an always-resolved
-/// [`AsyncCellHandle<V>`].
-pub type AsyncCellMap<K, V> = AsyncReactiveMap<K, V, AsyncCellHandle<V>>;
+/// [`AsyncSource<V>`].
+pub type AsyncCellMap<K, V> = AsyncReactiveMap<K, V, AsyncSource<V>>;
 
-/// An async **derived-slot** map: entries are [`AsyncSlotHandle<V>`] minted lazily
+/// An async **derived-slot** map: entries are [`AsyncComputed<V>`] minted lazily
 /// on access or eagerly via [`materialize_all`](AsyncReactiveMap::materialize_all),
 /// resolved via [`AsyncContext::get_async`].
-pub type AsyncSlotMap<K, V> = AsyncReactiveMap<K, V, AsyncSlotHandle<V>>;
+pub type AsyncSlotMap<K, V> = AsyncReactiveMap<K, V, AsyncComputed<V>>;
 
 #[cfg(test)]
 mod tests {

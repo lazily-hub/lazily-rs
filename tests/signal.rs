@@ -12,7 +12,7 @@ use lazily::Context;
 #[test]
 fn signal_is_materialized_eagerly_on_creation() {
     let ctx = Context::new();
-    let n = ctx.cell(2i32);
+    let n = ctx.source(2i32);
     // No read happens before the assertion — the signal must already hold its
     // computed value purely from creation.
     let doubled = ctx.signal(move |ctx| n.get(ctx) * 2);
@@ -22,7 +22,7 @@ fn signal_is_materialized_eagerly_on_creation() {
 #[test]
 fn signal_recomputes_eagerly_without_a_read() {
     let ctx = Context::new();
-    let n = ctx.cell(1i32);
+    let n = ctx.source(1i32);
     let computes = Rc::new(RefCell::new(0usize));
     let computes_inner = computes.clone();
     let sig = ctx.signal(move |ctx| {
@@ -42,7 +42,7 @@ fn signal_recomputes_eagerly_without_a_read() {
 #[test]
 fn signal_value_goes_v1_to_v2_with_no_intermediate_unset() {
     let ctx = Context::new();
-    let n = ctx.cell(1i32);
+    let n = ctx.source(1i32);
     let sig = ctx.signal(move |ctx| n.get(ctx) * 100);
 
     // Record every value the signal takes, observed through a dependent effect.
@@ -64,7 +64,7 @@ fn signal_value_goes_v1_to_v2_with_no_intermediate_unset() {
 #[test]
 fn signal_memo_guard_skips_equal_recomputation() {
     let ctx = Context::new();
-    let n = ctx.cell(4i32);
+    let n = ctx.source(4i32);
     // Value depends only on parity, so flipping between two evens is a no-op.
     let parity = ctx.signal(move |ctx| n.get(ctx) % 2);
 
@@ -92,7 +92,7 @@ fn signal_memo_guard_skips_equal_recomputation() {
 #[test]
 fn chained_signals_propagate_eagerly() {
     let ctx = Context::new();
-    let n = ctx.cell(1i32);
+    let n = ctx.source(1i32);
     let a = ctx.signal(move |ctx| n.get(ctx) + 1);
     let b = ctx.signal(move |ctx| a.get(ctx) * 10);
 
@@ -108,7 +108,7 @@ fn chained_signals_propagate_eagerly() {
 #[test]
 fn diamond_signal_graph_is_glitch_free() {
     let ctx = Context::new();
-    let n = ctx.cell(1i32);
+    let n = ctx.source(1i32);
     let a = ctx.signal(move |ctx| n.get(ctx) + 1); // n=1 -> 2 ; n=5 -> 6
     let c = ctx.signal(move |ctx| a.get(ctx) * 2); // -> 4 ; -> 12
     let d = ctx.signal(move |ctx| a.get(ctx) + c.get(ctx)); // -> 6 ; -> 18
@@ -135,8 +135,8 @@ fn diamond_signal_graph_is_glitch_free() {
 #[test]
 fn batched_writes_settle_to_a_single_consistent_value() {
     let ctx = Context::new();
-    let a = ctx.cell(1i32);
-    let b = ctx.cell(10i32);
+    let a = ctx.source(1i32);
+    let b = ctx.source(10i32);
     let sum = ctx.signal(move |ctx| a.get(ctx) + b.get(ctx));
 
     let seen = Rc::new(RefCell::new(Vec::<i32>::new()));
@@ -158,7 +158,7 @@ fn batched_writes_settle_to_a_single_consistent_value() {
 #[test]
 fn dispose_stops_eager_recomputation() {
     let ctx = Context::new();
-    let n = ctx.cell(1i32);
+    let n = ctx.source(1i32);
     let computes = Rc::new(RefCell::new(0usize));
     let computes_inner = computes.clone();
     let sig = ctx.signal(move |ctx| {
@@ -184,7 +184,7 @@ fn dispose_stops_eager_recomputation() {
 #[test]
 fn equal_value_set_is_a_noop_for_signals() {
     let ctx = Context::new();
-    let n = ctx.cell(3i32);
+    let n = ctx.source(3i32);
     let computes = Rc::new(RefCell::new(0usize));
     let computes_inner = computes.clone();
     let sig = ctx.signal(move |ctx| {
@@ -212,7 +212,7 @@ mod thread_safe {
     #[test]
     fn signal_is_materialized_eagerly_on_creation() {
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(2i32);
+        let n = ctx.source(2i32);
         let doubled = ctx.signal(move |ctx| ctx.get(&n) * 2);
         assert_eq!(doubled.get(&ctx), 4);
     }
@@ -220,7 +220,7 @@ mod thread_safe {
     #[test]
     fn signal_recomputes_eagerly_without_a_read() {
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(1i32);
+        let n = ctx.source(1i32);
         let computes = Arc::new(Mutex::new(0usize));
         let computes_inner = computes.clone();
         let sig = ctx.signal(move |ctx| {
@@ -238,7 +238,7 @@ mod thread_safe {
     #[test]
     fn signal_value_goes_v1_to_v2_with_no_intermediate_unset() {
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(1i32);
+        let n = ctx.source(1i32);
         let sig = ctx.signal(move |ctx| ctx.get(&n) * 100);
 
         let seen = Arc::new(Mutex::new(Vec::<i32>::new()));
@@ -257,7 +257,7 @@ mod thread_safe {
     #[test]
     fn signal_memo_guard_skips_equal_recomputation() {
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(4i32);
+        let n = ctx.source(4i32);
         let parity = ctx.signal(move |ctx| ctx.get(&n) % 2);
 
         let downstream_runs = Arc::new(Mutex::new(0usize));
@@ -283,7 +283,7 @@ mod thread_safe {
     #[test]
     fn chained_signals_propagate_eagerly() {
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(1i32);
+        let n = ctx.source(1i32);
         let a = ctx.signal(move |ctx| ctx.get(&n) + 1);
         let b = ctx.signal(move |ctx| a.get(ctx) * 10);
 
@@ -298,7 +298,7 @@ mod thread_safe {
     #[test]
     fn diamond_signal_graph_is_glitch_free() {
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(1i32);
+        let n = ctx.source(1i32);
         let a = ctx.signal(move |ctx| ctx.get(&n) + 1);
         let c = ctx.signal(move |ctx| a.get(ctx) * 2);
         let d = ctx.signal(move |ctx| a.get(ctx) + c.get(ctx));
@@ -323,8 +323,8 @@ mod thread_safe {
     #[test]
     fn batched_writes_settle_to_a_single_consistent_value() {
         let ctx = ThreadSafeContext::new();
-        let a = ctx.cell(1i32);
-        let b = ctx.cell(10i32);
+        let a = ctx.source(1i32);
+        let b = ctx.source(10i32);
         let sum = ctx.signal(move |ctx| ctx.get(&a) + ctx.get(&b));
 
         let seen = Arc::new(Mutex::new(Vec::<i32>::new()));
@@ -345,7 +345,7 @@ mod thread_safe {
     #[test]
     fn dispose_stops_eager_recomputation() {
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(1i32);
+        let n = ctx.source(1i32);
         let computes = Arc::new(Mutex::new(0usize));
         let computes_inner = computes.clone();
         let sig = ctx.signal(move |ctx| {
@@ -371,7 +371,7 @@ mod thread_safe {
     #[test]
     fn equal_value_set_is_a_noop_for_signals() {
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(3i32);
+        let n = ctx.source(3i32);
         let computes = Arc::new(Mutex::new(0usize));
         let computes_inner = computes.clone();
         let sig = ctx.signal(move |ctx| {
@@ -390,7 +390,7 @@ mod thread_safe {
         // The shared-graph signal must be usable from another OS thread, which
         // is the entire point of the ThreadSafeContext variant.
         let ctx = ThreadSafeContext::new();
-        let n = ctx.cell(2i32);
+        let n = ctx.source(2i32);
         let sig = ctx.signal(move |ctx| ctx.get(&n) * 3);
         assert_eq!(sig.get(&ctx), 6);
 

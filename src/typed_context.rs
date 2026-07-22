@@ -701,7 +701,7 @@ impl<Schema> TypedThreadSafeContext<Schema> {
     where
         T: PartialEq + Send + Sync + 'static,
     {
-        TypedThreadSafeCellHandle::new(self.inner.cell(value))
+        TypedThreadSafeCellHandle::new(self.inner.source(value))
     }
 
     pub fn slot<T, F>(&self, compute: F) -> TypedThreadSafeSlotHandle<Schema, T>

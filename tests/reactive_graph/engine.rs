@@ -203,8 +203,8 @@ pub fn replay<'a, M: GraphModel>(
                 let id = op["id"].as_str().unwrap().to_owned();
                 let value = op["value"].as_i64().unwrap();
                 let h = match op["scope"].as_str() {
-                    Some(s) => Ref::Cell(scopes[s].cell(value)),
-                    None => Ref::Cell(model.cell(value)),
+                    Some(s) => Ref::Cell(scopes[s].source(value)),
+                    None => Ref::Cell(model.source(value)),
                 };
                 nodes.insert(id.clone(), h);
                 stale.insert(id.clone(), h);

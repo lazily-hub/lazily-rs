@@ -244,7 +244,7 @@ fn context_memo_effect() -> InstrumentationSnapshot {
     let ctx = Context::new();
     ctx.reset_instrumentation();
 
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let parity = ctx.computed(move |ctx| ctx.get(&root) % 2);
     let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
     let _effect = ctx.effect(move |ctx| {
@@ -261,7 +261,7 @@ fn context_fan_out() -> InstrumentationSnapshot {
     let ctx = Context::new();
     ctx.reset_instrumentation();
 
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let slots = (0..FAN_OUT_WIDTH)
         .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
@@ -284,7 +284,7 @@ fn context_batch_storm() -> InstrumentationSnapshot {
     ctx.reset_instrumentation();
 
     let cells = (0..BATCH_STORM_CELLS)
-        .map(|idx| ctx.cell(idx))
+        .map(|idx| ctx.source(idx))
         .collect::<Vec<_>>();
     let sink = Rc::new(LocalCell::new(0usize));
     let effect_cells = cells.clone();
@@ -311,7 +311,7 @@ fn thread_safe_first_get() -> InstrumentationSnapshot {
     let ctx = ThreadSafeContext::new();
     ctx.reset_instrumentation();
 
-    let root = ctx.cell(40usize);
+    let root = ctx.source(40usize);
     let answer = ctx.computed(move |ctx| {
         thread::sleep(Duration::from_micros(200));
         ctx.get(&root).wrapping_add(2)
@@ -338,7 +338,7 @@ fn thread_safe_first_get() -> InstrumentationSnapshot {
 
 fn thread_safe_set_cell_invalidation_high_fan_out() -> ProfileResult {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let slots = (0..SET_CELL_INVALIDATION_FAN_OUT)
         .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
@@ -475,7 +475,7 @@ fn thread_safe_contention_profile(
 }
 
 fn run_thread_safe_fan_out_eager_validation(ctx: &ThreadSafeContext, workers: usize) -> usize {
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let slots = (0..GRAPH_PROPAGATION_WIDTH)
         .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
@@ -518,7 +518,7 @@ fn run_thread_safe_fan_out_eager_validation(ctx: &ThreadSafeContext, workers: us
 }
 
 fn run_thread_safe_fan_out_lazy_dirty_epochs(ctx: &ThreadSafeContext, workers: usize) -> usize {
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let slots = (0..GRAPH_PROPAGATION_WIDTH)
         .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
@@ -561,7 +561,7 @@ fn run_thread_safe_fan_in_lazy_dirty_epochs(ctx: &ThreadSafeContext, workers: us
     for worker in 0..workers {
         for offset in 0..CONTENTION_BATCH_CELLS_PER_WORKER {
             roots.push(
-                ctx.cell(
+                ctx.source(
                     worker
                         .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                         .wrapping_add(offset),
@@ -684,7 +684,7 @@ fn run_thread_safe_same_slot_set_cell_invalidation(
     ctx: &ThreadSafeContext,
     workers: usize,
 ) -> usize {
-    let root = ctx.cell(1usize);
+    let root = ctx.source(1usize);
     let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
@@ -723,7 +723,7 @@ fn run_thread_safe_independent_slot_set_cell_invalidation(
     workers: usize,
 ) -> usize {
     let roots = (0..workers)
-        .map(|worker| ctx.cell(worker))
+        .map(|worker| ctx.source(worker))
         .collect::<Vec<_>>();
     let values = roots
         .iter()
@@ -771,7 +771,7 @@ fn run_thread_safe_batched_set_cell_invalidation(ctx: &ThreadSafeContext, worker
         .map(|worker| {
             (0..CONTENTION_BATCH_CELLS_PER_WORKER)
                 .map(|offset| {
-                    ctx.cell(
+                    ctx.source(
                         worker
                             .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                             .wrapping_add(offset),
@@ -829,7 +829,7 @@ fn run_thread_safe_batched_set_cell_invalidation(ctx: &ThreadSafeContext, worker
 }
 
 fn run_thread_safe_same_slot_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
-    let root = ctx.cell(1usize);
+    let root = ctx.source(1usize);
     let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
@@ -865,7 +865,7 @@ fn run_thread_safe_same_slot_contention(ctx: &ThreadSafeContext, workers: usize)
 
 fn run_thread_safe_independent_slot_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
     let roots = (0..workers)
-        .map(|worker| ctx.cell(worker))
+        .map(|worker| ctx.source(worker))
         .collect::<Vec<_>>();
     let values = roots
         .iter()
@@ -910,7 +910,7 @@ fn run_thread_safe_independent_slot_contention(ctx: &ThreadSafeContext, workers:
 }
 
 fn run_thread_safe_read_mostly_contention(ctx: &ThreadSafeContext, workers: usize) -> usize {
-    let root = ctx.cell(1usize);
+    let root = ctx.source(1usize);
     let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
@@ -947,7 +947,7 @@ fn run_thread_safe_batched_write_bursts(ctx: &ThreadSafeContext, workers: usize)
         .map(|worker| {
             (0..CONTENTION_BATCH_CELLS_PER_WORKER)
                 .map(|offset| {
-                    ctx.cell(
+                    ctx.source(
                         worker
                             .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                             .wrapping_add(offset),
@@ -1009,7 +1009,7 @@ fn effect_worker_cells(ctx: &ThreadSafeContext, workers: usize) -> Vec<Vec<Sourc
         .map(|worker| {
             (0..CONTENTION_BATCH_CELLS_PER_WORKER)
                 .map(|offset| {
-                    ctx.cell(
+                    ctx.source(
                         worker
                             .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                             .wrapping_add(offset),
@@ -1081,7 +1081,7 @@ fn run_thread_safe_effect_queue_coalescing(ctx: &ThreadSafeContext, workers: usi
 
 fn run_thread_safe_effect_cleanup_execution(ctx: &ThreadSafeContext, workers: usize) -> usize {
     let cells = (0..workers)
-        .map(|worker| ctx.cell(worker))
+        .map(|worker| ctx.source(worker))
         .collect::<Vec<_>>();
     let cleanup_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sink = Arc::new(std::sync::atomic::AtomicUsize::new(0));

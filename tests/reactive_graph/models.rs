@@ -158,8 +158,8 @@ mod basic {
     pub struct BasicScope<'a>(TeardownScope<'a>, Log, Log, Poison);
 
     impl ScopeModel<BasicModel> for BasicScope<'_> {
-        fn cell(&self, value: i64) -> Source<i64> {
-            self.0.cell(value)
+        fn source(&self, value: i64) -> Source<i64> {
+            self.0.source(value)
         }
         fn computed(
             &self,
@@ -201,8 +201,8 @@ mod basic {
             &self.ctx
         }
 
-        fn cell(&self, value: i64) -> Source<i64> {
-            self.ctx.cell(value)
+        fn source(&self, value: i64) -> Source<i64> {
+            self.ctx.source(value)
         }
         fn computed(
             &self,
@@ -421,8 +421,8 @@ mod threadsafe {
     pub struct ThreadSafeScope(ThreadSafeTeardownScope, Log, Log, Poison);
 
     impl ScopeModel<ThreadSafeModel> for ThreadSafeScope {
-        fn cell(&self, value: i64) -> Source<i64> {
-            self.0.cell(value)
+        fn source(&self, value: i64) -> Source<i64> {
+            self.0.source(value)
         }
         fn computed(
             &self,
@@ -464,8 +464,8 @@ mod threadsafe {
             &self.ctx
         }
 
-        fn cell(&self, value: i64) -> Source<i64> {
-            self.ctx.cell(value)
+        fn source(&self, value: i64) -> Source<i64> {
+            self.ctx.source(value)
         }
         fn computed(
             &self,
@@ -571,8 +571,8 @@ pub use threadsafe::ThreadSafeModel;
 mod asynchronous {
     use super::*;
     use lazily::{
-        AsyncCellHandle, AsyncComputeContext, AsyncContext, AsyncEffectHandle, AsyncSignalHandle,
-        AsyncSlotHandle, AsyncTeardownScope,
+        AsyncComputeContext, AsyncComputed, AsyncContext, AsyncEffectHandle, AsyncSignalHandle,
+        AsyncSource, AsyncTeardownScope,
     };
 
     /// The async model owns its runtime and blocks on it inside `read`, so the
@@ -684,7 +684,7 @@ mod asynchronous {
     /// the executor. The merge cell acquires no dependency edge.
     fn async_feed_body(
         reads: &[Ref<AsyncContext>],
-        target: AsyncCellHandle<i64>,
+        target: AsyncSource<i64>,
         poison: &Poison,
         merges: &Merges,
     ) -> impl Fn(AsyncComputeContext) -> EffectFuture + Send + Sync + 'static {
@@ -716,16 +716,16 @@ mod asynchronous {
     pub struct AsyncScope(AsyncTeardownScope, Log, Log, Poison, tokio::runtime::Handle);
 
     impl ScopeModel<AsyncModel> for AsyncScope {
-        fn cell(&self, value: i64) -> AsyncCellHandle<i64> {
+        fn source(&self, value: i64) -> AsyncSource<i64> {
             let _guard = self.4.enter();
-            self.0.cell(value)
+            self.0.source(value)
         }
         fn computed(
             &self,
             reads: &[Ref<AsyncContext>],
             offset: i64,
             computes: &Computes,
-        ) -> AsyncSlotHandle<i64> {
+        ) -> AsyncComputed<i64> {
             let _guard = self.4.enter();
             self.0
                 .computed_async(compute(reads, offset, &self.3, computes))
@@ -768,16 +768,16 @@ mod asynchronous {
             &self.ctx
         }
 
-        fn cell(&self, value: i64) -> AsyncCellHandle<i64> {
+        fn source(&self, value: i64) -> AsyncSource<i64> {
             let _guard = self.rt.enter();
-            self.ctx.cell(value)
+            self.ctx.source(value)
         }
         fn computed(
             &self,
             reads: &[Ref<Self::Graph>],
             offset: i64,
             computes: &Computes,
-        ) -> AsyncSlotHandle<i64> {
+        ) -> AsyncComputed<i64> {
             let _guard = self.rt.enter();
             self.ctx
                 .computed_async(compute(reads, offset, &self.poison, computes))
@@ -811,11 +811,7 @@ mod asynchronous {
         fn dispose_signal(&self, signal: &Self::Signal) {
             self.ctx.dispose_signal(signal);
         }
-        fn batch(
-            &self,
-            writes: &[(AsyncCellHandle<i64>, i64)],
-            merges: &[(AsyncCellHandle<i64>, i64)],
-        ) {
+        fn batch(&self, writes: &[(AsyncSource<i64>, i64)], merges: &[(AsyncSource<i64>, i64)]) {
             let _guard = self.rt.enter();
             self.ctx.batch(|c| {
                 for (h, v) in writes {
@@ -826,7 +822,7 @@ mod asynchronous {
                 }
             });
         }
-        fn merge(&self, cell: AsyncCellHandle<i64>, op: i64) {
+        fn merge(&self, cell: AsyncSource<i64>, op: i64) {
             let _guard = self.rt.enter();
             self.ctx.apply_merge::<i64, Sum>(&cell, op);
         }
@@ -834,7 +830,7 @@ mod asynchronous {
             &self,
             _name: &str,
             reads: &[Ref<Self::Graph>],
-            target: AsyncCellHandle<i64>,
+            target: AsyncSource<i64>,
             merges: &Merges,
         ) -> AsyncEffectHandle {
             let _guard = self.rt.enter();
@@ -850,7 +846,7 @@ mod asynchronous {
         /// `drain_exhausted` stays `false`. That gap is recorded in the runner's
         /// per-model divergence ledger rather than papered over — bounding
         /// divergent async feedback is future work beyond the merge algebra.
-        fn diverge_effect(&self, name: &str, own: AsyncCellHandle<i64>) -> AsyncEffectHandle {
+        fn diverge_effect(&self, name: &str, own: AsyncSource<i64>) -> AsyncEffectHandle {
             self.effect(name, &[Ref::Cell(own)])
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
@@ -860,7 +856,7 @@ mod asynchronous {
                 Ref::Effect(_) => Err(()),
             }
         }
-        fn set_cell(&self, cell: AsyncCellHandle<i64>, value: i64) {
+        fn set_cell(&self, cell: AsyncSource<i64>, value: i64) {
             let _guard = self.rt.enter();
             self.ctx.set(&cell, value);
         }

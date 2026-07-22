@@ -28,7 +28,7 @@
 //!
 //! # Fine-grained vs. coarse
 //!
-//! Modelling a collection as a single `ctx.cell(HashMap<K, V>)` is *coarse*:
+//! Modelling a collection as a single `ctx.source(HashMap<K, V>)` is *coarse*:
 //! every single-entry mutation replaces the whole map, so any reader of any
 //! entry is invalidated and (over a wire) the entire map is re-sent.
 //!
@@ -126,7 +126,7 @@ impl<V: 'static> MapHandle<V> for Source<V> {
         // An input has no derivation: materialize by setting its value directly.
         // Evaluated once, detached (untracked) — an input cell's seed value is
         // not a dependency edge.
-        ctx.cell(ctx.eval_detached(compute))
+        ctx.source(ctx.eval_detached(compute))
     }
 
     fn observe<C: ComputeOps>(self, ctx: &C) -> V
@@ -222,9 +222,9 @@ where
             inner: Rc::new(ReactiveMapInner {
                 entries: RefCell::new(HashMap::new()),
                 order: RefCell::new(Vec::new()),
-                membership: ctx.cell(0u64),
+                membership: ctx.source(0u64),
                 version: StdCell::new(0),
-                order_signal: ctx.cell(0u64),
+                order_signal: ctx.source(0u64),
                 order_version: StdCell::new(0),
             }),
             _marker: PhantomData,

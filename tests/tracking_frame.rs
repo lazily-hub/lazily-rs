@@ -26,7 +26,7 @@ fn quiet<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
 #[test]
 fn a_panic_out_of_a_slot_compute_does_not_strand_the_frame() {
     let ctx = Context::new();
-    let src = ctx.cell(1i64);
+    let src = ctx.source(1i64);
     let mid = ctx.computed(move |c| c.get(&src) + 1);
     let survivor = ctx.computed(move |c| c.get(&mid) * 10);
     assert_eq!(ctx.get(&survivor), 20);
@@ -38,7 +38,7 @@ fn a_panic_out_of_a_slot_compute_does_not_strand_the_frame() {
     );
 
     // A top-level read is not inside any compute, so it must register nothing.
-    let fresh = ctx.cell(100i64);
+    let fresh = ctx.source(100i64);
     assert_eq!(ctx.get(&fresh), 100);
     assert_eq!(
         ctx.dependent_count(&fresh),
@@ -50,7 +50,7 @@ fn a_panic_out_of_a_slot_compute_does_not_strand_the_frame() {
 #[test]
 fn a_panic_out_of_an_effect_body_does_not_strand_the_frame() {
     let ctx = Context::new();
-    let src = ctx.cell(1i64);
+    let src = ctx.source(1i64);
     let mid = ctx.computed(move |c| c.get(&src) + 1);
     // The effect reads `src` directly as well as through `mid`. The direct edge
     // is what survives the disposal and gives the write below something to
@@ -70,7 +70,7 @@ fn a_panic_out_of_an_effect_body_does_not_strand_the_frame() {
         "rerunning an effect over a disposed dependency must error"
     );
 
-    let fresh = ctx.cell(100i64);
+    let fresh = ctx.source(100i64);
     assert_eq!(ctx.get(&fresh), 100);
     assert_eq!(
         ctx.dependent_count(&fresh),

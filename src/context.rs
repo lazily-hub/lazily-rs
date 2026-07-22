@@ -2586,10 +2586,16 @@ impl TeardownScope<'_> {
     }
 
     /// Create a source cell owned by this scope.
-    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
-        let handle = self.ctx.cell(value);
+    pub fn source<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
+        let handle = self.ctx.source(value);
         self.owned.borrow_mut().push(handle.id);
         handle
+    }
+
+    /// Compatibility constructor for the pre-Cell-kernel API.
+    #[deprecated(note = "use `TeardownScope::source`")]
+    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
+        self.source(value)
     }
 
     /// Register an effect owned by this scope.
@@ -2691,23 +2697,11 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
     // there is no ambient thread-local frame to bridge.
     type Compute<'a> = Compute<'a>;
 
-    fn cell<T>(&self, value: T) -> Self::Source<T>
+    fn source<T>(&self, value: T) -> Self::Source<T>
     where
         T: PartialEq + Send + Sync + 'static,
     {
-        Context::cell(self, value)
-    }
-    fn get_cell<T>(&self, handle: &Self::Source<T>) -> T
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        Context::get(self, handle)
-    }
-    fn set_cell<T>(&self, handle: &Self::Source<T>, value: T)
-    where
-        T: PartialEq + Send + Sync + 'static,
-    {
-        Context::set(self, handle, value);
+        Context::source(self, value)
     }
     fn computed<T, F>(&self, compute: F) -> Self::Computed<T>
     where
@@ -2719,12 +2713,6 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
         // recomputing node with no ambient frame. The old thread-local bridge is
         // gone.
         Context::computed(self, compute)
-    }
-    fn get<T>(&self, handle: &Self::Computed<T>) -> T
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        Context::get(self, handle)
     }
     fn effect<F, C>(&self, run: F) -> Self::Effect
     where
@@ -3313,7 +3301,7 @@ mod tests {
         let (cell_id, effect_id);
         {
             let conn = ctx.scope();
-            let cell = conn.cell(1usize);
+            let cell = conn.source(1usize);
             cell_id = cell.id;
             let effect = conn.effect(move |c| {
                 let _ = c.get(&cell);

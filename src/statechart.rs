@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 #[cfg(feature = "thread-safe")]
 use crate::ThreadSafeContext;
 #[cfg(feature = "async")]
-use crate::{AsyncCellHandle, AsyncContext};
+use crate::{AsyncContext, AsyncSource};
 use crate::{Context, Source};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,7 +509,7 @@ impl StateChart {
         let mut actions = Vec::new();
         enter_subtree(&def, &def.root, &mut enter, &mut actions);
 
-        let config = ctx.cell(enter);
+        let config = ctx.source(enter);
         Self {
             def,
             config,
@@ -591,7 +591,7 @@ impl ThreadSafeStateChart {
         let mut enter = BTreeSet::new();
         let mut actions = Vec::new();
         enter_subtree(&def, &def.root, &mut enter, &mut actions);
-        let config = ctx.cell(enter);
+        let config = ctx.source(enter);
         Self {
             def,
             config,
@@ -663,7 +663,7 @@ impl ThreadSafeStateChart {
 #[cfg(feature = "async")]
 pub struct AsyncStateChart {
     def: ChartDef,
-    config: AsyncCellHandle<BTreeSet<String>>,
+    config: AsyncSource<BTreeSet<String>>,
     history: parking_lot::Mutex<HashMap<String, Recording>>,
     last_actions: parking_lot::Mutex<Vec<String>>,
 }
@@ -675,7 +675,7 @@ impl AsyncStateChart {
         let mut enter = BTreeSet::new();
         let mut actions = Vec::new();
         enter_subtree(&def, &def.root, &mut enter, &mut actions);
-        let config = ctx.cell(enter);
+        let config = ctx.source(enter);
         Self {
             def,
             config,

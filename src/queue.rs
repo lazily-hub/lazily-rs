@@ -476,7 +476,7 @@ where
                 len,
                 is_empty,
                 is_full,
-                closed: ctx.cell(closed_val),
+                closed: ctx.source(closed_val),
             }),
         }
     }

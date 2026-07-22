@@ -19,7 +19,7 @@ use lazily::Context;
 #[test]
 fn tracked_read_registers_edge_against_the_recomputing_node() {
     let ctx = Context::new();
-    let a = ctx.cell(1i32);
+    let a = ctx.source(1i32);
 
     let calls = Rc::new(Cell::new(0usize));
     let b = ctx.computed({
@@ -56,7 +56,7 @@ fn tracked_read_registers_edge_against_the_recomputing_node() {
 #[test]
 fn untracked_read_registers_no_edge_and_does_not_recompute() {
     let ctx = Context::new();
-    let a = ctx.cell(1i32);
+    let a = ctx.source(1i32);
 
     let calls = Rc::new(Cell::new(0usize));
     let d = ctx.computed({
@@ -93,7 +93,7 @@ fn untracked_read_registers_no_edge_and_does_not_recompute() {
 #[test]
 fn effect_tracks_through_its_compute_view() {
     let ctx = Context::new();
-    let a = ctx.cell(1i32);
+    let a = ctx.source(1i32);
 
     let runs = Rc::new(Cell::new(0usize));
     let _watch = ctx.effect({

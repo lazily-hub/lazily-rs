@@ -28,7 +28,7 @@ fn bench_tokio_sync_cached_read(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = ThreadSafeContext::new();
-                let cell = ctx.cell(21usize);
+                let cell = ctx.source(21usize);
                 let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
                 let _ = ctx.get(&slot);
                 black_box(ctx.get(&slot))
@@ -41,7 +41,7 @@ fn bench_tokio_sync_cached_read(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = Arc::new(ThreadSafeContext::new());
-                let cell = ctx.cell(21usize);
+                let cell = ctx.source(21usize);
                 let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
                 let _ = ctx.get(&slot);
                 let ctx_c = ctx.clone();
@@ -63,7 +63,7 @@ fn bench_tokio_sync_cold_first_get(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = ThreadSafeContext::new();
-                let cell = ctx.cell(21usize);
+                let cell = ctx.source(21usize);
                 let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
                 black_box(ctx.get(&slot))
             })
@@ -75,7 +75,7 @@ fn bench_tokio_sync_cold_first_get(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = Arc::new(ThreadSafeContext::new());
-                let cell = ctx.cell(21usize);
+                let cell = ctx.source(21usize);
                 let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
                 let ctx_c = ctx.clone();
                 tokio::spawn(async move { black_box(ctx_c.get(&slot)) })
@@ -96,7 +96,7 @@ fn bench_tokio_sync_invalidation(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = ThreadSafeContext::new();
-                let cell = ctx.cell(0usize);
+                let cell = ctx.source(0usize);
                 let slot = ctx.computed(move |ctx| ctx.get(&cell).wrapping_add(1));
                 let _ = ctx.get(&slot);
                 let mut sum = 0usize;
@@ -125,7 +125,7 @@ fn bench_tokio_sync_concurrent_contention(c: &mut Criterion) {
                 b.iter(move || {
                     rt.block_on(async move {
                         let ctx = Arc::new(ThreadSafeContext::new());
-                        let cell = ctx.cell(0usize);
+                        let cell = ctx.source(0usize);
                         let slot = ctx.computed(move |ctx| ctx.get(&cell).wrapping_add(1));
                         let _ = ctx.get(&slot);
                         let mut handles = Vec::with_capacity(workers);
@@ -166,7 +166,7 @@ fn bench_tokio_sync_concurrent_contention(c: &mut Criterion) {
                         for w in 0..workers {
                             let ctx_c = ctx.clone();
                             handles.push(tokio::spawn(async move {
-                                let cell = ctx_c.cell(w);
+                                let cell = ctx_c.source(w);
                                 let slot =
                                     ctx_c.computed(move |ctx| ctx.get(&cell).wrapping_add(1));
                                 let mut sum = 0usize;
@@ -198,7 +198,7 @@ fn bench_tokio_sync_batch(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = ThreadSafeContext::new();
-                let cells: Vec<_> = (0..TOKIO_SYNC_BATCH_CELLS).map(|i| ctx.cell(i)).collect();
+                let cells: Vec<_> = (0..TOKIO_SYNC_BATCH_CELLS).map(|i| ctx.source(i)).collect();
                 let cells_clone = cells.clone();
                 let slot = ctx.computed(move |ctx| {
                     cells_clone
@@ -232,7 +232,7 @@ fn bench_tokio_sync_effect(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let ctx = ThreadSafeContext::new();
-                let cell = ctx.cell(0usize);
+                let cell = ctx.source(0usize);
                 let sink = Arc::new(AtomicUsize::new(0));
                 let sink_clone = sink.clone();
                 ctx.effect(move |ctx| {

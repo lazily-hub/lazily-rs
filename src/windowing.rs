@@ -231,7 +231,7 @@ impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> TumblingCountWindow<T, M
     pub fn new(ctx: &Context, n: u64) -> Self {
         Self {
             core: RefCell::new(TumblingCountCore::new(n)),
-            output: ctx.cell(None),
+            output: ctx.source(None),
         }
     }
     pub fn push(&self, ctx: &Context, v: T) -> Option<T> {
@@ -245,7 +245,7 @@ impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> SlidingWindow<T, M> {
     pub fn new(ctx: &Context, size: usize, slide: u64) -> Self {
         Self {
             core: RefCell::new(SlidingCore::new(size, slide)),
-            output: ctx.cell(None),
+            output: ctx.source(None),
         }
     }
     pub fn push(&self, ctx: &Context, v: T) -> Option<T> {
@@ -265,7 +265,7 @@ impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> TumblingTimeWindow<T, M>
     pub fn new(ctx: &Context, period: u64) -> Self {
         Self {
             core: RefCell::new(TumblingTimeCore::new(period)),
-            output: ctx.cell(None),
+            output: ctx.source(None),
         }
     }
     pub fn push(&self, _ctx: &Context, now: u64, v: T) {
@@ -294,7 +294,7 @@ impl<T: Clone + PartialEq + 'static, M: MergePolicy<T>> SessionWindow<T, M> {
     pub fn new(ctx: &Context, gap: u64) -> Self {
         Self {
             core: RefCell::new(SessionCore::new(gap)),
-            output: ctx.cell(None),
+            output: ctx.source(None),
         }
     }
     pub fn push(&self, ctx: &Context, now: u64, v: T) -> Option<T> {

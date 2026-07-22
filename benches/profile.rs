@@ -28,7 +28,7 @@ fn consume_snapshot(snapshot: InstrumentationSnapshot) -> u64 {
 
 fn context_profile_snapshot() -> InstrumentationSnapshot {
     let ctx = Context::new();
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let parity = ctx.computed(move |ctx| ctx.get(&root) % 2);
     let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
     let _effect = ctx.effect(move |ctx| {
@@ -44,7 +44,7 @@ fn context_profile_snapshot() -> InstrumentationSnapshot {
 
 fn thread_safe_profile_snapshot() -> InstrumentationSnapshot {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(40usize);
+    let root = ctx.source(40usize);
     let answer = ctx.computed(move |ctx| {
         thread::sleep(Duration::from_micros(200));
         ctx.get(&root).wrapping_add(2)

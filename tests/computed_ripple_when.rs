@@ -11,7 +11,7 @@ use std::rc::Rc;
 #[test]
 fn computed_ripple_when_custom_significance_propagates_on_proxy_change() {
     let ctx = Context::new();
-    let input = ctx.cell(0u64);
+    let input = ctx.source(0u64);
 
     // Derived value carries a `bucket` proxy; propagate only when the bucket
     // changes, ignoring the raw payload.
@@ -51,7 +51,7 @@ fn computed_ripple_when_custom_significance_propagates_on_proxy_change() {
 #[test]
 fn computed_ripple_when_propagate_every_n_via_value_carried_counter() {
     let ctx = Context::new();
-    let input = ctx.cell(0u64);
+    let input = ctx.source(0u64);
 
     // "Propagate every 3rd increment" — evidence (the counter) is IN the value,
     // so the predicate is a pure function of (old, new): propagate only when the
@@ -84,7 +84,7 @@ fn computed_ripple_when_propagate_every_n_via_value_carried_counter() {
 fn computed_is_computed_ripple_when_not_equal() {
     // `computed(f)` behaves as `computed_ripple_when(f, |o, n| o != n)`.
     let ctx = Context::new();
-    let input = ctx.cell(0i64);
+    let input = ctx.source(0i64);
 
     let via_computed = ctx.computed(move |c| c.get(&input).min(1));
     let via_when = ctx.computed_ripple_when(move |c| c.get(&input).min(1), |o, n| o != n);
@@ -126,7 +126,7 @@ fn computed_is_computed_ripple_when_not_equal() {
 #[test]
 fn slot_is_pass_through_always_propagates() {
     let ctx = Context::new();
-    let input = ctx.cell(0u64);
+    let input = ctx.source(0u64);
     // slot() installs no guard: even an equal recompute propagates.
     let passthrough = ctx.slot(move |c| {
         let _ = c.get(&input); // depend on input, but always yield the same value

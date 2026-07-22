@@ -39,7 +39,7 @@ fn effect_shape_rung(width: usize) -> f64 {
     let topics = (TOTAL_NODES / width).max(1);
     let ctx = Context::new();
 
-    let topic_a: Vec<_> = (0..topics).map(|_| ctx.cell(0u64)).collect();
+    let topic_a: Vec<_> = (0..topics).map(|_| ctx.source(0u64)).collect();
     for topic in &topic_a {
         let topic = *topic;
         for _ in 0..width {
@@ -69,7 +69,7 @@ fn teardown_shape_rung(width: usize) -> f64 {
 
     let mut subscriber_a = Vec::with_capacity(topics * width);
     for _ in 0..topics {
-        let topic = ctx.cell(0u64);
+        let topic = ctx.source(0u64);
         for i in 0..width {
             let slot = ctx.computed(move |ctx| ctx.get(&topic) + i as u64);
             ctx.get(&slot);
@@ -108,7 +108,7 @@ fn dispose_during_flush_rung(width: usize) -> f64 {
 
     let mut topic_a = Vec::with_capacity(topics);
     for _ in 0..topics {
-        let topic = ctx.cell(0u64);
+        let topic = ctx.source(0u64);
         let all_a: Rc<RefCell<Vec<lazily::Effect>>> = Rc::new(RefCell::new(Vec::new()));
         let armed = Rc::new(StdCell::new(false));
         let done = Rc::new(StdCell::new(false));
@@ -164,7 +164,7 @@ mod thread_safe_audit {
         let topics = (TOTAL_NODES / width).max(1);
         let ctx = ThreadSafeContext::new();
 
-        let topic_a: Vec<_> = (0..topics).map(|_| ctx.cell_copy(0u64)).collect();
+        let topic_a: Vec<_> = (0..topics).map(|_| ctx.source_copy(0u64)).collect();
         for topic in &topic_a {
             let topic = *topic;
             for _ in 0..width {
@@ -195,7 +195,7 @@ mod thread_safe_audit {
 
         let mut topic_a = Vec::with_capacity(topics);
         for _ in 0..topics {
-            let topic = ctx.cell_copy(0u64);
+            let topic = ctx.source_copy(0u64);
             let all_a: Arc<Mutex<Vec<lazily::Effect>>> = Arc::new(Mutex::new(Vec::new()));
             let armed = Arc::new(AtomicBool::new(false));
             let done = Arc::new(AtomicBool::new(false));

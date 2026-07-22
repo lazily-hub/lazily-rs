@@ -39,12 +39,12 @@ pub struct Context {
 | `slot.get(&ctx)` | Get value (computes if unset) |
 | `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
 | `ctx.get_rc(&slot)` | Get slot value as `Rc<T>`, avoiding deep clone |
-| `ctx.cell(value)` | Create a mutable cell |
-| `cell.get(&ctx)` | Get cell value |
-| `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
+| `ctx.source(value)` | Create a mutable cell |
+| `source.get(&ctx)` | Get cell value |
+| `ctx.get(&cell)` | Context method alias for `source.get(&ctx)` |
 | `ctx.get_cell_rc(&cell)` | Get cell value as `Rc<T>`, avoiding deep clone |
-| `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
-| `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
+| `ctx.set(&cell, value)` | Update cell (marks dependents dirty if changed) |
+| `source.set(&ctx, value)` | Handle method alias for `ctx.set(&cell, value)` |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run an effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.is_set(&slot)` | Check if slot has a cached, fresh value |
@@ -95,10 +95,10 @@ pub struct ThreadSafeContext {
 | `slot.get(&ctx)` | Get value from any thread (computes if unset) |
 | `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
 | `ctx.get_arc(&slot)` | Get slot value as `Arc<T>`, avoiding deep clone (the `Send + Sync` analog of `ctx.get_rc`) |
-| `ctx.cell(value)` | Create a mutable `Send + Sync` cell |
-| `cell.get(&ctx)` | Get cell value from any thread |
-| `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
-| `ctx.set_cell(&cell, value)` | Update cell and invalidate dependents across threads |
+| `ctx.source(value)` | Create a mutable `Send + Sync` cell |
+| `source.get(&ctx)` | Get cell value from any thread |
+| `ctx.get(&cell)` | Context method alias for `source.get(&ctx)` |
+| `ctx.set(&cell, value)` | Update cell and invalidate dependents across threads |
 | `ctx.batch(\|ctx\| { ... })` | Defer invalidation until the outermost shared batch exits |
 | `ctx.effect(\|ctx\| { ... })` | Run a `Send + Sync` effect immediately and rerun it after tracked dependencies invalidate |
 | `ctx.clear(&slot)` | Clear cached value and cascade to dependents |
@@ -152,7 +152,7 @@ struct CellNode {
 
 **Semantics:**
 
-- `ctx.set_cell()` and `cell.set(&ctx, value)` compare old and new via `PartialEq`
+- `ctx.set()` and `source.set(&ctx, value)` compare old and new via `PartialEq`
 - If unchanged, no invalidation occurs (no-op)
 - If changed, dependent Slots are marked dirty while cached values are preserved for memo validation
 
@@ -199,7 +199,7 @@ glitch-free, pull-based recomputation and the memo guard, while the Effect
 supplies eagerness.
 
 ```rust
-let n = ctx.cell(1);
+let n = ctx.source(1);
 let doubled = ctx.signal(|ctx| n.get(ctx) * 2); // materialized now: 2
 n.set(&ctx, 5);                                  // doubled is already 10
 assert_eq!(doubled.get(&ctx), 10);
@@ -208,7 +208,7 @@ assert_eq!(doubled.get(&ctx), 10);
 **Semantics:**
 
 - **Eager activation:** `ctx.signal()` computes the value once at creation; the value is set from the start
-- **Eager recomputation:** Dependency invalidation recomputes the value during the invalidation flush, before the invalidating `set_cell`/`set`/`batch` call returns — no read is required to drive it
+- **Eager recomputation:** Dependency invalidation recomputes the value during the invalidation flush, before the invalidating `set`/`set`/`batch` call returns — no read is required to drive it
 - **No unset state:** The backing slot is invalidated via dirty-marking (not hard-cleared), so the value transitions `v1 -> v2` and is never observed as unset
 - **Memo guard:** Backed by `ctx.memo`, a recomputation that yields an equal value (via `PartialEq`) does not invalidate downstream dependents
 - **Glitch-free:** Recomputation is pull-based; a Signal that reads other Signals/Slots always observes values consistent with the current inputs (e.g. a diamond `D = f(A, g(A))` never surfaces a mixed new-`A`/old-`g(A)` intermediate)
@@ -226,7 +226,7 @@ single-threaded `Context` provides (#lzsignalparity).
 - **`ThreadSafeContext::signal`** — shared-graph counterpart. Returns a
   `ThreadSafeSignalHandle<T>` with `.get`/`.dispose`/`.is_active(&ctx)` helpers
   and matching `ctx.get_signal`/`dispose_signal`/`is_signal_active`. Recomputation
-  is eager (driven during the invalidation flush before the `set_cell`/`batch`
+  is eager (driven during the invalidation flush before the `set`/`batch`
   call returns), glitch-free, memo-guarded, and batch-coalesced — identical to
   the single-threaded semantics above. Type bounds add `Send + Sync`:
   `signal<T>` requires `T: PartialEq + Send + Sync + 'static`; `get_signal`
@@ -258,25 +258,25 @@ Write-coalescing boundary for multiple cell updates or explicit slot clears.
 
 ```rust
 ctx.batch(|ctx| {
-    ctx.set_cell(&a, 1);
-    ctx.set_cell(&b, 2);
+    ctx.set(&a, 1);
+    ctx.set(&b, 2);
 });
 ```
 
 **Semantics:**
 
 - **Outermost boundary:** Nested batches flush only when the outermost batch exits
-- **Changed cells:** `ctx.set_cell()` still updates the cell value immediately, but dependent dirty marking is queued until batch exit
+- **Changed cells:** `ctx.set()` still updates the cell value immediately, but dependent dirty marking is queued until batch exit
 - **Explicit clears:** `slot.clear(&ctx)` and `cell.clear_dependents(&ctx)` are queued until batch exit
 - **Coalescing:** Repeated updates to the same cell or clears of the same slot queue one invalidation root
 - **Thread-safe local batching:** same-thread `ThreadSafeContext` batch writes buffer changed cells and clears in a thread-local batch frame, then merge that frame into the graph-owned batch queue at batch exit; cross-thread writes during another active batch still fall back to the graph-owned queue
 - **Effect flushing:** Effects scheduled by batched invalidation rerun after the batch invalidation pass and coalesce duplicate schedules
-- **Reads during a batch:** Direct `ctx.get_cell()` reads see the latest cell value immediately; dependent slot reads keep their pre-batch cached value until dirty marking flushes at batch exit
+- **Reads during a batch:** Direct `ctx.get()` reads see the latest cell value immediately; dependent slot reads keep their pre-batch cached value until dirty marking flushes at batch exit
 
 ### State Machine
 
-A finite state machine built on top of `CellHandle` and the reactive graph.
-`StateMachine<S, E>` wraps a `CellHandle<S>` as the current state and a pure
+A finite state machine built on top of `Source` and the reactive graph.
+`StateMachine<S, E>` wraps a `Source<S>` as the current state and a pure
 transition function `Fn(&S, &E) -> Option<S>`.
 
 ```rust
@@ -300,13 +300,13 @@ assert_eq!(m.state(&ctx), Door::Opening);
 | `StateMachine::new(ctx, initial, transition_fn)` | Create with initial state + pure transition function |
 | `send(ctx, event) -> bool` | Evaluate transition; `true` if accepted, `false` if rejected (`None`) |
 | `state(ctx) -> S` | Read the current state |
-| `state_handle() -> CellHandle<S>` | Underlying cell for reactive dependencies |
+| `state_handle() -> Source<S>` | Underlying cell for reactive dependencies |
 | `on_transition(ctx, \|old, new\| ...) -> EffectHandle` | Observer that fires on each state change with `(old, new)` |
 | `state_is(ctx, target) -> SignalHandle<bool>` | Eager signal: `true` when in `target` state |
 
 **Semantics:**
 
-- **PartialEq guard:** A transition to an equal state is accepted (`true`) but does not invalidate dependents (the `CellHandle` equality guard suppresses no-op updates). To force re-entry, call `cell.clear_dependents(ctx)` before `send`.
+- **PartialEq guard:** A transition to an equal state is accepted (`true`) but does not invalidate dependents (the `Source` equality guard suppresses no-op updates). To force re-entry, call `cell.clear_dependents(ctx)` before `send`.
 - **Reactive integration:** Any `ctx.computed`, `ctx.memo`, `ctx.signal`, or `ctx.effect` that reads `state_handle()` automatically recomputes/reruns on transition.
 - **On-enter / on-exit:** Use `ctx.effect` with cleanup — the effect body is on-enter, the returned cleanup closure is on-exit (runs before the next rerun). Alternatively, use `on_transition` for a single `(old, new)` observer.
 - **Batch atomicity:** `ctx.batch()` coalesces multiple `send()` calls — effects fire once after the batch settles.
@@ -343,7 +343,7 @@ preserving the glitch-free pull-based ordering of `ThreadSafeContext`.
 #### `AsyncStateMachine` — Tokio (`async` feature)
 
 `AsyncStateMachine<S, E>` is the async counterpart, backed by
-[`AsyncContext`](#asynccontext). The state lives in an `AsyncCellHandle<S>`;
+[`AsyncContext`](#asynccontext). The state lives in an `AsyncSource<S>`;
 because cells are the synchronous input layer of `AsyncContext`, `send` and
 `state` are synchronous. Reactive observers use the async effect/signal APIs:
 `on_transition` returns an `AsyncEffectHandle` and `state_is` returns an
@@ -391,7 +391,7 @@ Unique identifier for reactive nodes. Lightweight `Copy` type wrapping a `u64`.
 pub struct SlotId(u64);
 ```
 
-Both `SlotHandle<T>` and `CellHandle<T>` wrap a `SlotId` with `PhantomData<T>` for type safety.
+Both `Computed<T>` and `Source<T>` wrap a `SlotId` with `PhantomData<T>` for type safety.
 
 ## Keyed cell collections (`CellFamily` / `CellMap`)
 
@@ -399,7 +399,7 @@ Both `SlotHandle<T>` and `CellHandle<T>` wrap a `SlotId` with `PhantomData<T>` f
 address space: a hash collection whose **membership is itself reactive**, with one
 independently-tracked value cell per entry.
 
-- **`CellMap<K, V>`** — a `K → CellHandle<V>` map with two independent reactivity
+- **`CellMap<K, V>`** — a `K → Source<V>` map with two independent reactivity
   surfaces:
   - **Per-entry value reactivity.** Each entry is its own cell, so a reader that
     depends on entry `a` is invalidated only when `a` changes — never when a sibling
@@ -615,7 +615,7 @@ Current guarantees:
 
 - Independent `Context` instances may be used on different OS threads
 - A single `Context` must not be moved into, shared with, or accessed from another thread
-- `SlotHandle<T>` and `CellHandle<T>` are lightweight ids and are `Send + Sync` when `T` is `Send + Sync`, but they are only meaningful with their owning context
+- `Computed<T>` and `Source<T>` are lightweight ids and are `Send + Sync` when `T` is `Send + Sync`, but they are only meaningful with their owning context
 - `EffectHandle` is a lightweight id; effect execution and cleanup remain tied to the owning context thread
 - Dependency tracking is thread-local; a compute/effect callback cannot split work onto another thread and expect nested reads there to attach to the original tracking frame
 
@@ -629,7 +629,7 @@ API bounds:
 
 | Method family | Additional bounds |
 |---------------|-------------------|
-| `cell`, `get_cell`, `set_cell` | `T: PartialEq + Clone + Send + Sync + 'static` |
+| `cell`, `get`, `set` | `T: PartialEq + Clone + Send + Sync + 'static` |
 | `slot`, `computed` | `T: Clone + Send + Sync + 'static`; compute closure `Fn(&ThreadSafeContext) -> T + Send + Sync + 'static` |
 | `memo` | `T: PartialEq + Clone + Send + Sync + 'static`; compute closure `Send + Sync + 'static` |
 | `effect` | effect callback `Fn(&ThreadSafeContext) -> R + Send + Sync + 'static`; cleanup `FnOnce() + Send + 'static` |
@@ -965,12 +965,12 @@ pub struct AsyncContext {
     inner: Arc<AsyncContextInner>,
 }
 
-pub struct AsyncSlotHandle<T> {
+pub struct AsyncComputed<T> {
     id: SlotId,
     _marker: PhantomData<T>,
 }
 
-pub struct AsyncCellHandle<T> {
+pub struct AsyncSource<T> {
     id: SlotId,
     _marker: PhantomData<T>,
 }
@@ -991,13 +991,13 @@ pub struct AsyncComputeContext<'a> {
 | Method | Signature | Purpose |
 |--------|-----------|---------|
 | `new` | `fn new() -> Self` | Create a new async context |
-| `cell` | `fn cell<T>(&self, value: T) -> AsyncCellHandle<T>` | Create a mutable cell (`T: PartialEq + Clone + Send + Sync + 'static`) |
-| `get_cell` | `fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T` | Get cell value (synchronous) |
-| `set_cell` | `fn set_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)` | Update cell and invalidate dependents |
-| `computed_async` | `fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>` | Create an async computed slot |
-| `get` | `fn get<T>(&self, handle: &AsyncSlotHandle<T>) -> Option<T>` | Synchronous cached read; returns `Some(T)` if resolved, `None` otherwise. Avoids async overhead on warm paths |
-| `get_async` | `async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T` | Await slot value; uses `get()` fast-path for resolved slots, otherwise spawns async compute |
-| `memo_async` | `fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncSlotHandle<T>` | Like `computed_async` with `PartialEq` memo guard |
+| `source` | `fn source<T>(&self, value: T) -> AsyncSource<T>` | Create a mutable source (`T: PartialEq + Clone + Send + Sync + 'static`) |
+| `get` (source) | `fn get<T>(&self, handle: &AsyncSource<T>) -> T` | Get source value synchronously through the unified `Read` API |
+| `set` | `fn set<T>(&self, handle: &AsyncSource<T>, value: T)` | Update a source and invalidate dependents |
+| `computed_async` | `fn computed_async<T, F, Fut>(&self, compute: F) -> AsyncComputed<T>` | Create an async computed slot |
+| `get` (computed) | `fn get<T>(&self, handle: &AsyncComputed<T>) -> Option<T>` | Synchronous cached read; returns `Some(T)` if resolved, `None` otherwise. Avoids async overhead on warm paths |
+| `get_async` | `async fn get_async<T>(&self, handle: &AsyncComputed<T>) -> T` | Await slot value; uses `get()` fast-path for resolved slots, otherwise spawns async compute |
+| `memo_async` | `fn memo_async<T, F, Fut>(&self, compute: F) -> AsyncComputed<T>` | Like `computed_async` with `PartialEq` memo guard |
 | `effect_async` | `fn effect_async<F, Fut, C, CleanupFut>(&self, effect: F) -> AsyncEffectHandle` | Create an async effect |
 | `dispose_async_effect` | `fn dispose_async_effect(&self, handle: &AsyncEffectHandle)` | Dispose async effect and await cleanup |
 | `batch` | `fn batch<F, R>(&self, run: F) -> R` | Synchronous batch boundary; schedules async reruns at batch exit |
@@ -1007,7 +1007,7 @@ API bounds:
 | Method family | Additional bounds |
 |---------------|-------------------|
 | `get` | `T: Clone + Send + Sync + 'static` |
-| `cell`, `get_cell`, `set_cell` | `T: PartialEq + Clone + Send + Sync + 'static` |
+| `source`, source `get`/`set` | `T: PartialEq + Clone + Send + Sync + 'static` |
 | `computed_async`, `memo_async` | `T: PartialEq + Clone + Send + Sync + 'static`; compute `Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static`; future `Future<Output = T> + Send + 'static` |
 | `effect_async` | effect `Fn(AsyncComputeContext) -> Fut + Send + Sync + 'static`; future `Future<Output = Option<C>> + Send + 'static`; cleanup `FnOnce() -> CleanupFut + Send + 'static`; cleanup future `Future<Output = ()> + Send + 'static` |
 | handles | remain id-only and copyable; usable from any task only with the owning `AsyncContext` |
@@ -1143,14 +1143,14 @@ Instead, each callback receives an `AsyncComputeContext`:
 
 ```rust
 impl<'a> AsyncComputeContext<'a> {
-    pub async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T;
-    pub fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T;
+    pub async fn get_async<T>(&self, handle: &AsyncComputed<T>) -> T;
+    pub fn get<T>(&self, handle: &AsyncSource<T>) -> T;
 }
 ```
 
 - `get_async` on the compute context records the accessed slot as a dependency
 before awaiting its value.
-- `get_cell` on the compute context records the accessed cell as a dependency
+- `get` on the compute context records the accessed cell as a dependency
 synchronously.
 - Async reads register the graph edge immediately, so source invalidation while
 the future is suspended can cancel or supersede the in-flight computation before
@@ -1179,7 +1179,7 @@ where
   the next effect body starts. Disposal awaits the current cleanup before
   removing the effect node.
 - **Auto-tracking:** the effect body receives an `AsyncComputeContext` and
-  tracks dependencies through `get_async` and `get_cell` calls.
+  tracks dependencies through `get_async` and `get` calls.
 - **Dependency invalidation** schedules an async rerun after the current
   invalidation pass. The rerun is spawned on the runtime executor, not inline.
 - **Effect disposal:** removes pending scheduled reruns, awaits the current
@@ -1236,7 +1236,7 @@ Integration tests live in `tests/async_integration.rs` and are gated behind
 
 ## Invalidation Semantics
 
-- `ctx.set_cell()` → if value changed (PartialEq) → mark all dependent slots dirty
+- `ctx.set()` → if value changed (PartialEq) → mark all dependent slots dirty
 - `slot.clear(&ctx)` → remove cached value → cascade clear to all dependents
 - `cell.clear_dependents(&ctx)` → clear all dependent slots without changing cell value
 - `ctx.batch()` → queue changed cells and explicit slot/cell clears, then flush queued roots when the outermost batch exits
@@ -1279,7 +1279,7 @@ Required benchmark scenarios:
 - Memo equality suppression where an equal intermediate value prevents downstream recomputation
 - Effect flushing after dependency mutation
 - Batch storms that coalesce many writes into one invalidation/effect flush boundary
-- `ThreadSafeContext` `set_cell` invalidation isolation, split into:
+- `ThreadSafeContext` `set` invalidation isolation, split into:
   - high fan-out changed-cell invalidation without dependent reads
   - same-root/same-slot write contention without dependent reads
   - independent per-worker roots and slots without dependent reads
@@ -1309,7 +1309,7 @@ The optional `instrumentation` feature adds `instrumentation_snapshot()` and
 `ThreadSafeContext::lock_profile_snapshot()` returns per-operation lock and
 coordination counters for the thread-safe path. The buckets are intentionally
 high-level: unattributed/other work, `get` refresh, dependency edge add/remove,
-`set_cell` invalidation, recompute publication, and in-flight recompute waiting.
+`set` invalidation, recompute publication, and in-flight recompute waiting.
 For the per-slot sidecar recompute `Condvar`s, the in-flight wait bucket records
 the parked wait and reacquire boundary. The bucket acquisition counts must sum
 to the aggregate `lock_acquisitions` counter so profile consumers can attribute
@@ -1334,7 +1334,7 @@ batched-write, and effect-heavy cases, and instrumentation rows covering
 recomputes, duplicate speculative recomputes, dependency edge churn, effect
 queue depth, node allocations, lock wait/hold time, and per-operation
 `ThreadSafeContext` lock attribution for every 1/2/4/8/16-worker contention
-matrix profile and every `set_cell` invalidation isolation profile. The generated
+matrix profile and every `set` invalidation isolation profile. The generated
 section must also publish regression budgets for the slow contention profiles and
 their lock-site acquisition totals. `--check` verifies that the README section is
 already current without rewriting it and fails when required p50/p95 latency
@@ -1474,7 +1474,7 @@ new one.
   thread-safe path already guarantees (see *Threading and Concurrency
   Contract*: "Batch exit ... a single atomic graph mutation boundary and one
   coalesced effect flush per outermost invalidation pass"). Coalescing is
-  therefore free: one delta per flush, never one per `set_cell`.
+  therefore free: one delta per flush, never one per `set`.
 
 ### Epoch / versioning
 
@@ -1509,7 +1509,7 @@ DeltaOp =
 
 ### Consistency invariants (inherited, not re-derived)
 
-- **PartialEq cell guard:** an equal `set_cell` invalidates nothing, so it emits
+- **PartialEq cell guard:** an equal `set` invalidates nothing, so it emits
   no `CellSet` and no downstream ops — the wire is silent exactly when the graph
   is (SPEC *Invalidation Semantics*).
 - **memo equality suppression:** a dirty `memo()` that recomputes to an equal
@@ -1633,7 +1633,7 @@ process address spaces.
 Yes: lazily-rs has a viable FFI strategy, but the FFI layer should be an
 adapter around the same transport-agnostic state plane used by IPC and
 distributed peers. It should not expose the closure-based Rust `Context`,
-`ThreadSafeContext`, `SlotHandle<T>`, `CellHandle<T>`, or `&T` cached values
+`ThreadSafeContext`, `Computed<T>`, `Source<T>`, or `&T` cached values
 directly across an ABI boundary.
 
 ### Compatibility model
@@ -2034,7 +2034,7 @@ deterministically on each peer. Concretely:
   - Additive cells can opt into a **PN-counter** instead of a register.
 - The local **PartialEq invalidation guard** still applies — *after* merge: a
   merge that yields an equal value invalidates nothing, exactly as a local equal
-  `set_cell` does. **memo equality suppression** likewise holds post-merge, so
+  `set` does. **memo equality suppression** likewise holds post-merge, so
   convergent peers do the same downstream work.
 - `lazily-ipc`'s `Delta` generalizes from one monotonic `ipc_epoch` to
   **per-peer causal stamps**: each peer keeps its own sequence; cross-peer order

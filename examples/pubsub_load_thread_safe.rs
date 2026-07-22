@@ -37,7 +37,7 @@ fn rss_kib() -> u64 {
 fn sweep_width(width: usize) -> (f64, f64, f64) {
     let rss_before = rss_kib();
     let ctx = ThreadSafeContext::new();
-    let topic = ctx.cell(0u64);
+    let topic = ctx.source(0u64);
 
     let build_start = Instant::now();
     let subscriber_a: Vec<_> = (0..width)

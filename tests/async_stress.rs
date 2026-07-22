@@ -37,7 +37,7 @@ fn event_index(events: &[String], needle: &str) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn get_async_waiter_cancellation_and_stale_completion_keep_latest() {
     let ctx = Arc::new(AsyncContext::new());
-    let cell = ctx.cell(1i32);
+    let cell = ctx.source(1i32);
     let gates = Arc::new(Mutex::new(VecDeque::<oneshot::Receiver<()>>::new()));
     let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
 
@@ -103,9 +103,9 @@ async fn get_async_waiter_cancellation_and_stale_completion_keep_latest() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dependency_tracking_across_awaits_replaces_dynamic_edges() {
     let ctx = AsyncContext::new();
-    let use_left = ctx.cell(true);
-    let left = ctx.cell(2i32);
-    let right = ctx.cell(10i32);
+    let use_left = ctx.source(true);
+    let left = ctx.source(2i32);
+    let right = ctx.source(10i32);
     let outer_runs = Arc::new(AtomicU64::new(0));
 
     let left_slot = ctx.computed_async(move |ctx| {
@@ -160,7 +160,7 @@ async fn dependency_tracking_across_awaits_replaces_dynamic_edges() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn effect_cleanup_runs_before_each_replacement_body() {
     let ctx = AsyncContext::new();
-    let cell = ctx.cell(0i32);
+    let cell = ctx.source(0i32);
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
 
     ctx.effect_async({
@@ -230,11 +230,11 @@ fn cyclic_async_dependency_invalidation_terminates() {
             .expect("runtime");
         rt.block_on(async {
             let ctx = AsyncContext::new();
-            let cell = ctx.cell(1i32);
+            let cell = ctx.source(1i32);
 
             // `b`'s handle is not known when `a` is created; publish it through a
             // OnceLock so `a`'s compute can close over it.
-            static B_HANDLE: OnceLock<lazily::AsyncSlotHandle<i32>> = OnceLock::new();
+            static B_HANDLE: OnceLock<lazily::AsyncComputed<i32>> = OnceLock::new();
 
             let a = ctx.computed_async(move |cx| {
                 let v = cx.get(&cell);

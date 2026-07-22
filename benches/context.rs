@@ -124,7 +124,7 @@ impl ThreadSafeGraphPropagationCase {
 
 fn setup_context_fan_out(width: usize) -> (Context, Source<usize>, Vec<Computed<usize>>) {
     let ctx = Context::new();
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let slots = (0..width)
         .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
@@ -140,7 +140,7 @@ fn setup_thread_safe_fan_out(
     width: usize,
 ) -> (ThreadSafeContext, Source<usize>, Vec<Computed<usize>>) {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let slots = (0..width)
         .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
@@ -154,7 +154,7 @@ fn setup_thread_safe_fan_out(
 
 fn setup_context_memo_chain(depth: usize) -> (Context, Source<usize>, Computed<usize>) {
     let ctx = Context::new();
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let mut tail = ctx.computed(move |ctx| ctx.get(&root) % 2);
 
     for _ in 0..depth {
@@ -170,7 +170,7 @@ fn setup_thread_safe_memo_chain(
     depth: usize,
 ) -> (ThreadSafeContext, Source<usize>, Computed<usize>) {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let mut tail = ctx.computed(move |ctx| ctx.get(&root) % 2);
 
     for _ in 0..depth {
@@ -186,7 +186,9 @@ fn setup_context_batch_storm(
     cells_len: usize,
 ) -> (Context, Vec<Source<usize>>, Rc<LocalCell<usize>>) {
     let ctx = Context::new();
-    let cells = (0..cells_len).map(|idx| ctx.cell(idx)).collect::<Vec<_>>();
+    let cells = (0..cells_len)
+        .map(|idx| ctx.source(idx))
+        .collect::<Vec<_>>();
     let sink = Rc::new(LocalCell::new(0usize));
     let effect_cells = cells.clone();
     let effect_sink = Rc::clone(&sink);
@@ -205,7 +207,9 @@ fn setup_thread_safe_batch_storm(
     cells_len: usize,
 ) -> (ThreadSafeContext, Vec<Source<usize>>, Arc<AtomicUsize>) {
     let ctx = ThreadSafeContext::new();
-    let cells = (0..cells_len).map(|idx| ctx.cell(idx)).collect::<Vec<_>>();
+    let cells = (0..cells_len)
+        .map(|idx| ctx.source(idx))
+        .collect::<Vec<_>>();
     let sink = Arc::new(AtomicUsize::new(0));
     let effect_cells = cells.clone();
     let effect_sink = Arc::clone(&sink);
@@ -294,7 +298,7 @@ fn run_thread_safe_graph_propagation(
 
 fn run_thread_safe_fan_out_eager_validation(workers: usize) -> usize {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let slots = (0..GRAPH_PROPAGATION_WIDTH)
         .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
@@ -338,7 +342,7 @@ fn run_thread_safe_fan_out_eager_validation(workers: usize) -> usize {
 
 fn run_thread_safe_fan_out_lazy_dirty_epochs(workers: usize) -> usize {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(0usize);
+    let root = ctx.source(0usize);
     let slots = (0..GRAPH_PROPAGATION_WIDTH)
         .map(|offset| ctx.computed(move |ctx| ctx.get(&root).wrapping_add(offset)))
         .collect::<Vec<_>>();
@@ -382,7 +386,7 @@ fn run_thread_safe_fan_in_lazy_dirty_epochs(workers: usize) -> usize {
     for worker in 0..workers {
         for offset in 0..CONTENTION_BATCH_CELLS_PER_WORKER {
             roots.push(
-                ctx.cell(
+                ctx.source(
                     worker
                         .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                         .wrapping_add(offset),
@@ -504,7 +508,7 @@ fn run_thread_safe_fan_in_batched_flush(workers: usize) -> usize {
 
 fn run_thread_safe_same_slot_contention(workers: usize) -> usize {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(1usize);
+    let root = ctx.source(1usize);
     let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
@@ -539,7 +543,7 @@ fn run_thread_safe_same_slot_contention(workers: usize) -> usize {
 
 fn run_thread_safe_same_slot_set_cell_invalidation(workers: usize) -> usize {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(1usize);
+    let root = ctx.source(1usize);
     let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
@@ -576,7 +580,7 @@ fn run_thread_safe_same_slot_set_cell_invalidation(workers: usize) -> usize {
 fn run_thread_safe_independent_slot_contention(workers: usize) -> usize {
     let ctx = ThreadSafeContext::new();
     let roots = (0..workers)
-        .map(|worker| ctx.cell(worker))
+        .map(|worker| ctx.source(worker))
         .collect::<Vec<_>>();
     let values = roots
         .iter()
@@ -623,7 +627,7 @@ fn run_thread_safe_independent_slot_contention(workers: usize) -> usize {
 fn run_thread_safe_independent_slot_set_cell_invalidation(workers: usize) -> usize {
     let ctx = ThreadSafeContext::new();
     let roots = (0..workers)
-        .map(|worker| ctx.cell(worker))
+        .map(|worker| ctx.source(worker))
         .collect::<Vec<_>>();
     let values = roots
         .iter()
@@ -668,7 +672,7 @@ fn run_thread_safe_independent_slot_set_cell_invalidation(workers: usize) -> usi
 
 fn run_thread_safe_read_mostly_contention(workers: usize) -> usize {
     let ctx = ThreadSafeContext::new();
-    let root = ctx.cell(1usize);
+    let root = ctx.source(1usize);
     let value = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(1));
     black_box(ctx.get(&value));
 
@@ -706,7 +710,7 @@ fn run_thread_safe_batched_write_bursts(workers: usize) -> usize {
         .map(|worker| {
             (0..CONTENTION_BATCH_CELLS_PER_WORKER)
                 .map(|offset| {
-                    ctx.cell(
+                    ctx.source(
                         worker
                             .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                             .wrapping_add(offset),
@@ -768,7 +772,7 @@ fn effect_worker_cells(ctx: &ThreadSafeContext, workers: usize) -> Vec<Vec<Sourc
         .map(|worker| {
             (0..CONTENTION_BATCH_CELLS_PER_WORKER)
                 .map(|offset| {
-                    ctx.cell(
+                    ctx.source(
                         worker
                             .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                             .wrapping_add(offset),
@@ -840,7 +844,7 @@ fn run_thread_safe_effect_queue_coalescing(ctx: &ThreadSafeContext, workers: usi
 
 fn run_thread_safe_effect_cleanup_execution(ctx: &ThreadSafeContext, workers: usize) -> usize {
     let cells = (0..workers)
-        .map(|worker| ctx.cell(worker))
+        .map(|worker| ctx.source(worker))
         .collect::<Vec<_>>();
     let cleanup_runs = Arc::new(AtomicUsize::new(0));
     let sink = Arc::new(AtomicUsize::new(0));
@@ -969,7 +973,7 @@ fn run_thread_safe_batched_set_cell_invalidation(workers: usize) -> usize {
         .map(|worker| {
             (0..CONTENTION_BATCH_CELLS_PER_WORKER)
                 .map(|offset| {
-                    ctx.cell(
+                    ctx.source(
                         worker
                             .wrapping_mul(CONTENTION_BATCH_CELLS_PER_WORKER)
                             .wrapping_add(offset),
@@ -1031,7 +1035,7 @@ fn bench_cached_reads(c: &mut Criterion) {
 
     group.bench_function("context", |b| {
         let ctx = Context::new();
-        let root = ctx.cell(21usize);
+        let root = ctx.source(21usize);
         let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
         black_box(ctx.get(&doubled));
 
@@ -1040,7 +1044,7 @@ fn bench_cached_reads(c: &mut Criterion) {
 
     group.bench_function("thread_safe_context", |b| {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(21usize);
+        let root = ctx.source(21usize);
         let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
         black_box(ctx.get(&doubled));
 
@@ -1057,7 +1061,7 @@ fn bench_cold_first_get(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let ctx = Context::new();
-                let root = ctx.cell(21usize);
+                let root = ctx.source(21usize);
                 let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
                 (ctx, doubled)
             },
@@ -1070,7 +1074,7 @@ fn bench_cold_first_get(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let ctx = ThreadSafeContext::new();
-                let root = ctx.cell(21usize);
+                let root = ctx.source(21usize);
                 let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
                 (ctx, doubled)
             },
@@ -1194,7 +1198,7 @@ fn bench_effect_flushing(c: &mut Criterion) {
 
     group.bench_function("context", |b| {
         let ctx = Context::new();
-        let root = ctx.cell(0usize);
+        let root = ctx.source(0usize);
         let seen = Rc::new(LocalCell::new(0usize));
         let effect_seen = Rc::clone(&seen);
 
@@ -1212,7 +1216,7 @@ fn bench_effect_flushing(c: &mut Criterion) {
 
     group.bench_function("thread_safe_context", |b| {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(0usize);
+        let root = ctx.source(0usize);
         let seen = Arc::new(AtomicUsize::new(0));
         let effect_seen = Arc::clone(&seen);
 
@@ -1347,7 +1351,7 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
 
     group.bench_function("context_slot", |b| {
         let ctx = Context::new();
-        let cell = ctx.cell(42usize);
+        let cell = ctx.source(42usize);
         let slot = ctx.computed(move |ctx| ctx.get(&cell));
         black_box(ctx.get(&slot));
 
@@ -1356,14 +1360,14 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
 
     group.bench_function("context_cell", |b| {
         let ctx = Context::new();
-        let cell = ctx.cell(99usize);
+        let cell = ctx.source(99usize);
 
         b.iter(|| black_box(ctx.get(black_box(&cell))));
     });
 
     group.bench_function("thread_safe_slot", |b| {
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell(42usize);
+        let cell = ctx.source(42usize);
         let slot = ctx.computed(move |ctx| ctx.get(&cell));
         black_box(ctx.get(&slot));
 
@@ -1372,14 +1376,14 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
 
     group.bench_function("thread_safe_cell", |b| {
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell(99usize);
+        let cell = ctx.source(99usize);
 
         b.iter(|| black_box(ctx.get(black_box(&cell))));
     });
 
     group.bench_function("context_rc_slot", |b| {
         let ctx = Context::new();
-        let cell = ctx.cell(42usize);
+        let cell = ctx.source(42usize);
         let slot = ctx.computed(move |ctx| ctx.get(&cell));
         black_box(ctx.get(&slot));
 
@@ -1388,7 +1392,7 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
 
     group.bench_function("context_rc_cell", |b| {
         let ctx = Context::new();
-        let cell = ctx.cell(99usize);
+        let cell = ctx.source(99usize);
 
         b.iter(|| black_box(ctx.get_cell_rc(black_box(&cell))));
     });
@@ -1400,7 +1404,7 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
     // clone is an allocation plus a memcpy and the `Arc` is not.
     group.bench_function("thread_safe_arc_slot", |b| {
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell(42usize);
+        let cell = ctx.source(42usize);
         let slot = ctx.computed(move |ctx| ctx.get(&cell));
         black_box(ctx.get(&slot));
 
@@ -1409,7 +1413,7 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
 
     group.bench_function("thread_safe_string_slot", |b| {
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell(64usize);
+        let cell = ctx.source(64usize);
         let slot = ctx.computed(move |ctx| "lazily".repeat(ctx.get(&cell)));
         black_box(ctx.get(&slot));
 
@@ -1418,7 +1422,7 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
 
     group.bench_function("thread_safe_arc_string_slot", |b| {
         let ctx = ThreadSafeContext::new();
-        let cell = ctx.cell(64usize);
+        let cell = ctx.source(64usize);
         let slot = ctx.computed(move |ctx| "lazily".repeat(ctx.get(&cell)));
         black_box(ctx.get(&slot));
 

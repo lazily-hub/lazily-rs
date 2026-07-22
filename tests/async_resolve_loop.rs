@@ -70,7 +70,7 @@ async fn window1_resolved_between_fastpath_and_relock() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn window2_superseded_notifier_drop_reresolves_to_latest() {
     let ctx = Arc::new(AsyncContext::new());
-    let cell = ctx.cell(1i32);
+    let cell = ctx.source(1i32);
 
     // Gate the first compute so it is still in flight when we supersede it.
     let (release_first, first_gate) = oneshot::channel::<()>();

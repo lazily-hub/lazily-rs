@@ -63,7 +63,7 @@ impl HealthCell {
     pub fn new(ctx: &Context) -> Self {
         Self {
             core: RefCell::new(HealthCore::new()),
-            health: ctx.cell(Health::Healthy),
+            health: ctx.source(Health::Healthy),
         }
     }
     fn refresh(&self, ctx: &Context) {
@@ -114,7 +114,7 @@ impl ReadinessCell {
     pub fn new(ctx: &Context) -> Self {
         Self {
             core: RefCell::new(ReadinessCore::new()),
-            ready: ctx.cell(true),
+            ready: ctx.source(true),
         }
     }
     fn refresh(&self, ctx: &Context) {
@@ -182,7 +182,7 @@ impl<P: Clone + PartialEq + 'static> DiscoveryCell<P> {
     pub fn new(ctx: &Context) -> Self {
         Self {
             core: RefCell::new(DiscoveryCore::new()),
-            discovery: ctx.cell(BTreeMap::new()),
+            discovery: ctx.source(BTreeMap::new()),
         }
     }
     fn refresh(&self, ctx: &Context) {
@@ -292,7 +292,7 @@ impl ServiceRegistry {
     pub fn new(ctx: &Context) -> Self {
         Self {
             core: RefCell::new(ServiceRegistryCore::new()),
-            projection: ctx.cell(BTreeMap::new()),
+            projection: ctx.source(BTreeMap::new()),
         }
     }
     fn refresh(&self, ctx: &Context) {

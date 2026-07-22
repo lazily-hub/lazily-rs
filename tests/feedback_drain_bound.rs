@@ -29,7 +29,7 @@ fn divergent_loop_reports_exhaustion_instead_of_hanging() {
     // than at the default 100k iterations.
     ctx.set_drain_budget(64);
 
-    let counter = ctx.cell(0i64);
+    let counter = ctx.source(0i64);
 
     // Writes into its own dependency cone: reads `counter`, then writes it.
     // Each run reschedules the next.
@@ -76,7 +76,7 @@ fn terminating_cascade_does_not_report_exhaustion() {
     let ctx = Context::new();
     ctx.set_drain_budget(64);
 
-    let source = ctx.cell(0i64);
+    let source = ctx.source(0i64);
     let mut effects = Vec::new();
     // A wide fan-out: many effects, each running once per write. Spread thin
     // across effects rather than concentrated in one.
@@ -103,7 +103,7 @@ fn stop_condition_in_effect_body_terminates_the_loop() {
     let ctx = Context::new();
     ctx.set_drain_budget(1_000);
 
-    let counter = ctx.cell(0i64);
+    let counter = ctx.source(0i64);
 
     let _effect = ctx.effect(move |c| {
         let n = c.get(&counter);

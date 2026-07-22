@@ -22,7 +22,7 @@ fn make_fanout_graph(
     ctx: &Context,
     fanout: usize,
 ) -> (lazily::Source<i32>, Vec<lazily::Computed<i32>>) {
-    let source = ctx.cell(0);
+    let source = ctx.source(0);
     let slots: Vec<_> = (0..fanout)
         .map(|_| ctx.computed(move |ctx| ctx.get(&source) + 1))
         .collect();

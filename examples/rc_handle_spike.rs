@@ -88,7 +88,7 @@ fn cell_has_dependent<T>(ctx: &Context, cell: &Source<T>, slot_id_of: &Computed<
 
 fn claim_1_leaf_disposes_on_drop() {
     let ctx = Rc::new(Context::new());
-    let topic = ctx.cell(1u64);
+    let topic = ctx.source(1u64);
     let before = disposed_count();
     {
         let leaf = rc_slot(&ctx, move |c| c.get(&topic) + 1);
@@ -105,7 +105,7 @@ fn claim_1_leaf_disposes_on_drop() {
 
 fn claim_2_and_3_dependent_keeps_alive_then_cascades() {
     let ctx = Rc::new(Context::new());
-    let topic = ctx.cell(1u64);
+    let topic = ctx.source(1u64);
     let mid = rc_slot(&ctx, move |c| c.get(&topic) + 10);
 
     // sink captures a clone of mid: the strong reference is upward.
@@ -142,7 +142,7 @@ fn claim_4_no_reference_cycle() {
     {
         let ctx = Rc::new(Context::new());
         weak_probe = Rc::downgrade(&ctx);
-        let topic = ctx.cell(1u64);
+        let topic = ctx.source(1u64);
         let a = rc_slot(&ctx, move |c| c.get(&topic) + 1);
         let a2 = a.clone();
         let _b = rc_slot(&ctx, move |c| c.get(a2.handle()) + 1);
@@ -159,7 +159,7 @@ fn claim_4_no_reference_cycle() {
 fn cost_model(width: usize) {
     // --- build ---
     let ctx_plain = Context::new();
-    let topic_plain = ctx_plain.cell(0u64);
+    let topic_plain = ctx_plain.source(0u64);
     let start = Instant::now();
     let plain_a: Vec<_> = (0..width)
         .map(|i| {
@@ -171,7 +171,7 @@ fn cost_model(width: usize) {
     let plain_build = start.elapsed().as_nanos() as f64 / width as f64;
 
     let ctx_rc = Rc::new(Context::new());
-    let topic_rc = ctx_rc.cell(0u64);
+    let topic_rc = ctx_rc.source(0u64);
     let start = Instant::now();
     let rc_a: Vec<_> = (0..width)
         .map(|i| {

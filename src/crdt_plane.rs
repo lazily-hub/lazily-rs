@@ -230,7 +230,7 @@ impl CrdtPlaneRuntime {
     {
         let namespace = namespace.into();
         if self.membership_epoch.is_none() {
-            self.membership_epoch = Some(ctx.cell(0u64));
+            self.membership_epoch = Some(ctx.source(0u64));
         }
         self.family_members.entry(namespace.clone()).or_default();
         self.families.push(Box::new(LwwFamilyFactory::<V> {

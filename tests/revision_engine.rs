@@ -10,7 +10,7 @@ use lazily::{Computed, Context};
 #[test]
 fn revision_basic_cell_slot() {
     let ctx = Context::with_revision_engine();
-    let cell = ctx.cell(10);
+    let cell = ctx.source(10);
     let slot = ctx.computed(move |ctx| ctx.get(&cell) * 2);
 
     assert_eq!(ctx.get(&slot), 20);
@@ -25,7 +25,7 @@ fn revision_basic_cell_slot() {
 #[test]
 fn revision_diamond_dependency() {
     let ctx = Context::with_revision_engine();
-    let a = ctx.cell(1);
+    let a = ctx.source(1);
     let b = ctx.computed(move |ctx| ctx.get(&a) + 10);
     let c = ctx.computed(move |ctx| ctx.get(&a) * 3);
     let d = ctx.computed(move |ctx| ctx.get(&b) + ctx.get(&c));
@@ -38,7 +38,7 @@ fn revision_diamond_dependency() {
 #[test]
 fn revision_memo_guard() {
     let ctx = Context::with_revision_engine();
-    let a = ctx.cell(5);
+    let a = ctx.source(5);
     let slot = ctx.computed(move |ctx| {
         let _ = ctx.get(&a);
         42
@@ -52,7 +52,7 @@ fn revision_memo_guard() {
 #[test]
 fn revision_deep_chain() {
     let ctx = Context::with_revision_engine();
-    let base = ctx.cell(1u64);
+    let base = ctx.source(1u64);
     let s0: Computed<u64> = ctx.computed(move |ctx| ctx.get(&base) + 1);
     let mut prev = s0;
     for _ in 1..50 {
@@ -67,8 +67,8 @@ fn revision_deep_chain() {
 #[test]
 fn revision_batch() {
     let ctx = Context::with_revision_engine();
-    let a = ctx.cell(1);
-    let b = ctx.cell(2);
+    let a = ctx.source(1);
+    let b = ctx.source(2);
     let sum = ctx.computed(move |ctx| ctx.get(&a) + ctx.get(&b));
 
     assert_eq!(ctx.get(&sum), 3);
@@ -82,7 +82,7 @@ fn revision_batch() {
 #[test]
 fn revision_push_parity() {
     fn run(ctx: &Context) -> i32 {
-        let a = ctx.cell(3);
+        let a = ctx.source(3);
         let b = ctx.computed(move |ctx| ctx.get(&a) * ctx.get(&a));
         let c = ctx.computed(move |ctx| ctx.get(&b) - ctx.get(&a));
         let v0 = ctx.get(&c);
@@ -100,7 +100,7 @@ fn revision_push_parity() {
 #[test]
 fn revision_high_fanout_write_is_correct() {
     let ctx = Context::with_revision_engine();
-    let source = ctx.cell(1);
+    let source = ctx.source(1);
     let slots: Vec<_> = (0..100)
         .map(|_| ctx.computed(move |ctx| ctx.get(&source) + 1))
         .collect();

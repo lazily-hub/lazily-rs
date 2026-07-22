@@ -41,9 +41,9 @@ struct Graph {
 
 impl Graph {
     fn new(ctx: &Context) -> Self {
-        let a = ctx.cell(0i32);
-        let b = ctx.cell(0i32);
-        let gate = ctx.cell(false);
+        let a = ctx.source(0i32);
+        let b = ctx.source(0i32);
+        let gate = ctx.source(false);
 
         let sum = ctx.slot(move |ctx| ctx.get(&a) + ctx.get(&b));
         let parity = ctx.computed(move |ctx| ctx.get(&sum).rem_euclid(2));

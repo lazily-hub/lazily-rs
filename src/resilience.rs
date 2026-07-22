@@ -119,7 +119,7 @@ impl CircuitBreakerCell {
                 failure_threshold,
                 reset_timeout,
             )),
-            state: ctx.cell(BreakerState::Closed),
+            state: ctx.source(BreakerState::Closed),
         }
     }
     fn refresh(&self, ctx: &Context) {
@@ -191,7 +191,7 @@ impl RetryPolicyCell {
     pub fn new(ctx: &Context, base: u64, cap: u64) -> Self {
         Self {
             core: RefCell::new(RetryPolicyCore::new(base, cap)),
-            delay: ctx.cell(0),
+            delay: ctx.source(0),
         }
     }
     pub fn next_delay(&self, ctx: &Context) -> u64 {
@@ -257,7 +257,7 @@ impl BulkheadCell {
     pub fn new(ctx: &Context, capacity: u64) -> Self {
         Self {
             core: RefCell::new(BulkheadCore::new(capacity)),
-            in_use: ctx.cell(0),
+            in_use: ctx.source(0),
         }
     }
     fn refresh(&self, ctx: &Context) {
@@ -337,7 +337,7 @@ impl TimeoutCell {
     pub fn new(ctx: &Context) -> Self {
         Self {
             core: RefCell::new(TimeoutCore::new()),
-            timed_out: ctx.cell(false),
+            timed_out: ctx.source(false),
         }
     }
     fn refresh(&self, ctx: &Context) {

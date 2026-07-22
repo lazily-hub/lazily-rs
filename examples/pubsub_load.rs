@@ -130,7 +130,7 @@ struct Rung {
 fn sweep_width(width: usize) -> Rung {
     let rss_before = rss_kib();
     let ctx = Context::new();
-    let topic = ctx.cell(0u64);
+    let topic = ctx.source(0u64);
 
     // Build is the interesting half: every subscriber registers an edge on the
     // topic's dependent list, which is where an O(N) dedup would make this O(N^2).
@@ -178,7 +178,7 @@ fn sweep_width(width: usize) -> Rung {
 
 fn churn_soak() {
     let ctx = Context::new();
-    let topic = ctx.cell(0u64);
+    let topic = ctx.source(0u64);
     let mut subscriber_a: Vec<_> = (0..CHURN_LIVE_WIDTH)
         .map(|i| {
             let slot = ctx.computed(move |ctx| ctx.get(&topic) + i as u64);

@@ -122,7 +122,7 @@ impl<P: Clone + PartialEq + 'static> LeaseCell<P> {
     pub fn new(ctx: &Context) -> Self {
         Self {
             core: RefCell::new(LeaseCore::new()),
-            holder: ctx.cell(None),
+            holder: ctx.source(None),
         }
     }
 
@@ -192,7 +192,7 @@ impl<P: Clone + PartialEq + 'static> LeaderCell<P> {
         Self {
             core: RefCell::new(LeaseCore::new()),
             me,
-            current_leader: ctx.cell(None),
+            current_leader: ctx.source(None),
         }
     }
 
@@ -252,7 +252,7 @@ impl<P: Clone + PartialEq + 'static> LockCell<P> {
     pub fn new(ctx: &Context) -> Self {
         Self {
             core: RefCell::new(LeaseCore::new()),
-            is_locked: ctx.cell(false),
+            is_locked: ctx.source(false),
         }
     }
 
@@ -341,7 +341,7 @@ impl SemaphoreCell {
     pub fn new(ctx: &Context, capacity: u64) -> Self {
         Self {
             core: RefCell::new(SemaphoreCore::new(capacity)),
-            available: ctx.cell(capacity),
+            available: ctx.source(capacity),
         }
     }
 
@@ -413,7 +413,7 @@ impl<P: Ord + Clone + 'static> BarrierCell<P> {
         let open = core.is_open();
         Self {
             core: RefCell::new(core),
-            is_open: ctx.cell(open),
+            is_open: ctx.source(open),
         }
     }
 

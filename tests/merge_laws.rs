@@ -135,7 +135,7 @@ fn sum_flag_is_honest() {
 #[test]
 fn cell_is_merge_cell_keep_latest() {
     let ctx = Context::new();
-    let cell = ctx.cell(0i64);
+    let cell = ctx.source(0i64);
     let mc: Source<i64, KeepLatest> = ctx.merge_cell(0i64);
 
     for v in [3i64, 3, 7, 7, 1] {
@@ -228,7 +228,7 @@ fn reactive_source_supertype_uniform() {
     }
 
     let ctx = Context::new();
-    let cell = ctx.cell(0i64);
+    let cell = ctx.source(0i64);
     assert_eq!(drive(&ctx, cell), 2); // Cell ≡ MergeCell<KeepLatest>: merge == replace
 
     let mc: Source<i64, Sum> = ctx.merge_cell(0i64);

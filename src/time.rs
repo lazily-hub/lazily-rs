@@ -103,7 +103,7 @@ impl TimerCell {
     pub fn new(ctx: &Context, fire_at: u64) -> Self {
         Self {
             core: RefCell::new(TimerCore::new(fire_at)),
-            fired: ctx.cell(false),
+            fired: ctx.source(false),
         }
     }
 
@@ -201,7 +201,7 @@ impl IntervalCell {
     pub fn new(ctx: &Context, period: u64) -> Self {
         Self {
             core: RefCell::new(IntervalCore::new(period)),
-            count: ctx.cell(0u64),
+            count: ctx.source(0u64),
         }
     }
 
@@ -328,7 +328,7 @@ impl CronCell {
     pub fn new(ctx: &Context, cycle: u64, offsets: impl IntoIterator<Item = u64>) -> Self {
         Self {
             core: RefCell::new(CronCore::new(cycle, offsets)),
-            count: ctx.cell(0u64),
+            count: ctx.source(0u64),
         }
     }
 
@@ -425,7 +425,7 @@ where
         Self {
             core: RefCell::new(DeadlineCore::new(deadline)),
             value,
-            expired: ctx.cell(false),
+            expired: ctx.source(false),
         }
     }
 

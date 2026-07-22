@@ -89,7 +89,7 @@ impl<T: Clone + PartialEq + 'static> EphemeralCell<T> {
     pub fn new(ctx: &Context) -> Self {
         Self {
             core: RefCell::new(EphemeralCore::new()),
-            value: ctx.cell(None),
+            value: ctx.source(None),
         }
     }
     fn refresh(&self, ctx: &Context) {
@@ -179,7 +179,7 @@ impl<K: Ord + Clone + 'static, V: Clone + PartialEq + 'static> PresenceCell<K, V
     pub fn new(ctx: &Context, ttl: u64) -> Self {
         Self {
             core: RefCell::new(EphemeralMapCore::new()),
-            present: ctx.cell(BTreeMap::new()),
+            present: ctx.source(BTreeMap::new()),
             ttl,
         }
     }
@@ -223,7 +223,7 @@ impl<K: Ord + Clone + 'static, V: Clone + PartialEq + 'static> AwarenessCell<K, 
     pub fn new(ctx: &Context, ttl: u64) -> Self {
         Self {
             core: RefCell::new(EphemeralMapCore::new()),
-            present: ctx.cell(BTreeMap::new()),
+            present: ctx.source(BTreeMap::new()),
             ttl,
         }
     }

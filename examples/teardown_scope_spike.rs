@@ -23,7 +23,7 @@ use lazily::Context;
 
 fn claim_1_group_disposes_on_drop() {
     let ctx = Context::new();
-    let topic = ctx.cell(1u64);
+    let topic = ctx.source(1u64);
     let probe;
     {
         let conn = ctx.scope();
@@ -46,7 +46,7 @@ fn claim_1_group_disposes_on_drop() {
 
 fn claim_2_handles_stay_copy() {
     let ctx = Context::new();
-    let topic = ctx.cell(5u64);
+    let topic = ctx.source(5u64);
     let conn = ctx.scope();
     // `topic` captured twice, no clone: still a Copy handle.
     let a = conn.computed(move |c| c.get(&topic) + 1);
@@ -57,7 +57,7 @@ fn claim_2_handles_stay_copy() {
 
 fn claim_3_cross_group_reads_work() {
     let ctx = Context::new();
-    let topic = ctx.cell(2u64);
+    let topic = ctx.source(2u64);
     let outer = ctx.computed(move |c| c.get(&topic) * 3);
     let conn = ctx.scope();
     let inner = conn.computed(move |c| c.get(&outer) + 1);
@@ -68,7 +68,7 @@ fn claim_3_cross_group_reads_work() {
 fn cost_model(width: usize) {
     // build + teardown through a scope, against explicit per-node disposal
     let ctx = Context::new();
-    let topic = ctx.cell(0u64);
+    let topic = ctx.source(0u64);
 
     let start = Instant::now();
     let plain: Vec<_> = (0..width)

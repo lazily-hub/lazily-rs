@@ -14,7 +14,7 @@ fn threadsafe_apply_merge_folds_under_sum_without_an_edge() {
     use lazily::{Sum, ThreadSafeContext};
 
     let ctx = ThreadSafeContext::new();
-    let acc = ctx.cell(0i64);
+    let acc = ctx.source(0i64);
 
     ctx.apply_merge::<i64, Sum>(&acc, 1);
     ctx.apply_merge::<i64, Sum>(&acc, 2);
@@ -32,7 +32,7 @@ fn threadsafe_apply_merge_identity_fold_is_a_no_op() {
     use lazily::{Max, ThreadSafeContext};
 
     let ctx = ThreadSafeContext::new();
-    let acc = ctx.cell(5i64);
+    let acc = ctx.source(5i64);
     let observed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = observed.clone();
     // A memo over acc so we can see whether a merge invalidated downstream.
@@ -64,7 +64,7 @@ async fn async_apply_merge_folds_under_sum_without_an_edge() {
     use lazily::{AsyncContext, Sum};
 
     let ctx = AsyncContext::new();
-    let acc = ctx.cell(0i64);
+    let acc = ctx.source(0i64);
 
     // Merge is synchronous even here — cells are the synchronous input layer.
     ctx.apply_merge::<i64, Sum>(&acc, 1);

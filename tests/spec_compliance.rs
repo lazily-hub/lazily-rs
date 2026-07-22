@@ -56,8 +56,8 @@ mod context {
     #[test]
     fn context_creates_cells_with_unique_handles() {
         let ctx = Context::new();
-        let a = ctx.cell(10i32);
-        let b = ctx.cell(20i32);
+        let a = ctx.source(10i32);
+        let b = ctx.source(20i32);
         assert_eq!(ctx.get(&a), 10);
         assert_eq!(ctx.get(&b), 20);
     }
@@ -65,7 +65,7 @@ mod context {
     #[test]
     fn context_handles_mixed_slots_and_cells() {
         let ctx = Context::new();
-        let c = ctx.cell(100i32);
+        let c = ctx.source(100i32);
         let s = ctx.slot(move |ctx| ctx.get(&c) + 1);
         assert_eq!(ctx.get(&c), 100);
         assert_eq!(ctx.get(&s), 101);
@@ -74,7 +74,7 @@ mod context {
     #[test]
     fn context_computed_alias_tracks_dependencies() {
         let ctx = Context::new();
-        let c = ctx.cell(2i32);
+        let c = ctx.source(2i32);
         let doubled = ctx.computed(move |ctx| ctx.get(&c) * 2);
 
         assert_eq!(ctx.get(&doubled), 4);
@@ -88,7 +88,7 @@ mod context {
     #[test]
     fn context_allocates_after_effect_disposal() {
         let ctx = Context::new();
-        let root = ctx.cell(1i32);
+        let root = ctx.source(1i32);
         let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
         let effect = ctx.effect(move |ctx| {
             ctx.get(&doubled);
@@ -126,7 +126,7 @@ mod context {
         // alias. Small inline-eligible values have no shared box to refcount,
         // so get_cell_rc materializes a fresh Rc for them (value-correctness
         // for that path is covered by get_cell_rc_avoids_clone_for_non_clone_type).
-        let cell = ctx.cell([42u64; 4]);
+        let cell = ctx.source([42u64; 4]);
         let rc1 = ctx.get_cell_rc(&cell);
         let rc2 = ctx.get_cell_rc(&cell);
         assert_eq!(*rc1, [42u64; 4]);
@@ -153,7 +153,7 @@ mod context {
         struct NoClone(i32);
 
         let ctx = Context::new();
-        let cell = ctx.cell(NoClone(7));
+        let cell = ctx.source(NoClone(7));
         let rc = ctx.get_cell_rc(&cell);
         assert_eq!(rc.0, 7);
     }
@@ -161,7 +161,7 @@ mod context {
     #[test]
     fn get_rc_tracks_dependencies() {
         let ctx = Context::new();
-        let a = ctx.cell(1i32);
+        let a = ctx.source(1i32);
         let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
         let c = ctx.slot(move |ctx| *ctx.get_rc(&b) + 100);
 
@@ -173,7 +173,7 @@ mod context {
     #[test]
     fn get_cell_rc_tracks_dependencies() {
         let ctx = Context::new();
-        let a = ctx.cell(1i32);
+        let a = ctx.source(1i32);
         let b = ctx.slot(move |ctx| *ctx.get_cell_rc(&a) + 10);
 
         assert_eq!(*ctx.get_rc(&b), 11);
@@ -224,7 +224,7 @@ mod threading_contract {
             .map(|seed| {
                 thread::spawn(move || {
                     let ctx = Context::new();
-                    let cell = ctx.cell(seed);
+                    let cell = ctx.source(seed);
                     let doubled = ctx.computed(move |ctx| ctx.get(&cell) * 2);
 
                     assert_eq!(ctx.get(&doubled), seed * 2);
@@ -248,7 +248,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_context_shares_slot_across_threads() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(21i32);
+        let root = ctx.source(21i32);
         let compute_count = Arc::new(AtomicUsize::new(0));
         let compute_count_for_slot = Arc::clone(&compute_count);
         let answer = ctx.computed(move |ctx| {
@@ -289,7 +289,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_context_invalidates_across_threads() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(1i32);
+        let root = ctx.source(1i32);
         let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
 
         assert_eq!(ctx.get(&doubled), 2);
@@ -310,7 +310,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_frontier_invalidation_preserves_direct_force_recompute() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(0i32);
+        let root = ctx.source(0i32);
         let stable = ctx.computed(move |ctx| {
             ctx.get(&root);
             0i32
@@ -349,7 +349,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_context_allows_reentrant_computation() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(1i32);
+        let root = ctx.source(1i32);
         let inner = ctx.computed(move |ctx| ctx.get(&root) + 1);
         let outer = ctx.computed(move |ctx| ctx.get(&inner) + 1);
 
@@ -364,7 +364,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_effect_reruns_from_other_thread() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(0i32);
+        let root = ctx.source(0i32);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_for_effect = Arc::clone(&seen);
 
@@ -395,7 +395,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_concurrent_first_get_contention() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(21i32);
+        let root = ctx.source(21i32);
         let compute_count = Arc::new(AtomicUsize::new(0));
         let compute_count_for_slot = Arc::clone(&compute_count);
         let answer = ctx.computed(move |ctx| {
@@ -434,7 +434,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_concurrent_set_cell_contention() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(0usize);
+        let root = ctx.source(0usize);
         let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
 
         assert_eq!(ctx.get(&doubled), 0);
@@ -469,7 +469,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_retries_slot_compute_invalidated_midflight() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(0usize);
+        let root = ctx.source(0usize);
         let compute_runs = Arc::new(AtomicUsize::new(0));
         let gate = Arc::new(AtomicUsize::new(0));
         let compute_runs_for_slot = Arc::clone(&compute_runs);
@@ -509,7 +509,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_batch_flushes_after_cross_thread_exit() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(0i32);
+        let root = ctx.source(0i32);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_for_effect = Arc::clone(&seen);
 
@@ -546,7 +546,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_effect_coalesces_diamond_invalidation_across_thread() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(0i32);
+        let root = ctx.source(0i32);
         let left = ctx.computed(move |ctx| ctx.get(&root) + 1);
         let right = ctx.computed(move |ctx| ctx.get(&root) + 1);
         let sum = ctx.computed(move |ctx| ctx.get(&left) + ctx.get(&right));
@@ -580,7 +580,7 @@ mod threading_contract {
 
         thread::spawn(move || {
             let ctx = ThreadSafeContext::new();
-            let root = ctx.cell(0i32);
+            let root = ctx.source(0i32);
             let seen = Arc::new(Mutex::new(Vec::new()));
             let seen_for_effect = Arc::clone(&seen);
 
@@ -613,7 +613,7 @@ mod threading_contract {
     #[test]
     fn thread_safe_clear_and_dispose_races_remain_consistent() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(1usize);
+        let root = ctx.source(1usize);
         let doubled = ctx.computed(move |ctx| ctx.get(&root) * 2);
         let runs = Arc::new(AtomicUsize::new(0));
         let runs_for_effect = Arc::clone(&runs);
@@ -687,9 +687,9 @@ mod threading_contract {
     #[test]
     fn thread_safe_dynamic_effect_dependency_cleanup_survives_disposal() {
         let ctx = ThreadSafeContext::new();
-        let choose_left = ctx.cell(true);
-        let left = ctx.cell(1usize);
-        let right = ctx.cell(10usize);
+        let choose_left = ctx.source(true);
+        let left = ctx.source(1usize);
+        let right = ctx.source(10usize);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let cleanup_runs = Arc::new(AtomicUsize::new(0));
         let seen_for_effect = Arc::clone(&seen);
@@ -1080,7 +1080,7 @@ mod benchmark_instrumentation {
     #[test]
     fn context_instrumentation_tracks_graph_work() {
         let ctx = Context::new();
-        let root = ctx.cell(0usize);
+        let root = ctx.source(0usize);
         let parity = ctx.computed(move |ctx| ctx.get(&root) % 2);
         let label = ctx.computed(move |ctx| ctx.get(&parity).wrapping_add(1));
         let _effect = ctx.effect(move |ctx| {
@@ -1120,7 +1120,7 @@ mod benchmark_instrumentation {
     #[test]
     fn thread_safe_instrumentation_tracks_dedup_and_locks() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(40usize);
+        let root = ctx.source(40usize);
         let gate = Arc::new(AtomicUsize::new(0));
         let compute_runs = Arc::new(AtomicUsize::new(0));
         let gate_for_slot = Arc::clone(&gate);
@@ -1235,7 +1235,7 @@ mod benchmark_instrumentation {
     #[test]
     fn thread_safe_cached_get_bypasses_get_refresh_graph_lock() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(40usize);
+        let root = ctx.source(40usize);
         let answer = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(2));
 
         assert_eq!(ctx.get(&answer), 42);
@@ -1262,10 +1262,10 @@ mod benchmark_instrumentation {
     fn thread_safe_effect_rerun_preserves_unchanged_dependency_edges() {
         let ctx = ThreadSafeContext::new();
         let cells = [
-            ctx.cell(0usize),
-            ctx.cell(0usize),
-            ctx.cell(0usize),
-            ctx.cell(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
         ];
         let runs = Arc::new(AtomicUsize::new(0));
         let sink = Arc::new(AtomicUsize::new(0));
@@ -1397,7 +1397,7 @@ mod benchmark_instrumentation {
     #[test]
     fn thread_safe_cached_get_revalidates_after_cross_thread_invalidation() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(40usize);
+        let root = ctx.source(40usize);
         let answer = ctx.computed(move |ctx| ctx.get(&root).wrapping_add(2));
 
         assert_eq!(ctx.get(&answer), 42);
@@ -1434,7 +1434,7 @@ mod benchmark_instrumentation {
     #[test]
     fn thread_safe_in_flight_wait_parks_until_recompute_finishes() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(40usize);
+        let root = ctx.source(40usize);
         let gate = Arc::new(AtomicUsize::new(0));
         let compute_runs = Arc::new(AtomicUsize::new(0));
         let gate_for_slot = Arc::clone(&gate);
@@ -1493,7 +1493,7 @@ mod benchmark_instrumentation {
     #[test]
     fn thread_safe_dirty_same_slot_waiters_bypass_graph_locks() {
         let ctx = ThreadSafeContext::new();
-        let root = ctx.cell(40usize);
+        let root = ctx.source(40usize);
         let gate = Arc::new(AtomicUsize::new(0));
         let compute_runs = Arc::new(AtomicUsize::new(0));
         let gate_for_slot = Arc::clone(&gate);
@@ -1583,7 +1583,7 @@ mod benchmark_instrumentation {
         let workers = 8usize;
         let iters = 16usize;
         let roots = (0..workers)
-            .map(|worker| ctx.cell(worker))
+            .map(|worker| ctx.source(worker))
             .collect::<Vec<_>>();
         let values = roots
             .iter()
@@ -1658,7 +1658,7 @@ mod benchmark_instrumentation {
         let ctx = ThreadSafeContext::new();
         let workers = 8usize;
         let roots = (0..workers)
-            .map(|worker| ctx.cell(worker))
+            .map(|worker| ctx.source(worker))
             .collect::<Vec<_>>();
         let values = roots
             .iter()
@@ -1700,10 +1700,10 @@ mod benchmark_instrumentation {
     fn thread_safe_batch_queues_same_thread_writes_before_graph_flush() {
         let ctx = ThreadSafeContext::new();
         let cells = [
-            ctx.cell(0usize),
-            ctx.cell(0usize),
-            ctx.cell(0usize),
-            ctx.cell(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
         ];
         let total = ctx.computed(move |ctx| {
             cells
@@ -1748,8 +1748,8 @@ mod benchmark_instrumentation {
     #[test]
     fn thread_safe_in_flight_waiters_are_scoped_to_finished_slot() {
         let ctx = ThreadSafeContext::new();
-        let root_a = ctx.cell(40usize);
-        let root_b = ctx.cell(100usize);
+        let root_a = ctx.source(40usize);
+        let root_b = ctx.source(100usize);
         let gate_a = Arc::new(AtomicUsize::new(0));
         let gate_b = Arc::new(AtomicUsize::new(0));
         let gate_a_for_slot = Arc::clone(&gate_a);
@@ -1840,10 +1840,10 @@ mod benchmark_instrumentation {
     fn thread_safe_recompute_preserves_unchanged_dependency_edges() {
         let ctx = ThreadSafeContext::new();
         let cells = [
-            ctx.cell(0usize),
-            ctx.cell(0usize),
-            ctx.cell(0usize),
-            ctx.cell(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
+            ctx.source(0usize),
         ];
         let total = ctx.computed(move |ctx| {
             cells
@@ -1888,9 +1888,9 @@ mod benchmark_instrumentation {
     #[test]
     fn thread_safe_recompute_diffs_dynamic_dependency_edges() {
         let ctx = ThreadSafeContext::new();
-        let use_right = ctx.cell(false);
-        let left = ctx.cell(1usize);
-        let right = ctx.cell(10usize);
+        let use_right = ctx.source(false);
+        let left = ctx.source(1usize);
+        let right = ctx.source(10usize);
         let selected = ctx.computed(move |ctx| {
             if ctx.get(&use_right) {
                 ctx.get(&right)
@@ -1996,7 +1996,7 @@ mod slot_semantics {
     #[test]
     fn clear_removes_cached_value() {
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let s = ctx.slot(move |ctx| ctx.get(&c) * 10);
 
         assert_eq!(ctx.get(&s), 10);
@@ -2012,7 +2012,7 @@ mod slot_semantics {
     #[test]
     fn clear_cascades_to_dependents() {
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let a = ctx.slot(move |ctx| ctx.get(&c));
         let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
         let d = ctx.slot(move |ctx| ctx.get(&b) + 100);
@@ -2041,7 +2041,7 @@ mod slot_semantics {
         B_COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let a = ctx.slot(move |ctx| ctx.get(&c));
         let b = ctx.slot(move |ctx| {
             B_COUNT.with(|cnt| cnt.set(cnt.get() + 1));
@@ -2095,7 +2095,7 @@ mod cell_semantics {
     #[test]
     fn cell_initial_value_accessible() {
         let ctx = Context::new();
-        let c = ctx.cell(42i32);
+        let c = ctx.source(42i32);
         assert_eq!(ctx.get(&c), 42);
     }
 
@@ -2103,7 +2103,7 @@ mod cell_semantics {
     #[test]
     fn cell_set_updates_value() {
         let ctx = Context::new();
-        let c = ctx.cell(0i32);
+        let c = ctx.source(0i32);
         ctx.set(&c, 100);
         assert_eq!(ctx.get(&c), 100);
     }
@@ -2117,7 +2117,7 @@ mod cell_semantics {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(5i32);
+        let c = ctx.source(5i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c) * 3
@@ -2145,7 +2145,7 @@ mod cell_semantics {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c) + 100
@@ -2177,7 +2177,7 @@ mod cell_semantics {
         C_COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let root = ctx.cell(1i32);
+        let root = ctx.source(1i32);
         let a = ctx.slot(move |ctx| {
             A_COUNT.with(|c| c.set(c.get() + 1));
             ctx.get(&root)
@@ -2213,7 +2213,7 @@ mod cell_semantics {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let name = ctx.cell("alice".to_string());
+        let name = ctx.source("alice".to_string());
         let greeting = ctx.slot(move |ctx| {
             COUNT.with(|c| c.set(c.get() + 1));
             format!("hi {}", ctx.get(&name))
@@ -2255,7 +2255,7 @@ mod dependency_tracking {
         OUTER_COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let inner = ctx.slot(move |ctx| {
             INNER_COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c) * 10
@@ -2287,8 +2287,8 @@ mod dependency_tracking {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c1 = ctx.cell(10i32);
-        let c2 = ctx.cell(20i32);
+        let c1 = ctx.source(10i32);
+        let c2 = ctx.source(20i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c1) + ctx.get(&c2)
@@ -2322,9 +2322,9 @@ mod dependency_tracking {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let flag = ctx.cell(true);
-        let a = ctx.cell(10i32);
-        let b = ctx.cell(20i32);
+        let flag = ctx.source(true);
+        let a = ctx.source(10i32);
+        let b = ctx.source(20i32);
 
         // When flag is true, depends on a. When false, depends on b.
         let s = ctx.slot(move |ctx| {
@@ -2381,7 +2381,7 @@ mod invalidation_semantics {
     #[test]
     fn cell_set_clears_dependents_not_self() {
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let s = ctx.slot(move |ctx| ctx.get(&c));
 
         assert_eq!(ctx.get(&s), 1);
@@ -2400,7 +2400,7 @@ mod invalidation_semantics {
     #[test]
     fn slot_clear_cascades() {
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let a = ctx.slot(move |ctx| ctx.get(&c));
         let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
 
@@ -2425,7 +2425,7 @@ mod invalidation_semantics {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c)
@@ -2457,7 +2457,7 @@ mod invalidation_semantics {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(0i32);
+        let c = ctx.source(0i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c)
@@ -2484,7 +2484,7 @@ mod invalidation_semantics {
     #[test]
     fn equal_intermediate_slot_prevents_downstream_recompute() {
         let ctx = Context::new();
-        let root = ctx.cell(0i32);
+        let root = ctx.source(0i32);
         let parity_computes = Rc::new(RefCell::new(0));
         let parity_computes_for_slot = Rc::clone(&parity_computes);
         let parity = ctx.computed(move |ctx| {
@@ -2557,7 +2557,7 @@ mod effect_system {
     #[test]
     fn effect_runs_immediately_and_reruns_when_cell_changes() {
         let ctx = Context::new();
-        let count = ctx.cell(0i32);
+        let count = ctx.source(0i32);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let seen_for_effect = Rc::clone(&seen);
 
@@ -2587,7 +2587,7 @@ mod effect_system {
     #[test]
     fn effect_tracks_slot_dependencies_and_coalesces_scheduling() {
         let ctx = Context::new();
-        let root = ctx.cell(1i32);
+        let root = ctx.source(1i32);
         let left = ctx.slot(move |ctx| ctx.get(&root) + 1);
         let right = ctx.slot(move |ctx| ctx.get(&root) + 2);
         let sum = ctx.slot(move |ctx| ctx.get(&left) + ctx.get(&right));
@@ -2613,7 +2613,7 @@ mod effect_system {
     #[test]
     fn effect_skips_rerun_when_slot_dependency_recomputes_equal() {
         let ctx = Context::new();
-        let root = ctx.cell(0i32);
+        let root = ctx.source(0i32);
         let parity_computes = Rc::new(RefCell::new(0));
         let parity_computes_for_slot = Rc::clone(&parity_computes);
         let parity = ctx.computed(move |ctx| {
@@ -2660,7 +2660,7 @@ mod effect_system {
     #[test]
     fn effect_cleanup_runs_before_rerun_and_on_dispose() {
         let ctx = Context::new();
-        let value = ctx.cell(0i32);
+        let value = ctx.source(0i32);
         let events = Rc::new(RefCell::new(Vec::new()));
         let events_for_effect = Rc::clone(&events);
 
@@ -2708,7 +2708,7 @@ mod effect_system {
     #[test]
     fn effect_initial_run_schedules_nested_invalidations_after_cleanup_is_stored() {
         let ctx = Context::new();
-        let value = ctx.cell(0i32);
+        let value = ctx.source(0i32);
         let events = Rc::new(RefCell::new(Vec::new()));
         let events_for_effect = Rc::clone(&events);
 
@@ -2746,9 +2746,9 @@ mod effect_system {
     #[test]
     fn effect_dependencies_are_dynamic() {
         let ctx = Context::new();
-        let flag = ctx.cell(true);
-        let a = ctx.cell(10i32);
-        let b = ctx.cell(20i32);
+        let flag = ctx.source(true);
+        let a = ctx.source(10i32);
+        let b = ctx.source(20i32);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let seen_for_effect = Rc::clone(&seen);
 
@@ -2796,7 +2796,7 @@ mod batch_updates {
     #[test]
     fn batch_defers_cell_invalidation_until_outermost_exit() {
         let ctx = Context::new();
-        let value = ctx.cell(0i32);
+        let value = ctx.source(0i32);
         let computes = Rc::new(RefCell::new(0));
         let computes_for_slot = Rc::clone(&computes);
         let doubled = ctx.slot(move |ctx| {
@@ -2839,7 +2839,7 @@ mod batch_updates {
     #[test]
     fn batch_coalesces_effect_reruns() {
         let ctx = Context::new();
-        let value = ctx.cell(0i32);
+        let value = ctx.source(0i32);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let seen_for_effect = Rc::clone(&seen);
 
@@ -2871,7 +2871,7 @@ mod batch_updates {
     #[test]
     fn nested_batches_flush_only_at_outermost_exit() {
         let ctx = Context::new();
-        let value = ctx.cell(0i32);
+        let value = ctx.source(0i32);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let seen_for_effect = Rc::clone(&seen);
 
@@ -2901,7 +2901,7 @@ mod batch_updates {
     #[test]
     fn batch_defers_slot_clear_and_effect_cleanup() {
         let ctx = Context::new();
-        let value = ctx.cell(2i32);
+        let value = ctx.source(2i32);
         let doubled = ctx.slot(move |ctx| ctx.get(&value) * 2);
         let events = Rc::new(RefCell::new(Vec::new()));
         let events_for_effect = Rc::clone(&events);
@@ -2945,7 +2945,7 @@ mod batch_updates {
     #[test]
     fn batch_defers_cell_clear_dependents() {
         let ctx = Context::new();
-        let value = ctx.cell(2i32);
+        let value = ctx.source(2i32);
         let computes = Rc::new(RefCell::new(0));
         let computes_for_slot = Rc::clone(&computes);
         let doubled = ctx.slot(move |ctx| {
@@ -2986,7 +2986,7 @@ mod batch_updates {
     #[test]
     fn batch_cell_set_plus_clear_dependents_hard_clears_transitive_slots() {
         let ctx = Context::new();
-        let value = ctx.cell(2i32);
+        let value = ctx.source(2i32);
         let doubled = ctx.slot(move |ctx| ctx.get(&value) * 2);
         let label = ctx.slot(move |ctx| format!("value:{}", ctx.get(&doubled)));
 
@@ -3046,7 +3046,7 @@ mod edge_cases {
         C_COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let base = ctx.cell(10i32);
+        let base = ctx.source(10i32);
 
         let a = ctx.slot(move |ctx| {
             A_COUNT.with(|c| c.set(c.get() + 1));
@@ -3089,7 +3089,7 @@ mod edge_cases {
         COUNTS.with(|c| c.set([0; 5]));
 
         let ctx = Context::new();
-        let root = ctx.cell(1i32);
+        let root = ctx.source(1i32);
 
         let s1 = ctx.slot(move |ctx| {
             COUNTS.with(|c| {
@@ -3159,9 +3159,9 @@ mod edge_cases {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let a = ctx.cell(1i32);
-        let b = ctx.cell(2i32);
-        let c = ctx.cell(3i32);
+        let a = ctx.source(1i32);
+        let b = ctx.source(2i32);
+        let c = ctx.source(3i32);
 
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
@@ -3188,7 +3188,7 @@ mod edge_cases {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c) * 10
@@ -3224,7 +3224,7 @@ mod edge_cases {
         D_COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let root = ctx.cell(1i32);
+        let root = ctx.source(1i32);
         let a = ctx.slot(move |ctx| ctx.get(&root) + 1);
         let b = ctx.slot(move |ctx| ctx.get(&root) + 2);
         let d = ctx.slot(move |ctx| {
@@ -3255,7 +3255,7 @@ mod edge_cases {
         B_COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let a = ctx.slot(move |ctx| {
             A_COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c)
@@ -3280,7 +3280,7 @@ mod edge_cases {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(0i32);
+        let c = ctx.source(0i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c)
@@ -3305,7 +3305,7 @@ mod edge_cases {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c)
@@ -3389,7 +3389,7 @@ mod edge_cases {
         COUNT.with(|c| c.set(0));
 
         let ctx = Context::new();
-        let c = ctx.cell(10i32);
+        let c = ctx.source(10i32);
         let s = ctx.slot(move |ctx| {
             COUNT.with(|cnt| cnt.set(cnt.get() + 1));
             ctx.get(&c) * 2
@@ -3410,7 +3410,7 @@ mod edge_cases {
     #[test]
     fn cell_handle_clear_dependents_cascades() {
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let a = ctx.slot(move |ctx| ctx.get(&c) + 1);
         let b = ctx.slot(move |ctx| ctx.get(&a) + 10);
         let d = ctx.slot(move |ctx| ctx.get(&b) + 100);
@@ -3433,7 +3433,7 @@ mod edge_cases {
     #[test]
     fn cell_handle_set_updates_and_invalidates_dependents() {
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let doubled = ctx.slot(move |ctx| ctx.get(&c) * 2);
 
         assert_eq!(ctx.get(&doubled), 2);
@@ -3448,7 +3448,7 @@ mod edge_cases {
     #[test]
     fn slot_handle_copy_refers_to_same_slot() {
         let ctx = Context::new();
-        let c = ctx.cell(5i32);
+        let c = ctx.source(5i32);
         let s = ctx.slot(move |ctx| ctx.get(&c) * 2);
         let s_copy = s;
 
@@ -3464,7 +3464,7 @@ mod edge_cases {
     #[test]
     fn cell_handle_copy_refers_to_same_cell() {
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let c_copy = c;
 
         ctx.set(&c, 42);
@@ -3475,7 +3475,7 @@ mod edge_cases {
     #[test]
     fn slot_with_vec_type() {
         let ctx = Context::new();
-        let size = ctx.cell(3usize);
+        let size = ctx.source(3usize);
         let v = ctx.slot(move |ctx| {
             let n = ctx.get(&size);
             (0..n).collect::<Vec<usize>>()
@@ -3497,21 +3497,21 @@ mod handle_get_methods {
     #[test]
     fn cell_handle_get_returns_initial_value() {
         let ctx = Context::new();
-        let c = ctx.cell(42i32);
+        let c = ctx.source(42i32);
         assert_eq!(c.get(&ctx), 42);
     }
 
     #[test]
     fn cell_handle_get_matches_context_get_cell() {
         let ctx = Context::new();
-        let c = ctx.cell(99i32);
+        let c = ctx.source(99i32);
         assert_eq!(c.get(&ctx), ctx.get(&c));
     }
 
     #[test]
     fn cell_handle_get_tracks_dependencies() {
         let ctx = Context::new();
-        let c = ctx.cell(10i32);
+        let c = ctx.source(10i32);
         let s = ctx.computed(move |ctx| c.get(ctx) * 2);
         assert_eq!(s.get(&ctx), 20);
         c.set(&ctx, 5);
@@ -3535,7 +3535,7 @@ mod handle_get_methods {
     #[test]
     fn slot_handle_get_lazy_recomputation() {
         let ctx = Context::new();
-        let c = ctx.cell(1i32);
+        let c = ctx.source(1i32);
         let s = ctx.computed(move |ctx| c.get(ctx) + 10);
         assert_eq!(s.get(&ctx), 11);
         c.set(&ctx, 5);
@@ -3546,7 +3546,7 @@ mod handle_get_methods {
     #[test]
     fn thread_safe_cell_get_cell_still_works() {
         let ctx = ThreadSafeContext::new();
-        let c = ctx.cell(42i32);
+        let c = ctx.source(42i32);
         assert_eq!(ctx.get(&c), 42);
     }
 
@@ -3554,7 +3554,7 @@ mod handle_get_methods {
     #[test]
     fn thread_safe_slot_get_still_works() {
         let ctx = ThreadSafeContext::new();
-        let c = ctx.cell(10i32);
+        let c = ctx.source(10i32);
         let s = ctx.computed(move |ctx| ctx.get(&c) * 2);
         assert_eq!(ctx.get(&s), 20);
     }
@@ -3675,8 +3675,8 @@ mod async_context_design_spec {
     fn spec_documents_async_context_type_definitions() {
         for fragment in [
             "pub struct AsyncContext",
-            "pub struct AsyncSlotHandle<T>",
-            "pub struct AsyncCellHandle<T>",
+            "pub struct AsyncComputed<T>",
+            "pub struct AsyncSource<T>",
             "pub struct AsyncEffectHandle",
             "pub struct AsyncComputeContext",
             "AsyncContextInner",
@@ -3693,9 +3693,9 @@ mod async_context_design_spec {
             "memo_async",
             "effect_async",
             "dispose_async_effect",
-            "fn cell<T>(&self, value: T) -> AsyncCellHandle<T>",
-            "fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T",
-            "fn set_cell<T>(&self, handle: &AsyncCellHandle<T>, value: T)",
+            "fn source<T>(&self, value: T) -> AsyncSource<T>",
+            "fn get<T>(&self, handle: &AsyncSource<T>) -> T",
+            "fn set<T>(&self, handle: &AsyncSource<T>, value: T)",
             "fn batch<F, R>(&self, run: F) -> R",
         ] {
             assert_spec_contains(fragment);
@@ -3762,8 +3762,8 @@ mod async_context_design_spec {
         for fragment in [
             "do not use thread-local tracking stacks",
             "AsyncComputeContext",
-            "pub async fn get_async<T>(&self, handle: &AsyncSlotHandle<T>) -> T",
-            "pub fn get_cell<T>(&self, handle: &AsyncCellHandle<T>) -> T",
+            "pub async fn get_async<T>(&self, handle: &AsyncComputed<T>) -> T",
+            "pub fn get<T>(&self, handle: &AsyncSource<T>) -> T",
             "records the accessed slot as a dependency",
             "records the accessed cell as a dependency",
             "Async reads register the graph edge immediately",

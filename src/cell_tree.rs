@@ -94,7 +94,7 @@ where
         Self {
             inner: Rc::new(CellTreeNode {
                 id,
-                value: ctx.cell(value),
+                value: ctx.source(value),
                 order: CellMap::new(ctx),
                 nodes: RefCell::new(HashMap::new()),
             }),

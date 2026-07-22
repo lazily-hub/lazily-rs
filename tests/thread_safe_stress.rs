@@ -26,7 +26,7 @@ fn run_read_contention(strategy: ReadStrategy) -> ReadContentionOutcome {
     let ctx = ThreadSafeContext::with_read_strategy(strategy);
     assert_eq!(ctx.read_strategy(), strategy);
 
-    let input = ctx.cell(0usize);
+    let input = ctx.source(0usize);
     let doubled = ctx.computed(move |ctx| ctx.get(&input).wrapping_mul(2));
     assert_eq!(ctx.get(&doubled), 0);
 
@@ -122,10 +122,10 @@ fn read_strategy_parity_under_contention() {
 
 fn run_batch_effect_disposal_stress(strategy: ReadStrategy) -> usize {
     let ctx = ThreadSafeContext::with_read_strategy(strategy);
-    let choose_left = ctx.cell(false);
-    let left = ctx.cell(1usize);
-    let right = ctx.cell(10usize);
-    let bias = ctx.cell(100usize);
+    let choose_left = ctx.source(false);
+    let left = ctx.source(1usize);
+    let right = ctx.source(10usize);
+    let bias = ctx.source(100usize);
     let selected = ctx.computed(move |ctx| {
         expected_total(
             ctx.get(&choose_left),

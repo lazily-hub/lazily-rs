@@ -103,7 +103,7 @@ use lazily::Context;
 let ctx = Context::new();
 
 // Create a mutable cell
-let counter = ctx.cell(0i32);
+let counter = ctx.source(0i32);
 
 // Create a derived value (automatically tracks dependencies)
 let doubled = ctx.computed(|ctx| {
@@ -307,14 +307,14 @@ For `ctx.computed()` cells, if recomputation returns a value equal to the previo
 
 ### Cell
 
-A `CellHandle<T>` holds a mutable value. `cell.set(&ctx, value)` and `ctx.set_cell()` compare old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively marked dirty.
+A `Source<T>` holds a mutable value. `source.set(&ctx, value)` and `ctx.set()` compare old and new values via `PartialEq` — if unchanged, no invalidation occurs. If changed, all dependent Slots are recursively marked dirty.
 
 ### Signal
 
-A `SignalHandle<T>` is an **eager** derived value — a *derived construct, not a core primitive* (`Signal ≡ Computed.eager`: a guarded computed cell plus a puller Effect). Where a Slot only marks itself dirty on invalidation and recomputes on the next read, a Signal recomputes *the instant a dependency is invalidated*, before the invalidating `set`/`set_cell`/`batch` call returns. The value is always materialized, so observers never see an intermediate unset value — a dependency change drives the value directly from `v1` to `v2`.
+A `SignalHandle<T>` is an **eager** derived value — a *derived construct, not a core primitive* (`Signal ≡ Computed.eager`: a guarded computed cell plus a puller Effect). Where a Slot only marks itself dirty on invalidation and recomputes on the next read, a Signal recomputes *the instant a dependency is invalidated*, before the invalidating `set`/`set`/`batch` call returns. The value is always materialized, so observers never see an intermediate unset value — a dependency change drives the value directly from `v1` to `v2`.
 
 ```rust
-let n = ctx.cell(1);
+let n = ctx.source(1);
 let doubled = ctx.signal(|ctx| n.get(ctx) * 2); // materialized now: 2
 n.set(&ctx, 5);                                  // doubled is already 10 — eager
 assert_eq!(doubled.get(&ctx), 10);
@@ -326,7 +326,7 @@ A Signal is **composed from existing primitives**, not a parallel engine: a guar
 
 ### Batch Updates
 
-`ctx.batch(|ctx| { ... })` groups multiple cell updates and explicit slot/cell clears into one invalidation pass. Nested batches flush only when the outermost batch exits. Direct `ctx.get_cell()` reads inside the callback see the latest cell value immediately; changed-cell dependents are marked dirty after the batch, so Slot reads during the callback return their pre-batch cached value until the batch completes.
+`ctx.batch(|ctx| { ... })` groups multiple cell updates and explicit slot/cell clears into one invalidation pass. Nested batches flush only when the outermost batch exits. Direct `ctx.get()` reads inside the callback see the latest cell value immediately; changed-cell dependents are marked dirty after the batch, so Slot reads during the callback return their pre-batch cached value until the batch completes.
 
 ### Effect
 
@@ -355,12 +355,12 @@ effect.dispose(&ctx);
 | `ctx.memoized_slot::<Key, T, _>(\|ctx\| T)` | Return a context-local factory slot handle, creating it on first use |
 | `slot.get(&ctx)` | Get value (computes if unset) |
 | `ctx.get(&slot)` | Context method alias for `slot.get(&ctx)` |
-| `ctx.cell(value)` | Create a mutable cell |
+| `ctx.source(value)` | Create a mutable cell |
 | `ctx.memoized_cell::<Key, T, _>(\|ctx\| T)` | Return a context-local factory cell handle, creating it on first use |
-| `cell.get(&ctx)` | Get cell value |
-| `ctx.get_cell(&cell)` | Context method alias for `cell.get(&ctx)` |
-| `ctx.set_cell(&cell, value)` | Update cell (marks dependents dirty if changed) |
-| `cell.set(&ctx, value)` | Handle method alias for `ctx.set_cell(&cell, value)` |
+| `source.get(&ctx)` | Get cell value |
+| `ctx.get(&cell)` | Context method alias for `source.get(&ctx)` |
+| `ctx.set(&cell, value)` | Update cell (marks dependents dirty if changed) |
+| `source.set(&ctx, value)` | Handle method alias for `ctx.set(&cell, value)` |
 | `#[lazily::computed] fn name(ctx: &TypedContext<_>) -> T` | Decorator-style typed computed factory over `TypedContext` |
 | `#[lazily::source] fn name(ctx: &TypedContext<_>) -> T` | Decorator-style typed source factory over `TypedContext` |
 | `ctx.signal(\|ctx\| T)` | Create an eager derived value (recomputes on invalidation, no unset window); `T: PartialEq + 'static` |
@@ -391,8 +391,8 @@ run, so callbacks can re-enter the same context without deadlocking. If a slot
 is invalidated while its callback is running, the stale result is discarded and
 the getter retries before returning a fresh value.
 
-Cell values use a read-scaling sidecar (v0.23.0+): `ctx.cell()` reads take a
-shared `RwLock` read (concurrent readers don't serialize), and `ctx.cell_copy()`
+Cell values use a read-scaling sidecar (v0.23.0+): `ctx.source()` reads take a
+shared `RwLock` read (concurrent readers don't serialize), and `ctx.source_copy()`
 opts small `Copy` values into a wait-free inline seqlock — no heap allocation,
 no refcount traffic on read. Both mirror the slot fast-path design.
 
