@@ -51,7 +51,7 @@ use std::rc::Rc;
 
 use crate::Context;
 use crate::KeepLatest;
-use crate::context::{Compute, ComputeOps, SlotId};
+use crate::context::{Compute, ComputeOps, ReadRc, SlotId};
 use crate::effect::Effect;
 use crate::merge::MergePolicy;
 
@@ -212,6 +212,7 @@ impl<T> Computed<T> {
     pub fn get_rc<C: ComputeOps>(&self, ctx: &C) -> Rc<T>
     where
         T: 'static,
+        Computed<T>: ReadRc<C, Value = T>,
     {
         ctx.get_rc(self)
     }

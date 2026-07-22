@@ -1394,7 +1394,7 @@ fn bench_typed_cache_reads(c: &mut Criterion) {
         let ctx = Context::new();
         let cell = ctx.source(99usize);
 
-        b.iter(|| black_box(ctx.get_cell_rc(black_box(&cell))));
+        b.iter(|| black_box(ctx.get_rc(black_box(&cell))));
     });
 
     // #lzrsgetarc: the `Send + Sync` analog to `get_rc`. The pair below is the

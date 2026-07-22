@@ -119,16 +119,16 @@ mod context {
     }
 
     #[test]
-    fn get_cell_rc_returns_reference_counted_cell_value() {
+    fn get_rc_returns_reference_counted_source_value() {
         let ctx = Context::new();
         // Use a heap-backed value (32 bytes > the inline cap) so the shared-
-        // allocation guarantee of get_cell_rc is exercised: both Rc's must
+        // allocation guarantee of get_rc is exercised: both Rc's must
         // alias. Small inline-eligible values have no shared box to refcount,
-        // so get_cell_rc materializes a fresh Rc for them (value-correctness
-        // for that path is covered by get_cell_rc_avoids_clone_for_non_clone_type).
+        // so get_rc materializes a fresh Rc for them (value-correctness for
+        // that path is covered by get_rc_avoids_clone_for_non_clone_source).
         let cell = ctx.source([42u64; 4]);
-        let rc1 = ctx.get_cell_rc(&cell);
-        let rc2 = ctx.get_cell_rc(&cell);
+        let rc1 = ctx.get_rc(&cell);
+        let rc2 = ctx.get_rc(&cell);
         assert_eq!(*rc1, [42u64; 4]);
         assert!(
             Rc::ptr_eq(&rc1, &rc2),
@@ -148,13 +148,13 @@ mod context {
     }
 
     #[test]
-    fn get_cell_rc_avoids_clone_for_non_clone_type() {
+    fn get_rc_avoids_clone_for_non_clone_source() {
         #[derive(Debug, PartialEq)]
         struct NoClone(i32);
 
         let ctx = Context::new();
         let cell = ctx.source(NoClone(7));
-        let rc = ctx.get_cell_rc(&cell);
+        let rc = ctx.get_rc(&cell);
         assert_eq!(rc.0, 7);
     }
 
@@ -171,10 +171,10 @@ mod context {
     }
 
     #[test]
-    fn get_cell_rc_tracks_dependencies() {
+    fn get_rc_source_tracks_dependencies() {
         let ctx = Context::new();
         let a = ctx.source(1i32);
-        let b = ctx.slot(move |ctx| *ctx.get_cell_rc(&a) + 10);
+        let b = ctx.slot(move |ctx| *ctx.get_rc(&a) + 10);
 
         assert_eq!(*ctx.get_rc(&b), 11);
         ctx.set(&a, 5);

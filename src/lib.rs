@@ -160,7 +160,7 @@ pub use command::{
     DedupePolicy, applied_receipt, rejected_receipt,
 };
 pub use context::{
-    Compute, ComputeOps, Context, DrainExhaustion, GraphNode, Read, TeardownScope, Write,
+    Compute, ComputeOps, Context, DrainExhaustion, GraphNode, Read, ReadRc, TeardownScope, Write,
 };
 pub use coordination::{
     BarrierCell, BarrierCore, LeaderCell, LeaderRole, LeaseCell, LeaseCore, LockCell,

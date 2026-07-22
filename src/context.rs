@@ -959,14 +959,12 @@ impl Context {
         handle.write(self, value)
     }
 
-    /// Get the value of a slot as `Rc<T>`, avoiding a deep clone.
+    /// Get the value of a computed or source as `Rc<T>`, avoiding a deep clone.
     ///
     /// Returns a reference-counted pointer to the stored value. Use this when
     /// you only need to read the value without owning a separate copy.
-    pub fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
-        // A bare `&Context` read is untracked; tracked reads go through
-        // `Compute::get_rc` (value-threaded), which registers its own edge.
-        self.get_rc_untracked(handle)
+    pub fn get_rc<H: ReadRc<Self> + ?Sized>(&self, handle: &H) -> Rc<H::Value> {
+        handle.read_rc(self)
     }
 
     /// [`get_rc`](Self::get_rc) without registering a dependency edge — the
@@ -1222,16 +1220,19 @@ impl Context {
         self.get(handle)
     }
 
-    /// Get the value of a cell as `Rc<T>`, avoiding a deep clone.
+    /// Get the value of a source as `Rc<T>`, avoiding a deep clone.
+    #[deprecated(note = "use `Context::get_rc` — the unified zero-copy read")]
     pub fn get_cell_rc<T: 'static>(&self, handle: &Source<T>) -> Rc<T> {
-        // A bare `&Context` read is untracked; the tracking path is
-        // `Compute::get_cell_rc`, which registers its own edge.
+        self.get_rc(handle)
+    }
+
+    fn get_source_rc_untracked<T: 'static, M>(&self, handle: &Source<T, M>) -> Rc<T> {
         let inner = self.inner.borrow();
         if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, handle.id) {
             assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
             unsafe { c.value.rc_clone_unchecked::<T>() }
         } else {
-            panic!("get_cell_rc called on non-cell id");
+            panic!("get_rc called on non-source id");
         }
     }
 
@@ -1323,7 +1324,7 @@ impl Context {
         // Eager puller: re-materializes the formula after every invalidation.
         // `get_rc` refreshes and registers the dependency without deep-cloning.
         let effect = self.effect(move |ctx| {
-            let _ = ctx.get_rc::<T>(&Computed::<T>::from_id(id));
+            let _ = ctx.get_rc(&Computed::<T>::from_id(id));
         });
         let mut inner = self.inner.borrow_mut();
         if let Some(Node::Computed(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
@@ -2737,6 +2738,15 @@ pub trait Read<Ctx: ?Sized> {
     fn read(&self, ctx: &Ctx) -> Self::Output;
 }
 
+/// A handle readable as a reference-counted value through `get_rc`.
+///
+/// Implemented by both [`Computed`] and [`Source`], mirroring [`Read`] while
+/// preserving the zero-copy `Rc<T>` result.
+pub trait ReadRc<Ctx: ?Sized> {
+    type Value: 'static;
+    fn read_rc(&self, ctx: &Ctx) -> Rc<Self::Value>;
+}
+
 /// A handle writable through a context's `set` (`#lzcellkernel`), generic over
 /// the context type `Ctx`.
 ///
@@ -2760,6 +2770,20 @@ impl<T: Clone + 'static, M> Read<Context> for Source<T, M> {
         // A bare `&Context` read is untracked; the primary path tracks via
         // `Read<Compute>`.
         ctx.read_source_untracked(self.id)
+    }
+}
+
+impl<T: 'static> ReadRc<Context> for Computed<T> {
+    type Value = T;
+    fn read_rc(&self, ctx: &Context) -> Rc<T> {
+        ctx.get_rc_untracked(self)
+    }
+}
+
+impl<T: 'static, M> ReadRc<Context> for Source<T, M> {
+    type Value = T;
+    fn read_rc(&self, ctx: &Context) -> Rc<T> {
+        ctx.get_source_rc_untracked(self)
     }
 }
 
@@ -2858,19 +2882,16 @@ impl<'a> Compute<'a> {
         self.ctx
     }
 
-    /// Read a computed's value as `Rc<T>`, registering an edge (`#lzrsgetarc`).
-    pub fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
-        self.ctx.register_dependency(handle.id, self.slot_id);
-        self.ctx.get_rc_untracked(handle)
+    /// Read a computed or source as `Rc<T>`, registering an edge (`#lzrsgetarc`).
+    pub fn get_rc<H: ReadRc<Self> + ?Sized>(&self, handle: &H) -> Rc<H::Value> {
+        handle.read_rc(self)
     }
 
     /// Read a source cell's value as `Rc<T>`, registering an edge against this
-    /// recompute's node. The `Compute`-side of [`Context::get_cell_rc`].
+    /// recompute's node. Compatibility wrapper for [`Compute::get_rc`].
+    #[deprecated(note = "use `Compute::get_rc` — the unified zero-copy read")]
     pub fn get_cell_rc<T: 'static>(&self, handle: &Source<T>) -> Rc<T> {
-        self.ctx.register_dependency(handle.id, self.slot_id);
-        // The `&Context` delegate is untracked, so this registers exactly one
-        // edge — against this recompute's node.
-        self.ctx.get_cell_rc(handle)
+        self.get_rc(handle)
     }
 
     /// Create a source cell (construction is not a read; delegates to the ctx).
@@ -2937,6 +2958,22 @@ impl<'a, T: Clone + 'static, M> Read<Compute<'a>> for Source<T, M> {
     }
 }
 
+impl<'a, T: 'static> ReadRc<Compute<'a>> for Computed<T> {
+    type Value = T;
+    fn read_rc(&self, cx: &Compute<'a>) -> Rc<T> {
+        cx.ctx.register_dependency(self.id, cx.slot_id);
+        cx.ctx.get_rc_untracked(self)
+    }
+}
+
+impl<'a, T: 'static, M> ReadRc<Compute<'a>> for Source<T, M> {
+    type Value = T;
+    fn read_rc(&self, cx: &Compute<'a>) -> Rc<T> {
+        cx.ctx.register_dependency(self.id, cx.slot_id);
+        cx.ctx.get_source_rc_untracked(self)
+    }
+}
+
 impl<'a, T: PartialEq + 'static> Write<Compute<'a>> for Source<T> {
     type Value = T;
     fn write(&self, cx: &Compute<'a>, value: T) {
@@ -2978,9 +3015,14 @@ pub trait ComputeOps {
     /// bare [`Context`] registers nothing.
     fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T;
 
-    /// Read a computed node's value as `Rc<T>`, with the same tracking
-    /// discipline as [`read_value`](Self::read_value).
-    fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T>;
+    /// Read a computed or source as `Rc<T>`, with the same tracking discipline
+    /// as [`read_value`](Self::read_value).
+    fn get_rc<H: ReadRc<Self> + ?Sized>(&self, handle: &H) -> Rc<H::Value>
+    where
+        Self: Sized,
+    {
+        handle.read_rc(self)
+    }
 
     /// Read a handle's value through its [`Read`] impl for this surface.
     fn get<H: Read<Self> + ?Sized>(&self, handle: &H) -> <H as Read<Self>>::Output
@@ -3044,10 +3086,6 @@ impl ComputeOps for Context {
         Context::read_value::<T>(self, id)
     }
 
-    fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
-        Context::get_rc::<T>(self, handle)
-    }
-
     fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
         Context::cell::<T>(self, value)
     }
@@ -3107,11 +3145,6 @@ impl ComputeOps for Compute<'_> {
         // Untracked base: the edge is already threaded via `slot_id` above, so
         // the delegate must not register again (would double-register).
         self.ctx.read_value_untracked::<T>(id)
-    }
-
-    fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
-        self.ctx.register_dependency(handle.id, self.slot_id);
-        self.ctx.get_rc_untracked(handle)
     }
 
     fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {

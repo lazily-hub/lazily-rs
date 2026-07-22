@@ -231,7 +231,7 @@ impl<Schema> TypedContext<Schema> {
     where
         T: 'static,
     {
-        self.inner.get_cell_rc(&handle.raw)
+        self.inner.get_rc(&handle.raw)
     }
 
     pub fn set_cell<T>(&self, handle: &TypedCellHandle<Schema, T>, value: T)
@@ -357,7 +357,7 @@ impl<'a, Schema> TypedContextRef<'a, Schema> {
         if let Some(node) = self.track {
             self.inner.register_dependency(handle.raw.id, node);
         }
-        self.inner.get_cell_rc(&handle.raw)
+        self.inner.get_rc(&handle.raw)
     }
 
     pub fn memoized_slot<K, T, F>(&self, compute: F) -> TypedSlotHandle<Schema, T>

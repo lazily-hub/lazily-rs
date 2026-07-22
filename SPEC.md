@@ -42,7 +42,7 @@ pub struct Context {
 | `ctx.source(value)` | Create a mutable cell |
 | `source.get(&ctx)` | Get cell value |
 | `ctx.get(&cell)` | Context method alias for `source.get(&ctx)` |
-| `ctx.get_cell_rc(&cell)` | Get cell value as `Rc<T>`, avoiding deep clone |
+| `ctx.get_rc(&source)` | Get source value as `Rc<T>`, avoiding deep clone |
 | `ctx.set(&cell, value)` | Update cell (marks dependents dirty if changed) |
 | `source.set(&ctx, value)` | Handle method alias for `ctx.set(&cell, value)` |
 | `ctx.batch(\|ctx\| { ... })` | Defer changed-cell dirty marking and explicit clears until the outermost batch exits |
@@ -833,7 +833,7 @@ Read-path fast-path:
    `dyn Any::downcast_ref`
 4. On mismatch, panic with the same "type mismatch" message as before
 
-`get_rc()` and `get_cell_rc()` follow the same pattern but clone the
+`get_rc()` follows the same pattern for both computed and source handles but clones the
 reference-counted pointer instead of cloning the inner value.
 `ThreadSafeContext::get_arc()` is their `Send + Sync` analog. It reads the
 authoritative `Arc` on the node rather than the cached-read sidecar (which
