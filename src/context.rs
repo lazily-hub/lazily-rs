@@ -11,15 +11,24 @@ use crate::effect::{Effect, EffectCallbackResult};
 use crate::merge::MergePolicy;
 
 /// Type alias for the erased compute function stored in slots.
-type ComputeFn = dyn Fn(&Context) -> AnyValue;
+type ComputeFn = dyn Fn(&Compute) -> AnyValue;
 /// Type alias for the erased equality function stored in slots.
 type EqualsFn = dyn Fn(&AnyValue, &AnyValue) -> bool;
 /// Type alias for the erased effect callback stored in effects.
-type EffectFn = dyn Fn(&Context) -> Option<Box<dyn FnOnce()>>;
+type EffectFn = dyn Fn(&Compute) -> Option<Box<dyn FnOnce()>>;
 
 /// Unique identifier for a reactive node (slot or cell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SlotId(pub(crate) u64);
+
+impl SlotId {
+    /// A sentinel id that never resolves to a live node. A [`Compute`] bound to
+    /// it registers no edges — `register_dependency` no-ops on a missing node —
+    /// so it is the id used for a one-shot *detached* eval outside any recompute
+    /// (`Context::eval_detached`), where the unified `Fn(&Compute)` closure type
+    /// must be honoured without forming spurious dependencies.
+    pub(crate) const DETACHED: SlotId = SlotId(u64::MAX);
+}
 
 #[cfg(not(feature = "vec_edges"))]
 type EdgeVec = SmallVec<[SlotId; 2]>;
@@ -346,35 +355,46 @@ impl AnyValue {
 }
 
 // ---------------------------------------------------------------------------
-// Thread-local tracking stack for automatic dependency discovery
+// Dependency discovery (`#lzcellkernel`)
 // ---------------------------------------------------------------------------
+//
+// The **primary** surface threads the recomputing node id as a *value* through
+// the fortified [`Compute`] view handed to every compute/effect closure (see
+// `ComputeOps` / `Compute`): a tracked read registers against `Compute::slot_id`
+// and a bare `&Context` read registers nothing. The primary recompute/effect
+// sites push **no** thread-local frame, so `Compute::untracked()` is genuinely
+// untracked and the whole class of stranded-frame bugs is structurally gone.
+//
+// The thread-local frame below survives as a **narrow compatibility bridge** for
+// exactly one caller: the `SyncReactiveGraph` capability trait's `Fn(&Self)`
+// compute/effect closures (`src/reactive_graph.rs`), whose closure shape is
+// shared with the still-thread-local `ThreadSafeContext` / `AsyncContext` and so
+// cannot yet be migrated to `&Compute` without a cross-context GAT change. Those
+// impls (`SyncReactiveGraph for Context`) adapt an old-style `Fn(&Context)`
+// closure by pushing a frame for its duration; bare `&Context` reads made inside
+// it then attribute to the recomputing node via `current_tracking_frame`. No
+// other path consults it — it is vestigial for the entire public cell/kernel
+// API.
 
 thread_local! {
     static TRACKING_STACK: RefCell<Vec<SlotId>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(crate) fn push_tracking_frame(id: SlotId) {
+fn push_tracking_frame(id: SlotId) {
     TRACKING_STACK.with(|stack| stack.borrow_mut().push(id));
 }
 
-pub(crate) fn pop_tracking_frame() {
+fn pop_tracking_frame() {
     TRACKING_STACK.with(|stack| stack.borrow_mut().pop());
 }
 
-/// RAII guard around a tracking frame.
-///
-/// The pop MUST run on the unwind path as well as the normal one. Reading a
-/// disposed node panics — that is this library's expression of the spec's
-/// `read_after_dispose` — and such a read happens *inside* a compute closure
-/// whenever a surviving dependent is recomputed after its dependency was
-/// disposed. With a bare `push` / `pop` pair the unwind skips the pop, leaving
-/// the dead slot as the current frame, so every later top-level read registers
-/// a spurious dependency edge against it (`#lzspecedgeindex`). Caught by
-/// `tests/tracking_frame.rs`.
-pub(crate) struct TrackingFrame;
+/// RAII guard around a bridge tracking frame (see the module note above). The
+/// pop runs on the unwind path too, so a panic out of a bridged `Fn(&Context)`
+/// closure cannot strand the frame.
+struct TrackingFrame;
 
 impl TrackingFrame {
-    pub(crate) fn push(id: SlotId) -> Self {
+    fn push(id: SlotId) -> Self {
         push_tracking_frame(id);
         Self
     }
@@ -386,10 +406,9 @@ impl Drop for TrackingFrame {
     }
 }
 
-/// If there is an active tracking frame, return the id of the slot currently
-/// being computed (i.e. the dependent that should subscribe to whatever is
-/// being accessed).
-pub(crate) fn current_tracking_frame() -> Option<SlotId> {
+/// The id of the node whose bridged `Fn(&Context)` closure is currently running,
+/// if any. `None` on the primary [`Compute`]-threaded path and at top level.
+fn current_tracking_frame() -> Option<SlotId> {
     TRACKING_STACK.with(|stack| stack.borrow().last().copied())
 }
 
@@ -666,7 +685,7 @@ impl Context {
         inner.nodes[index] = Some(node);
     }
 
-    fn register_dependency(&self, dependency_id: SlotId, dependent_id: SlotId) {
+    pub(crate) fn register_dependency(&self, dependency_id: SlotId, dependent_id: SlotId) {
         if dependency_id == dependent_id {
             return;
         }
@@ -843,7 +862,7 @@ impl Context {
     pub fn slot<T, F>(&self, compute: F) -> Computed<T>
     where
         T: 'static,
-        F: Fn(&Context) -> T + 'static,
+        F: Fn(&Compute) -> T + 'static,
     {
         self.slot_with_equals(compute, None)
     }
@@ -862,7 +881,7 @@ impl Context {
     pub fn computed<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + 'static,
-        F: Fn(&Context) -> T + 'static,
+        F: Fn(&Compute) -> T + 'static,
     {
         self.slot_with_equals(
             compute,
@@ -899,7 +918,7 @@ impl Context {
     pub fn computed_ripple_when<T, F, C>(&self, compute: F, changed: C) -> Computed<T>
     where
         T: 'static,
-        F: Fn(&Context) -> T + 'static,
+        F: Fn(&Compute) -> T + 'static,
         C: Fn(&T, &T) -> bool + 'static,
     {
         self.slot_with_equals(
@@ -925,7 +944,7 @@ impl Context {
     where
         K: 'static,
         T: 'static,
-        F: Fn(&Context) -> T + 'static,
+        F: Fn(&Compute) -> T + 'static,
     {
         let key = FactoryKey {
             kind: FactoryKind::Slot,
@@ -943,7 +962,7 @@ impl Context {
     fn slot_with_equals<T, F>(&self, compute: F, equals: Option<Box<EqualsFn>>) -> Computed<T>
     where
         T: 'static,
-        F: Fn(&Context) -> T + 'static,
+        F: Fn(&Compute) -> T + 'static,
     {
         let id = self.alloc_id();
         let node = ComputedNode {
@@ -986,10 +1005,18 @@ impl Context {
     /// Returns a reference-counted pointer to the stored value. Use this when
     /// you only need to read the value without owning a separate copy.
     pub fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
+        // Primary tracked reads go through `Compute::get_rc` (value-threaded).
+        // A bare `&Context` read tracks only under an active capability-trait
+        // bridge frame (module note); otherwise it is untracked.
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
+        self.get_rc_untracked(handle)
+    }
 
+    /// [`get_rc`](Self::get_rc) without registering a dependency edge — the
+    /// fortified [`Compute`] wrapper registers against its own node instead.
+    fn get_rc_untracked<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
         self.refresh_slot(handle.id);
 
         let inner = self.inner.borrow();
@@ -1005,13 +1032,33 @@ impl Context {
         panic!("get_rc called on unset or non-slot id");
     }
 
+    /// Read a source cell's value **without** registering a dependency edge.
+    fn read_source_untracked<T: Clone + 'static>(&self, id: SlotId) -> T {
+        let inner = self.inner.borrow();
+        if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, id) {
+            assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
+            unsafe { c.value.as_t_ref_unchecked::<T>() }.clone()
+        } else {
+            panic!("get called on non-cell id");
+        }
+    }
+
     /// Internal: get a slot value by id, performing computation if unset and
     /// registering dependency tracking.
     fn get_slot<T: Clone + 'static>(&self, id: SlotId) -> T {
+        // Tracks only under an active capability-trait bridge frame (module
+        // note); the primary path tracks via `Compute`, not here.
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(id, parent_id);
         }
+        self.get_slot_untracked(id)
+    }
 
+    /// Read a computed slot's value **without** registering a dependency edge.
+    /// The fortified `Compute` wrapper (`#lzcellkernel`) uses this and registers
+    /// the edge against its own value-threaded node id instead of the ambient
+    /// tracking frame.
+    fn get_slot_untracked<T: Clone + 'static>(&self, id: SlotId) -> T {
         self.refresh_slot(id);
 
         let inner = self.inner.borrow();
@@ -1182,8 +1229,8 @@ impl Context {
         }
 
         let result = {
-            let _frame = TrackingFrame::push(id);
-            (compute.as_ref())(self)
+            let cx = Compute::new(self, id, 0);
+            (compute.as_ref())(&cx)
         };
 
         let changed = {
@@ -1226,10 +1273,11 @@ impl Context {
 
     /// Get the value of a cell as `Rc<T>`, avoiding a deep clone.
     pub fn get_cell_rc<T: 'static>(&self, handle: &Source<T>) -> Rc<T> {
+        // Tracks only under an active capability-trait bridge frame (module
+        // note); the primary path tracks via `Compute`, not here.
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(handle.id, parent_id);
         }
-
         let inner = self.inner.borrow();
         if let Some(Node::Source(c)) = Self::get_node(&inner.nodes, handle.id) {
             assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
@@ -1244,9 +1292,20 @@ impl Context {
     /// read directly. Registers a dependency when called inside a reactive
     /// computation. Backs `Source::get` / `Computed::get` uniformly across kinds.
     pub(crate) fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T {
+        // Tracks only under an active capability-trait bridge frame (module
+        // note); the primary path tracks via `Compute::read_value`, which
+        // registers against its threaded node id and calls the untracked base.
         if let Some(parent_id) = current_tracking_frame() {
             self.register_dependency(id, parent_id);
         }
+        self.read_value_untracked(id)
+    }
+
+    /// Read any node's value by id **without** registering a dependency edge.
+    /// A formula (Computed node) is refreshed then read; a source (Source node)
+    /// is read directly. The untracked base of [`read_value`](Self::read_value)
+    /// used by the fortified [`Compute`] view (which registers its own edge).
+    pub(crate) fn read_value_untracked<T: Clone + 'static>(&self, id: SlotId) -> T {
         // No-op for non-slot nodes (`refresh_slot` early-returns `false`).
         self.refresh_slot(id);
         let inner = self.inner.borrow();
@@ -1264,6 +1323,15 @@ impl Context {
             }
             _ => panic!("read_value called on unset or unknown id"),
         }
+    }
+
+    /// Evaluate `f` once, **detached** from any recompute: reads through the
+    /// supplied [`Compute`] register no dependency edge (it is bound to
+    /// [`SlotId::DETACHED`]). Used to produce a value under the unified
+    /// `Fn(&Compute)` closure type when there is no owning node yet — e.g. a
+    /// source cell's eager initial value in the keyed-collection family.
+    pub(crate) fn eval_detached<T>(&self, f: impl FnOnce(&Compute) -> T) -> T {
+        f(&Compute::new(self, SlotId::DETACHED, 0))
     }
 
     // -- Cell kernel constructors (`#lzcellkernel`) ------------------------
@@ -1428,7 +1496,7 @@ impl Context {
     where
         K: 'static,
         T: PartialEq + 'static,
-        F: FnOnce(&Context) -> T,
+        F: FnOnce(&Compute) -> T,
     {
         let key = FactoryKey {
             kind: FactoryKind::Cell,
@@ -1438,7 +1506,8 @@ impl Context {
             return handle;
         }
 
-        let value = init(self);
+        // A memoized *cell* seed is a one-shot untracked eval (`#lzcellkernel`).
+        let value = self.eval_detached(init);
         let handle = self.cell(value);
         self.insert_factory_handle(key, TypeId::of::<T>(), handle);
         handle
@@ -1611,7 +1680,7 @@ impl Context {
     /// disposed.
     pub fn effect<F, R>(&self, run: F) -> Effect
     where
-        F: Fn(&Context) -> R + 'static,
+        F: Fn(&Compute) -> R + 'static,
         R: EffectCallbackResult + 'static,
     {
         let id = self.alloc_id();
@@ -2113,8 +2182,8 @@ impl Context {
         }
 
         let next_cleanup = {
-            let _frame = TrackingFrame::push(id);
-            (run.as_ref())(self)
+            let cx = Compute::new(self, id, 0);
+            (run.as_ref())(&cx)
         };
 
         let mut inner = self.inner.borrow_mut();
@@ -2164,7 +2233,7 @@ impl Context {
     pub fn signal<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + 'static,
-        F: Fn(&Context) -> T + 'static,
+        F: Fn(&Compute) -> T + 'static,
     {
         // `#lzcellkernel` — the eager construction is a guarded computed cell
         // that is then made eager: `computed(f).eager()`. Retires the former
@@ -2564,7 +2633,7 @@ impl TeardownScope<'_> {
     pub fn computed<T, F>(&self, compute: F) -> Computed<T>
     where
         T: PartialEq + 'static,
-        F: Fn(&Context) -> T + 'static,
+        F: Fn(&Compute) -> T + 'static,
     {
         let handle = self.ctx.computed(compute);
         self.owned.borrow_mut().push(handle.id);
@@ -2581,7 +2650,7 @@ impl TeardownScope<'_> {
     /// Register an effect owned by this scope.
     pub fn effect<F, R>(&self, run: F) -> Effect
     where
-        F: Fn(&Context) -> R + 'static,
+        F: Fn(&Compute) -> R + 'static,
         R: EffectCallbackResult + 'static,
     {
         let handle = self.ctx.effect(run);
@@ -2695,7 +2764,16 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
         T: PartialEq + Send + Sync + 'static,
         F: Fn(&Self) -> T + Send + Sync + 'static,
     {
-        Context::computed(self, compute)
+        // Bridge (module note): this capability trait hands an old-style
+        // `Fn(&Context)` closure, a shape shared with the still-thread-local
+        // `ThreadSafeContext` / `AsyncContext`. Adapt it to the primary
+        // `Fn(&Compute)` surface by pushing a tracking frame for its duration so
+        // its bare `&Context` reads attribute to this node. The primary
+        // `Context::computed` / `Compute` API never pushes a frame.
+        Context::computed(self, move |cx: &Compute| {
+            let _frame = TrackingFrame::push(cx.slot_id());
+            compute(cx.untracked())
+        })
     }
     fn get<T>(&self, handle: &Self::Computed<T>) -> T
     where
@@ -2708,7 +2786,11 @@ impl crate::reactive_graph::SyncReactiveGraph for Context {
         F: Fn(&Self) -> C + Send + Sync + 'static,
         C: FnOnce() + Send + Sync + 'static,
     {
-        Context::effect(self, run)
+        // Same bridge as `computed` above.
+        Context::effect(self, move |cx: &Compute| {
+            let _frame = TrackingFrame::push(cx.slot_id());
+            run(cx.untracked())
+        })
     }
 }
 
@@ -2742,20 +2824,15 @@ impl<T: Clone + 'static> Read<Context> for Computed<T> {
     }
 }
 
-impl<T: Clone + 'static> Read<Context> for Source<T> {
+impl<T: Clone + 'static, M> Read<Context> for Source<T, M> {
     type Output = T;
     fn read(&self, ctx: &Context) -> T {
+        // Tracks only under an active capability-trait bridge frame (module
+        // note); the primary path tracks via `Read<Compute>`.
         if let Some(parent_id) = current_tracking_frame() {
             ctx.register_dependency(self.id, parent_id);
         }
-
-        let inner = ctx.inner.borrow();
-        if let Some(Node::Source(c)) = Context::get_node(&inner.nodes, self.id) {
-            assert!(c.type_id == node_type_tag::<T>(), "type mismatch in cell");
-            unsafe { c.value.as_t_ref_unchecked::<T>() }.clone()
-        } else {
-            panic!("get called on non-cell id");
-        }
+        ctx.read_source_untracked(self.id)
     }
 }
 
@@ -2763,6 +2840,403 @@ impl<T: PartialEq + 'static> Write<Context> for Source<T> {
     type Value = T;
     fn write(&self, ctx: &Context, value: T) {
         ctx.set_source::<T>(self.id, value);
+    }
+}
+
+/// A fortified, non-escapable **compute context** (`#lzcellkernel`).
+///
+/// Handed to a `computed` / `slot` / `computed_ripple_when` recompute closure as
+/// the **sole tracking-read surface**. It carries the recomputing node id **as a
+/// value** — not an ambient thread-local — so every dependency edge registered
+/// through it attributes to the *correct* node, including a read that happens
+/// after an `.await` in the async bindings (the value survives suspension where
+/// a thread-local would be clobbered).
+///
+/// Fortification, by construction:
+/// - **Non-escapable:** lifetime `'a` binds it to the recompute call; it is
+///   `!Send` and holds a borrow, so it cannot be stored past the closure and
+///   reused to register an edge against the wrong node.
+/// - **Sole surface:** the closure receives *only* a `Compute`; a normal read
+///   therefore *cannot* miss tracking. An intentional untracked read is the
+///   explicitly-named [`Compute::untracked`].
+/// - **Generation-stamped:** `gen` pins the node's liveness at recompute start,
+///   so a read against a disposed/recycled node is detected, never misattributed.
+///
+/// The escape hatch is closed by the type system. A `Compute` cannot be smuggled
+/// out of its closure into outer state — the borrow it carries does not outlive
+/// the recompute call:
+///
+/// ```compile_fail
+/// use std::cell::RefCell;
+/// use lazily::{Compute, Context};
+/// let ctx = Context::new();
+/// let leaked: RefCell<Option<&Compute<'_>>> = RefCell::new(None);
+/// let _ = ctx.computed(|c| {
+///     *leaked.borrow_mut() = Some(c); // ERROR: `c` does not live long enough
+///     0i32
+/// });
+/// ```
+///
+/// Nor can it cross a thread boundary — it is `!Send`:
+///
+/// ```compile_fail
+/// use lazily::{Compute, Context};
+/// fn assert_send<T: Send>(_: &T) {}
+/// let ctx = Context::new();
+/// let _ = ctx.computed(|c: &Compute<'_>| {
+///     assert_send(c); // ERROR: `*const ()` cannot be sent between threads safely
+///     0i32
+/// });
+/// ```
+pub struct Compute<'a> {
+    ctx: &'a Context,
+    slot_id: SlotId,
+    #[allow(dead_code)]
+    generation: u64,
+    // Not `Send`/`Sync` and cannot outlive `'a` — enforces non-escapability.
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl<'a> Compute<'a> {
+    pub(crate) fn new(ctx: &'a Context, slot_id: SlotId, generation: u64) -> Self {
+        Self {
+            ctx,
+            slot_id,
+            generation,
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    /// The `SlotId` of the node currently being recomputed — the dependent every
+    /// tracked read through this context subscribes.
+    pub(crate) fn slot_id(&self) -> SlotId {
+        self.slot_id
+    }
+
+    /// Read a cell, registering a dependency edge against this recompute's node.
+    pub fn get<H: Read<Self> + ?Sized>(&self, handle: &H) -> <H as Read<Self>>::Output {
+        handle.read(self)
+    }
+
+    /// Write a source cell from inside a compute (untracked — a write is an
+    /// argument, never a dependency; §9.2.3).
+    pub fn set<H: Write<Self> + ?Sized>(&self, handle: &H, value: <H as Write<Self>>::Value) {
+        handle.write(self, value)
+    }
+
+    /// The explicit untracked-read escape: the owning [`Context`], whose reads
+    /// register no dependency edge. Use only when a read deliberately must not
+    /// form an edge. Returns the borrow with the compute's own lifetime `'a`.
+    pub fn untracked(&self) -> &'a Context {
+        self.ctx
+    }
+
+    /// Read a computed's value as `Rc<T>`, registering an edge (`#lzrsgetarc`).
+    pub fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
+        self.ctx.register_dependency(handle.id, self.slot_id);
+        self.ctx.get_rc_untracked(handle)
+    }
+
+    /// Read a source cell's value as `Rc<T>`, registering an edge against this
+    /// recompute's node. The `Compute`-side of [`Context::get_cell_rc`].
+    pub fn get_cell_rc<T: 'static>(&self, handle: &Source<T>) -> Rc<T> {
+        self.ctx.register_dependency(handle.id, self.slot_id);
+        // No bridge frame is ever active on the primary `Compute` path, so the
+        // delegate registers nothing further.
+        self.ctx.get_cell_rc(handle)
+    }
+
+    /// Create a source cell (construction is not a read; delegates to the ctx).
+    pub fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
+        self.ctx.cell(value)
+    }
+
+    /// Create a source cell (v2 spelling of [`Compute::cell`]).
+    pub fn source<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
+        self.ctx.source(value)
+    }
+
+    /// Create a guarded computed cell.
+    pub fn computed<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: PartialEq + 'static,
+        F: Fn(&Compute) -> T + 'static,
+    {
+        self.ctx.computed(compute)
+    }
+
+    /// Create a guarded computed with an explicit change predicate.
+    pub fn computed_ripple_when<T, F, C>(&self, compute: F, changed: C) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Compute) -> T + 'static,
+        C: Fn(&T, &T) -> bool + 'static,
+    {
+        self.ctx.computed_ripple_when(compute, changed)
+    }
+
+    /// Create a pass-through (unguarded) derived cell.
+    pub fn slot<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Compute) -> T + 'static,
+    {
+        self.ctx.slot(compute)
+    }
+
+    /// Run `f` in a batch (coalesced invalidation). The callback receives the
+    /// owning [`Context`] — a batch is a write-coalescing scope.
+    pub fn batch<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Context) -> R,
+    {
+        self.ctx.batch(f)
+    }
+}
+
+impl<'a, T: Clone + 'static> Read<Compute<'a>> for Computed<T> {
+    type Output = T;
+    fn read(&self, cx: &Compute<'a>) -> T {
+        cx.ctx.register_dependency(self.id, cx.slot_id);
+        cx.ctx.get_slot_untracked(self.id)
+    }
+}
+
+impl<'a, T: Clone + 'static, M> Read<Compute<'a>> for Source<T, M> {
+    type Output = T;
+    fn read(&self, cx: &Compute<'a>) -> T {
+        cx.ctx.register_dependency(self.id, cx.slot_id);
+        cx.ctx.read_source_untracked(self.id)
+    }
+}
+
+impl<'a, T: PartialEq + 'static> Write<Compute<'a>> for Source<T> {
+    type Value = T;
+    fn write(&self, cx: &Compute<'a>, value: T) {
+        cx.ctx.set_source::<T>(self.id, value);
+    }
+}
+
+/// The **compute-time operations subset** of the `Context` API (`#lzcellkernel`)
+/// — exactly the operations a compute/effect closure may perform (`get` / `set`
+/// / `source` / `cell` / `computed` / `computed_ripple_when` / `slot` / `effect`
+/// / `batch` / `get_rc` / `read_value` / `dispose_node`), and no more. The rest
+/// of `Context` — revision control, degree/graph introspection, teardown-scope
+/// creation, instrumentation, IPC hooks — is deliberately **off** this trait.
+///
+/// This is the trait that dissolves the `&Context`-vs-`&Compute` cascade: every
+/// signature reachable from *inside* a compute/effect closure is written
+/// against `&impl ComputeOps` / `<C: ComputeOps>` instead of a concrete
+/// context, so the same handle convenience methods and internal builders work
+/// whether they run at top level (through [`Context`], **untracked**) or inside
+/// a recompute (through [`Compute`], **tracked** against the recomputing node).
+///
+/// It is deliberately distinct from the execution-model traits
+/// ([`ReactiveGraph`](crate::ReactiveGraph) / `SyncReactiveGraph`): those pick
+/// *which* graph implementation you hold, across models, with associated types;
+/// `ComputeOps` is **intra-model** (concrete `Context` types, no associated
+/// types) and names the read/construct operations the single-threaded graph
+/// shares between its ambient view and its per-compute view. Read discipline is
+/// the whole point — a `Compute::read_value` registers a dependency edge; a
+/// `Context::read_value` does not.
+///
+/// **Implemented by exactly two types**, and it is not a universal funnel:
+/// - [`Context`] — the owning single-threaded graph (also implements
+///   [`SyncReactiveGraph`](crate::SyncReactiveGraph)); its reads are untracked.
+/// - [`Compute`] — the per-recompute *view* (a view, not a model; implements
+///   *only* `ComputeOps`); its reads track against the recomputing node.
+pub trait ComputeOps {
+    /// Read a node's value with this surface's tracking discipline: a
+    /// [`Compute`] registers a dependency edge against the recomputing node; a
+    /// bare [`Context`] registers nothing.
+    fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T;
+
+    /// Read a computed node's value as `Rc<T>`, with the same tracking
+    /// discipline as [`read_value`](Self::read_value).
+    fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T>;
+
+    /// Read a handle's value through its [`Read`] impl for this surface.
+    fn get<H: Read<Self> + ?Sized>(&self, handle: &H) -> <H as Read<Self>>::Output
+    where
+        Self: Sized,
+    {
+        handle.read(self)
+    }
+
+    /// Write a source handle through its [`Write`] impl for this surface.
+    fn set<H: Write<Self> + ?Sized>(&self, handle: &H, value: <H as Write<Self>>::Value)
+    where
+        Self: Sized,
+    {
+        handle.write(self, value)
+    }
+
+    /// Create a source cell (`KeepLatest`).
+    fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T>;
+
+    /// Create a source cell — the v2 spelling of [`cell`](Self::cell).
+    fn source<T: PartialEq + 'static>(&self, value: T) -> Source<T>;
+
+    /// Create a guarded computed cell.
+    fn computed<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: PartialEq + 'static,
+        F: Fn(&Compute) -> T + 'static;
+
+    /// Create a guarded computed cell with an explicit change predicate.
+    fn computed_ripple_when<T, F, C>(&self, compute: F, changed: C) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Compute) -> T + 'static,
+        C: Fn(&T, &T) -> bool + 'static;
+
+    /// Create a pass-through (unguarded) derived cell.
+    fn slot<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Compute) -> T + 'static;
+
+    /// Register an effect.
+    fn effect<F, R>(&self, run: F) -> Effect
+    where
+        F: Fn(&Compute) -> R + 'static,
+        R: EffectCallbackResult + 'static;
+
+    /// Run `f` inside a batch (coalesced invalidation). The callback receives
+    /// the owning [`Context`] — a batch is a write-coalescing scope.
+    fn batch<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Context) -> R;
+
+    /// Tear down a node by id (detach both edge directions, recycle the id).
+    fn dispose_node(&self, id: SlotId);
+}
+
+impl ComputeOps for Context {
+    fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T {
+        Context::read_value::<T>(self, id)
+    }
+
+    fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
+        Context::get_rc::<T>(self, handle)
+    }
+
+    fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
+        Context::cell::<T>(self, value)
+    }
+
+    fn source<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
+        Context::source::<T>(self, value)
+    }
+
+    fn computed<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: PartialEq + 'static,
+        F: Fn(&Compute) -> T + 'static,
+    {
+        Context::computed(self, compute)
+    }
+
+    fn computed_ripple_when<T, F, C>(&self, compute: F, changed: C) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Compute) -> T + 'static,
+        C: Fn(&T, &T) -> bool + 'static,
+    {
+        Context::computed_ripple_when(self, compute, changed)
+    }
+
+    fn slot<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Compute) -> T + 'static,
+    {
+        Context::slot(self, compute)
+    }
+
+    fn effect<F, R>(&self, run: F) -> Effect
+    where
+        F: Fn(&Compute) -> R + 'static,
+        R: EffectCallbackResult + 'static,
+    {
+        Context::effect(self, run)
+    }
+
+    fn batch<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Context) -> R,
+    {
+        Context::batch(self, f)
+    }
+
+    fn dispose_node(&self, id: SlotId) {
+        Context::dispose_node(self, id)
+    }
+}
+
+impl ComputeOps for Compute<'_> {
+    fn read_value<T: Clone + 'static>(&self, id: SlotId) -> T {
+        self.ctx.register_dependency(id, self.slot_id);
+        // Untracked base: the edge is already threaded via `slot_id` above, so
+        // never consult the bridge frame here (would double-register).
+        self.ctx.read_value_untracked::<T>(id)
+    }
+
+    fn get_rc<T: 'static>(&self, handle: &Computed<T>) -> Rc<T> {
+        self.ctx.register_dependency(handle.id, self.slot_id);
+        self.ctx.get_rc_untracked(handle)
+    }
+
+    fn cell<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
+        self.ctx.cell(value)
+    }
+
+    fn source<T: PartialEq + 'static>(&self, value: T) -> Source<T> {
+        self.ctx.source(value)
+    }
+
+    fn computed<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: PartialEq + 'static,
+        F: Fn(&Compute) -> T + 'static,
+    {
+        self.ctx.computed(compute)
+    }
+
+    fn computed_ripple_when<T, F, C>(&self, compute: F, changed: C) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Compute) -> T + 'static,
+        C: Fn(&T, &T) -> bool + 'static,
+    {
+        self.ctx.computed_ripple_when(compute, changed)
+    }
+
+    fn slot<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: 'static,
+        F: Fn(&Compute) -> T + 'static,
+    {
+        self.ctx.slot(compute)
+    }
+
+    fn effect<F, R>(&self, run: F) -> Effect
+    where
+        F: Fn(&Compute) -> R + 'static,
+        R: EffectCallbackResult + 'static,
+    {
+        self.ctx.effect(run)
+    }
+
+    fn batch<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Context) -> R,
+    {
+        self.ctx.batch(f)
+    }
+
+    fn dispose_node(&self, id: SlotId) {
+        self.ctx.dispose_node(id)
     }
 }
 

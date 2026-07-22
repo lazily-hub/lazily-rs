@@ -52,6 +52,7 @@ use std::rc::Rc;
 use crate::Context;
 use crate::cell::Source;
 use crate::cell_family::CellMap;
+use crate::context::ComputeOps;
 
 /// A node in an ordered, stably-keyed reactive tree (`#lzordtree`).
 ///
@@ -112,8 +113,11 @@ where
 
     /// Reactively read this node's value. A reader is invalidated only when
     /// *this* node's value changes, not when a sibling or child changes.
-    pub fn get(&self, ctx: &Context) -> V {
-        ctx.get(&self.inner.value)
+    pub fn get<C: ComputeOps>(&self, ctx: &C) -> V
+    where
+        V: Clone + 'static,
+    {
+        self.inner.value.get(ctx)
     }
 
     /// Set this node's value. Invalidates only this node's value dependents
@@ -191,7 +195,7 @@ where
     /// Reactive, ordered list of child ids. Subscribes the caller to this
     /// node's child **order** (add/remove/move), not to child or descendant
     /// value changes.
-    pub fn child_ids(&self, ctx: &Context) -> Vec<Id> {
+    pub fn child_ids<C: ComputeOps>(&self, ctx: &C) -> Vec<Id> {
         self.inner.order.keys(ctx)
     }
 
@@ -208,12 +212,12 @@ where
 
     /// Reactive direct-child count. Subscribes to *set membership* only — a
     /// pure reorder does not invalidate a `len` reader.
-    pub fn len(&self, ctx: &Context) -> usize {
+    pub fn len<C: ComputeOps>(&self, ctx: &C) -> usize {
         self.inner.order.len(ctx)
     }
 
     /// Reactive emptiness check (set membership).
-    pub fn is_empty(&self, ctx: &Context) -> bool {
+    pub fn is_empty<C: ComputeOps>(&self, ctx: &C) -> bool {
         self.inner.order.is_empty(ctx)
     }
 

@@ -1,10 +1,13 @@
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::{Computed, Context, Read, Source, Write};
+use crate::context::{Compute, SlotId};
+use crate::{Computed, Context, Source};
 
 #[cfg(feature = "thread-safe")]
 use crate::ThreadSafeContext;
+#[cfg(feature = "thread-safe")]
+use crate::{Read, Write};
 
 /// A single-threaded lazily context tagged with a schema/context-family type.
 ///
@@ -16,8 +19,16 @@ pub struct TypedContext<Schema> {
 }
 
 /// Read-only typed context view passed into typed slot computations.
+///
+/// It threads the recomputing node id **as a value** (`#lzcellkernel`): a ref
+/// built from a [`Compute`] carries `track = Some(slot_id)` so reads through it
+/// register a dependency edge against the recomputing node; a ref built from a
+/// bare [`Context`] (via [`TypedContext::as_ref`]) carries `track = None` and
+/// reads untracked. Each read mints a throwaway [`Compute`] view over the shared
+/// graph — there is no ambient thread-local.
 pub struct TypedContextRef<'a, Schema> {
     inner: &'a Context,
+    track: Option<SlotId>,
     _schema: PhantomData<fn() -> Schema>,
 }
 
@@ -141,7 +152,7 @@ impl<Schema> TypedContext<Schema> {
     }
 
     pub fn as_ref(&self) -> TypedContextRef<'_, Schema> {
-        TypedContextRef::new(&self.inner)
+        TypedContextRef::detached(&self.inner)
     }
 
     pub fn cell<T>(&self, value: T) -> TypedCellHandle<Schema, T>
@@ -157,7 +168,7 @@ impl<Schema> TypedContext<Schema> {
         F: for<'a> Fn(&TypedContextRef<'a, Schema>) -> T + 'static,
     {
         let raw = self.inner.slot(move |ctx| {
-            let typed = TypedContextRef::new(ctx);
+            let typed = TypedContextRef::from_compute(ctx);
             compute(&typed)
         });
         TypedSlotHandle::new(raw)
@@ -169,7 +180,7 @@ impl<Schema> TypedContext<Schema> {
         F: for<'a> Fn(&TypedContextRef<'a, Schema>) -> T + 'static,
     {
         let raw = self.inner.computed(move |ctx| {
-            let typed = TypedContextRef::new(ctx);
+            let typed = TypedContextRef::from_compute(ctx);
             compute(&typed)
         });
         TypedSlotHandle::new(raw)
@@ -265,7 +276,7 @@ impl<Schema: 'static> TypedFactoryContext for TypedContext<Schema> {
         F: for<'a> Fn(&TypedContextRef<'a, Self::Schema>) -> T + 'static,
     {
         let raw = self.inner.memoized_slot::<K, T, _>(move |ctx| {
-            let typed = TypedContextRef::new(ctx);
+            let typed = TypedContextRef::from_compute(ctx);
             compute(&typed)
         });
         TypedSlotHandle::new(raw)
@@ -278,7 +289,7 @@ impl<Schema: 'static> TypedFactoryContext for TypedContext<Schema> {
         F: for<'a> FnOnce(&TypedContextRef<'a, Self::Schema>) -> T,
     {
         let raw = self.inner.memoized_cell::<K, T, _>(move |ctx| {
-            let typed = TypedContextRef::new(ctx);
+            let typed = TypedContextRef::from_compute(ctx);
             init(&typed)
         });
         TypedCellHandle::new(raw)
@@ -286,11 +297,30 @@ impl<Schema: 'static> TypedFactoryContext for TypedContext<Schema> {
 }
 
 impl<'a, Schema> TypedContextRef<'a, Schema> {
-    fn new(inner: &'a Context) -> Self {
+    /// Build a **tracked** ref from the recompute's [`Compute`] view — reads
+    /// register against the recomputing node.
+    fn from_compute(cx: &Compute<'a>) -> Self {
         Self {
-            inner,
+            inner: cx.untracked(),
+            track: Some(cx.slot_id()),
             _schema: PhantomData,
         }
+    }
+
+    /// Build an **untracked** ref from a bare context (outside any recompute).
+    fn detached(inner: &'a Context) -> Self {
+        Self {
+            inner,
+            track: None,
+            _schema: PhantomData,
+        }
+    }
+
+    /// The per-read [`Compute`] view carrying this ref's tracking discipline: a
+    /// tracked ref registers against its node, an untracked one against the
+    /// no-op [`SlotId::DETACHED`] sentinel.
+    fn ops(&self) -> Compute<'_> {
+        Compute::new(self.inner, self.track.unwrap_or(SlotId::DETACHED), 0)
     }
 
     pub fn raw(&self) -> &'a Context {
@@ -308,20 +338,25 @@ impl<'a, Schema> TypedContextRef<'a, Schema> {
     where
         T: 'static,
     {
-        self.inner.get_rc(&handle.raw)
+        self.ops().get_rc(&handle.raw)
     }
 
     pub fn get_cell<T>(&self, handle: &TypedCellHandle<Schema, T>) -> T
     where
         T: Clone + 'static,
     {
-        self.inner.get(&handle.raw)
+        handle.raw.get(&self.ops())
     }
 
     pub fn get_cell_rc<T>(&self, handle: &TypedCellHandle<Schema, T>) -> Rc<T>
     where
         T: 'static,
     {
+        // Rc read of a source cell: register the edge (if tracked), then read.
+        // A source has no tracked Rc read, so register the edge explicitly.
+        if let Some(node) = self.track {
+            self.inner.register_dependency(handle.raw.id, node);
+        }
         self.inner.get_cell_rc(&handle.raw)
     }
 
@@ -360,7 +395,7 @@ impl<Schema: 'static> TypedFactoryContext for TypedContextRef<'_, Schema> {
         F: for<'a> Fn(&TypedContextRef<'a, Self::Schema>) -> T + 'static,
     {
         let raw = self.inner.memoized_slot::<K, T, _>(move |ctx| {
-            let typed = TypedContextRef::new(ctx);
+            let typed = TypedContextRef::from_compute(ctx);
             compute(&typed)
         });
         TypedSlotHandle::new(raw)
@@ -373,7 +408,7 @@ impl<Schema: 'static> TypedFactoryContext for TypedContextRef<'_, Schema> {
         F: for<'a> FnOnce(&TypedContextRef<'a, Self::Schema>) -> T,
     {
         let raw = self.inner.memoized_cell::<K, T, _>(move |ctx| {
-            let typed = TypedContextRef::new(ctx);
+            let typed = TypedContextRef::from_compute(ctx);
             init(&typed)
         });
         TypedCellHandle::new(raw)
@@ -409,7 +444,9 @@ where
     type Output = T;
 
     fn get_typed_ref(self, ctx: &TypedContextRef<'_, Schema>) -> Self::Output {
-        ctx.inner.get(&self.raw)
+        // Tracked read: route through the ref's per-read `Compute` view so the
+        // edge attributes to the recomputing node (`#lzcellkernel`).
+        self.raw.get(&ctx.ops())
     }
 }
 
@@ -420,7 +457,9 @@ where
     type Output = T;
 
     fn get_typed_ref(self, ctx: &TypedContextRef<'_, Schema>) -> Self::Output {
-        ctx.inner.get(&self.raw)
+        // Tracked read: route through the ref's per-read `Compute` view so the
+        // edge attributes to the recomputing node (`#lzcellkernel`).
+        self.raw.get(&ctx.ops())
     }
 }
 
@@ -453,7 +492,9 @@ where
     type Output = T;
 
     fn get_typed_ref(self, ctx: &TypedContextRef<'_, Schema>) -> Self::Output {
-        ctx.inner.get(&self.raw)
+        // Tracked read: route through the ref's per-read `Compute` view so the
+        // edge attributes to the recomputing node (`#lzcellkernel`).
+        self.raw.get(&ctx.ops())
     }
 }
 
@@ -464,7 +505,9 @@ where
     type Output = T;
 
     fn get_typed_ref(self, ctx: &TypedContextRef<'_, Schema>) -> Self::Output {
-        ctx.inner.get(&self.raw)
+        // Tracked read: route through the ref's per-read `Compute` view so the
+        // edge attributes to the recomputing node (`#lzcellkernel`).
+        self.raw.get(&ctx.ops())
     }
 }
 
@@ -490,7 +533,8 @@ where
 
     fn get_typed_ref(self, ctx: &TypedContextRef<'_, Schema>) -> Self::Output {
         let handle = self(ctx);
-        ctx.inner.get(&handle.raw)
+        // Tracked read (`#lzcellkernel`): attribute to the recomputing node.
+        handle.raw.get(&ctx.ops())
     }
 }
 
@@ -516,7 +560,8 @@ where
 
     fn get_typed_ref(self, ctx: &TypedContextRef<'_, Schema>) -> Self::Output {
         let handle = self(ctx);
-        ctx.inner.get(&handle.raw)
+        // Tracked read (`#lzcellkernel`): attribute to the recomputing node.
+        handle.raw.get(&ctx.ops())
     }
 }
 

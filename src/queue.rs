@@ -101,6 +101,7 @@ use std::rc::Rc;
 use crate::Context;
 use crate::cell::Computed;
 use crate::cell::Source;
+use crate::context::ComputeOps;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -590,8 +591,8 @@ where
     /// Reactive read of the current head value. `None` when the queue is empty.
     /// A reader is invalidated when the head value *changes* — every pop, and a
     /// push only when transitioning from empty.
-    pub fn head(&self, ctx: &Context) -> Option<T> {
-        ctx.get(&self.inner.head)
+    pub fn head<C: ComputeOps>(&self, ctx: &C) -> Option<T> {
+        self.inner.head.get(ctx)
     }
 
     /// Handle to the `head` reader-kind Slot, for wiring derived computeds
@@ -602,14 +603,14 @@ where
 
     /// Reactive read of the number of buffered elements. Invalidated whenever
     /// the count changes (every successful push/pop).
-    pub fn len(&self, ctx: &Context) -> usize {
-        ctx.get(&self.inner.len)
+    pub fn len<C: ComputeOps>(&self, ctx: &C) -> usize {
+        self.inner.len.get(ctx)
     }
 
     /// Reactive emptiness check. Invalidated only on the empty ↔ non-empty
     /// transition.
-    pub fn is_empty(&self, ctx: &Context) -> bool {
-        ctx.get(&self.inner.is_empty)
+    pub fn is_empty<C: ComputeOps>(&self, ctx: &C) -> bool {
+        self.inner.is_empty.get(ctx)
     }
 
     /// Reactive fullness check (only meaningful when the backend is bounded).
@@ -618,14 +619,14 @@ where
     /// that transitions full → not-full invalidates the producer's `is_full`
     /// subscription and the producer resumes. For an unbounded backend this is
     /// always `false` and never invalidates.
-    pub fn is_full(&self, ctx: &Context) -> bool {
-        ctx.get(&self.inner.is_full)
+    pub fn is_full<C: ComputeOps>(&self, ctx: &C) -> bool {
+        self.inner.is_full.get(ctx)
     }
 
     /// Reactive read of the closed flag. Invalidated only on the open → closed
     /// transition.
-    pub fn is_closed(&self, ctx: &Context) -> bool {
-        ctx.get(&self.inner.closed)
+    pub fn is_closed<C: ComputeOps>(&self, ctx: &C) -> bool {
+        self.inner.closed.get(ctx)
     }
 
     /// Handles to the reader-kind nodes, for advanced wiring (e.g. effects that

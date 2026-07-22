@@ -70,6 +70,7 @@ use std::rc::Rc;
 use crate::Context;
 use crate::cell::Computed;
 use crate::cell::Source;
+use crate::context::{Compute, ComputeOps};
 
 /// Which kind of reactive node a [`ReactiveMap`] entry is — the handle-kind axis
 /// the map abstracts over.
@@ -99,13 +100,13 @@ pub trait MapHandle<V>: sealed::Sealed + Copy + 'static {
     /// Allocate the node for one entry in `ctx`, with `compute` producing its
     /// canonical value. An input cell sets the value directly; a derived slot
     /// wraps `compute` as its recomputation.
-    fn materialize(ctx: &Context, compute: impl Fn(&Context) -> V + 'static) -> Self
+    fn materialize(ctx: &Context, compute: impl Fn(&Compute) -> V + 'static) -> Self
     where
         V: PartialEq + Clone + 'static;
 
-    /// Read this entry's value through its owning context (subscribes the caller
-    /// as any cell/slot read does).
-    fn observe(self, ctx: &Context) -> V
+    /// Read this entry's value through any reactive surface (subscribes the
+    /// caller as any cell/slot read does when `ctx` is a [`Compute`]).
+    fn observe<C: ComputeOps>(self, ctx: &C) -> V
     where
         V: Clone + 'static;
 
@@ -118,19 +119,21 @@ impl<V> sealed::Sealed for Source<V> {}
 impl<V: 'static> MapHandle<V> for Source<V> {
     const KIND: EntryKind = EntryKind::Cell;
 
-    fn materialize(ctx: &Context, compute: impl Fn(&Context) -> V + 'static) -> Self
+    fn materialize(ctx: &Context, compute: impl Fn(&Compute) -> V + 'static) -> Self
     where
         V: PartialEq + Clone + 'static,
     {
         // An input has no derivation: materialize by setting its value directly.
-        ctx.cell(compute(ctx))
+        // Evaluated once, detached (untracked) — an input cell's seed value is
+        // not a dependency edge.
+        ctx.cell(ctx.eval_detached(compute))
     }
 
-    fn observe(self, ctx: &Context) -> V
+    fn observe<C: ComputeOps>(self, ctx: &C) -> V
     where
         V: Clone + 'static,
     {
-        ctx.get(&self)
+        self.get(ctx)
     }
 
     fn clear_dependents(self, ctx: &Context) {
@@ -142,7 +145,7 @@ impl<V> sealed::Sealed for Computed<V> {}
 impl<V: 'static> MapHandle<V> for Computed<V> {
     const KIND: EntryKind = EntryKind::Slot;
 
-    fn materialize(ctx: &Context, compute: impl Fn(&Context) -> V + 'static) -> Self
+    fn materialize(ctx: &Context, compute: impl Fn(&Compute) -> V + 'static) -> Self
     where
         V: PartialEq + Clone + 'static,
     {
@@ -150,11 +153,11 @@ impl<V: 'static> MapHandle<V> for Computed<V> {
         ctx.computed(compute)
     }
 
-    fn observe(self, ctx: &Context) -> V
+    fn observe<C: ComputeOps>(self, ctx: &C) -> V
     where
         V: Clone + 'static,
     {
-        ctx.get(&self)
+        self.get(ctx)
     }
 
     fn clear_dependents(self, ctx: &Context) {
@@ -251,7 +254,7 @@ where
     /// Mint the entry node for `key` (via `H::materialize` with `compute` as its
     /// canonical value producer) on first access, caching the handle and bumping
     /// reactive membership. Re-minting an existing key returns the cached handle.
-    fn mint_with(&self, ctx: &Context, key: K, compute: impl Fn(&Context) -> V + 'static) -> H {
+    fn mint_with(&self, ctx: &Context, key: K, compute: impl Fn(&Compute) -> V + 'static) -> H {
         if let Some(handle) = self.inner.entries.borrow().get(&key).copied() {
             return handle; // warm: already allocated.
         }
@@ -290,7 +293,7 @@ where
 
     /// Read the value at `key` if present. Reactive on that entry only (a reader
     /// is invalidated when this entry changes, not when siblings change).
-    pub fn get(&self, ctx: &Context, key: &K) -> Option<V> {
+    pub fn get<C: ComputeOps>(&self, ctx: &C, key: &K) -> Option<V> {
         let handle = self.inner.entries.borrow().get(key).copied();
         handle.map(|h| h.observe(ctx))
     }
@@ -314,8 +317,8 @@ where
     /// Reactive snapshot of the keys in their current order. Subscribes the
     /// caller to **order** changes (add/remove **and move/reorder**), not to
     /// per-entry value changes.
-    pub fn keys(&self, ctx: &Context) -> Vec<K> {
-        let _ = ctx.get(&self.inner.order_signal);
+    pub fn keys<C: ComputeOps>(&self, ctx: &C) -> Vec<K> {
+        let _ = self.inner.order_signal.get(ctx);
         self.inner.order.borrow().clone()
     }
 
@@ -406,20 +409,20 @@ where
     }
 
     /// Reactive entry count. Subscribes the caller to membership changes only.
-    pub fn len(&self, ctx: &Context) -> usize {
-        let _ = ctx.get(&self.inner.membership);
+    pub fn len<C: ComputeOps>(&self, ctx: &C) -> usize {
+        let _ = self.inner.membership.get(ctx);
         self.inner.order.borrow().len()
     }
 
     /// Reactive emptiness check. Subscribes the caller to membership changes.
-    pub fn is_empty(&self, ctx: &Context) -> bool {
+    pub fn is_empty<C: ComputeOps>(&self, ctx: &C) -> bool {
         self.len(ctx) == 0
     }
 
     /// Reactive membership test for `key`. Subscribes the caller to membership
     /// changes (add/remove of any key), not to value changes.
-    pub fn contains_key(&self, ctx: &Context, key: &K) -> bool {
-        let _ = ctx.get(&self.inner.membership);
+    pub fn contains_key<C: ComputeOps>(&self, ctx: &C, key: &K) -> bool {
+        let _ = self.inner.membership.get(ctx);
         self.inner.entries.borrow().contains_key(key)
     }
 

@@ -51,7 +51,7 @@ use std::rc::Rc;
 
 use crate::Context;
 use crate::KeepLatest;
-use crate::context::SlotId;
+use crate::context::{Compute, ComputeOps, SlotId};
 use crate::effect::Effect;
 use crate::merge::MergePolicy;
 
@@ -81,11 +81,12 @@ impl<T, M> Source<T, M> {
         }
     }
 
-    /// Read this cell's current value through its owning context.
+    /// Read this cell's current value through any reactive surface.
     ///
     /// Registers a dependency when called inside a reactive computation (a
-    /// computed-cell compute or an effect run).
-    pub fn get(&self, ctx: &Context) -> T
+    /// computed-cell compute or an effect run) — i.e. when `ctx` is a
+    /// [`Compute`]; a bare [`Context`] read is untracked (`#lzcellkernel`).
+    pub fn get<C: ComputeOps>(&self, ctx: &C) -> T
     where
         T: Clone + 'static,
     {
@@ -94,7 +95,7 @@ impl<T, M> Source<T, M> {
 
     /// Tear this node down: detach both edge directions, invalidate surviving
     /// readers, and recycle the id.
-    pub fn dispose(&self, ctx: &Context)
+    pub fn dispose<C: ComputeOps>(&self, ctx: &C)
     where
         T: 'static,
     {
@@ -102,8 +103,9 @@ impl<T, M> Source<T, M> {
     }
 
     /// Run `on_change` now and again on every change to this value. Returns the
-    /// backing [`Effect`]; dispose it to unsubscribe.
-    pub fn subscribe(&self, ctx: &Context, on_change: impl FnMut(&Context, &T) + 'static) -> Effect
+    /// backing [`Effect`]; dispose it to unsubscribe. The callback receives the
+    /// effect's [`Compute`] view, so reads inside it track against the effect.
+    pub fn subscribe(&self, ctx: &Context, on_change: impl FnMut(&Compute, &T) + 'static) -> Effect
     where
         T: Clone + 'static,
         M: 'static,
@@ -195,10 +197,11 @@ impl<T> Computed<T> {
         }
     }
 
-    /// Read this computed cell's current value through its owning context.
+    /// Read this computed cell's current value through any reactive surface.
     ///
-    /// Registers a dependency when called inside a reactive computation.
-    pub fn get(&self, ctx: &Context) -> T
+    /// Registers a dependency when called inside a reactive computation — i.e.
+    /// when `ctx` is a [`Compute`]; a bare [`Context`] read is untracked.
+    pub fn get<C: ComputeOps>(&self, ctx: &C) -> T
     where
         T: Clone + 'static,
     {
@@ -206,7 +209,7 @@ impl<T> Computed<T> {
     }
 
     /// Read this computed cell's current value as `Rc<T>`, avoiding a deep clone.
-    pub fn get_rc(&self, ctx: &Context) -> Rc<T>
+    pub fn get_rc<C: ComputeOps>(&self, ctx: &C) -> Rc<T>
     where
         T: 'static,
     {
@@ -216,7 +219,7 @@ impl<T> Computed<T> {
     /// Tear this node down: detach both edge directions, invalidate surviving
     /// readers, and recycle the id. Disposing an eager computed cell also tears
     /// down its puller.
-    pub fn dispose(&self, ctx: &Context)
+    pub fn dispose<C: ComputeOps>(&self, ctx: &C)
     where
         T: 'static,
     {
@@ -224,8 +227,9 @@ impl<T> Computed<T> {
     }
 
     /// Run `on_change` now and again on every change to this value. Returns the
-    /// backing [`Effect`]; dispose it to unsubscribe.
-    pub fn subscribe(&self, ctx: &Context, on_change: impl FnMut(&Context, &T) + 'static) -> Effect
+    /// backing [`Effect`]; dispose it to unsubscribe. The callback receives the
+    /// effect's [`Compute`] view, so reads inside it track against the effect.
+    pub fn subscribe(&self, ctx: &Context, on_change: impl FnMut(&Compute, &T) + 'static) -> Effect
     where
         T: Clone + 'static,
     {
