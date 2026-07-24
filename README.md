@@ -343,6 +343,49 @@ let effect = ctx.effect(move |ctx| {
 effect.dispose(&ctx);
 ```
 
+### Durable effect sinks (`#lzdurablesink`)
+
+Durable storage is an **effect sink**, not a transition authority. While a Lazily
+runtime is live, transitions are decided from live state; durable storage
+receives a projection or an ordered fact as an effect, and a sink MUST NOT reload
+storage to arbitrate the transition it is currently persisting. Authority flows
+one way:
+
+```text
+cold durable state ──hydrate once──▶ live Lazily state
+                                      │   (computed / fact stream)
+                                      ▼
+                            Effect / AsyncEffect
+                                      ▼
+                          write-only durable sink
+                                      │  ack / failure
+                                      └────────▶ live Lazily state
+```
+
+- **Projection** (latest recoverable state): a `Computed` read by an `Effect` /
+  `AsyncEffect` does an idempotent upsert of the settled epoch. Lazily's existing
+  effect-batch coalescing means a batch `A → B → C` persists only `C` — correct
+  for a current-state projection.
+- **History** (every accepted fact, ordered): use the existing `TopicCell` /
+  `Outbox` drain — append, replay-from-cursor, `ack_through` — not ordinary
+  effects. Do not modify effects to retain intermediate values; that would
+  duplicate the ordered-stream primitives.
+- **Acknowledgement**: success advances a monotone `durable_through(epoch)`; a
+  sink failure is represented in live state as `pending` / `retrying` /
+  `backpressured` and MUST NOT trigger a storage reload at the decision seam.
+- **Markers**: values on the [`Ephemeral`](src/presence.rs) plane MUST NOT enter a
+  durable sink — the `Ephemeral`/`Durable` markers statically reject the mismatch
+  (compile-fail doctest in `src/presence.rs`). Cold loading and migration belong
+  to a separate startup hydrator, not the runtime effect.
+
+Lazily ships no storage backend for this — the sink is an application-owned
+write-only trait (the `OutboxStore` boundary is the existing example). The
+authority rule, the projection-vs-history shape table, the two reference examples
+(coalesced projection; lossless ordered fact sink), and the caller-chosen
+`eventual_projection` / `durable_before_applied` / `ephemeral` visibility
+policies live in [`lazily-spec` § Durable Effect Sinks](https://github.com/lazily-hub/lazily-spec/blob/main/docs/durable-sinks.md);
+the formal backstop is `lazily-formal/LazilyFormal/DurableSink.lean`.
+
 ## API
 
 | Method | Purpose |
