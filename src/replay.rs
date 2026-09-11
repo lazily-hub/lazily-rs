@@ -606,9 +606,10 @@ impl ReplayDigest {
                 hex.len()
             )));
         }
-        let bytes = hex.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len() / 2);
-        for pair in bytes.chunks_exact(2) {
+        // The even-length check above leaves no remainder, so the tail is empty.
+        let (pairs, _rest) = hex.as_bytes().as_chunks::<2>();
+        let mut out = Vec::with_capacity(pairs.len());
+        for pair in pairs {
             let text = std::str::from_utf8(pair)
                 .map_err(|_| ReplayProofError::MalformedDigest("non-ASCII hex digit".to_owned()))?;
             out.push(u8::from_str_radix(text, 16).map_err(|_| {
