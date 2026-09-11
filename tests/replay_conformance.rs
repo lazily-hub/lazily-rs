@@ -371,7 +371,12 @@ fn canonical_encoding_equality_classes() {
     let path = format!("{SPEC_DIR}/{name}");
     let values = fx["config"]["values"].as_object().unwrap();
     let steps = fx["steps"].as_array().unwrap();
-    assert!(steps.len() >= 11, "{path}: expected at least 11 steps");
+    // Pinned to what a CI clone of published lazily-spec carries: the corpus at
+    // `#lzreplayframing` holds exactly 14 steps, three of them the member-framing
+    // rows that actually pin the length prefix (`seq_a_sbc`/`seq_as_bc`,
+    // `map_a_sb`/`map_as_b`, and the nested `seq_nested_*` pair, which is the
+    // fixture's first NESTED container). 15 fails.
+    assert!(steps.len() >= 14, "{path}: expected at least 14 steps");
     let mut outcomes: Vec<bool> = Vec::new();
 
     for (index, step) in steps.iter().enumerate() {

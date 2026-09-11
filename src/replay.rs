@@ -453,8 +453,12 @@ impl<K: Into<ReplayValue>, V: Into<ReplayValue>, S> From<HashMap<K, V, S>> for R
 ///
 /// The length prefix is the row of the contract that is easiest to get wrong:
 /// concatenating member encodings without a length or delimiter makes
-/// `["a","bc"]` and `["ab","c"]` identical, and a harness that cannot tell them
-/// apart certifies a graph that reshaped its own output.
+/// `["a","sbc"]` and `["as","bc"]` identical — the `s` tag of the second member
+/// is absorbed into the first one's body — and a harness that cannot tell them
+/// apart certifies a graph that reshaped its own output. `["a","bc"]` vs
+/// `["ab","c"]` is NOT that witness: those two differ even unframed, because the
+/// tags already separate them. See
+/// `tests::framing_pins_the_length_and_not_merely_the_tag`.
 fn frame(tag: u8, body: &[u8], out: &mut Vec<u8>) {
     out.push(tag);
     out.extend_from_slice(body.len().to_string().as_bytes());
@@ -1404,6 +1408,59 @@ mod tests {
         let a_bc = ReplayValue::seq(["a", "bc"]);
         let ab_c = ReplayValue::seq(["ab", "c"]);
         assert_ne!(canonical_digest(&a_bc), canonical_digest(&ab_c));
+    }
+
+    /// The obligation the corpus cannot carry, because only this binding knows
+    /// its own bytes (`#lzreplayframing`).
+    ///
+    /// The pair above asserts a real equality class but does NOT pin the length:
+    /// `["a","bc"]` and `["ab","c"]` differ as byte strings under an encoder with
+    /// no length prefix at all, because the `s` tag in front of every member
+    /// already separates them. So it passes a broken encoder.
+    ///
+    /// This binding's layout is `<tag><decimal len>:<body>` with the string tag
+    /// `b's'` — which is the REFERENCE layout the corpus assumes, so the corpus
+    /// pair `["a","sbc"]` / `["as","bc"]` is this binding's pair too and is kept
+    /// here verbatim rather than replaced. Strip `<len>:` from [`frame`] and a
+    /// string becomes `s<body>`:
+    ///
+    /// * `["a","sbc"]` -> `sa` `ssbc` -> `sassbc`
+    /// * `["as","bc"]` -> `sas` `sbc`  -> `sassbc`
+    ///
+    /// The second pair pins the DIGITS specifically, for the weaker mutation
+    /// that drops `body.len()` but keeps the `:` terminator, leaving `s:<body>`:
+    ///
+    /// * `["a","s:bc"]` -> `s:a` `s:s:bc` -> `s:as:s:bc`
+    /// * `["as:","bc"]` -> `s:as:` `s:bc` -> `s:as:s:bc`
+    ///
+    /// Both members are chosen so that the bytes the mutant drops are exactly the
+    /// bytes that would otherwise keep the shifted boundary visible.
+    #[test]
+    fn framing_pins_the_length_and_not_merely_the_tag() {
+        // Collides when `<len>:` goes away (the reference layout, tag `s`).
+        assert_ne!(
+            canonical_digest(&ReplayValue::seq(["a", "sbc"])),
+            canonical_digest(&ReplayValue::seq(["as", "bc"])),
+        );
+        // Collides when only the length DIGITS go away and `:` stays.
+        assert_ne!(
+            canonical_digest(&ReplayValue::seq(["a", "s:bc"])),
+            canonical_digest(&ReplayValue::seq(["as:", "bc"])),
+        );
+        // The mapping analogue, same two mutants, through the `m` frame.
+        assert_ne!(
+            canonical_digest(&ReplayValue::map([("a", "sb")])),
+            canonical_digest(&ReplayValue::map([("as", "b")])),
+        );
+        // A nested container boundary has no tag to hide behind, so this pair
+        // collides under ANY unframed concatenation, whatever the tags are.
+        assert_ne!(
+            canonical_digest(&ReplayValue::seq([
+                ReplayValue::seq(["a"]),
+                ReplayValue::Str("b".to_owned()),
+            ])),
+            canonical_digest(&ReplayValue::seq([ReplayValue::seq(["a", "b"])])),
+        );
     }
 
     #[test]

@@ -163,10 +163,21 @@ this repo.
   redden), the frame's tag and length dropped (the encoding fixture reddens),
   comparison restricted to the final checkpoint (`first_divergent_seq` reports 3
   instead of 1), and the observation shifted off the subject's state (only the
-  record cross-check sees it). Dropping only the LENGTH stays green here, because
-  the corpus's `["a","bc"]` / `["ab","c"]` pair is still separated by the type
-  tags; framing is load-bearing for pairs like `["as","bc"]` / `["a","sbc"]`, and
-  the probe aimed at it has to remove the tag too
+  record cross-check sees it). Dropping only the LENGTH used to stay green here,
+  because the corpus's `["a","bc"]` / `["ab","c"]` pair is still separated by the
+  type tags. That hole is closed (`#lzreplayframing`): the corpus now carries
+  three more `returns: false` rows — `["a","sbc"]`/`["as","bc"]`,
+  `{"a":"sb"}`/`{"as":"b"}`, and the NESTED `[["a"],"b"]`/`[["a","b"]]`, the
+  fixture's first nested container — and `src/replay.rs`'s
+  `framing_pins_the_length_and_not_merely_the_tag` carries the same pairs beside
+  the encoder, because the first two are layout-dependent and only the binding
+  knows its own bytes. This binding's layout is `<tag><decimal len>:<body>` with
+  string tag `b's'`, i.e. the corpus's REFERENCE layout, so the corpus pair is
+  also the local pair; a second local pair `["a","s:bc"]` / `["as:","bc"]` pins
+  the length DIGITS against the weaker mutant that keeps the `:` terminator.
+  Mutation-checked cold in two more directions: `frame` reduced to `<tag><body>`
+  (local test and corpus step 8 redden, while the old `["a","bc"]` pair stays
+  GREEN) and `frame` reduced to `<tag>:<body>` (the `s:` pair reddens)
 - `tests/temporal_conformance.rs` — temporal sources (`#lztime`) compute fixtures (lazily-spec/conformance/temporal/`*.json`); timer single-shot idempotent fire, interval boundary counting under clock jumps, cron pattern matching, deadline expiry preserving value, edge-only reader invalidation
 - `tests/common/mod.rs` — the runtime conformance manifest recorder
   (`#lazilyupgradeconformance`). Rust integration tests are separate crates, so
