@@ -387,6 +387,11 @@ mod thread_safe_flavor {
         let r = make_readers(&ctx, &q);
         let steps = fixture["steps"].as_array().expect("steps array");
         assert!(!steps.is_empty(), "a replay of zero steps is not a replay");
+        // Executed-equals-loaded (`#lzcorpusfloorguard`): counted here rather
+        // than returning `steps.len()`, so a step the dispatch loop walks past
+        // cannot be reported as replayed. See the note where the old
+        // minimum-step constant used to live.
+        let mut executed = 0usize;
 
         for (i, step) in steps.iter().enumerate() {
             materialize(&ctx, &r);
@@ -516,8 +521,17 @@ mod thread_safe_flavor {
                     .collect();
                 assert_eq!(q.elements(), want, "{name} step {i}: elements");
             });
+            executed += 1;
         }
-        steps.len()
+
+        assert_eq!(
+            executed,
+            steps.len(),
+            "{name}: loaded {} steps but executed {executed} — a skipped step is a \
+             step the corpus does not check",
+            steps.len()
+        );
+        executed
     }
 
     #[test]
@@ -530,12 +544,19 @@ mod thread_safe_flavor {
         for f in QUEUE_FIXTURES {
             total += replay(f);
         }
-        // Positive proof, not an absence guard: a replay that loaded nothing would
-        // otherwise print the same success.
+        // No step-count floor (`#lzcorpusfloorguard`): a hand-maintained minimum
+        // drifts the moment the corpus grows. `#lzreplayframing` added three
+        // steps to a replay fixture and eight of nine bindings were still pinned
+        // at 11, so the new rows sat inside the slack and would have reported
+        // green WITHOUT EXECUTING. `replay` now proves executed == loaded per
+        // fixture and panics on an unrecognised `op.type`; a SHRINKING corpus is
+        // caught at its source by lazily-spec's `corpus-counts.json` +
+        // `scripts/check-corpus-floors.mjs`.
+        // Positive proof, not an absence guard: a replay that loaded nothing
+        // would otherwise print the same success.
         assert!(
-            total >= 25,
-            "thread-safe flavor replayed only {total} steps across \
-             {} fixtures — too few to be the real corpus",
+            total > 0,
+            "thread-safe flavor replayed nothing across {} fixtures",
             QUEUE_FIXTURES.len()
         );
     }
@@ -685,6 +706,11 @@ mod async_flavor {
         let r = q.reader_handles();
         let steps = fixture["steps"].as_array().expect("steps array");
         assert!(!steps.is_empty(), "a replay of zero steps is not a replay");
+        // Executed-equals-loaded (`#lzcorpusfloorguard`): counted here rather
+        // than returning `steps.len()`, so a step the dispatch loop walks past
+        // cannot be reported as replayed. See the note where the old
+        // minimum-step constant used to live.
+        let mut executed = 0usize;
 
         for (i, step) in steps.iter().enumerate() {
             materialize(&ctx, &r);
@@ -816,8 +842,17 @@ mod async_flavor {
                     .collect();
                 assert_eq!(q.elements(), want, "{name} step {i}: elements");
             });
+            executed += 1;
         }
-        steps.len()
+
+        assert_eq!(
+            executed,
+            steps.len(),
+            "{name}: loaded {} steps but executed {executed} — a skipped step is a \
+             step the corpus does not check",
+            steps.len()
+        );
+        executed
     }
 
     #[test]
@@ -830,9 +865,18 @@ mod async_flavor {
         for f in QUEUE_FIXTURES {
             total += replay(f);
         }
+        // No step-count floor (`#lzcorpusfloorguard`): a hand-maintained minimum
+        // drifts the moment the corpus grows. `#lzreplayframing` added three
+        // steps to a replay fixture and eight of nine bindings were still pinned
+        // at 11, so the new rows sat inside the slack and would have reported
+        // green WITHOUT EXECUTING. `replay` now proves executed == loaded per
+        // fixture and panics on an unrecognised `op.type`; a SHRINKING corpus is
+        // caught at its source by lazily-spec's `corpus-counts.json` +
+        // `scripts/check-corpus-floors.mjs`.
         assert!(
-            total >= 25,
-            "async flavor replayed only {total} steps — too few to be the real corpus"
+            total > 0,
+            "async flavor replayed nothing across {} fixtures",
+            QUEUE_FIXTURES.len()
         );
     }
 
@@ -958,6 +1002,11 @@ mod topic_flavors {
 
         let steps = fixture["steps"].as_array().expect("steps array");
         assert!(!steps.is_empty(), "a replay of zero steps is not a replay");
+        // Executed-equals-loaded (`#lzcorpusfloorguard`): counted here rather
+        // than returning `steps.len()`, so a step the dispatch loop walks past
+        // cannot be reported as replayed. See the note where the old
+        // minimum-step constant used to live.
+        let mut executed = 0usize;
 
         for (i, step) in steps.iter().enumerate() {
             // Every known reader is materialized BEFORE the op, so a post-op
@@ -1129,8 +1178,17 @@ mod topic_flavors {
                     });
                 }
             }
+            executed += 1;
         }
-        steps.len()
+
+        assert_eq!(
+            executed,
+            steps.len(),
+            "{name}: loaded {} steps but executed {executed} — a skipped step is a \
+             step the corpus does not check",
+            steps.len()
+        );
+        executed
     }
 
     /// The corpus, once per flavor. Returns the total replayed steps so each
@@ -1142,9 +1200,15 @@ mod topic_flavors {
             .sum()
     }
 
-    /// Every flavor must clear this bar, so "the async one ran two steps" cannot
-    /// hide behind a green summary line.
-    pub const MIN_STEPS: usize = 29;
+    // A hand-maintained minimum-steps constant used to live here
+    // (`#lzcorpusfloorguard`). It had to move every time the corpus did, which
+    // is exactly what drifted: `#lzreplayframing` grew a replay fixture 11 -> 14
+    // and eight of nine bindings kept a floor of 11, so the added rows sat in
+    // the slack and would have reported green WITHOUT EXECUTING. `replay` now
+    // asserts executed == loaded and panics on an unrecognised `op.type`, which
+    // is exact and constant-free. The corpus SHRINKING — the only thing the
+    // floor really bought — is guarded where a shrink happens, by lazily-spec's
+    // `corpus-counts.json` + `scripts/check-corpus-floors.mjs`.
 
     pub fn fixtures_present() -> bool {
         spec_fixtures_present()
@@ -1153,7 +1217,7 @@ mod topic_flavors {
 
 /// Single-threaded `TopicCell` — the reference the other two flavors mirror.
 mod topic_sync {
-    use super::topic_flavors::{MIN_STEPS, TopicModel, fixtures_present, replay_corpus};
+    use super::topic_flavors::{TopicModel, fixtures_present, replay_corpus};
     use lazily::{Context, TopicCell, TopicDurability, TopicSnapshot, TopicSubscriptionSnapshot};
 
     struct Model {
@@ -1214,10 +1278,11 @@ mod topic_sync {
             return;
         }
         let total = replay_corpus::<Model>("single-threaded");
+        // No floor (`#lzcorpusfloorguard`): `replay` asserts executed ==
+        // loaded per fixture and panics on an unrecognised `op.type`.
         assert!(
-            total >= MIN_STEPS,
-            "single-threaded topic replayed only {total} steps — too few to be the \
-             real corpus"
+            total > 0,
+            "single-threaded topic replayed nothing — the corpus never loaded"
         );
     }
 }
@@ -1225,7 +1290,7 @@ mod topic_sync {
 /// `ThreadSafeTopicCell` — same corpus, same trait, `ThreadSafeContext` graph.
 #[cfg(feature = "thread-safe")]
 mod topic_thread_safe {
-    use super::topic_flavors::{MIN_STEPS, TopicModel, fixtures_present, replay_corpus};
+    use super::topic_flavors::{TopicModel, fixtures_present, replay_corpus};
     use lazily::{
         ThreadSafeContext, ThreadSafeTopicCell, TopicDurability, TopicSnapshot,
         TopicSubscriptionSnapshot,
@@ -1289,10 +1354,11 @@ mod topic_thread_safe {
             return;
         }
         let total = replay_corpus::<Model>("thread-safe");
+        // No floor (`#lzcorpusfloorguard`): `replay` asserts executed ==
+        // loaded per fixture and panics on an unrecognised `op.type`.
         assert!(
-            total >= MIN_STEPS,
-            "thread-safe topic replayed only {total} steps — too few to be the real \
-             corpus"
+            total > 0,
+            "thread-safe topic replayed nothing — the corpus never loaded"
         );
     }
 
@@ -1389,7 +1455,7 @@ mod topic_thread_safe {
 /// settle step: cursors are not async-coloured.
 #[cfg(feature = "async")]
 mod topic_async {
-    use super::topic_flavors::{MIN_STEPS, TopicModel, fixtures_present, replay_corpus};
+    use super::topic_flavors::{TopicModel, fixtures_present, replay_corpus};
     use lazily::{
         AsyncContext, AsyncTopicCell, TopicDurability, TopicSnapshot, TopicSubscriptionSnapshot,
     };
@@ -1452,9 +1518,11 @@ mod topic_async {
             return;
         }
         let total = replay_corpus::<Model>("async");
+        // No floor (`#lzcorpusfloorguard`): `replay` asserts executed ==
+        // loaded per fixture and panics on an unrecognised `op.type`.
         assert!(
-            total >= MIN_STEPS,
-            "async topic replayed only {total} steps — too few to be the real corpus"
+            total > 0,
+            "async topic replayed nothing — the corpus never loaded"
         );
     }
 
@@ -1581,6 +1649,11 @@ mod work_queue_flavors {
 
         let steps = fixture["steps"].as_array().expect("steps array");
         assert!(!steps.is_empty(), "a replay of zero steps is not a replay");
+        // Executed-equals-loaded (`#lzcorpusfloorguard`): counted here rather
+        // than returning `steps.len()`, so a step the dispatch loop walks past
+        // cannot be reported as replayed. See the note where the old
+        // minimum-step constant used to live.
+        let mut executed = 0usize;
 
         for (i, step) in steps.iter().enumerate() {
             queue.materialize();
@@ -1725,8 +1798,17 @@ mod work_queue_flavors {
             reads.assert_key_at("in_flight_len", in_flight_len, &at);
             reads.assert_key_at("dead_letter_len", dead_letter_len, &at);
             reads.finish();
+            executed += 1;
         }
-        steps.len()
+
+        assert_eq!(
+            executed,
+            steps.len(),
+            "{name}: loaded {} steps but executed {executed} — a skipped step is a \
+             step the corpus does not check",
+            steps.len()
+        );
+        executed
     }
 
     pub fn replay_corpus<M: WorkQueueModel>(flavor: &str) -> usize {
@@ -1736,7 +1818,10 @@ mod work_queue_flavors {
             .sum()
     }
 
-    pub const MIN_STEPS: usize = 14;
+    // No minimum-steps constant here either (`#lzcorpusfloorguard`) — see the
+    // note in `topic_flavors`. `replay` proves executed == loaded per fixture;
+    // the shrink direction is pinned by lazily-spec's `corpus-counts.json` +
+    // `scripts/check-corpus-floors.mjs`.
 
     pub fn fixtures_present() -> bool {
         spec_fixtures_present()
@@ -1782,7 +1867,7 @@ mod work_queue_flavors {
 
 /// Single-threaded `WorkQueueCell` — the reference the other two flavors mirror.
 mod work_queue_sync {
-    use super::work_queue_flavors::{MIN_STEPS, WorkQueueModel, fixtures_present, replay_corpus};
+    use super::work_queue_flavors::{WorkQueueModel, fixtures_present, replay_corpus};
     use lazily::{Context, WorkQueueCell, WorkQueueDeadLetter, WorkQueueDelivery, WorkQueueItem};
 
     struct Model {
@@ -1856,9 +1941,11 @@ mod work_queue_sync {
             return;
         }
         let total = replay_corpus::<Model>("single-threaded");
+        // No floor (`#lzcorpusfloorguard`): `replay` asserts executed ==
+        // loaded per fixture and panics on an unrecognised `op.type`.
         assert!(
-            total >= MIN_STEPS,
-            "single-threaded work queue replayed only {total} steps"
+            total > 0,
+            "single-threaded work queue replayed nothing — the corpus never loaded"
         );
     }
 }
@@ -1867,7 +1954,7 @@ mod work_queue_sync {
 /// threads competing for exclusive delivery.
 #[cfg(feature = "thread-safe")]
 mod work_queue_thread_safe {
-    use super::work_queue_flavors::{MIN_STEPS, WorkQueueModel, fixtures_present, replay_corpus};
+    use super::work_queue_flavors::{WorkQueueModel, fixtures_present, replay_corpus};
     use lazily::{
         ThreadSafeContext, ThreadSafeWorkQueueCell, WorkQueueDeadLetter, WorkQueueDelivery,
         WorkQueueItem,
@@ -1943,9 +2030,11 @@ mod work_queue_thread_safe {
             return;
         }
         let total = replay_corpus::<Model>("thread-safe");
+        // No floor (`#lzcorpusfloorguard`): `replay` asserts executed ==
+        // loaded per fixture and panics on an unrecognised `op.type`.
         assert!(
-            total >= MIN_STEPS,
-            "thread-safe work queue replayed only {total} steps"
+            total > 0,
+            "thread-safe work queue replayed nothing — the corpus never loaded"
         );
     }
 
@@ -2032,7 +2121,7 @@ mod work_queue_thread_safe {
 /// `AsyncWorkQueueCell` — same corpus, `AsyncContext` graph, caller-driven clock.
 #[cfg(feature = "async")]
 mod work_queue_async {
-    use super::work_queue_flavors::{MIN_STEPS, WorkQueueModel, fixtures_present, replay_corpus};
+    use super::work_queue_flavors::{WorkQueueModel, fixtures_present, replay_corpus};
     use lazily::{
         AsyncContext, AsyncWorkQueueCell, WorkQueueDeadLetter, WorkQueueDelivery, WorkQueueItem,
     };
@@ -2106,9 +2195,11 @@ mod work_queue_async {
             return;
         }
         let total = replay_corpus::<Model>("async");
+        // No floor (`#lzcorpusfloorguard`): `replay` asserts executed ==
+        // loaded per fixture and panics on an unrecognised `op.type`.
         assert!(
-            total >= MIN_STEPS,
-            "async work queue replayed only {total} steps"
+            total > 0,
+            "async work queue replayed nothing — the corpus never loaded"
         );
     }
 

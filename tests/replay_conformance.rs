@@ -144,7 +144,17 @@ fn checkpoint_seqs(fingerprint: &ReplayFingerprint) -> Vec<i64> {
 
 // -- obligations 1 and 2 ------------------------------------------------------
 
-fn drive_harness_fixture(name: &str, minimum_steps: usize) {
+// No per-fixture step COUNT anywhere below (`#lzcorpusfloorguard`). A
+// hard-coded floor drifts: `#lzreplayframing` grew
+// `replay/canonical_encoding_equality.json` from 11 steps to 14 and eight of
+// nine bindings were still pinned at 11, so the three new rows sat inside the
+// slack and would have reported green WITHOUT EXECUTING. What replaces the
+// number is exact and can never drift — every step LOADED is counted as
+// EXECUTED, and an unrecognised `op.type` panics instead of falling through.
+// The one thing a floor did buy, noticing the corpus SHRINK, is now guarded at
+// the single place a shrink can happen: lazily-spec's `corpus-counts.json`
+// pinned by `scripts/check-corpus-floors.mjs`.
+fn drive_harness_fixture(name: &str) {
     let fx = load_fixture(name);
     assert_eq!(fx["kind"], "Replay");
     assert_eq!(fx["model"], "ReplayHarness");
@@ -158,11 +168,7 @@ fn drive_harness_fixture(name: &str, minimum_steps: usize) {
         .collect();
     let mut fingerprints: BTreeMap<String, ReplayFingerprint> = BTreeMap::new();
     let steps = fx["steps"].as_array().unwrap();
-    assert!(
-        steps.len() >= minimum_steps,
-        "{path}: expected at least {minimum_steps} steps, got {}",
-        steps.len()
-    );
+    let mut executed = 0usize;
 
     for (index, step) in steps.iter().enumerate() {
         let op = &step["op"];
@@ -184,6 +190,7 @@ fn drive_harness_fixture(name: &str, minimum_steps: usize) {
                 left.digest() == right.digest(),
                 "{where_}: returns"
             );
+            executed += 1;
             continue;
         }
 
@@ -278,7 +285,17 @@ fn drive_harness_fixture(name: &str, minimum_steps: usize) {
             }
             other => panic!("unknown canonical replay operation `{other}`"),
         }
+        executed += 1;
     }
+
+    // The constant-free replacement for the deleted floor: a step the loop
+    // walked past is a step the corpus does not actually check.
+    assert_eq!(
+        executed,
+        steps.len(),
+        "{path}: loaded {} steps but executed {executed}",
+        steps.len()
+    );
 }
 
 #[test]
@@ -286,7 +303,7 @@ fn canonical_fingerprint_log_binding() {
     if !spec_fixtures_present() {
         return;
     }
-    drive_harness_fixture("fingerprint_log_binding.json", 8);
+    drive_harness_fixture("fingerprint_log_binding.json");
 }
 
 #[test]
@@ -294,7 +311,7 @@ fn canonical_divergence_localization() {
     if !spec_fixtures_present() {
         return;
     }
-    drive_harness_fixture("divergence_localization.json", 7);
+    drive_harness_fixture("divergence_localization.json");
 }
 
 // -- obligation 3 -------------------------------------------------------------
@@ -371,12 +388,15 @@ fn canonical_encoding_equality_classes() {
     let path = format!("{SPEC_DIR}/{name}");
     let values = fx["config"]["values"].as_object().unwrap();
     let steps = fx["steps"].as_array().unwrap();
-    // Pinned to what a CI clone of published lazily-spec carries: the corpus at
-    // `#lzreplayframing` holds exactly 14 steps, three of them the member-framing
-    // rows that actually pin the length prefix (`seq_a_sbc`/`seq_as_bc`,
-    // `map_a_sb`/`map_as_b`, and the nested `seq_nested_*` pair, which is the
-    // fixture's first NESTED container). 15 fails.
-    assert!(steps.len() >= 14, "{path}: expected at least 14 steps");
+    // The step count that used to be pinned here (`#lzcorpusfloorguard`) is
+    // gone — see the note on `drive_harness_fixture`. This fixture is the exact
+    // one that drifted: `#lzreplayframing` took it 11 -> 14 and the floor stayed
+    // at 11, so the three member-framing rows that pin the length prefix
+    // (`seq_a_sbc`/`seq_as_bc`, `map_a_sb`/`map_as_b`, and the nested
+    // `seq_nested_*` pair) sat in the slack. Executed-equals-loaded below covers
+    // any future addition; the shrink direction lives in lazily-spec's
+    // `corpus-counts.json` / `scripts/check-corpus-floors.mjs`.
+    let mut executed = 0usize;
     let mut outcomes: Vec<bool> = Vec::new();
 
     for (index, step) in steps.iter().enumerate() {
@@ -419,7 +439,15 @@ fn canonical_encoding_equality_classes() {
             }
             other => panic!("unknown canonical encoding operation `{other}`"),
         }
+        executed += 1;
     }
+
+    assert_eq!(
+        executed,
+        steps.len(),
+        "{path}: loaded {} steps but executed {executed}",
+        steps.len()
+    );
 
     // Both outcomes really occurred: a runner that only ever saw `false` would
     // pass every inequality claim with a thoroughly broken encoding.

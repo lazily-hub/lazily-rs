@@ -344,7 +344,21 @@ fn expected_steps(fixture: &Value) -> usize {
 #[test]
 fn corpus_is_present_and_non_trivial() {
     let fixture = load().expect("canonical latest-durable projection fixture");
-    assert!(expected_steps(&fixture) >= 20);
+    // No step-count floor here (`#lzcorpusfloorguard`). A hard-coded minimum
+    // drifts the moment the corpus grows — `#lzreplayframing` added three steps
+    // to a replay fixture and eight of nine bindings kept a floor of 11, so the
+    // new rows sat in the slack and would have reported green WITHOUT
+    // EXECUTING. The constant-free guard is the `replays_every_step` tests
+    // below: every step LOADED is counted as EXECUTED, and `run_op` panics on an
+    // unrecognised `op.type` rather than skipping it. A SHRINKING corpus is
+    // caught where a shrink happens, by lazily-spec's `corpus-counts.json` +
+    // `scripts/check-corpus-floors.mjs`.
+    for scenario in fixture["scenarios"].as_array().expect("scenarios") {
+        assert!(
+            !scenario["steps"].as_array().expect("steps").is_empty(),
+            "a scenario with no steps is a vacuous replay"
+        );
+    }
 }
 
 #[test]

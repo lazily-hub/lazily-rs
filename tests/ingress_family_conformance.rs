@@ -968,11 +968,22 @@ fn corpus_is_present_and_non_trivial() {
         corpus_present(),
         "lazily-spec ingress corpus not found at {SPEC_DIR}"
     );
-    let total = expected_step_total();
-    assert!(
-        total >= 30,
-        "the ingress corpus replays only {total} steps; that is not the named schedule set"
-    );
+    // No step-count floor here (`#lzcorpusfloorguard`). A hard-coded minimum
+    // drifts the moment the corpus grows — `#lzreplayframing` added three steps
+    // to a replay fixture and eight of nine bindings kept a floor of 11, so the
+    // new rows sat in the slack and would have reported green WITHOUT
+    // EXECUTING. The constant-free guard is the `replays_every_step` tests
+    // below: every step LOADED is counted as EXECUTED, and `run_op` panics on an
+    // unrecognised `op.type` rather than skipping it. A SHRINKING corpus is
+    // caught where a shrink happens, by lazily-spec's `corpus-counts.json` +
+    // `scripts/check-corpus-floors.mjs`.
+    for name in FIXTURES {
+        let fixture = load(name).unwrap_or_else(|| panic!("fixture {name} missing"));
+        assert!(
+            !fixture["steps"].as_array().expect("steps").is_empty(),
+            "{name}: a fixture with no steps is a vacuous replay"
+        );
+    }
 }
 
 #[test]
