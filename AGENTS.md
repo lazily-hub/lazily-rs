@@ -92,7 +92,7 @@ this repo.
   watermark, the reorder buffer, and the observed clock, so there is nothing to
   await. Spec: `lazily-spec/docs/transport-ingress.md`; formal:
   `lazily-formal/LazilyFormal/Ingress.lean`
-- `src/time.rs` — temporal source primitives (`#lztime`): logical-clock-driven `TimelineSource` cores (`TimerCore`/`IntervalCore`/`CronCore`/`DeadlineCore`) split from thin reactive cells (`TimerCell` single-shot / `IntervalCell` periodic / `CronCell` pattern-periodic / `DeadlineCell<T>` value+deadline → `Deadlined`), plus `ManualClock`. Edge-only reactive invalidation; `BytesPayload` cores (`DeadlineCell` is `PyObjectPayload`). Foundation for leases/expiry/windows/presence.
+- `src/time.rs` — temporal source primitives (`#lztime`): logical-clock-driven `TimelineSource` cores (`TimerCore`/`IntervalCore`/`CronCore`/`DeadlineCore`) split from thin reactive cells (`TimerCell` single-shot / `IntervalCell` periodic / `CronCell` pattern-periodic / `DeadlineCell<T>` value+deadline → `Deadlined`), plus `ManualClock`. Edge-only reactive invalidation; `BytesPayload` cores (`DeadlineCell` is `PyObjectPayload`). Sets the logical-clock discipline that leases/expiry/windows/presence follow, but those families do NOT compose `DeadlineCore` — their deadlines are re-armable, which `DeadlineCore` (a monotone `TimerCore`) deliberately is not. The only in-tree composition of a temporal core is `stdlib::Timer`.
 - `src/state_table.rs` — typed **state tables** (`#lazilystatetable`): a total pure
   `StateTable::decide(&Input) -> Decision` over a *finite product state*, wired as a
   `Computed`. The complement of `state_machine.rs`, not a variant of it —
