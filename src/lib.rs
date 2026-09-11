@@ -130,6 +130,7 @@ mod relay_roles;
 mod relay_transport;
 #[cfg(feature = "ipc")]
 mod reliable_sync;
+mod replay;
 mod resilience;
 mod sem_tree;
 #[cfg(feature = "distributed")]
@@ -378,6 +379,11 @@ pub use relay_transport::{FramedTransport, InProcTransport, Transport};
 pub use reliable_sync::{
     Clock, DriverError, OrSet, Progress, ResyncAction, ResyncCoordinator, SnapshotProvider,
     SyncDriver, WireLwwRegister,
+};
+pub use replay::{
+    DivergenceKind, INITIAL_SEQ, ReplayCheckpoint, ReplayDigest, ReplayDivergence, ReplayEvent,
+    ReplayFingerprint, ReplayGraph, ReplayHarness, ReplayLog, ReplayObservation, ReplayProofError,
+    ReplayValue, canonical_bytes, canonical_digest,
 };
 pub use resilience::{
     BreakerState, BulkheadCell, BulkheadCore, CircuitBreakerCell, CircuitBreakerCore,

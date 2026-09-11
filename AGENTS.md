@@ -116,6 +116,26 @@ this repo.
 - `src/stdlib.rs` — Lazily standard-library conveniences layered over portable primitives rather than added to the graph kernel. `stdlib::Timer` binds logical `TimerCore` to Rust's monotone `Instant`; `Timeout<T>` adds caller-driven operation/cancellation polling, strict monotone deadlines, typed latched outcomes, and deterministic clock/wait seams without owning a future, executor, or thread; `RevisionBarrier` combines monotone revisions with derived predicates, barrier-owned cancellation, `Timer` deadlines, disposal, and application-owned keyed effect receipts while closing check-to-sleep lost wakeups.
 - `src/transport.rs` — cross-process zero-copy transport (`#lzzcpy`): `BlobBackend` adapter trait + `InProcessBackend` (wraps `ShmBlobArena`) + `ArrowBackend` (Arrow IPC stream bytes) + `ShmBackend` (POSIX `shm_open`+`mmap`, `shm` feature, Linux) + `spill_message`/`resolve_value` policy + `BlobRouter` multi-backend resolver
 - `src/crdt_tree.rs` — `CrdtTree` lossless document contract (`#lzcrdttree`): merge, frontier, delta, empty-frontier snapshot, and materialized value; implemented by `TextCrdt`
+- `src/replay.rs` — replay-equivalence proof (`#lzreplayrs`): `ReplayLog` (ordered,
+  strictly-increasing, possibly non-contiguous events plus a digest over its
+  canonical bytes), `ReplayFingerprint` (per-checkpoint per-cell digests, bound to
+  the log digest AND the stride), and `ReplayHarness` (`record` / `check` /
+  `verify` / `prove`). `verify` revalidates the log binding BEFORE any value is
+  compared — two different logs can settle to the same final values, so a
+  value-only comparison would certify a fingerprint that proves nothing about the
+  log in front of it. Divergence is localized to the FIRST diverging checkpoint,
+  naming the cell label. `ReplayProofError` is an enum so a driver routes on the
+  TYPE, not a message: `LogMismatch`, `StrideMismatch`, `Divergence`, `Encoding`.
+  **No hash crate.** The spec leaves both the hash and the byte layout
+  binding-chosen (fingerprints are pinned beside a test in one language, never
+  exchanged), and lazily-rs keeps every dependency optional, so a `ReplayDigest`
+  stores the EXACT canonical bytes — at fingerprint sizes the degenerate strongest
+  choice, zero collision risk and zero new dependency. What is shared across the
+  family is the equality CLASSES, which `canonical_bytes` enforces with a
+  type-tagged, length-framed, order-stable encoding over `ReplayValue`;
+  `ReplayValue::Opaque` is the residual dynamic case and fails loudly rather than
+  degrading to a `Debug` rendering that would embed an address and report a FALSE
+  divergence every run. Optional (MAY) row in `coverage.json`
 - `src/outbox.rs` — storage-independent durable outbox (`#lzdurableoutbox`): `OutboxStore` ordered-byte boundary, shared `Outbox<S>` append/ack/prune/replay protocol, in-memory backend, and `durable-sqlite` adapter
 - `tests/ingress_family_conformance.rs` — the ingress contract
   (`#designimplementtransport`) replayed against **all three flavors** through one
@@ -126,6 +146,27 @@ this repo.
   is asserted per reader kind in **both** directions via a cache-validity probe, so
   over-invalidation is as visible as under-. Carries a three-row ledger enforced by
   grepping `src/` in both directions, plus a mutation-check record of seven probes
+- `tests/replay_conformance.rs` — the replay-equivalence contract (`#lzreplayrs`)
+  over `lazily-spec/conformance/replay/*.json`: the log binding revalidated before
+  any value compare (including the two-logs-same-sum case a value comparison would
+  wrongly accept), first-checkpoint divergence localization plus the stride
+  binding, and the canonical encoding's equality classes as same/different pairs —
+  never a hex digest, which is what leaves the layout binding-chosen. The corpus
+  declares its subjects in prose, so `Accumulator` here is this binding's copy of
+  that declaration. On a `record` step the fingerprint's `sum` digest is
+  cross-checked against the digest of the subject's final state computed WITHOUT
+  the harness; without that the fixture would accept a harness that fingerprinted
+  some other value entirely, since every other key in the block stays satisfied.
+  The encoding test also asserts both outcomes really occurred — a runner that
+  only ever saw `false` passes every inequality claim with a broken encoding.
+  Mutation-checked in four directions: revalidation neutered (log + stride steps
+  redden), the frame's tag and length dropped (the encoding fixture reddens),
+  comparison restricted to the final checkpoint (`first_divergent_seq` reports 3
+  instead of 1), and the observation shifted off the subject's state (only the
+  record cross-check sees it). Dropping only the LENGTH stays green here, because
+  the corpus's `["a","bc"]` / `["ab","c"]` pair is still separated by the type
+  tags; framing is load-bearing for pairs like `["as","bc"]` / `["a","sbc"]`, and
+  the probe aimed at it has to remove the tag too
 - `tests/temporal_conformance.rs` — temporal sources (`#lztime`) compute fixtures (lazily-spec/conformance/temporal/`*.json`); timer single-shot idempotent fire, interval boundary counting under clock jumps, cron pattern matching, deadline expiry preserving value, edge-only reader invalidation
 - `tests/common/mod.rs` — the runtime conformance manifest recorder
   (`#lazilyupgradeconformance`). Rust integration tests are separate crates, so
@@ -575,17 +616,18 @@ authoring `AGENTS.md`, `SKILL.md`, or runbooks in this repo must read:
 
 before making changes.
 
-<!-- tsift:code-navigation v=0.1.81 -->
+<!-- tsift:code-navigation v=0.1.96 -->
 ## Code Navigation
 
-Run `tsift status` at session start from the owning repo root. If the task or file lives under a git submodule (for example `src/tsift/...`), switch to that submodule root first so the harness loads the narrower local instructions and repo state instead of the superproject root. If status prints a `run:` recommendation for stale or missing tsift state, run `tsift status --fix` before relying on tsift results; when the harness cannot perform write commands, ask the user to run the printed command instead.
+Run `tsift status` at session start from the owning repo root. If the task or file lives under a git submodule (for example `src/tsift/...`), switch to that submodule root first so the harness loads the narrower local instructions and repo state instead of the superproject root. `tsift status` repairs the `.tsift/` index state it owns and never rewrites tracked files (`--no-fix` skips even that). If status reports stale or missing instructions, run `tsift init` to refresh the tracked Code Navigation block and runbook; it names every tracked file it rewrites or moves. When the harness cannot perform write commands, ask the user to run the printed `run:` command instead.
 
 Prefer tsift envelopes over raw reads:
 - `tsift --envelope search <query>` instead of `grep`/`rg`
-- `tsift --envelope source-read <file>` / `tsift --envelope symbol-read <symbol>` instead of `cat`/`head`
+- `tsift --envelope source-read <file>` / `tsift --envelope symbol-read <symbol>` instead of raw `cat`/`head`/`tail`/`sed`/`less` source reads
 - `tsift --envelope explain <symbol>` and `tsift graph <symbol> --callers` / `--callees` for call graphs
-- `tsift diff-digest [path]` instead of `git diff`, `git show`, or patch-style `git log`
-- `tsift --envelope session-review <path>` / `tsift --envelope context-pack <path>` instead of replaying long session docs, transcripts, or runtime logs
+- `tsift diff-digest [path]` (`--pathspec <pathspec>` to preserve scoped reviews) instead of `git diff`, commit-form `git show`, or patch-style `git log`; blob-form `git show <rev>:<path>` stays a raw object read
+- `tsift --envelope session-review <path>` / `tsift --envelope context-pack <path>` instead of replaying long session docs or transcripts
+- raw-read rewrites route recognized session docs/transcripts to `tsift session-digest --input <path>` and captured logs to `tsift log-digest --input <path>`
 - `tsift --envelope digest-runner --kind test|log --path . --shell-command '<command>'` instead of raw test/build output
 
 Command detail lives in [`.agent/runbooks/code-navigation.md`](.agent/runbooks/code-navigation.md) — budgets, `tsift workflow search`, `report.scale_guard` handling, the harness rewrite path for `PreToolUse`-less harnesses, and Codex/OpenCode integration. `tsift init` writes and versions that runbook alongside this block, so it is present in every initialized checkout; read it before broad exploration instead of expanding this block. A repository that also ships a current `.claude/skills/tsift/SKILL.md` should use that skill as the deeper source.

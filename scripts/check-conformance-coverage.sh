@@ -408,13 +408,10 @@ fi
 # someone looked; shrinking this list is the work. Adding to it silently is how the
 # guard rots, so keep a reason with any new entry.
 KNOWN_UNCOVERED=(
-  # Replay-equivalence proof (`lazily-spec/docs/replay-equivalence.md`) is an
-  # optional (MAY) coverage row and lazily-py is the reference implementation;
-  # this binding has no harness yet, so it opens none of the three. Building one
-  # is what removes these entries — they are not permanent carve-outs.
-  "replay/canonical_encoding_equality.json"
-  "replay/divergence_localization.json"
-  "replay/fingerprint_log_binding.json"
+  # The three `replay/` fixtures left this list when `tests/replay_conformance.rs`
+  # landed (`#lzreplayrs`): the harness is `src/replay.rs` and all three are now
+  # OPENED and replayed. Kept as a note rather than deleted silently, because the
+  # entry that leaves is the interesting one.
   # No runner at all — these were already excused under the static guard.
   "agent-doc/delta_agent_doc_state.json"
   "agent-doc/snapshot_agent_doc_state.json"
@@ -543,8 +540,8 @@ fi
 # corpus or the recorder shrank, which is the finding.
 #
 # PINNED TO REALITY (#lzscenariofloordrift). This floor equals what CI actually
-# replays, with NO margin: the run that pinned it OPENED exactly 144 fixtures,
-# and 145 fails. The older convention — "the corpus grew by N, so raise the
+# replays, with NO margin: the run that pinned it OPENED exactly 150 fixtures,
+# and 151 fails. The older convention — "the corpus grew by N, so raise the
 # floor by N and keep the existing margin" — is the bug it replaces. It let the
 # gap reach 13, and a floor 13 below reality tolerates 13 fixtures silently
 # detaching, which is the exact failure this floor exists to catch.
@@ -554,7 +551,7 @@ fi
 # coverage OK: <n>/..." line, set this to that <n>, then prove it is exact by
 # temporarily setting it to <n>+1 and watching this guard fail. A floor you
 # never watched fail is a floor you have not verified.
-MIN_FIXTURES="${MIN_FIXTURES:-144}"
+MIN_FIXTURES="${MIN_FIXTURES:-150}"
 if [ "$total" -eq 0 ]; then
   echo "ERROR: the corpus at $SPEC_DIR listed ZERO fixtures." >&2
   echo "       Every check above is vacuously green over an empty population." >&2
@@ -786,8 +783,8 @@ if problems:
 # having compared nothing. Assert the magnitude before claiming green.
 #
 # PINNED TO REALITY (#lzscenariofloordrift). This equals what CI actually
-# replays, with NO margin: the run that pinned it REPLAYED exactly 162
-# scenarios, and 163 fails. It is deliberately NOT the old "raise by however
+# replays, with NO margin: the run that pinned it REPLAYED exactly 166
+# scenarios, and 167 fails. It is deliberately NOT the old "raise by however
 # many this change added, keeping the margin" convention — that convention only
 # ever widens the gap, and it had reached 24 here. A floor 24 below reality
 # tolerates 24 scenarios silently detaching, which is precisely what this floor
@@ -797,7 +794,7 @@ if problems:
 # a delta: run `make check`, read the "scenario coverage OK: <n>/..." line, set
 # this to that <n>, then prove it exact by setting it to <n>+1 and watching this
 # guard fail. A floor you never watched fail is a floor you have not verified.
-MIN_SCENARIOS = int(os.environ.get("MIN_SCENARIOS", "162"))
+MIN_SCENARIOS = int(os.environ.get("MIN_SCENARIOS", "166"))
 if total == 0:
     sys.stderr.write(
         "ERROR: ZERO scenarios were found across the opened fixtures.\n"
