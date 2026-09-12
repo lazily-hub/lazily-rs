@@ -285,7 +285,7 @@ this repo.
   digest SEPARATES `5` from `5.0` (without which the first assertion is satisfied
   by a digest that folds the very divergence it looks for), and `5.0`/`5e0` are
   pinned as FOLDING because `serde_json` normalises both to one `f64` at parse.
-  571/771 sites bound or, with the ledger, 771/771 accounted. Validated in ten
+  570/771 sites bound or, with the ledger, 771/771 accounted. Validated in ten
   directions: a declared block with no bind FAILS naming it; a stale excuse FAILS
   in both its directions (bound-after-all, and naming no such site); an unknown
   class, an empty reason and a duplicated entry each FAIL; deleting a
