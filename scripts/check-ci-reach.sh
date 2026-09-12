@@ -364,6 +364,36 @@ EXPECTED_NO_GATE_TARGETS=(
 # that is gone. That is why the existence rung is fatal rather than a fallback to
 # the flat haystack.
 #
+# WHAT THIS MAP CANNOT SEE, stated here rather than left implied, because the
+# closure pin above had to retract exactly this kind of overclaim once already.
+#
+#   A REFLEXIVE EDIT OF THE MAP ITSELF. Repoint `test-shm` at `npm run check` AND
+#   change its entry here to `Typecheck + test`, and this guard passes at exit 0
+#   with stderr empty -- measured, not supposed. Nothing else catches it: the
+#   command is in `make -n check`, so both oracle directions pass, and no other
+#   member runs it, so the collision check passes. A distinctness rung over the
+#   step names would not help either, and that was checked rather than assumed --
+#   all 46 entries name 46 distinct steps today, and the moved entry names a step
+#   no other member pins, so it stays distinct.
+#
+#   So the claim is the SAME one the closure pin makes, and no stronger: what
+#   this map buys is that retiring a gate is an INCOMPLETE edit. It can no longer
+#   be one line in the Makefile; it takes a second edit, in this file, next to a
+#   comment saying which CI step is supposed to run the gate. The review is still
+#   the thing that catches a wrong answer. A guard that could tell a legitimate
+#   step rename from a reflexive one would have to know which command the gate is
+#   SUPPOSED to be -- that is the per-member recipe anchor, at recipe-rate churn,
+#   which is the mistake recorded at the top of this file.
+#
+#   WHICH STEP OF SEVERAL, when a member's anchors are satisfied by more than
+#   one step. Eight of the 46 are in that position (see the superset table
+#   above), and for them the entry records an INTENT that the reach check cannot
+#   confirm: `test` pinned to `Test default features` passes, and `test` pinned
+#   to any of the other 39 steps whose command contains `cargo test --locked`
+#   would pass too. What the entry still buys there is the deletion catch, which
+#   is the defect that was live: whichever of the 40 it names, deleting THAT step
+#   now fails.
+#
 # Editing this map is a LEGITIMATE act, like editing the closure pin: renaming a
 # CI step must edit it, and the guard says so by name.
 EXPECTED_GATE_STEPS=(
