@@ -43,6 +43,18 @@
 //! tree, and [`MIN_SANCTIONED_READS`] fails a parse that found no fixture reads
 //! at all (a visitor whose `MethodCall` arm stopped firing).
 //!
+//! # Scope
+//!
+//! The COERCING-CHAIN and SILENT-SKIP rules apply under `tests/` only: the
+//! library legitimately defaults JSON it is parsing rather than asserting
+//! against. The BANNED ACCESSOR and the `#[allow]` that hides it are checked
+//! crate-wide — `src/`, `benches/` and `examples/` too — because clippy's ban is
+//! crate-wide and an `#[allow]` in `src/` would let a helper there hand a
+//! coerced flag to a runner that trusts it. The one live `Value::as_bool` at the
+//! time of writing was in `src/bin/lazily-interop-peer.rs`, spelled
+//! `.and_then(Value::as_bool)` — a function PATH, not a method call, which is
+//! why the typed walk matches both spellings.
+//!
 //! # Allowlist
 //!
 //! `common/json.rs` only. It IS the sanctioned reader, so it is the one
@@ -63,7 +75,7 @@ use syn::{Expr, ExprMethodCall};
 
 /// The one file allowed to call the banned accessors: it is the sanctioned
 /// reader every other call site goes through.
-const ALLOWLIST: &[&str] = &["common/json.rs"];
+const ALLOWLIST: &[&str] = &["tests/common/json.rs"];
 
 /// Accessors whose `None` erases a STRUCTURE, so the default that discharges it
 /// is a value that SATISFIES assertions rather than contradicting them: `false`
@@ -197,7 +209,7 @@ impl<'ast> Visit<'ast> for Scan {
         {
             self.banned.push((
                 segment.ident.span().start().line,
-                format!("{}  [as a function path]", segment.ident),
+                format!("{}  (as a function path)", segment.ident),
             ));
         }
         visit::visit_path(self, path);
@@ -227,7 +239,7 @@ impl<'ast> Visit<'ast> for Scan {
         let name = call.method.to_string();
         let line = call.method.span().start().line;
         if BANNED_ACCESSORS.contains(&name.as_str()) {
-            self.banned.push((line, name.clone()));
+            self.banned.push((line, format!("{name}()")));
         }
         if SANCTIONED_READS.contains(&name.as_str()) {
             self.sanctioned += 1;
@@ -291,7 +303,7 @@ fn scan_tokens(tokens: TokenStream, scan: &mut Scan) {
                 // call or function path; the chain bookkeeping below still needs
                 // the preceding `.`.
                 if BANNED_ACCESSORS.contains(&name.as_str()) {
-                    scan.banned.push((line, name.clone()));
+                    scan.banned.push((line, format!("{name}()  (in a macro)")));
                 }
                 if !after_dot {
                     armed = None;
@@ -351,18 +363,34 @@ fn rust_sources(root: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn the_weak_fixture_read_is_unavailable() {
-    let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let sources = rust_sources(&tests_dir);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tests_dir = root.join("tests");
+    let mut sources: Vec<(PathBuf, bool)> = rust_sources(&tests_dir)
+        .into_iter()
+        .map(|path| (path, true))
+        .collect();
+    // Crate-wide for the banned accessor and the `#[allow]` — see § Scope.
+    for outside in ["src", "benches", "examples"] {
+        let directory = root.join(outside);
+        if directory.is_dir() {
+            sources.extend(
+                rust_sources(&directory)
+                    .into_iter()
+                    .map(|path| (path, false)),
+            );
+        }
+    }
 
     let allowlisted: BTreeSet<&str> = ALLOWLIST.iter().copied().collect();
     let mut problems: Vec<String> = Vec::new();
     let mut sanctioned = 0usize;
     let mut scanned = 0usize;
 
-    for path in &sources {
+    for (path, under_tests) in &sources {
+        let under_tests = *under_tests;
         let relative = path
-            .strip_prefix(&tests_dir)
-            .expect("source under tests/")
+            .strip_prefix(root)
+            .unwrap_or(path)
             .to_str()
             .expect("UTF-8 path")
             .replace('\\', "/");
@@ -371,8 +399,10 @@ fn the_weak_fixture_read_is_unavailable() {
             .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
         let mut scan = Scan::default();
         scan.visit_file(&syntax);
-        scanned += 1;
-        sanctioned += scan.sanctioned;
+        if under_tests {
+            scanned += 1;
+            sanctioned += scan.sanctioned;
+        }
 
         if allowlisted.contains(relative.as_str()) {
             // The sanctioned reader is allowed the banned accessor and the local
@@ -388,10 +418,22 @@ fn the_weak_fixture_read_is_unavailable() {
         }
         for (line, what) in &scan.banned {
             problems.push(format!(
-                "{relative}:{line}: `{what}()` on a fixture value. Use \
+                "{relative}:{line}: `{what}` on a fixture value. Use \
                  `common::FixtureJson::fixture_flag*` — a coerced flag asserts the OPPOSITE \
                  claim and passes (#lzsiblingrunnermasking)"
             ));
+        }
+        for line in &scan.allows {
+            problems.push(format!(
+                "{relative}:{line}: `#[allow(clippy::disallowed_methods)]` silences the ban on \
+                 `Value::as_bool`. Only `tests/common/json.rs` may carry it \
+                 (#lzsiblingrunnermasking)"
+            ));
+        }
+        if !under_tests {
+            // The library is not asserting against a fixture, so a default in a
+            // JSON chain there is a parse decision and not this rung's business.
+            continue;
         }
         for (line, what) in &scan.coercing {
             problems.push(format!(
@@ -407,13 +449,6 @@ fn the_weak_fixture_read_is_unavailable() {
                  the body does not run and the replay continues against a world the fixture does \
                  not describe. Use `fixture_array_opt` / `fixture_object_opt`, or give the \
                  `if let` an `else` that panics (#lzsiblingrunnermasking)"
-            ));
-        }
-        for line in &scan.allows {
-            problems.push(format!(
-                "{relative}:{line}: `#[allow(clippy::disallowed_methods)]` silences the ban on \
-                 `Value::as_bool`. Only `common/json.rs` may carry it \
-                 (#lzsiblingrunnermasking)"
             ));
         }
     }
@@ -448,6 +483,7 @@ fn the_weak_fixture_read_is_unavailable() {
     eprintln!(
         "fixture-flag hygiene OK: {scanned} sources under tests/ parsed (including \
          subdirectories), {sanctioned} sanctioned fixture reads, 0 banned accessors, 0 coercing \
-         chains, 0 local silences of the clippy ban, and `clippy.toml` still declares it"
+         chains, 0 local silences of the clippy ban anywhere in the crate, and `clippy.toml` \
+         still declares it"
     );
 }

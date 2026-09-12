@@ -474,12 +474,21 @@ this repo.
   live inside `assert_eq!`. Two floors, so a scan that matched nothing cannot
   pass: `MIN_SCANNED_SOURCES` fails a walk that lost the tree, and
   `MIN_SANCTIONED_READS` fails a visitor whose `MethodCall` arm stopped firing.
-  One allowlist entry, `common/json.rs`, because it IS the sanctioned reader.
-  Falsified seven ways: the planted weak spelling (clippy AND the rung fail); the
+  One allowlist entry, `tests/common/json.rs`, because it IS the sanctioned
+  reader. The coercing-chain and silent-skip rules are `tests/`-only — the
+  library defaults JSON it is PARSING rather than asserting against — but the
+  banned accessor and the `#[allow]` that hides it are checked CRATE-WIDE, since
+  an `#[allow]` in `src/` would otherwise let a helper there hand a coerced flag
+  to a runner that trusts it. The one live `Value::as_bool` outside `tests/` was
+  `src/bin/lazily-interop-peer.rs`'s `.and_then(Value::as_bool)` — a function
+  PATH, not a method call, which is why both spellings are matched.
+  Falsified eight ways: the planted weak spelling (clippy AND the rung fail); the
   `#[allow]` escape and the emptied `clippy.toml` (clippy PASSES, the rung
   fails); the `as_array`+`unwrap_or_default` chain and the `if let` silent skip
   (clippy has no lint at all); and each floor raised past the real count, plus
-  the walk pointed at a directory with ten sources
+  the walk pointed at a ten-source directory; and an `#[allow]` in `src/` over a
+  re-coerced `bool_field` (clippy PASSES, the rung names both the path spelling
+  and the `allow`)
 
   **The runner-pair enumeration** (`#lzsiblingrunnermasking`), written down here
   for the first time. Fixtures this binding opens from MORE THAN ONE runner —
