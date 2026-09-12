@@ -841,11 +841,14 @@ KNOWN_UNBOUND_BLOCKS=(
 BLOCK_LEDGER="${LAZILY_CONFORMANCE_BLOCKS:-build/conformance-assertion-blocks.txt}"
 
 BLOCK_EXCUSES="$(printf '%s\n' "${KNOWN_UNBOUND_BLOCKS[@]:-}")" \
-python3 - "$BLOCK_LEDGER" <<'PY'
+KNOWN_UNCOVERED_LEDGER="$(printf '%s\n' "${KNOWN_UNCOVERED[@]:-}")" \
+python3 - "$BLOCK_LEDGER" "$SPEC_DIR" <<'PY'
+import json
 import os
 import sys
 
 ledger_path = sys.argv[1]
+corpus_dir = sys.argv[2]
 if not os.path.isfile(ledger_path) or os.path.getsize(ledger_path) == 0:
     sys.stderr.write(
         "FAIL: no assertion-block ledger at %s.\n"
@@ -903,30 +906,271 @@ if unbound:
     )
     sys.exit(1)
 
-# Positive-evidence floor (#lzvacuousrun): zero declared blocks means zero
-# unbound blocks, which reports OK having compared nothing.
+# ---- Positive-evidence MAGNITUDE, DERIVED from the corpus (#lzblocksitepin) ----
 #
-# PINNED TO REALITY (#lzscenariofloordrift). This equals what CI actually
-# inventories, with NO margin: the run that pinned it declared exactly 30
-# blocks, and 31 fails. It previously sat at 20 — ten below reality, so ten
-# blocks could have detached without reddening anything.
+# Everything above is scoped to blocks a runner BOUND, so all of it is
+# vacuously satisfied by an empty population: zero declared blocks means zero
+# unbound blocks, and the loop cannot tell "nothing is wrong" from "nothing was
+# examined" (#lzvacuousrun).
 #
-# When the corpus moves, re-derive from the gate's own output instead of adding
-# a delta: run `make check`, read the "assertion-block bind OK: <n> distinct
-# blocks" line, set this to that <n>, then prove it exact by setting it to <n>+1
-# and watching this guard fail.
-MIN_BLOCKS = int(os.environ.get("MIN_BLOCKS", "30"))
-if len(declared) < MIN_BLOCKS:
+# This used to be `MIN_BLOCKS = 30`, and both halves of that were wrong.
+#
+#   * TYPED. A hand-written number is re-pinned by hand, which means it drifts by
+#     hand. It is now DERIVED from the canonical corpus listing on disk minus this
+#     binding's own KNOWN_UNCOVERED ledger. Deriving it from the runtime manifest
+#     instead would follow the actual count into the ditch: let the recorder
+#     detach and both go to zero, green over nothing.
+#   * A FLOOR. `>=` cannot see a shrink that stays above it, and a shrink is
+#     exactly what a detached inventory looks like. Both dimensions below are
+#     EQUALITIES.
+#
+# TWO dimensions, because each is blind to what the other sees:
+#
+#   * A DIGEST count absorbs the DELETION of a block whose bytes recur elsewhere.
+#     TEN of this corpus's 36 sites carry a shape that recurs — four digests spelled
+#     two or more times, `signaling/frames.json`'s `{"to": 2}` four times over, six
+#     occurrences beyond the first — so deleting any one of those ten leaves the
+#     digest set untouched at 30. SITES are one per occurrence, so they see it.
+#   * A SITE count absorbs a CONTENT edit that collapses two distinct claims into
+#     one: respelling a unique block exactly like another leaves 36 sites and takes
+#     the digest set from 30 to 29. The corpus has genuinely lost a claim.
+#
+# WHAT THIS PINS, stated plainly so a green run is not read as more than it is:
+# both sides read the corpus, so deleting a fixture in a real CI run moves the
+# expectation and the inventory TOGETHER. What is pinned is the agreement between
+# the RUN and the corpus — a run whose inventory detached, or which read a
+# different tree than the guard walks, cannot agree. The corpus-against-its-own-
+# history half lives in lazily-spec's `corpus-counts.json`.
+#
+# The derived population is the corpus listing minus KNOWN_UNCOVERED rather than
+# the manifest, and that is not an approximation of the opened set: the fixture
+# rung above already fails on a canonical fixture the suite did not open AND on a
+# KNOWN_UNCOVERED entry the suite DID open, so by the time control reaches here
+# the two sets are provably the same 150 files.
+
+# The walk rule, ONE definition. `record_declared_blocks()` in tests/common/mod.rs
+# is the other half and they must agree exactly: a derivation that walked the
+# corpus differently from the inventory it is compared against would be worse
+# than the typed constant it replaced. That agreement is not asserted by comment —
+# the site/digest set identity cross-check at the bottom of this block fails if
+# the two implementations ever diverge.
+#
+# The rule is deliberately NARROW, matching what tests/common/mod.rs does TODAY:
+# the top-level `assertions` object, plus the `assertions` object of each element
+# of the top-level `frames`, `scenarios` and `rejects` arrays. Nothing else, at no
+# other depth, under no other name. That narrowness is a KNOWN gap, not an
+# endorsement: the same 150 opened fixtures carry 771
+# sites / 661 digests when every block name is read at every depth, so this rung
+# reaches 36 of 771 sites (4.7%) and 30 of 661 digests (4.5%). The whole
+# remainder is the four names this walk never looks at — `expected` (434 sites /
+# 359 digests), `expect` (295 / 266), `expect_initial` (3 / 3) and `expect_after`
+# (3 / 3) — and ZERO `assertions` blocks are missed at any depth. Widening the
+# walk is its own item, because in lazily-zig the same widening surfaced 204
+# unbound digests over 239 sites and took a full cycle across nine runners.
+# Deriving the magnitude is what stops the narrow rung drifting WHILE that is
+# pending.
+BLOCK_CONTAINERS = ("frames", "scenarios", "rejects")
+
+
+def iter_declared_blocks(doc):
+    """Yield `(where, block)` exactly as `record_declared_blocks()` declares them."""
+    block = doc.get("assertions")
+    if isinstance(block, dict):
+        yield "assertions", block
+    for container in BLOCK_CONTAINERS:
+        items = doc.get(container)
+        if not isinstance(items, list):
+            continue
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            block = item.get("assertions")
+            if isinstance(block, dict):
+                yield "%s[%d].assertions" % (container, index), block
+
+
+def block_digest(block):
+    """`block_digest()` in tests/common/mod.rs: FNV-1a over `serde_json::to_string`.
+
+    Three properties of that rendering have to be reproduced exactly, and each is
+    load-bearing rather than incidental:
+
+    * KEYS SORTED. `serde_json::Value` is built on `BTreeMap` unless the
+      `preserve_order` feature is on, and it is not, so re-serialising a parsed
+      document emits every object's keys in byte order at every depth. Hashing
+      document order instead splits one block into two and reports the corpus
+      unbound.
+    * NO SEPARATOR PADDING. `to_string` is the compact form.
+    * NON-ASCII RAW. serde_json escapes `"`, `\\`, and C0 controls and passes every
+      other character through as UTF-8; several `assertions` blocks carry em
+      dashes, so `ensure_ascii` would diverge on them.
+
+    `sort_keys` orders by Python string comparison, which for UTF-8 agrees with
+    Rust's `String: Ord` byte comparison at every code point.
+    """
+    text = json.dumps(block, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+    hash_state = 0xCBF2_9CE4_8422_2325
+    for byte in text.encode("utf-8"):
+        hash_state ^= byte
+        hash_state = (hash_state * 0x0000_0100_0000_01B3) & 0xFFFF_FFFF_FFFF_FFFF
+    return "%016x" % hash_state
+
+
+uncovered = {
+    entry.strip()
+    for entry in os.environ.get("KNOWN_UNCOVERED_LEDGER", "").splitlines()
+    if entry.strip()
+}
+
+canonical = []
+for walk_root, _walk_dirs, walk_names in os.walk(corpus_dir):
+    for walk_name in walk_names:
+        if walk_name.endswith(".json"):
+            canonical.append(
+                os.path.relpath(os.path.join(walk_root, walk_name), corpus_dir).replace(
+                    os.sep, "/"
+                )
+            )
+canonical.sort()
+opened = [fixture for fixture in canonical if fixture not in uncovered]
+
+expected_sites = {}   # "fixture|where" -> digest
+for fixture in opened:
+    try:
+        with open(os.path.join(corpus_dir, fixture), encoding="utf-8") as handle:
+            document = json.load(handle)
+    except OSError as error:
+        sys.stderr.write(
+            "ERROR: could not read canonical fixture '%s' out of %s: %s\n"
+            "       The expectation below is derived from these bytes, so an\n"
+            "       unreadable fixture is missing EVIDENCE, not evidence of absence.\n"
+            % (fixture, corpus_dir, error)
+        )
+        sys.exit(1)
+    except ValueError:
+        # Mirrors `record_declared_blocks()`, which returns on a parse error rather
+        # than failing. Unparseable bytes contribute nothing to EITHER side, so the
+        # two still agree.
+        continue
+    if not isinstance(document, dict):
+        continue
+    for where, block in iter_declared_blocks(document):
+        expected_sites["%s|%s" % (fixture, where)] = block_digest(block)
+
+expected_digests = set(expected_sites.values())
+declared_sites = {site for sites in declared.values() for site in sites}
+
+# Zero-guard on each dimension. A derived expectation of zero is a hard error, not
+# a satisfied one: zero == zero reports OK having compared nothing.
+if not canonical:
     sys.stderr.write(
-        "ERROR: only %d distinct assertion blocks were inventoried, expected >= %d.\n"
-        "       The loader-side inventory detached, or fixtures stopped being read.\n"
-        "       Do not lower MIN_BLOCKS to fix this.\n" % (len(declared), MIN_BLOCKS)
+        "ERROR: the corpus at %s listed ZERO fixtures, so every derived expectation\n"
+        "       below is 0 and this rung would pass having compared nothing\n"
+        "       (#lzvacuousrun). The checkout is wrong, or\n"
+        "       LAZILY_SPEC_CONFORMANCE_DIR points somewhere empty.\n" % corpus_dir
+    )
+    sys.exit(1)
+if not expected_sites or not expected_digests:
+    sys.stderr.write(
+        "ERROR: %d opened fixture(s) in %s carry ZERO assertion blocks under the walk\n"
+        "       in record_declared_blocks(). An expectation of 0 sites / 0 digests is\n"
+        "       a green badge over an empty comparison (#lzvacuousrun).\n"
+        % (len(opened), corpus_dir)
     )
     sys.exit(1)
 
+# Dimension 1: SITES, one per occurrence.
+if len(declared_sites) != len(expected_sites):
+    direction = "FEWER than" if len(declared_sites) < len(expected_sites) else "MORE than"
+    sys.stderr.write(
+        "ERROR: the run inventoried %d assertion-block SITES; the canonical corpus at\n"
+        "       %s minus KNOWN_UNCOVERED derives %d over %d opened of %d canonical\n"
+        "       fixtures. The run has %s the corpus declares.\n"
+        "       This is an EQUALITY, not a floor. The distinct-digest dimension below\n"
+        "       can agree while this does not: a block whose content recurs elsewhere\n"
+        "       leaves the digest set unchanged when it is deleted, so SITES are the\n"
+        "       dimension that sees it (#lzblocksitepin).\n"
+        "       There is no number to re-pin here — the expectation is computed from\n"
+        "       the corpus. Either the corpus moved under this checkout (re-pull the\n"
+        "       lazily-spec sibling so both sides read the same bytes), or the\n"
+        "       loader-side walk in tests/common/mod.rs detached.\n"
+        % (
+            len(declared_sites),
+            corpus_dir,
+            len(expected_sites),
+            len(opened),
+            len(canonical),
+            direction,
+        )
+    )
+    for site in sorted(set(expected_sites) ^ declared_sites):
+        side = "corpus only" if site in expected_sites else "run only"
+        sys.stderr.write("        %s (%s)\n" % (site, side))
+    sys.exit(1)
+
+# Dimension 2: DISTINCT DIGESTS, content-keyed.
+if len(declared) != len(expected_digests):
+    direction = "FEWER than" if len(declared) < len(expected_digests) else "MORE than"
+    sys.stderr.write(
+        "ERROR: the run inventoried %d DISTINCT assertion-block digests; the canonical\n"
+        "       corpus at %s minus KNOWN_UNCOVERED derives %d over %d opened of %d\n"
+        "       canonical fixtures. The run has %s the corpus declares.\n"
+        "       This is an EQUALITY, not a floor. The SITE count above can agree while\n"
+        "       this does not: two sites spelled identically share one digest, so a\n"
+        "       content edit that collapses two distinct claims into one leaves the\n"
+        "       site count untouched (#lzblocksitepin).\n"
+        "       There is no number to re-pin here — the expectation is computed from\n"
+        "       the corpus. Either the corpus moved under this checkout, or\n"
+        "       block_digest() in tests/common/mod.rs and its twin in this script\n"
+        "       stopped agreeing.\n"
+        % (
+            len(declared),
+            corpus_dir,
+            len(expected_digests),
+            len(opened),
+            len(canonical),
+            direction,
+        )
+    )
+    sys.exit(1)
+
+# ONE WALK, TWO CALLERS — cross-checked, not asserted by comment. The two
+# dimensions above are CARDINALITIES, and cardinality is blind to a twin that
+# walks the same shape and hashes it differently: a divergent digest rendering
+# (a float formatted by ryu versus by Python's repr, an object hashed in document
+# order rather than sorted) keeps both counts identical while every digest
+# differs. This compares the sets themselves, so the claim that the Python walk
+# above IS the Rust walk is checked every run.
+if set(expected_sites) != declared_sites or expected_digests != set(declared):
+    sys.stderr.write(
+        "ERROR: the run and the corpus agree on HOW MANY assertion blocks there are\n"
+        "       (%d sites, %d digests) and disagree on WHICH. The two halves of the\n"
+        "       one walk rule — record_declared_blocks()/block_digest() in\n"
+        "       tests/common/mod.rs, and their twin in this script — have diverged.\n"
+        "       A new fixture carrying a value the two render differently (a float, an\n"
+        "       exotic escape) is the usual cause; so is an object hashed in document\n"
+        "       order rather than in sorted key order.\n" % (len(declared_sites), len(declared))
+    )
+    for site in sorted(set(expected_sites) ^ declared_sites):
+        side = "corpus only" if site in expected_sites else "run only"
+        sys.stderr.write("        site %s (%s)\n" % (site, side))
+    for digest in sorted(expected_digests ^ set(declared)):
+        side = "corpus only" if digest in expected_digests else "run only"
+        sys.stderr.write("        digest %s (%s)\n" % (digest, side))
+    sys.exit(1)
+
 print(
-    "assertion-block bind OK: %d distinct blocks inventoried from OPENED fixtures, "
-    "every one BOUND by a runner (%d excused; matched by content digest, not by label)"
-    % (len(declared), len(excuses))
+    "assertion-block bind OK: %d sites / %d distinct blocks inventoried from OPENED "
+    "fixtures, every one BOUND by a runner (%d excused; matched by content digest, "
+    "not by label). Both dimensions DERIVED from %d opened of %d canonical fixtures "
+    "and asserted EQUAL, and the two walks agree on WHICH blocks, not merely how many "
+    "(#lzblocksitepin)"
+    % (
+        len(declared_sites),
+        len(declared),
+        len(excuses),
+        len(opened),
+        len(canonical),
+    )
 )
 PY
