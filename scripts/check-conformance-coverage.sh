@@ -562,10 +562,22 @@ fi
 # The two directions above already enforce that composition fixture by fixture —
 # every corpus fixture is opened or excused, and every excuse names a fixture the
 # run did NOT open — so `corpus \ KNOWN_UNCOVERED` IS the opened set and its
-# CARDINALITY is checkable without a second source of truth. What the equality
-# adds over those two loops is the arithmetic: a duplicated excuse entry passes
-# both directions while making the count disagree, which is why the duplicate
-# check below comes first.
+# CARDINALITY is checkable without a second source of truth.
+#
+# What the equality adds over those two loops is a TRIPWIRE and the magnitude in
+# the OK line, and nothing else — it is IMPLIED, because once `missing` is 0 the
+# two directions make `covered == total - uniq_known` an identity. Keep it so a
+# weakened loop is caught by arithmetic that no longer agrees, not because it
+# catches anything the loops miss.
+#
+# It specifically does NOT catch a duplicated excuse. An earlier version of this
+# comment claimed it did, and that claim was wrong about the code directly below
+# it: `uniq_known` is `sort -u | wc -l`, so both sides of the equality DEDUPE and
+# a repeated entry moves neither. The `uniq -d` check below is the whole of what
+# closes that gap. The claim propagated to lazily-go and lazily-dart before
+# lazily-dart measured it and sent it back (#lzdartcoveragefloors); both landed
+# the duplicate check anyway, so nothing shipped broken — but the reasoning was
+# load-bearing for three bindings and false in all of them.
 uniq_known=0
 if [ "${#KNOWN_UNCOVERED[@]}" -gt 0 ]; then
   dupes="$(printf '%s\n' "${KNOWN_UNCOVERED[@]}" | sort | uniq -d)"
