@@ -106,21 +106,26 @@ const SANCTIONED_READS: &[&str] = &[
     "fixture_object_opt",
 ];
 
-/// A walk that lost the tree reports zero violations. There are ~90 sources
-/// under `tests/`; the floor is set well below that so ordinary additions and
-/// deletions do not move it, and far above zero.
+/// A walk that lost the tree reports zero violations. 95 sources under `tests/`
+/// at the time of writing; the floor sits well below that so ordinary additions
+/// and deletions do not move it, and far above zero. Not an equality: unlike a
+/// LEDGER, this count is not evidence of anything on its own — a runner added or
+/// retired is not a hygiene event, and an equality here would be the typed
+/// constant `#lzledgerratchet` argues against for exactly the cases where the
+/// number carries no claim.
 const MIN_SCANNED_SOURCES: usize = 60;
 
 /// A parse whose `MethodCall` arm stopped firing reports zero violations too.
-/// Every fixture flag in the binding now routes through the trait, so a run that
-/// sees none of them did not inspect what it claims to have inspected.
+/// Every fixture flag in the binding now routes through the trait — 101 reads at
+/// the time of writing — so a run that sees none of them did not inspect what it
+/// claims to have inspected.
 const MIN_SANCTIONED_READS: usize = 40;
 
 #[derive(Default)]
 struct Scan {
-    /// `if let Some(x) = <json accessor>` with NO `else` — the third weak
-    /// spelling the brief names, and the one that leaves no trace at all: the
-    /// block simply does not run.
+    /// `if let Some(x) = <json accessor>` with NO `else` — the weakest of the
+    /// four shapes, and the only one that leaves no trace at all: nothing is
+    /// substituted, the block simply does not run.
     silent_skips: Vec<(usize, String)>,
     /// `as_bool()` (and any other banned accessor) outside the allowlist.
     banned: Vec<(usize, String)>,
