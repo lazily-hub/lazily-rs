@@ -1181,18 +1181,29 @@ for _site, (klass, _reason) in excuses.items():
 # because a guard that quietly substitutes a number for one nobody could read is
 # reporting green over a policy nobody set.
 _pin_raw = os.environ.get("EXPECTED_LEDGERED_BLOCKS", "0")
-# Bare ASCII digits only, and deliberately stricter than both `int()` and
-# `str.isdigit()`: `int("1_0")` is 10, `int(" 7 ")` is 7, and `"\u0663".isdigit()`
-# is true, so a typo in an override can silently mean a number nobody wrote. A
-# negative is refused by the same check — no ledger size can equal it, so it
-# would make this guard unsatisfiable rather than exact.
+# ONE parse for the whole family (#lzpinparsestrict): a NON-EMPTY run of bare
+# ASCII digits `0`-`9`, and nothing else. Deliberately stricter than both `int()`
+# and `str.isdigit()`, because each of those silently accepts a number nobody
+# wrote: `int("1_0")` is 10 (PEP 515 separators), `int(" 7 ")` is 7, and
+# `"\u0663".isdigit()` is true for the Arabic-Indic three. Refused here:
+# whitespace around or inside, a leading `+` or `-`, separators, a radix prefix,
+# a float or an exponent, and any non-ASCII digit. A negative falls out of the
+# same check — no ledger size can equal it, so it would make this guard
+# unsatisfiable rather than exact. Leading zeros are fine and `0` stays valid;
+# five bindings in this family pin at zero.
+#
+# An UNSET variable takes the committed literal above. An EXPLICITLY EMPTY one is
+# a REJECTION, not a fall-through to it: `os.environ.get(NAME, DEFAULT)`
+# distinguishes the two, and whoever exported the wrong thing is the one person
+# who cannot see that it was ignored.
 if not _pin_raw or _pin_raw.strip("0123456789"):
     sys.stderr.write(
         "FAIL: EXPECTED_LEDGERED_BLOCKS=%r is not a non-negative integer in bare\n"
-        "      digits. This pin is an EXACT size for the unbound-block ledger, and\n"
-        "      an unreadable override does not fall back to the committed literal: a\n"
-        "      guard that substitutes a number for one nobody could read reports\n"
-        "      green over a policy nobody set.\n" % _pin_raw
+        "      ASCII digits (#lzpinparsestrict). This pin is an EXACT size for the\n"
+        "      unbound-block ledger, and an unreadable override does not fall back\n"
+        "      to the committed literal — not even an empty one: a guard that\n"
+        "      substitutes a number for one nobody could read reports green over a\n"
+        "      policy nobody set.\n" % _pin_raw
     )
     sys.exit(1)
 EXPECTED_LEDGERED_BLOCKS = int(_pin_raw)
