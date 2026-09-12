@@ -2,6 +2,7 @@
 
 mod common;
 
+use common::Expect;
 #[cfg(feature = "async")]
 use lazily::{AsyncBoundaryIngressCell, AsyncContext};
 use lazily::{
@@ -374,89 +375,128 @@ fn u64s(value: &Value) -> Vec<u64> {
         .collect()
 }
 
-fn assert_delivery(actual: Option<&BoundaryDeliveryReceipt>, expected: &Value, where_: &str) {
+/// The `delivery` sub-block, guarded by a DESCENDED tracker.
+///
+/// This used to iterate the fixture's keys and `panic!` on an unrecognised one —
+/// a hand-rolled copy of rung 2, one of two in this file. The instinct was
+/// right and the place was wrong: a per-runner copy holds only while that
+/// runner remembers it, it cannot see a key that is read and then discarded, and
+/// rung 0 saw nothing at all because no block here was ever BOUND
+/// (`#lzrsbindpending`). Iteration is now inverted — the runner names the keys it
+/// implements and the tracker reports whatever is left over.
+fn assert_delivery(actual: Option<&BoundaryDeliveryReceipt>, expect: &Expect, where_: &str) {
     let actual = actual.expect("active delivery");
-    let object = expected.as_object().expect("delivery object");
-    for (key, value) in object {
-        match key.as_str() {
-            "receipt_id" => assert_eq!(
-                actual.receipt_id,
-                value.as_str().expect("receipt id"),
-                "{where_}"
-            ),
-            "targets" => assert_eq!(
-                actual.targets.iter().cloned().collect::<Vec<_>>(),
-                strings(value),
-                "{where_}"
-            ),
-            "acked" => assert_eq!(
-                actual.acknowledged.iter().cloned().collect::<Vec<_>>(),
-                strings(value),
-                "{where_}"
-            ),
-            "converged" => {
-                assert_eq!(
-                    actual.converged(),
-                    value.as_bool().expect("bool"),
-                    "{where_}"
-                )
-            }
-            other => panic!("{where_}: unknown delivery assertion {other}"),
-        }
-    }
+    expect.assert_key_if_present("receipt_id", |value| {
+        assert_eq!(
+            actual.receipt_id,
+            value.as_str().expect("receipt id"),
+            "{where_}"
+        )
+    });
+    expect.assert_key_if_present("targets", |value| {
+        assert_eq!(
+            actual.targets.iter().cloned().collect::<Vec<_>>(),
+            strings(value),
+            "{where_}"
+        )
+    });
+    expect.assert_key_if_present("acked", |value| {
+        assert_eq!(
+            actual.acknowledged.iter().cloned().collect::<Vec<_>>(),
+            strings(value),
+            "{where_}"
+        )
+    });
+    expect.assert_key_if_present("converged", |value| {
+        assert_eq!(
+            actual.converged(),
+            value.as_bool().expect("bool"),
+            "{where_}"
+        )
+    });
 }
 
-fn assert_expected(actual: &BoundaryIngressProjection<String>, expected: &Value, where_: &str) {
-    let object = expected.as_object().expect("expected object");
-    for (key, value) in object {
-        match key.as_str() {
-            "phase" => assert_eq!(
-                phase(actual.phase),
-                value.as_str().expect("phase"),
-                "{where_}"
-            ),
-            "generation" => {
-                assert_eq!(
-                    actual.generation,
-                    value.as_u64().expect("generation"),
-                    "{where_}"
-                )
-            }
-            "cursor" => assert_eq!(actual.cursor, value.as_u64(), "{where_}"),
-            "buffered_cursors" => {
-                assert_eq!(actual.buffered_cursors, u64s(value), "{where_}")
-            }
-            "source_keys" => assert_eq!(actual.source_keys, strings(value), "{where_}"),
-            "members" => assert_eq!(actual.members, strings(value), "{where_}"),
-            "validation" => assert_eq!(
-                actual.validation,
-                validation(value.as_str().expect("validation")),
-                "{where_}"
-            ),
-            "replay_from" => assert_eq!(actual.replay_from, value.as_u64(), "{where_}"),
-            "stale_events" => assert_eq!(
-                actual.stale_events,
-                value.as_u64().expect("stale events"),
-                "{where_}"
-            ),
-            "delivery" => assert_delivery(actual.active_delivery.as_ref(), value, where_),
-            "ready" => assert_eq!(
-                actual.readiness() == BoundaryIngressReadiness::Ready,
-                value.as_bool().expect("ready"),
-                "{where_}"
-            ),
-            "fresh" => assert_eq!(
-                actual.freshness == BoundaryFreshness::Fresh,
-                value.as_bool().expect("fresh"),
-                "{where_}"
-            ),
-            "observation_revision" | "revision" => assert_eq!(
+/// A step's `expected` block, guarded by the tracker rather than by a loop.
+///
+/// The second hand-rolled rung 2 in this file, and the same inversion: the
+/// runner names what it implements, `Expect` reports what nothing read. `phase`
+/// and `generation` are asserted unconditionally because every step carries
+/// them; the rest are optional, and an absent key carries no obligation.
+fn assert_expected(actual: &BoundaryIngressProjection<String>, expect: &Expect, where_: &str) {
+    expect.assert_key_if_present("phase", |value| {
+        assert_eq!(
+            phase(actual.phase),
+            value.as_str().expect("phase"),
+            "{where_}"
+        )
+    });
+    expect.assert_key_if_present("generation", |value| {
+        assert_eq!(
+            actual.generation,
+            value.as_u64().expect("generation"),
+            "{where_}"
+        )
+    });
+    expect.assert_key_if_present("cursor", |value| {
+        assert_eq!(actual.cursor, value.as_u64(), "{where_}")
+    });
+    expect.assert_key_if_present("buffered_cursors", |value| {
+        assert_eq!(actual.buffered_cursors, u64s(value), "{where_}")
+    });
+    expect.assert_key_if_present("source_keys", |value| {
+        assert_eq!(actual.source_keys, strings(value), "{where_}")
+    });
+    expect.assert_key_if_present("members", |value| {
+        assert_eq!(actual.members, strings(value), "{where_}")
+    });
+    expect.assert_key_if_present("validation", |value| {
+        assert_eq!(
+            actual.validation,
+            validation(value.as_str().expect("validation")),
+            "{where_}"
+        )
+    });
+    expect.assert_key_if_present("replay_from", |value| {
+        assert_eq!(actual.replay_from, value.as_u64(), "{where_}")
+    });
+    expect.assert_key_if_present("stale_events", |value| {
+        assert_eq!(
+            actual.stale_events,
+            value.as_u64().expect("stale events"),
+            "{where_}"
+        )
+    });
+    expect.assert_key_if_present("ready", |value| {
+        assert_eq!(
+            actual.readiness() == BoundaryIngressReadiness::Ready,
+            value.as_bool().expect("ready"),
+            "{where_}"
+        )
+    });
+    expect.assert_key_if_present("fresh", |value| {
+        assert_eq!(
+            actual.freshness == BoundaryFreshness::Fresh,
+            value.as_bool().expect("fresh"),
+            "{where_}"
+        )
+    });
+    // Two spellings of one claim, both carried by this corpus.
+    for key in ["observation_revision", "revision"] {
+        expect.assert_key_if_present(key, |value| {
+            assert_eq!(
                 actual.revision,
                 value.as_u64().expect("revision"),
                 "{where_}"
-            ),
-            other => panic!("{where_}: unknown boundary assertion {other}"),
-        }
+            )
+        });
+    }
+    // `delivery` is object-valued, so it is consumed by DESCENT
+    // (`#lzsubblockkeyset`): the child owns every sub-key, and a field planted
+    // in the corpus fails as an unconsumed key rather than being compared by
+    // nothing.
+    if let Some(delivery) = expect.sub_if_present("delivery") {
+        assert_delivery(actual.active_delivery.as_ref(), &delivery, where_);
+        delivery.finish();
     }
 }
 
@@ -517,11 +557,17 @@ fn replay<M: Model>() -> usize {
                 "tick" => model.tick(op["now"].as_u64().expect("now")),
                 other => panic!("{id} step {index}: unknown op {other}"),
             }
+            let expected = Expect::new(
+                FIXTURE.to_string(),
+                format!("scenarios[{id}].steps[{index}].expected"),
+                &step["expected"],
+            );
             assert_expected(
                 &model.projection(),
-                &step["expected"],
+                &expected,
                 &format!("{id} step {index}"),
             );
+            expected.finish();
             count += 1;
         }
     }
