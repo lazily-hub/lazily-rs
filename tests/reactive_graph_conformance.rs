@@ -200,13 +200,20 @@ fn run_corpus<M: GraphModel>() {
         // ONE guard for the fixture-level `expected` tail (`#lzassertunknownkeys`),
         // shared by the scenario replays and the `observationally_equal` check
         // below, so no key of that block goes unread.
-        let fixture_expected =
-            Expect::new(format!("{SPEC_DIR}/{name}"), "expected", &fx["expected"]);
+        let spec_path = format!("{SPEC_DIR}/{name}");
+        let fixture_expected = Expect::new(spec_path.clone(), "expected", &fx["expected"]);
         let models: Vec<M>;
         let reports: Vec<Report> = match fx["shape"].as_str() {
             Some("steps") => {
                 models = vec![M::create()];
-                vec![replay(&models[0], name, arr(&fx["steps"]), None)]
+                vec![replay(
+                    &models[0],
+                    name,
+                    &spec_path,
+                    "",
+                    arr(&fx["steps"]),
+                    None,
+                )]
             }
             Some("scenarios") => {
                 let count = fx["scenarios"]
@@ -219,8 +226,15 @@ fn run_corpus<M: GraphModel>() {
                 // scenario this fold never reached.
                 common::scenarios(&format!("{SPEC_DIR}/{name}"), &fx)
                     .zip(&models)
-                    .map(|((_i, _id, s), m)| {
-                        replay(m, name, arr(&s["steps"]), Some(&fixture_expected))
+                    .map(|((i, _id, s), m)| {
+                        replay(
+                            m,
+                            name,
+                            &spec_path,
+                            &format!("scenarios[{i}]."),
+                            arr(&s["steps"]),
+                            Some(&fixture_expected),
+                        )
                     })
                     .collect()
             }

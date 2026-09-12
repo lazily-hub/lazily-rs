@@ -91,6 +91,8 @@ fn catch_armed_failure<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Res
 pub fn replay<'a, M: GraphModel>(
     model: &'a M,
     fixture: &str,
+    spec_path: &str,
+    label_prefix: &str,
     steps: &[Value],
     tail: Option<&Expect>,
 ) -> Report {
@@ -491,9 +493,29 @@ pub fn replay<'a, M: GraphModel>(
         // order on the last one.
         let cleaned: Vec<String> = log_snapshot(model.cleanup_log());
 
-        let Some(expect) = step.get("expect").and_then(Value::as_object) else {
+        let Some(block) = step.get("expect").filter(|v| v.is_object()) else {
             continue;
         };
+        // BOUND to the tracker (`#lzrsbindpending`). The loop this replaces
+        // iterated the fixture's keys and `panic!`ed on an unrecognised one —
+        // the third hand-rolled copy of rung 2 in this suite, and the largest:
+        // 113 sites. The instinct is right and the place is wrong. A per-runner
+        // copy holds only while that runner remembers it; it cannot see rung 3
+        // at all, because a key read and then discarded satisfies the loop; and
+        // rung 0 saw nothing either way, since no per-step block here was ever
+        // BOUND. The fixture-level `expected` tail below has used `Expect`
+        // since it was written — the per-step blocks simply never got it.
+        //
+        // Iteration is INVERTED: the runner names what it implements and the
+        // tracker reports what nothing read. Every object-valued key is consumed
+        // by DESCENT (`#lzsubblockkeyset`), so the child owns every node id and a
+        // node the corpus adds fails as an unconsumed key rather than being
+        // compared by nothing — the same shape the tail already uses.
+        let expect = Expect::new(
+            spec_path.to_owned(),
+            format!("{label_prefix}steps[{i}].expect"),
+            block,
+        );
 
         // `computes_of` is evaluated BEFORE every other key, and deliberately.
         //
@@ -504,8 +526,9 @@ pub fn replay<'a, M: GraphModel>(
         // make a non-conforming one agree with it.
         // `dispose_signal_reverts_to_lazy` step 3 is exactly that pairing, and
         // it is the only step that separates a real `dispose_signal` from a
-        // no-op. Relying on the map's key order for this would be a silent
-        // dependency on serde_json's `preserve_order` feature.
+        // no-op. Ordering this by the tracker call sequence, rather than by the
+        // key order of a map, is what keeps it from being a silent dependency on
+        // serde_json's `preserve_order` feature.
         //
         // On `lazily` itself the order happens not to matter — the steps that
         // pair `computes_of` with a read are steps where the read recomputes
@@ -514,8 +537,8 @@ pub fn replay<'a, M: GraphModel>(
         // it is exactly the binding whose `dispose_signal` leaves a live puller
         // behind that a read-first ordering would let through, so the guard
         // stays.
-        if let Some(want) = expect.get("computes_of") {
-            for (id, v) in want.as_object().unwrap() {
+        if let Some(want) = expect.sub_if_present("computes_of") {
+            for id in node_ids(&want) {
                 // `computes_of` on a derived node reads its compute counter; on
                 // an *effect* (e.g. `merge_folds`'s `watch`, an observer of the
                 // accumulator) the "computes" are its runs, already recorded in
@@ -531,141 +554,180 @@ pub fn replay<'a, M: GraphModel>(
                         _ => panic!("{fixture}: computes_of unknown node {id}"),
                     },
                 };
-                check!(format!("computes_of.{id}"), got, v.as_u64().unwrap());
+                want.assert_key_with(id.as_str(), |v| {
+                    check!(format!("computes_of.{id}"), got, v.as_u64().unwrap());
+                });
             }
+            want.finish();
         }
 
-        for (key, want) in expect {
-            match key.as_str() {
-                "note" | "computes_of" => {}
-                // `#lzmergefeed`: cumulative fold count for a merge cell. Not
-                // ordering-sensitive against reads (a read never folds), so it
-                // is checked here in step order rather than pre-evaluated like
-                // `computes_of`.
-                "merges_of" => {
-                    for (id, v) in want.as_object().unwrap() {
-                        let counter = merges
-                            .get(id.as_str())
-                            .unwrap_or_else(|| panic!("{fixture}: merges_of unknown cell {id}"));
-                        check!(
-                            format!("merges_of.{id}"),
-                            merges_seen(counter) as u64,
-                            v.as_u64().unwrap()
-                        );
-                    }
-                }
-                // `#lzfeedbackdrain`: did the op's settle exhaust the effect
-                // drain? A divergent scheduler-closed loop must report `true`
-                // rather than hang; a converging op reports `false`.
-                "drain_exhausted" => {
-                    check!(
-                        "drain_exhausted",
-                        model.drain_exhausted(),
-                        want.as_bool().unwrap()
-                    );
-                }
-                "dependents_of" => {
-                    for (id, v) in want.as_object().unwrap() {
-                        check!(
-                            format!("dependents_of.{id}"),
-                            degree!(id.as_str(), dependents_of),
-                            v.as_u64().unwrap() as usize
-                        );
-                    }
-                }
-                "dependencies_of" => {
-                    for (id, v) in want.as_object().unwrap() {
-                        check!(
-                            format!("dependencies_of.{id}"),
-                            degree!(id.as_str(), dependencies_of),
-                            v.as_u64().unwrap() as usize
-                        );
-                    }
-                }
-                // Any non-null error code means "this op must fail"; null means
-                // "must not". The runner does not model error identity — the
-                // fixtures carry the code so the contract is legible, and each
-                // binding's own tests pin which error it raises.
-                "error" => check!("error", op_error, !want.is_null()),
-                "value" => {
-                    if expect.get("error").and_then(Value::as_str).is_none() {
-                        // The signal fixtures assert `value` on the `signal`
-                        // CREATION op, not only on `read` ops. Only `read` sets
-                        // `op_value`, so without this fallback the assertion
-                        // would compare `None` against the expected number —
-                        // which fails loudly here, but in a runner that treated
-                        // a missing value as "nothing to check" would silently
-                        // assert nothing. The read is issued lazily, *after*
-                        // `computes_of` has already been evaluated above, so it
-                        // cannot mask a deferred materialization.
-                        // `#lzmergefeed`: a feed effect's op id is the effect
-                        // (unreadable), so its `value` assertion targets the
-                        // merge cell it feeds — the accumulator whose baseline
-                        // fold the step is pinning. Otherwise (signal creation)
-                        // the op id is itself the readable node.
-                        let read_target = op["merges_into"].as_str().or_else(|| op["id"].as_str());
-                        let got = match op_value {
-                            Some(v) => Some(v),
-                            None => read_target.and_then(|id| read_id!(id).ok()),
-                        };
-                        check!("value", got, want.as_i64());
-                    }
-                }
-                "read" => {
-                    for (id, v) in want.as_object().unwrap() {
-                        check!(
-                            format!("read.{id}"),
-                            read_id!(id.as_str()),
-                            Ok(v.as_i64().unwrap())
-                        );
-                    }
-                }
-                "readable" => {
-                    for (id, v) in want.as_object().unwrap() {
-                        // A signal is readable iff its backing slot is: clause 4
-                        // says disposing the puller leaves the value live, so
-                        // this must NOT consult the puller's active flag.
-                        let alive = if signals.contains_key(id.as_str()) {
-                            read_id!(id.as_str()).is_ok()
-                        } else {
-                            match nodes.get(id.as_str()) {
-                                None => false,
-                                Some(Ref::Effect(h)) => model.is_effect_active(*h),
-                                Some(_) => read_id!(id.as_str()).is_ok(),
-                            }
-                        };
-                        check!(format!("readable.{id}"), alive, v.as_bool().unwrap());
-                    }
-                }
-                "observed_by" => check!("observed_by", observed.clone(), strs(want)),
-                "observed_count" => {
-                    check!(
-                        "observed_count",
-                        observed.len() as u64,
-                        want.as_u64().unwrap()
-                    )
-                }
-                "cleanup_order" => {
-                    // Only effects run a cleanup callback, so the expected order
-                    // is projected onto its effect entries.
-                    let want: Vec<String> = strs(want)
-                        .into_iter()
-                        .filter(|id| matches!(stale.get(id), Some(Ref::Effect(_))))
-                        .collect();
-                    check!("cleanup_order", cleaned.clone(), want);
-                }
-                "scope_owned_count" => {
-                    for (name, v) in want.as_object().unwrap() {
-                        check!(
-                            format!("scope_owned_count.{name}"),
-                            scopes[name.as_str()].owned() as u64,
-                            v.as_u64().unwrap()
-                        );
-                    }
-                }
-                other => panic!("{fixture}: unknown expectation {other}"),
+        // `note` needs no excuse here: it is one of `Expect`'s ANNOTATION_KEYS,
+        // exempt by name precisely because this corpus carries 89 per-step ones
+        // and no runner should hand-wave each. A per-step `excuse_key("note")`
+        // was written here first and then deleted after measuring that removing
+        // it reddens nothing — a redundant excuse is the hand-waving the
+        // exemption exists to prevent.
+
+        // `#lzmergefeed`: cumulative fold count for a merge cell. Not
+        // ordering-sensitive against reads (a read never folds), so it is
+        // checked after `computes_of` rather than pre-evaluated with it.
+        if let Some(want) = expect.sub_if_present("merges_of") {
+            for id in node_ids(&want) {
+                let counter = merges
+                    .get(id.as_str())
+                    .unwrap_or_else(|| panic!("{fixture}: merges_of unknown cell {id}"));
+                let got = merges_seen(counter) as u64;
+                want.assert_key_with(id.as_str(), |v| {
+                    check!(format!("merges_of.{id}"), got, v.as_u64().unwrap());
+                });
             }
+            want.finish();
         }
+
+        // `#lzfeedbackdrain`: did the op's settle exhaust the effect drain? A
+        // divergent scheduler-closed loop must report `true` rather than hang; a
+        // converging op reports `false`.
+        expect.assert_key_if_present("drain_exhausted", |want| {
+            check!(
+                "drain_exhausted",
+                model.drain_exhausted(),
+                want.as_bool().unwrap()
+            );
+        });
+
+        if let Some(want) = expect.sub_if_present("dependents_of") {
+            for id in node_ids(&want) {
+                let got = degree!(id.as_str(), dependents_of);
+                want.assert_key_with(id.as_str(), |v| {
+                    check!(
+                        format!("dependents_of.{id}"),
+                        got,
+                        v.as_u64().unwrap() as usize
+                    );
+                });
+            }
+            want.finish();
+        }
+
+        if let Some(want) = expect.sub_if_present("dependencies_of") {
+            for id in node_ids(&want) {
+                let got = degree!(id.as_str(), dependencies_of);
+                want.assert_key_with(id.as_str(), |v| {
+                    check!(
+                        format!("dependencies_of.{id}"),
+                        got,
+                        v.as_u64().unwrap() as usize
+                    );
+                });
+            }
+            want.finish();
+        }
+
+        // Any non-null error code means "this op must fail"; null means "must
+        // not". The runner does not model error identity — the fixtures carry
+        // the code so the contract is legible, and each binding's own tests pin
+        // which error it raises.
+        expect.assert_key_if_present("error", |want| {
+            check!("error", op_error, !want.is_null());
+        });
+
+        // Read against the RAW block, not through the tracker: this only
+        // decides whether `value` is checked at all, and `error` has its own
+        // assertion above.
+        if block.get("error").and_then(Value::as_str).is_none() {
+            expect.assert_key_if_present("value", |want| {
+                // The signal fixtures assert `value` on the `signal` CREATION
+                // op, not only on `read` ops. Only `read` sets `op_value`, so
+                // without this fallback the assertion would compare `None`
+                // against the expected number — which fails loudly here, but in
+                // a runner that treated a missing value as "nothing to check"
+                // would silently assert nothing. The read is issued lazily,
+                // *after* `computes_of` has already been evaluated above, so it
+                // cannot mask a deferred materialization.
+                // `#lzmergefeed`: a feed effect's op id is the effect
+                // (unreadable), so its `value` assertion targets the merge cell
+                // it feeds — the accumulator whose baseline fold the step is
+                // pinning. Otherwise (signal creation) the op id is itself the
+                // readable node.
+                let read_target = op["merges_into"].as_str().or_else(|| op["id"].as_str());
+                let got = match op_value {
+                    Some(v) => Some(v),
+                    None => read_target.and_then(|id| read_id!(id).ok()),
+                };
+                check!("value", got, want.as_i64());
+            });
+        }
+        // No `else` excusing `value`: no block in this corpus carries a string
+        // `error` AND a `value` (8 carry the error, none the pair), so an excuse
+        // here would name a key that is never present. `assert_key_if_present`
+        // already treats an absent key as carrying no obligation.
+
+        if let Some(want) = expect.sub_if_present("read") {
+            for id in node_ids(&want) {
+                let got = read_id!(id.as_str());
+                want.assert_key_with(id.as_str(), |v| {
+                    check!(format!("read.{id}"), got, Ok(v.as_i64().unwrap()));
+                });
+            }
+            want.finish();
+        }
+
+        if let Some(want) = expect.sub_if_present("readable") {
+            for id in node_ids(&want) {
+                // A signal is readable iff its backing slot is: clause 4 says
+                // disposing the puller leaves the value live, so this must NOT
+                // consult the puller's active flag.
+                let alive = if signals.contains_key(id.as_str()) {
+                    read_id!(id.as_str()).is_ok()
+                } else {
+                    match nodes.get(id.as_str()) {
+                        None => false,
+                        Some(Ref::Effect(h)) => model.is_effect_active(*h),
+                        Some(_) => read_id!(id.as_str()).is_ok(),
+                    }
+                };
+                want.assert_key_with(id.as_str(), |v| {
+                    check!(format!("readable.{id}"), alive, v.as_bool().unwrap());
+                });
+            }
+            want.finish();
+        }
+
+        expect.assert_key_if_present("observed_by", |want| {
+            check!("observed_by", observed.clone(), strs(want));
+        });
+        expect.assert_key_if_present("observed_count", |want| {
+            check!(
+                "observed_count",
+                observed.len() as u64,
+                want.as_u64().unwrap()
+            );
+        });
+        expect.assert_key_if_present("cleanup_order", |want| {
+            // Only effects run a cleanup callback, so the expected order is
+            // projected onto its effect entries.
+            let want: Vec<String> = strs(want)
+                .into_iter()
+                .filter(|id| matches!(stale.get(id), Some(Ref::Effect(_))))
+                .collect();
+            check!("cleanup_order", cleaned.clone(), want);
+        });
+
+        if let Some(want) = expect.sub_if_present("scope_owned_count") {
+            for name in node_ids(&want) {
+                let got = scopes[name.as_str()].owned() as u64;
+                want.assert_key_with(name.as_str(), |v| {
+                    check!(
+                        format!("scope_owned_count.{name}"),
+                        got,
+                        v.as_u64().unwrap()
+                    );
+                });
+            }
+            want.finish();
+        }
+
+        expect.finish();
     }
 
     // -- `scenarios`-shaped tail --------------------------------------------
