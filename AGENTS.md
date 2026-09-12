@@ -234,11 +234,31 @@ this repo.
   ledger on the manifest's terms, and `check-conformance-coverage.sh` fails on
   any inventoried block with no bind, carries a `KNOWN_UNBOUND_BLOCKS` excuse
   list (currently EMPTY, reason REQUIRED) so an unbindable block is visible
-  every run rather than invisible, and enforces a `MIN_BLOCKS` floor because
-  zero declared blocks means zero unbound blocks reported OK over nothing.
-  30/30 blocks bound. Validated in four directions: a declared block with no
-  bind FAILS naming it, the floor FAILS when raised above the real count, an
-  absent ledger FAILS as missing evidence, and the real ledger passes
+  every run rather than invisible, and asserts the inventory's MAGNITUDE because
+  zero declared blocks means zero unbound blocks reported OK over nothing. That
+  magnitude is no longer a `MIN_BLOCKS` floor (`#lzblockmagnitudeaudit`): a typed
+  number drifts by hand and a `>=` cannot see a shrink that stays above it. It is
+  DERIVED from the corpus listing minus this crate's own `KNOWN_UNCOVERED`, on
+  TWO dimensions — 36 assertion-block SITES and 30 distinct DIGESTS — each an
+  EQUALITY. Both are needed: a digest count absorbs the deletion of a block whose
+  bytes recur elsewhere (ten of the 36 sites carry a recurring shape;
+  `signaling/frames.json` spells `{"to": 2}` four times), and a site count
+  absorbs a content edit that collapses two distinct claims into one.
+  36/36 sites bound. Validated in five directions: a declared block with no bind
+  FAILS naming it; deleting a recurring-digest block moves SITES alone; collapsing
+  a unique-digest block moves DIGESTS alone; a corpus with every narrow-walk block
+  stripped FAILS on the zero-guard rather than passing over an empty comparison;
+  and a digest twin that hashes the same shape differently FAILS the set-identity
+  cross-check, which neither cardinality can see. An absent ledger FAILS as
+  missing evidence, and the real ledger passes.
+  SCOPE — the walk is NARROW and deriving the number does not settle that: it
+  reads the top-level `assertions` object plus the `assertions` object of each
+  element of the top-level `frames`/`scenarios`/`rejects` arrays, which is 36 of
+  the 771 sites the same 150 opened fixtures carry when every block name is read
+  at every depth (4.7%). The whole remainder is the four names this walk never
+  looks at — `expected` 434 sites, `expect` 295, `expect_initial` 3,
+  `expect_after` 3 — and ZERO `assertions` blocks are missed at any depth, so the
+  gap is block NAMES, not depth. Widening it is its own separate piece of work
 - `tests/common/expect.rs` — the assertion-key guard
   (`#lzassertunknownkeys`, `#lzconsumednotasserted`), the two rungs below the
   manifest. Rung 2: having OPENED a fixture, did the runner CONSUME the keys it
