@@ -445,6 +445,80 @@ EXPECTED_GATE_STEPS=(
 	"ci-reach	CI-reachability guard"
 )
 
+# ------------------------------------------- the REACH MODE pin (#lzcheckcireachguard)
+#
+# Which closure members are reached by CI invoking `make <target>` rather than by
+# spelling the gate's command. Pinned by NAME, by set equality, in both
+# directions -- because refusing a member a gate-step entry is NOT the same as
+# pinning that it is make-invoked, and the difference is a measured false green.
+#
+# The map above fixes 46 members. This set fixes the other 4. Before it existed,
+# "which members are make-invoked" was fixed only as the COMPLEMENT of the map --
+# and a population pinned only as another population's complement is not pinned
+# against an edit that moves BOTH TOGETHER (lazily-dart's formulation, after
+# lazily-cpp falsified the complement argument by testing it; dart then
+# reproduced it and retracted its own). Reproduced here on `test-shm`:
+#
+#   1. change its CI step body from the cargo command to `make test-shm`
+#   2. delete its `"test-shm<TAB>Test zero-copy shm transport"` entry above
+#
+# EACH HALF ALONE EXITS 1 -- half 1 on the reverse-direction rung (an entry whose
+# target was not step-checked), half 2 on the unpinned rung. TOGETHER THEY EXIT 0
+# with stderr EMPTY, because the deleted entry is the evidence that would have
+# made the mode change visible. The whole trace was one OK line's counts moving
+#
+#   46 member(s) ... ; 4 reached by CI invoking make by name
+#   45 member(s) ... ; 5 reached by CI invoking make by name
+#
+# and ci.yml's guard step asserts exit status plus `grep -q "check-ci-reach: OK"`,
+# both of which that run satisfies -- so it would have been GREEN on the runner.
+# A COUNT IS NOT A PIN. That is the same lesson the closure pin above records for
+# `${#EXPECTED_CLOSURE_TARGETS[@]}`, arriving by a different route.
+#
+# What the edit actually costs is the whole point of the map: once CI says
+# `make test-shm`, the CI step no longer independently spells the gate, so the
+# recipe-swap this map exists to catch becomes undetectable for that member
+# again -- faithfully, because CI now runs whatever the recipe says. That is a
+# legitimate thing to do and an illegitimate thing to do SILENTLY.
+#
+# rs is the family's most exposed binding here: 4 make-invoked members is the
+# largest such population, and 46 anchor-reached is the largest complement.
+#
+# It also protects the anchor collision this binding deliberately routes around.
+# `test-lean-formal` and `test-lazily-formal` both reduce to `lake build`, and
+# both are make-invoked, so `make_invokes` short-circuits before `anchor_reached`
+# ever sees them. With the mode unpinned, moving either one to anchor-reached put
+# the colliding pair back into the anchor-matching path with nothing said; now it
+# takes an edit here, and the member then needs a gate-step entry whose anchor
+# `lake build` is in ZERO of ci.yml's 59 steps, so it fails loudly.
+#
+# AND STEP-SCOPING REPAIRS THAT COLLISION RATHER THAN MERELY AVOIDING IT, which
+# was measured rather than hoped. Move BOTH lean targets to anchor-reached (CI
+# spelling `cd lean-spec && lake build` and `cd lean-formal && lake build`), pin
+# each to its own step, and then DELETE one of the two steps:
+#
+#   step-scoped  -> exit 1, naming the deleted step
+#   flat haystack (revert the one line that narrows it) -> exit 0
+#
+# because under the flat check the surviving step's `lake build` satisfies the
+# deleted one's anchor. So the anchor collision is not merely kept out of this
+# rung -- inside this rung it stops being exploitable.
+#
+# THE POSITIONAL INVOCATION MASK IS UNAFFECTED BY A MODE FLIP, also measured. The
+# mask is derived from two `make -n $ROOT_TARGET` dry runs, so it is a property of
+# the Makefile alone; a mode flip edits ci.yml and this script and touches neither
+# dry run. With both lean targets flipped, the oracle line still read `63 command
+# line(s)` and `0 per-invocation token(s) masked`, byte-identical to a clean run.
+# A member does not change which side of the mask it is evaluated on, because the
+# mask has no sides: it is applied to both sides of every oracle comparison, and
+# the oracle does not consult reach mode at all.
+EXPECTED_MAKE_INVOKED=(
+	"benchmark-check"
+	"benchmark-evidence"
+	"test-lazily-formal"
+	"test-lean-formal"
+)
+
 # WHAT THESE PINS CANNOT SEE. Stated here rather than left implied, because a
 # pin reads as a stronger claim than it is (#lzpinreachclosure).
 #
@@ -1259,6 +1333,28 @@ for gs_entry in "${EXPECTED_GATE_STEPS[@]}"; do
 	fi
 done
 
+# MUTUALLY EXCLUSIVE with the mode pin (lazily-go's finding). Every gate-carrying
+# non-excused member belongs to exactly ONE of the two arrays: it is either
+# checked inside a named CI step, or reached by CI invoking make by name. A target
+# in BOTH is already fatal downstream -- whichever mode it is actually in, the
+# other array's entry becomes an orphan or an unobserved pin -- but it is fatal
+# for a reason that names the wrong thing, and stating the property here is what
+# stops either array from absorbing what the other drops.
+step_map_both="$(comm -12 \
+	<(printf '%s\n' "${EXPECTED_GATE_STEPS[@]}" | awk -F'\t' 'NF { print $1 }' | sort -u) \
+	<(printf '%s\n' "${EXPECTED_MAKE_INVOKED[@]:-}" | awk 'NF' | sort -u))"
+if [ -n "$step_map_both" ]; then
+	echo "check-ci-reach: target(s) in BOTH EXPECTED_GATE_STEPS and EXPECTED_MAKE_INVOKED:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$step_map_both"
+	echo "A member is reached ONE way: checked inside a named CI step, or invoked as" >&2
+	echo "\`make <target>\`. Listing it both ways lets each array look complete while the" >&2
+	echo "other is what is really in force (#lzcheckcireachguard)." >&2
+	step_map_status=1
+fi
+
 # Duplicate TARGET keys: the first entry wins in `gate_step_of`, so a second one
 # is a silent no-op and the reader cannot tell which step is in force.
 step_map_dupe_keys="$(printf '%s' "$step_map_keys" | awk 'NF' | sort | uniq -d)"
@@ -1365,6 +1461,17 @@ steps_running_anchor() {
 		}
 		END { for (st in seen) print st }
 	' "$ci_step_anchor"
+}
+
+# Are ALL of these anchors reachable somewhere in CI (the flat haystack)? Used
+# only to pick the right SUBJECT for a member with no map entry.
+step_globally_reached() {
+	local a
+	while IFS= read -r a; do
+		[ -n "$a" ] || continue
+		anchor_reached "$a" || return 1
+	done <<<"$1"
+	return 0
 }
 
 # The step this target's gate is pinned to, or a non-zero status if unmapped.
@@ -1578,6 +1685,8 @@ step_mapped_count=0
 step_unmapped=""
 step_unmapped_count=0
 makeinv_count=0
+# Members observed to be reached by CI invoking make by name, for the mode pin.
+makeinv_seen=""
 # Targets whose excuse is GOOD and which still carry a map entry.
 excused_mapped=""
 stale=""
@@ -1714,9 +1823,14 @@ while IFS= read -r target; do
 	pinned_step=""
 	if make_invokes "$target"; then
 		# CI names the target and lets make decide what that means, so there is
-		# no CI-side spelling of the gate to scope. Deliberately unmapped; the
-		# set-equality rung below keeps it deliberate.
+		# no CI-side spelling of the gate to scope. Deliberately unmapped, and
+		# the mode set-equality rung below is what keeps it deliberate rather
+		# than merely counted. Excused targets are left to the excuse rungs, for
+		# the same reason they are left out of the orphan comparison.
 		makeinv_count=$((makeinv_count + 1))
+		if ! is_excused "$target"; then
+			makeinv_seen="$makeinv_seen$target"$'\n'
+		fi
 	elif is_excused "$target"; then
 		# GLOBAL on purpose, and this is the one place that stays global: a stale
 		# excuse is the claim "CI does not run this ANYWHERE", so narrowing the
@@ -1740,15 +1854,32 @@ while IFS= read -r target; do
 			fi
 		done <<<"$target_anchors"
 	else
-		# Its own category, never folded into `unreached` (the same rule the
-		# `unreadable` category follows): "CI does not run this" and "this guard
-		# was never told where CI runs it" are different claims, and the second
-		# one is about the map, not about CI. `continue` keeps it out of every
-		# count, and the refusal below is fatal before any count is printed.
-		step_unmapped="$step_unmapped$target"$'\n'
-		step_unmapped_count=$((step_unmapped_count + 1))
-		printf 'UNMAPPED %s\n' "$target"
-		continue
+		# NO MAP ENTRY. Which of two things that is depends on whether CI runs
+		# the gate ANYWHERE, and asking is what keeps the subject right
+		# (lazily-cpp's ordering finding). Deleting a member's CI step AND its
+		# entry together reported "EXPECTED_GATE_STEPS does not map it to a CI
+		# step", which sends the reader to ADD A PIN -- the wrong fix for a gate
+		# that has left CI. Measured on `test-shm`.
+		if step_globally_reached "$target_anchors"; then
+			# Its own category, never folded into `unreached` (the same rule the
+			# `unreadable` category follows): "CI does not run this" and "this
+			# guard was never told WHERE CI runs it" are different claims, and
+			# the second one is about the map, not about CI. `continue` keeps it
+			# out of every count, and the refusal below is fatal before any
+			# count is printed.
+			step_unmapped="$step_unmapped$target"$'\n'
+			step_unmapped_count=$((step_unmapped_count + 1))
+			printf 'UNMAPPED %s\n' "$target"
+			continue
+		fi
+		# CI does not run it at all, so the missing entry is a consequence, not
+		# the fault. Fall through to the pre-existing unreached verdict, which
+		# names the anchors no CI step runs.
+		hit=0
+		while IFS= read -r a; do
+			[ -n "$a" ] || continue
+			anchor_reached "$a" || missing_anchors="$missing_anchors$a"$'\n'
+		done <<<"$target_anchors"
 	fi
 
 	if is_excused "$target"; then
@@ -1811,6 +1942,62 @@ if [ "$unreadable_count" -gt 0 ]; then
 	echo "An unreadable recipe is NOT a recipe with no gate in it. Left unread, each of" >&2
 	echo "these would have been reported as 'runs no checkable command' and stopped being" >&2
 	echo "required to appear in CI, with this script still exiting 0." >&2
+	exit 1
+fi
+
+# THE REACH MODE PIN, set-equal in both directions, and ordered BEFORE the
+# unpinned rung below (#lzcheckcireachguard). The order is load-bearing: a member
+# that switched to `make <target>` and lost its entry in the same edit must be
+# reported as a MODE CHANGE, not as a missing pin, or the remedy the reader is
+# handed is "add an entry" -- which would re-pin a gate CI no longer spells and
+# make the false green permanent.
+mode_status=0
+makeinv_seen_sorted="$(printf '%s' "$makeinv_seen" | awk 'NF' | sort)"
+makeinv_pin_sorted="$(printf '%s\n' "${EXPECTED_MAKE_INVOKED[@]:-}" | awk 'NF' | sort)"
+
+makeinv_new="$(comm -13 <(printf '%s\n' "$makeinv_pin_sorted" | awk 'NF') <(printf '%s\n' "$makeinv_seen_sorted" | awk 'NF'))"
+if [ -n "$makeinv_new" ]; then
+	echo >&2
+	echo "check-ci-reach: target(s) now reached by CI invoking \`$MAKE_BIN <target>\` that" >&2
+	echo "                EXPECTED_MAKE_INVOKED does not pin:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$makeinv_new"
+	echo >&2
+	echo "A CI step that says \`$MAKE_BIN <target>\` no longer SPELLS the gate, so this guard" >&2
+	echo "can no longer tell whether the recipe still runs what it used to -- CI faithfully" >&2
+	echo "runs whatever the recipe says. That is a legitimate change and an illegitimate" >&2
+	echo "SILENT one, which is why the mode is pinned rather than counted: with it only" >&2
+	echo "counted, making this change and deleting the target's EXPECTED_GATE_STEPS entry in" >&2
+	echo "the same edit exited 0 with stderr empty." >&2
+	echo >&2
+	echo "  - the CI step was changed by MISTAKE: restore the command it spelled." >&2
+	echo "  - CI really should run it through make now: add the target here AND remove its" >&2
+	echo "    EXPECTED_GATE_STEPS entry, in the same commit, so the diff shows a gate" >&2
+	echo "    leaving step-scoped enforcement on purpose (#lzcheckcireachguard)." >&2
+	mode_status=1
+fi
+
+makeinv_gone="$(comm -23 <(printf '%s\n' "$makeinv_pin_sorted" | awk 'NF') <(printf '%s\n' "$makeinv_seen_sorted" | awk 'NF'))"
+if [ -n "$makeinv_gone" ]; then
+	echo >&2
+	echo "check-ci-reach: target(s) pinned in EXPECTED_MAKE_INVOKED that CI no longer invokes" >&2
+	echo "                as \`$MAKE_BIN <target>\`:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$makeinv_gone"
+	echo >&2
+	echo "Usually GOOD news -- a gate CI used to run through make is now spelled out in a" >&2
+	echo "step, which is the stronger form. Then the remedy is to remove the entry here and" >&2
+	echo "add one to EXPECTED_GATE_STEPS naming that step. It is also what a rename, a" >&2
+	echo "retirement, or a newly-added excuse looks like from this side; the closure pin and" >&2
+	echo "the excuse rungs say which (#lzcheckcireachguard)." >&2
+	mode_status=1
+fi
+
+if [ "$mode_status" -ne 0 ]; then
 	exit 1
 fi
 
@@ -2069,8 +2256,19 @@ oracle_sig_count="$(awk 'NF { n++ } END { print n + 0 }' "$oracle_sig")"
 oracle_sig_distinct="$(cut -f2 "$oracle_sig" | sort -u | awk 'NF { n++ } END { print n + 0 }')"
 echo "check-ci-reach: closure oracle matched — $oracle_root_count command line(s) in \`$MAKE_BIN -n $ROOT_TARGET\`, set-equal to the union of the closure members' own commands ($oracle_mask_count per-invocation token(s) masked); $oracle_sig_count member(s) reduce to $oracle_sig_distinct distinct command set(s); $nogate_count carrying no gate, set-equal to EXPECTED_NO_GATE_TARGETS"
 
+# BOTH SIDES of both equalities are printed, never one side twice
+# (lazily-go's finding). go reverted one direction of its mode equality and the
+# line still read `1 reached by make invocation, 0 pinned as such, set-equal` --
+# one against zero, called set-equal -- because the sentence restated the
+# observed count and asserted the equality rather than showing what it compared.
+# The array is data; the equality is the check; the line has to show the
+# comparison it claims. Same rule the oracle line above follows for
+# `51 member(s) reduce to 51 distinct command set(s)`.
 step_map_distinct="$(printf '%s\n' "${EXPECTED_GATE_STEPS[@]}" | awk -F'\t' 'NF { print $2 }' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
-echo "check-ci-reach: gate step map matched — $step_mapped_count member(s) checked inside their pinned CI step, $step_map_distinct distinct step name(s) each unique among the $ci_step_total run: step(s) in ${workflows[*]}; $makeinv_count reached by CI invoking make by name and deliberately unmapped"
+step_map_pinned="$(printf '%s\n' "${EXPECTED_GATE_STEPS[@]}" | awk -F'\t' 'NF { print $1 }' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
+makeinv_pinned="$(printf '%s\n' "${EXPECTED_MAKE_INVOKED[@]:-}" | awk 'NF' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
+step_partition_total="$((step_mapped_count + makeinv_count + excused_ok))"
+echo "check-ci-reach: gate step map matched — $step_mapped_count member(s) checked inside their pinned CI step of $step_map_pinned pinned in EXPECTED_GATE_STEPS, over $step_map_distinct distinct step name(s) each unique among the $ci_step_total run: step(s) in ${workflows[*]}; $makeinv_count reached by CI invoking make by name of $makeinv_pinned pinned in EXPECTED_MAKE_INVOKED; the two are disjoint and together with $excused_ok excused partition the $step_partition_total gate-carrying member(s)"
 
 # A guard that examined nothing must not report OK — the same vacuity rule the
 # conformance guards apply (#lzvacuousrun).
