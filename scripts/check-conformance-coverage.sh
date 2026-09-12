@@ -956,12 +956,16 @@ PY
 # without deleting entries and coverage cannot regress upward without someone
 # adding one by hand.
 #
-# 113 entries, all `bind-pending`, all reachable: every one is a per-step
-# expectation its runner already reads and compares — what is missing is the
-# routing through `Expect`, not the assertion. Two step loops account for all of
-# them: reactive-graph 113 (`#lzrsbindpending`). This list is expected
-# to SHRINK; shrinking it is the work, and `#lzrsblockwalk` widened the walk
-# precisely so that the work is countable instead of invisible.
+# EMPTY, and the size pin below says so in a way that fails if it stops being
+# true (`#lzrsbindpending`, `#lzledgerratchet`). It held 201 entries when
+# `#lzrsblockwalk` widened the walk — semtree_incremental 6,
+# boundary_ingress_adapter 28, stdlib 54, reactive-graph 113 — all `bind-pending`
+# and all reachable: every one was a per-step expectation its runner already read
+# and compared, missing the routing through `Expect` rather than the assertion.
+# All 201 have been migrated, so 771 of 771 sites are BOUND and nothing is
+# excused. Shrinking this list was the work; keeping it at zero is now the
+# invariant, and widening the walk is what made either countable instead of
+# invisible.
 #
 # lazily-kt is the warning about how this shrinks: its first migration pass
 # measured a 100 percent higher-rung failure rate — every block it bound then
@@ -972,10 +976,6 @@ PY
 # key (`#lzsubblockkeyset`), and one failed rung 2 as an assertion key never
 # consumed. Budget for the rung above, not for a mechanical edit.
 KNOWN_UNBOUND_BLOCKS=(
-
-  # ingress — 28 sites in boundary_ingress_adapter.json, one step loop.
-
-  # ingress — 28 sites in boundary_ingress_adapter.json, one step loop.
 
 )
 
@@ -1133,44 +1133,110 @@ by_class = {}
 for _site, (klass, _reason) in excuses.items():
     by_class[klass] = by_class.get(klass, 0) + 1
 
-# A CEILING on the excused population — and the resolution of a disagreement
-# with lazily-kt, which pins a typed COUNT of its bind-pending set beside the
-# same set equality (`#lzrsbindpending`).
+# An EXACT SIZE on the excused population (`#lzledgerratchet`), and the
+# resolution of a disagreement with lazily-kt, which pins a typed COUNT of its
+# bind-pending set beside the same set equality (`#lzrsbindpending`).
 #
-# A typed count that mirrors the current population is redundant with the set
-# equality above and can only ever drift away from it: if the sets are equal the
-# counts are equal, so the number adds no information and adds an edit site. That
-# is the `MIN_BLOCKS = 30` shape, and refusing it is right.
+# The defect a typed number usually carries is not that a number EXISTS; it is
+# that the number has SLACK. A floor far below reality never fires, so nobody
+# ever updates it, and it silently absorbs every detachment above it. `962923a`
+# read that as an argument against measuring the excused population at all, and
+# pinned a `<=` ceiling here instead, on the grounds that a policy does not
+# drift with the corpus the way a measurement does.
 #
-# But set equality alone has a hole a count does close: it is satisfied by ANY
-# consistent pair. A commit that detaches fifty binds AND writes fifty entries
-# passes both directions. Nothing above sees that — the magnitude rung does not
-# either, because the sites are still DECLARED, only no longer bound.
+# That was right about the hole and wrong about the operator.
 #
-# The fix is not a count of what is excused; it is a CEILING on how much may be.
-# A ceiling is a policy rather than a measurement, so it does not drift with the
-# corpus and never needs re-pinning except deliberately, upward, in review. At
-# zero it also needs no maintenance at all. What it buys is that a regression and
-# its excuse can no longer land in the same commit unnoticed: raising this line is
-# the explicit act.
+# The hole is real: set equality alone is satisfied by ANY consistent pair. A
+# commit that detaches fifty binds AND writes the fifty matching entries passes
+# both directions, and the magnitude rung does not see it either, because the
+# sites are still DECLARED and only no longer bound. Closing it needs a number
+# compared against a COMMITTED CONSTANT rather than against the run, because
+# both sides of the set equality move together under that commit and a constant
+# does not. That independence is the whole value, and it is why ledger size is
+# not the redundant number a derivable floor is: it follows from nothing in this
+# script, unlike a fixture floor that is just the corpus minus a ledger already
+# read here.
 #
-# Raise it ONLY for a genuinely unbindable block, with the `unreachable` class and
-# a reason, and expect to be asked why the capability cannot exist. Never raise it
-# to park a `bind-pending` site — that is the laundering this guard exists to
-# refuse.
-MAX_LEDGERED_BLOCKS = int(os.environ.get("MAX_LEDGERED_BLOCKS", "0"))
-if len(excuses) > MAX_LEDGERED_BLOCKS:
+# But a `<=` ceiling SELF-DISABLES. It refuses that commit only while slack is
+# zero. Migrate one site and the ledger shrinks while the constant stays put;
+# slack becomes 1, and the same detach-plus-excuse commit passes again for as
+# many sites as have been migrated since anyone last re-pinned. Held at a
+# nonzero value across a few migrations it converges on exactly the
+# floor-with-slack shape it was introduced to replace.
+#
+# An equality has no slack by construction and cannot rot quietly, because a
+# stale value FAILS. That is a ratchet rather than drift: GROWTH means an excuse
+# was added, SHRINK means sites were migrated and this line was not lowered in
+# the same commit, and both are things a person must see in a diff.
+#
+# Raising it is legitimate — a corpus that gains a genuinely unbindable block is
+# the real case — but it must be deliberate and visible right here, with the
+# `unreachable` class and a reason, and expect to be asked why the capability
+# cannot exist. Never raise it to park a `bind-pending` site; that is the
+# laundering this guard exists to refuse.
+#
+# The pinned value is the `"0"` literal below — the env var exists so a probe can
+# vary it without editing the file, not so a caller can relax it. An override
+# that cannot be read fails closed rather than silently reverting to the literal,
+# because a guard that quietly substitutes a number for one nobody could read is
+# reporting green over a policy nobody set.
+_pin_raw = os.environ.get("EXPECTED_LEDGERED_BLOCKS", "0")
+# Bare ASCII digits only, and deliberately stricter than both `int()` and
+# `str.isdigit()`: `int("1_0")` is 10, `int(" 7 ")` is 7, and `"\u0663".isdigit()`
+# is true, so a typo in an override can silently mean a number nobody wrote. A
+# negative is refused by the same check — no ledger size can equal it, so it
+# would make this guard unsatisfiable rather than exact.
+if not _pin_raw or _pin_raw.strip("0123456789"):
     sys.stderr.write(
-        "FAIL: %d assertion-block site(s) are ledgered as unbound; the ceiling is %d.\n"
-        "      The set equality above only checks that the ledger and the run AGREE,\n"
-        "      which any consistent pair satisfies — a commit that detaches binds and\n"
-        "      writes the matching entries passes it. This ceiling is what makes\n"
-        "      enlarging the excused set an explicit act instead of a side effect.\n"
-        "      Bind the block. Raise this line only for a genuinely unbindable one,\n"
-        "      with the `unreachable` class and a reason:\n" % (len(excuses), MAX_LEDGERED_BLOCKS)
+        "FAIL: EXPECTED_LEDGERED_BLOCKS=%r is not a non-negative integer in bare\n"
+        "      digits. This pin is an EXACT size for the unbound-block ledger, and\n"
+        "      an unreadable override does not fall back to the committed literal: a\n"
+        "      guard that substitutes a number for one nobody could read reports\n"
+        "      green over a policy nobody set.\n" % _pin_raw
     )
-    for site, (klass, reason) in sorted(excuses.items()):
+    sys.exit(1)
+EXPECTED_LEDGERED_BLOCKS = int(_pin_raw)
+
+if len(excuses) != EXPECTED_LEDGERED_BLOCKS:
+    plural = "y" if len(excuses) == 1 else "ies"
+    if len(excuses) > EXPECTED_LEDGERED_BLOCKS:
+        sys.stderr.write(
+            "FAIL: the unbound-block ledger GREW to %d entr%s against a pin of %d.\n"
+            "      The set equality above cannot see this. It checks only that the\n"
+            "      ledger and the RUN agree, and a detached bind's site is still\n"
+            "      DECLARED — so a commit that detaches binds and writes the matching\n"
+            "      entries satisfies both of its directions. This pin is compared\n"
+            "      against a COMMITTED CONSTANT, which does not move when the run\n"
+            "      does. Bind the block. Raise the pin only for a genuinely\n"
+            "      unbindable one, with the `unreachable` class and a reason:\n"
+            % (len(excuses), plural, EXPECTED_LEDGERED_BLOCKS)
+        )
+    else:
+        sys.stderr.write(
+            "FAIL: the unbound-block ledger SHRANK to %d entr%s and the pin is still\n"
+            "      %d. LOWER THE PIN TO %d IN THIS COMMIT. The migration is the good\n"
+            "      news; leaving the pin above the ledger is what re-arms the defect\n"
+            "      this pin replaced, because the difference is slack that silently\n"
+            "      absorbs exactly that many future detachments. An equality is a\n"
+            "      ratchet only while it is lowered by the same commit that earns the\n"
+            "      lower number.%s\n"
+            % (
+                len(excuses),
+                plural,
+                EXPECTED_LEDGERED_BLOCKS,
+                len(excuses),
+                " The ledger now holds:" if excuses else " The ledger is now EMPTY.",
+            )
+        )
+    # Capped. Thirty unchanging lines train a reader to skip the whole block,
+    # and every entry is in `git diff` anyway.
+    for site, (klass, reason) in sorted(excuses.items())[:20]:
         sys.stderr.write("        %s [%s] %s\n" % (site, klass, reason))
+    if len(excuses) > 20:
+        sys.stderr.write(
+            "        ... and %d more; `git diff` the ledger for the rest.\n"
+            % (len(excuses) - 20)
+        )
     sys.exit(1)
 
 # A bind a runner made that the LOADER never declared (`#lzrunnerownjsonclone`).
@@ -1508,9 +1574,11 @@ if rebuilt:
 print(
     "assertion-block bind OK: %d sites / %d distinct blocks inventoried from OPENED "
     "fixtures under every block name at every depth (#lzrsblockwalk). %d site(s) BOUND "
-    "by a runner, %d ledgered of at most %d (%s) — the ledger is an EQUALITY against the "
-    "run, failing on an unbound site nobody excused AND on an excuse the run outlived, "
-    "under a CEILING that makes enlarging it an explicit act. %d bind(s) the "
+    "by a runner, %d ledgered of exactly %d pinned (%s) — the ledger is an EQUALITY "
+    "against the run, failing on an unbound site nobody excused AND on an excuse the run "
+    "outlived, under a SIZE PIN that is itself an EQUALITY against a committed constant, "
+    "so it fails on an added excuse AND on a migration that left the pin stale "
+    "(#lzledgerratchet). %d bind(s) the "
     "loader never declared — %d below an emitted block, %d matching no corpus object "
     "(#lzrunnerownjsonclone). Both dimensions "
     "DERIVED from %d opened of %d canonical fixtures and asserted EQUAL, and the two "
@@ -1520,7 +1588,7 @@ print(
         len(declared),
         len(declared_sites) - len(excuses),
         len(excuses),
-        MAX_LEDGERED_BLOCKS,
+        EXPECTED_LEDGERED_BLOCKS,
         ", ".join(
             "%d %s" % (count, klass) for klass, count in sorted(by_class.items())
         )

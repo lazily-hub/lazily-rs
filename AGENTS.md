@@ -263,17 +263,39 @@ this repo.
   site the run DID bind — or for a site the corpus does not carry — FAILS as
   stale. Nothing else catches that one, because the forward loop `continue`s
   before it consults the ledger, and with the list empty it is the live
-  direction. (3) CEILING: `MAX_LEDGERED_BLOCKS`, default **0**. Set equality
-  alone is satisfied by any CONSISTENT PAIR, so a commit that detaches fifty
-  binds and writes the fifty matching entries passes both directions, and the
-  magnitude rung does not see it either — the sites are still DECLARED, just no
-  longer bound. Demonstrated: dropping one `bound` line and adding its entry gets
-  past both directions and is refused only by the ceiling. A ceiling is a POLICY
-  rather than a measurement, so unlike a typed count of the current population it
-  does not drift with the corpus and never needs re-pinning except deliberately,
-  upward, in review. That is also the answer carried to `#lzktbindpending`, where
-  kt pins a mirroring count instead: drop the count, add the ceiling — unless the
-  pending set is matched by PATTERN rather than enumerated, since a pattern can
+  direction. (3) SIZE PIN: `EXPECTED_LEDGERED_BLOCKS`, an EXACT equality, pinned
+  at **0** (`#lzledgerratchet`). Set equality alone is satisfied by any
+  CONSISTENT PAIR, so a commit that detaches fifty binds and writes the fifty
+  matching entries passes both directions, and the magnitude rung does not see it
+  either — the sites are still DECLARED, just no longer bound. Demonstrated:
+  dropping one `bound` line and adding its entry gets past both directions and is
+  refused only by this pin. What closes the hole is that the pin compares the
+  ledger against a COMMITTED CONSTANT rather than against the run, and both sides
+  of the set equality move together under that commit while a constant does not.
+  The operator is an equality in BOTH directions, and the shrink direction is the
+  one that matters for keeping it honest. `962923a` shipped this as a `<=`
+  ceiling, reasoning that a policy does not drift the way a measurement does.
+  A `<=` ceiling SELF-DISABLES: it refuses the attack only while slack is zero,
+  and every migration that shrinks the ledger without lowering the constant adds
+  a slack of one, so after a few migrations the same detach-plus-excuse commit
+  passes again — converging on exactly the floor-with-slack shape the pin was
+  introduced to replace. Measured, three steps: at a ceiling of 2 with 2
+  ledgered, the attack is refused; migrate one and leave the ceiling at 2 and it
+  exits 0; the attack then passes. Under the equality, step 2 FAILS unless the
+  same commit lowers the pin, and the attack on the migrated state is refused. An
+  equality has no slack by construction and cannot rot quietly, because a stale
+  value FAILS — that is a ratchet, not drift. The cost is one deliberate edit per
+  migration, which is the point: growth means an excuse was added, shrink means
+  sites were migrated and the pin was not lowered, and both are things a person
+  must see in a diff. A malformed, empty or negative override fails closed rather
+  than reverting to the committed literal, in bare ASCII digits only — `int()`
+  reads `1_0` as 10 and ` 7 ` as 7, so a typo would otherwise mean a number
+  nobody wrote. That is also the answer carried to
+  `#lzktbindpending`, where kt pins a mirroring count beside the same set
+  equality: the count is not redundant and not wrong to have — ledger size is
+  derivable from nothing, unlike a fixture floor that is the corpus minus a
+  ledger the script already reads — but it must be an EQUALITY, and a pending set
+  matched by PATTERN rather than enumerated needs it doubly, since a pattern can
   widen silently and set equality cannot see it.
   WHAT THE MIGRATION COST, measured rather than predicted. lazily-kt's 28-of-28
   higher-rung failure rate did NOT generalise. Across the seven blocks rs
