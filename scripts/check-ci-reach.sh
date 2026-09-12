@@ -235,6 +235,186 @@ EXPECTED_NO_GATE_TARGETS=(
 	"conformance-manifest-reset"
 )
 
+# ------------------------------------------------ the GATE STEP map (#lzcheckcireachguard)
+#
+# Which CI STEP is supposed to run each gate, pinned by the step's NAME, so reach
+# is checked INSIDE that step instead of anywhere in the workflow.
+#
+# WHAT THIS CLOSES. The recipe-swap attack the block above records as standing:
+# point one member's recipe at a command that some CI step runs but no other
+# member does. Every existing rung is satisfied -- the name is still on the
+# `check:` line, the recipe is still non-empty, no two members collide, and the
+# command really is in `make -n check`, so both oracle directions pass -- and
+# `anchor_reached` passes too, because it asks whether ANY of the 122 command
+# lines scraped out of ci.yml contains the anchor. Measured here, not supposed:
+# replacing `test-shm`'s recipe with `npm run check` (the `signaling` job's
+# `Typecheck + test` step, a command no closure member runs) printed
+#
+#   reached  test-shm
+#   check-ci-reach: OK — 50 target(s) reached by CI, 0 excused, 2 carrying no gate
+#
+# at exit 0, stdout BYTE-IDENTICAL to a clean run over all 2133 bytes and stderr
+# empty, with `npm` appearing nowhere. The shm and blob-backend rungs were gone
+# and the guard approved. Step-scoping exits 1 on that same Makefile and names
+# the member, the step it is pinned to, and the anchor absent from it.
+#
+# WHY THE NAME AND NOT THE RECIPE. The obvious alternative is a per-member recipe
+# anchor -- a second spelling of every recipe inside this guard -- which this
+# script's header records as the mistake that cost lazily-cpp a hand-written
+# equality assertion, and whose churn is recipe-rate: every added flag moves it,
+# so it gets updated reflexively and becomes a passes-when-stale check. A step
+# name moves only when a step is renamed. A recipe gaining a flag moves the
+# recipe and the CI step together and this map does not move at all.
+#
+# WHAT IT DOES NOT COVER, and this is the measurement that decided the shape.
+# Four closure members are reached by CI invoking make BY NAME:
+#
+#   test-lean-formal      make test-lean-formal     (job `lean`)
+#   test-lazily-formal    make test-lazily-formal   (job `lean`)
+#   benchmark-evidence    make benchmark-evidence   (job `benchmark-budgets`)
+#   benchmark-check       make benchmark-check      (job `benchmark-budgets`)
+#
+# For those, CI's instruction is "run the target", so there is no independent
+# CI-side spelling of the gate to cross-check and pinning a step name asserts
+# NOTHING: repoint the recipe and `make test-lean-formal` still runs whatever the
+# recipe now says, faithfully. They are deliberately absent from this map, and
+# the set-equality rung below is what keeps that deliberate rather than
+# forgotten -- if CI ever stops invoking one through make, it starts being
+# anchor-checked and the map must gain an entry.
+#
+# That split was the open question for rs and it came out 46 anchor-reached to 4
+# make-invoked, not the other way round. Three things that look like they should
+# raise the make-invoked count do not, and each was counted rather than assumed:
+#
+#   * `make check` appears in ci.yml NINE times and invokes nothing. Eight are
+#     COMMENT lines -- the trap this script's header exists for -- and the ninth,
+#     at :444, is inside an `echo "::error::a make check gate is unreachable from
+#     CI"` STRING. The quoted-string variant is the sharper form of the same
+#     trap: it survives a grep that has learned to skip `#` lines, which is how
+#     the count seven was arrived at before it was measured.
+#   * regressions.yml invokes `make benchmark-check` and
+#     `make benchmark-evidence-record` for real, and does not count: ci-reach.conf
+#     lists ci.yml ALONE, because a scheduled workflow does not gate the commit
+#     that broke a gate. Read the `workflow:` KEYS, not a grep for the filename --
+#     the conf mentions regressions.yml only in the comment explaining its
+#     exclusion, so a grep for the name finds a hit that means the opposite.
+#   * this binding has no ancestor-invocation credit at all. `make_invokes`
+#     matches the target's OWN name, so unlike lazily-gd -- whose guard credits
+#     reach through `make_invokes_ancestor` and which is excluded from this design
+#     for that reason -- a `make check` step here would credit only the `check`
+#     target itself, which carries no gate.
+#
+# THE ANCHOR COLLISION DOES NOT REACH THIS RUNG. `test-lean-formal` and
+# `test-lazily-formal` both reduce to the anchor `lake build` -- the measurement
+# recorded at the collision check below, and the reason this binding's oracle
+# compares raw lines rather than anchors. Those two are exactly two of the four
+# make-invoked members, so `make_invokes` short-circuits before `anchor_reached`
+# runs and their anchors are never consulted here. Measured: `lake build` is in
+# ZERO of ci.yml's 59 steps, so with the make-invocation credit removed both
+# targets read as MISSING rather than as reaching each other's step. The
+# collision lives in the oracle's comparison domain; this map lives in
+# `anchor_reached`'s. They do not meet.
+#
+# STEP NAMES ARE NOT GLOBALLY UNIQUE, so uniqueness is asserted rather than
+# assumed. Across this repo's four workflows there are 68 `run:` steps and 64
+# distinct names -- four collisions: `Install Rust stable` appears four times
+# (ci.yml `test`, ci.yml `benchmark-budgets`, regressions.yml `loom`,
+# regressions.yml `benchmark-budgets`) and `Test loom model` twice (ci.yml
+# `test`, regressions.yml `loom`). Only ONE of those collisions is inside the
+# haystack this guard reads, since ci-reach.conf lists ci.yml alone: `Install
+# Rust stable` in jobs `test` and `benchmark-budgets`. No gate step collides
+# today -- all 46 names below are unique among ci.yml's 59 steps -- and the rung
+# below refuses a pinned name that is not, rather than silently pinning two
+# steps at once. Qualifying every entry by job was considered and rejected as
+# decoration: all 46 live in the single `test` job, so a `test/` prefix would
+# discriminate nothing while adding a second thing to keep in sync.
+#
+# IT ALSO CLOSES THE OPPOSITE ATTACK -- DELETING A CI STEP -- and in rs that one
+# is a PRESENT defect, not a hypothetical (lazily-cs found the shape). The flat
+# haystack asks whether the member's anchors are an in-order subsequence of SOME
+# CI command, and a narrower step's command is routinely a superset of a broader
+# one's. Measured over ci.yml's 59 steps: 8 of the 46 members below have their
+# whole anchor set contained in at least one OTHER step's command --
+#
+#   test                    `cargo test --locked`                         39 other steps
+#   test-thread-safe        `cargo test --locked --features thread-safe`   5 other steps
+#   test-async              `cargo test --locked --features async`         5 other steps
+#   test-crdt-plane         ... --features distributed webrtc              1 other step
+#   test-ffi                ... --features ffi --test ffi                  1 other step
+#   test-signaling-client   ... --features signaling-client                1 other step
+#   test-webrtc             ... --features webrtc-str0m                    1 other step
+#   ci-reach                `check-ci-reach.sh`                            1 other step
+#
+# -- so for each of those, DELETING its real CI step passed. Reproduced against
+# the pre-fix script on the worst one: with the `Test default features` step
+# (`cargo +stable test --locked`, the entire default-feature suite) deleted from
+# ci.yml outright, the guard printed
+#
+#   check-ci-reach: OK — 50 target(s) reached by CI, 0 excused, 2 carrying no gate
+#
+# at exit 0, stdout BYTE-IDENTICAL to a healthy run over all 2133 bytes, stderr
+# empty -- because 39 narrower `cargo test --locked --features ...` steps each
+# contain `cargo test --locked` as a subsequence. rs is the family'"'"'s worst case for
+# this by a wide margin: it has the most steps, and its whole test matrix is one
+# program with additive flags, which is exactly the shape that makes every
+# narrower step a superset of the broader one.
+#
+# Note which rung catches it: the EXISTENCE rung below, not the reach check. A
+# deleted step takes its NAME with it, and a map that pins names notices a name
+# that is gone. That is why the existence rung is fatal rather than a fallback to
+# the flat haystack.
+#
+# Editing this map is a LEGITIMATE act, like editing the closure pin: renaming a
+# CI step must edit it, and the guard says so by name.
+EXPECTED_GATE_STEPS=(
+	"fmt	Check formatting"
+	"clippy	Clippy"
+	"build	Build"
+	"test	Test default features"
+	"test-thread-safe	Test thread-safe feature (#lzthreadsafe)"
+	"test-tokio	Test Tokio feature"
+	"test-async	Test async feature"
+	"test-async-resolve	Test async resolve-loop windows (#k03k)"
+	"test-loom	Test loom model"
+	"test-distributed	Test distributed feature"
+	"test-crdt-plane	Test distributed CRDT plane runtime integration (#lzcrdtplane5b)"
+	"test-interop-peer	Interop peer self-check (#lzinteroppeerci)"
+	"test-distributed-conformance	Test distributed conformance corpus"
+	"test-ffi	Test FFI surface (JSON codec)"
+	"test-ffi-binary	Test FFI surface (binary codec)"
+	"test-ipc	Test IPC transport (JSON codec)"
+	"test-ipc-binary	Test IPC transport (binary codec)"
+	"test-json-base64	Test IPC transport (json-base64 codec)"
+	"test-ipc-conformance	Test IPC conformance against canonical spec fixtures (#lzspecconf)"
+	"test-codec-roundtrip-conformance	Test frame-codec round-trip conformance against canonical spec fixtures"
+	"test-nodeid-exact-range-conformance	Test NodeId exact-representation bound against canonical spec fixtures"
+	"test-nodekey-null-leniency-conformance	Test NodeKey null-leniency against canonical spec fixtures"
+	"test-blob-backend-discriminator-conformance	Test blob-backend discriminator strictness against canonical spec fixtures"
+	"test-reliable-sync-conformance	Test reliable-sync conformance against canonical spec fixtures"
+	"test-protobuf-graph-boundary	Test generated Protobuf graph-boundary interop"
+	"test-durable-outbox	Test durable outbox store protocol against canonical spec fixtures"
+	"test-shm	Test zero-copy shm transport"
+	"test-collections-conformance	Test keyed cell collections conformance against canonical spec fixtures (#lzcellfamily)"
+	"test-collections-family-conformance	Test keyed collections family conformance across all three flavors"
+	"test-queue-family-conformance	Test queue family conformance across all three flavors"
+	"test-ingress-family-conformance	Test ingress family conformance across all three flavors"
+	"test-egress-family-conformance	Test egress family conformance across all three flavors"
+	"test-queue-conformance	Test reactive queue conformance against canonical spec fixtures"
+	"test-queue-demand-driven	Test demand-driven reader-kinds + store-without-cascade (Phase 0"
+	"test-seqcrdt-conformance	Test SeqCrdt conformance against canonical spec fixtures (#lzseqcrdt)"
+	"test-registers-conformance	Test register CRDT conformance against canonical spec fixtures"
+	"test-lossless-tree	Test lossless-tree CRDT conformance against canonical spec fixtures"
+	"test-schema-compliance	Test JSON Schema compliance against canonical spec schemas (#lzspecschema)"
+	"test-statechart-conformance	Test statechart conformance against canonical spec fixtures"
+	"test-signaling-client	Test signaling client feature"
+	"test-webrtc	Test WebRTC DataChannel transport + str0m backend (#webrtcbackend)"
+	"test-webrtc-signaling	Test WebRTC handshake over signaling"
+	"test-websocket	Test WebSocket DataChannel backend (#akp3)"
+	"conformance-coverage	Conformance coverage + scenario replay ledger (#lzguardsnotinci)"
+	"assertion-ordering-check	Assertion observation ordering (#lzassertordering)"
+	"ci-reach	CI-reachability guard"
+)
+
 # WHAT THESE PINS CANNOT SEE. Stated here rather than left implied, because a
 # pin reads as a stronger claim than it is (#lzpinreachclosure).
 #
@@ -705,6 +885,118 @@ ci_commands() {
 	' "$@"
 }
 
+# The same scrape, but per STEP: every `run:` step's commands tagged with the
+# step's NAME (#lzcheckcireachguard). `ci_commands` above deliberately flattens
+# every workflow into one set, because that is the right haystack for the
+# question "does CI run this anywhere" -- which is what a stale EXCUSE is about.
+# It is the wrong haystack for "does the step that is supposed to run this gate
+# run it", and that difference is what the step map below checks.
+#
+# STEP NAMES ARE READ THE WAY YAML READS THEM, not as raw line text, and that is
+# load-bearing here rather than pedantic: ci.yml carries
+# `- name: Test demand-driven reader-kinds + store-without-cascade (Phase 0 #relaycell)`
+# and a plain YAML scalar ENDS at ` #`, so the step's real name stops at
+# `(Phase 0`. A scan that kept the raw text would pin a name no step has, and the
+# pin would then be checked against a set it can never match. A quoted name is
+# taken verbatim, comment character included, for the same reason.
+#
+# A `name:`/`run:` pair is recognized only when both keys sit at the SAME column,
+# which is what makes a step's own keys distinguishable from a nested `with:`
+# sub-key that happens to be called `name`, and from the enclosing JOB's `name:`
+# (ci.yml has both shapes). That pairing was checked against a real YAML parser
+# rather than trusted: over all four workflows in this repo, this scan's 68 step
+# names are identical to PyYAML's, in the same order, `(Phase 0` truncation
+# included. A leading `- ` is skipped before the column is taken, because a step's
+# first key carries the dash and its later keys do not.
+ci_step_scan() {
+	awk -v mode="$1" '
+		function flush() { if (buf != "") { print stepname "\t" buf; buf = "" } }
+		# A plain YAML scalar ends at ` #`; a quoted one does not.
+		function yaml_scalar(v,   q, i) {
+			sub(/^[[:space:]]+/, "", v)
+			q = substr(v, 1, 1)
+			if (q == "\"" || q == "'"'"'") {
+				i = index(substr(v, 2), q)
+				if (i > 0) return substr(v, 2, i - 1)
+				return substr(v, 2)
+			}
+			sub(/[[:space:]]+#.*$/, "", v)
+			sub(/[[:space:]]+$/, "", v)
+			return v
+		}
+		# Column at which this line'"'"'s mapping KEY starts, with a leading `- `
+		# sequence-item dash skipped. Returns -1 for a line that is not a key.
+		function keycol(line,   ind, rest) {
+			ind = match(line, /[^ ]/) - 1
+			if (ind < 0) return -1
+			rest = substr(line, ind + 1)
+			if (rest ~ /^-[[:space:]]+/) {
+				match(rest, /^-[[:space:]]+/)
+				return ind + RLENGTH
+			}
+			return ind
+		}
+		BEGIN { UNNAMED = "\003unnamed" }
+		FNR == 1 { flush(); delete pend }
+		{
+			line = $0
+			indent = match(line, /[^ ]/) - 1
+			if (indent < 0) indent = 9999
+
+			if (inblock) {
+				if (line ~ /^[[:space:]]*$/) next
+				if (indent <= block_indent) { flush(); inblock = 0 }
+				else {
+					sub(/^[[:space:]]+/, "", line)
+					if (substr(line, 1, 1) == "#") next
+					if (line ~ /\\[[:space:]]*$/) {
+						sub(/\\[[:space:]]*$/, "", line)
+						buf = buf " " line
+						next
+					}
+					if (buf != "") { print stepname "\t" buf " " line; buf = "" }
+					else print stepname "\t" line
+					next
+				}
+			}
+
+			kc = keycol(line)
+			# A new sequence item starts a new step: whatever name was pending at
+			# this column belonged to the PREVIOUS item (one with no `run:`, such
+			# as a `uses:` step) and must not be inherited.
+			if (kc >= 0 && substr(line, indent + 1) ~ /^-[[:space:]]/) delete pend[kc]
+
+			if (kc >= 0 && line ~ /^[[:space:]]*(-[[:space:]]+)?name:[[:space:]]*[^[:space:]]/) {
+				val = line
+				sub(/^[[:space:]]*(-[[:space:]]+)?name:[[:space:]]*/, "", val)
+				pend[kc] = yaml_scalar(val)
+				next
+			}
+
+			if (line ~ /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*[|>][-+]?[[:space:]]*$/) {
+				stepname = (kc in pend) ? pend[kc] : UNNAMED
+				delete pend[kc]
+				if (mode == "names") { print stepname; next }
+				inblock = 1
+				block_indent = indent
+				buf = ""
+				next
+			}
+			if (line ~ /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*[^|>[:space:]]/) {
+				stepname = (kc in pend) ? pend[kc] : UNNAMED
+				delete pend[kc]
+				if (mode == "names") { print stepname; next }
+				sub(/^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*/, "", line)
+				print stepname "\t" line
+			}
+		}
+		END { flush() }
+	' "${@:2}"
+}
+
+ci_step_names() { ci_step_scan names "$@"; }
+ci_step_commands() { ci_step_scan cmds "$@"; }
+
 # ------------------------------------------------------------------- normalizing
 
 # Reduce command text to anchors, one per line, each a space-separated token list.
@@ -810,6 +1102,8 @@ anchors() {
 
 ci_raw="$(mktemp)"
 ci_anchor="$(mktemp)"
+ci_step_anchor="$(mktemp)"
+ci_step_all="$(mktemp)"
 oracle_root="$(mktemp)"
 oracle_member="$(mktemp)"
 oracle_root_a_f="$(mktemp)"
@@ -841,9 +1135,135 @@ oracle_shape_unstable() {
 }
 
 oracle_sig=""
-trap 'rm -f "$ci_raw" "$ci_anchor" "$oracle_root" "$oracle_member" "$oracle_root_a_f" "$oracle_root_b_f" "$oracle_sig"' EXIT
+trap 'rm -f "$ci_raw" "$ci_anchor" "$ci_step_anchor" "$ci_step_all" "$oracle_root" "$oracle_member" "$oracle_root_a_f" "$oracle_root_b_f" "$oracle_sig"' EXIT
 ci_commands "${workflows[@]}" >"$ci_raw"
 anchors <"$ci_raw" | sort -u >"$ci_anchor"
+
+# Per-step tables for the gate-step map. `ci_step_anchor` holds
+# `<step name><TAB><anchor>`; `ci_step_all` holds one line per `run:` step so the
+# existence and uniqueness rungs can see steps that contribute no anchor at all
+# (ci.yml has four: two fixture fetches, an evidence reset, and a fixture guard).
+#
+# `anchors` is run PER COMMAND rather than over the whole file, because it emits
+# zero, one or many anchors for one input line and there would be no way to paste
+# the step tag back on afterwards. Verified to be the same haystack: with the tag
+# stripped, `ci_step_commands` over ci.yml is byte-identical to `ci_commands`
+# over it, 122 lines. Step-scoped reach is therefore a strict PARTITION of what
+# `anchor_reached` searches -- strictly stronger, never differently scoped.
+ci_step_names "${workflows[@]}" >"$ci_step_all"
+: >"$ci_step_anchor"
+while IFS=$'\t' read -r step_nm step_cmd; do
+	[ -n "$step_cmd" ] || continue
+	while IFS= read -r step_a; do
+		[ -n "$step_a" ] || continue
+		printf '%s\t%s\n' "$step_nm" "$step_a" >>"$ci_step_anchor"
+	done < <(printf '%s\n' "$step_cmd" | anchors)
+done < <(ci_step_commands "${workflows[@]}")
+
+# ------------------------------------------- the gate step map, validated up front
+#
+# Three things are checked before the map is used for anything, because each of
+# them would otherwise turn into a confusing verdict about the wrong subject
+# (#lzcheckcireachguard).
+UNNAMED_STEP=$'\003unnamed'
+
+if [ "${#EXPECTED_GATE_STEPS[@]}" -eq 0 ]; then
+	echo "check-ci-reach: EXPECTED_GATE_STEPS is EMPTY — with no gate step map every member" >&2
+	echo "                would fall through to the unmapped refusal below (#lzcheckcireachguard)." >&2
+	exit 1
+fi
+
+step_map_status=0
+step_map_keys=""
+for gs_entry in "${EXPECTED_GATE_STEPS[@]}"; do
+	gs_target="${gs_entry%%$'\t'*}"
+	gs_step="${gs_entry#*$'\t'}"
+
+	# A malformed entry (no TAB) leaves target and step equal, which would pin a
+	# gate to a step named after the target. Say so rather than searching for it.
+	if [ "$gs_step" = "$gs_entry" ] || [ -z "$gs_target" ] || [ -z "$gs_step" ]; then
+		echo "check-ci-reach: malformed EXPECTED_GATE_STEPS entry '$gs_entry' — each entry is" >&2
+		echo "                '<target><TAB><CI step name>' (#lzcheckcireachguard)." >&2
+		step_map_status=1
+		continue
+	fi
+
+	if [ "$gs_step" = "$UNNAMED_STEP" ]; then
+		echo "check-ci-reach: EXPECTED_GATE_STEPS pins '$gs_target' to the UNNAMED-step sentinel," >&2
+		echo "                which is this script's internal marker and not a step name." >&2
+		step_map_status=1
+		continue
+	fi
+
+	step_map_keys="$step_map_keys$gs_target"$'\n'
+
+	# EXISTS, and exactly once. A name no step has would fail closed -- its
+	# anchor set is empty, so the target would read as unreached -- but with the
+	# wrong subject: the gate is fine and the MAP is stale. A name TWO steps
+	# share is worse, because it silently widens the haystack back out to both
+	# of them, which is the weakening this rung exists to prevent. rs has one
+	# duplicated step name in the workflows it reads (`Install Rust stable`, in
+	# jobs `test` and `benchmark-budgets`); it carries no gate, so nothing is
+	# pinned to it, and this rung is what keeps that true.
+	gs_hits="$(awk -v want="$gs_step" '$0 == want { n++ } END { print n + 0 }' "$ci_step_all")"
+	if [ "$gs_hits" -eq 0 ]; then
+		echo "check-ci-reach: EXPECTED_GATE_STEPS pins '$gs_target' to a CI step named" >&2
+		echo "                '$gs_step', and no \`run:\` step in ${workflows[*]} has that name." >&2
+		echo "                Two things do this and they need opposite remedies:" >&2
+		echo "                  - the step was DELETED, and the gate has left CI. Restore the" >&2
+		echo "                    step. Under the flat haystack this used to pass silently" >&2
+		echo "                    whenever any other step's command happened to contain this" >&2
+		echo "                    one's (see the superset measurement at EXPECTED_GATE_STEPS)." >&2
+		echo "                  - the step was RENAMED, and the gate is fine. Update the entry" >&2
+		echo "                    to the new name." >&2
+		echo "                In neither case drop the entry: that would stop checking the gate" >&2
+		echo "                inside any step at all (#lzcheckcireachguard)." >&2
+		step_map_status=1
+	elif [ "$gs_hits" -gt 1 ]; then
+		echo "check-ci-reach: EXPECTED_GATE_STEPS pins '$gs_target' to '$gs_step', and $gs_hits" >&2
+		echo "                \`run:\` steps in ${workflows[*]} share that name." >&2
+		echo "                Pinning a name two steps share checks the gate against BOTH of" >&2
+		echo "                them, which is the widening this map exists to prevent. Rename" >&2
+		echo "                one of the steps; do not loosen this rung (#lzcheckcireachguard)." >&2
+		step_map_status=1
+	fi
+done
+
+# Duplicate TARGET keys: the first entry wins in `gate_step_of`, so a second one
+# is a silent no-op and the reader cannot tell which step is in force.
+step_map_dupe_keys="$(printf '%s' "$step_map_keys" | awk 'NF' | sort | uniq -d)"
+if [ -n "$step_map_dupe_keys" ]; then
+	echo "check-ci-reach: EXPECTED_GATE_STEPS names these target(s) more than once:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$step_map_dupe_keys"
+	echo "The first entry wins and the rest are silent no-ops (#lzcheckcireachguard)." >&2
+	step_map_status=1
+fi
+
+# An UNNAMED `run:` step that carries an anchor cannot be pinned at all, so a
+# gate that lands in one is outside this map's reach by construction. A `name:`
+# is not a behaviour change, so the remedy is to add one. ci.yml has no unnamed
+# `run:` step today; asserting that keeps it true.
+step_map_unnamed_gate="$(awk -F'\t' -v u="$UNNAMED_STEP" '$1 == u { print $2 }' "$ci_step_anchor")"
+if [ -n "$step_map_unnamed_gate" ]; then
+	echo "check-ci-reach: UNNAMED \`run:\` step(s) in ${workflows[*]} carry checkable commands:" >&2
+	while IFS= read -r c; do
+		[ -n "$c" ] || continue
+		echo "  - $c" >&2
+	done <<<"$step_map_unnamed_gate"
+	echo "A step with no \`name:\` cannot be named in EXPECTED_GATE_STEPS, so a gate that" >&2
+	echo "lands in one cannot be step-scoped. Add a \`name:\` — it is not a behaviour" >&2
+	echo "change (#lzcheckcireachguard)." >&2
+	step_map_status=1
+fi
+
+if [ "$step_map_status" -ne 0 ]; then
+	exit 1
+fi
+
+ci_step_total="$(awk 'NF { n++ } END { print n + 0 }' "$ci_step_all")"
 
 if [ ! -s "$ci_anchor" ]; then
 	echo "check-ci-reach: no run: steps found in ${workflows[*]} — a guard with an empty haystack passes everything" >&2
@@ -879,6 +1299,55 @@ make_invokes() {
 		}
 		END { exit found ? 0 : 1 }
 	' "$ci_anchor"
+}
+
+# Does the CI step NAMED $1 run a command containing anchor $2? Same subsequence
+# rule and same either-side wildcard as `anchor_reached`, with the haystack cut
+# down to one step (#lzcheckcireachguard).
+step_anchor_reached() {
+	awk -F'\t' -v want_step="$1" -v want="$2" '
+		BEGIN { ANY = "\001any"; wn = split(want, w, / /) }
+		$1 != want_step { next }
+		{
+			hn = split($2, h, / /)
+			wi = 1
+			for (hi = 1; hi <= hn && wi <= wn; hi++)
+				if (h[hi] == w[wi] || h[hi] == ANY || w[wi] == ANY) wi++
+			if (wi > wn) { found = 1; exit }
+		}
+		END { exit found ? 0 : 1 }
+	' "$ci_step_anchor"
+}
+
+# Which steps DO run a command containing anchor $1. Diagnostic only: when a
+# pinned step turns out not to run its gate, the interesting question is which
+# step does, because "some other step runs it" is the exact signature of a recipe
+# pointed at another step's gate.
+steps_running_anchor() {
+	awk -F'\t' -v want="$1" '
+		BEGIN { ANY = "\001any"; wn = split(want, w, / /) }
+		{
+			hn = split($2, h, / /)
+			wi = 1
+			for (hi = 1; hi <= hn && wi <= wn; hi++)
+				if (h[hi] == w[wi] || h[hi] == ANY || w[wi] == ANY) wi++
+			if (wi > wn) seen[$1] = 1
+		}
+		END { for (st in seen) print st }
+	' "$ci_step_anchor"
+}
+
+# The step this target's gate is pinned to, or a non-zero status if unmapped.
+gate_step_of() {
+	local t="$1" e k
+	for e in "${EXPECTED_GATE_STEPS[@]}"; do
+		k="${e%%$'\t'*}"
+		if [ "$k" = "$t" ]; then
+			printf '%s' "${e#*$'\t'}"
+			return 0
+		fi
+	done
+	return 1
 }
 
 is_excused() {
@@ -1072,6 +1541,15 @@ oracle_sig="$(mktemp)"
 
 unreached=""
 unreached_count=0
+# Members checked inside a pinned CI step, and members with no map entry
+# (#lzcheckcireachguard).
+step_mapped=""
+step_mapped_count=0
+step_unmapped=""
+step_unmapped_count=0
+makeinv_count=0
+# Targets whose excuse is GOOD and which still carry a map entry.
+excused_mapped=""
 stale=""
 stale_count=0
 nogate=""
@@ -1201,7 +1679,19 @@ while IFS= read -r target; do
 
 	hit=1
 	missing_anchors=""
-	if ! make_invokes "$target"; then
+	# Non-empty only when this target's reach was checked INSIDE a pinned step;
+	# it is what the MISSING diagnostic below reads to say which step was asked.
+	pinned_step=""
+	if make_invokes "$target"; then
+		# CI names the target and lets make decide what that means, so there is
+		# no CI-side spelling of the gate to scope. Deliberately unmapped; the
+		# set-equality rung below keeps it deliberate.
+		makeinv_count=$((makeinv_count + 1))
+	elif is_excused "$target"; then
+		# GLOBAL on purpose, and this is the one place that stays global: a stale
+		# excuse is the claim "CI does not run this ANYWHERE", so narrowing the
+		# haystack to one step would let an excuse survive for a gate CI runs in
+		# some other step -- weakening the rung in the name of strengthening it.
 		while IFS= read -r a; do
 			[ -n "$a" ] || continue
 			if ! anchor_reached "$a"; then
@@ -1209,6 +1699,26 @@ while IFS= read -r target; do
 				missing_anchors="$missing_anchors$a"$'\n'
 			fi
 		done <<<"$target_anchors"
+	elif pinned_step="$(gate_step_of "$target")"; then
+		step_mapped="$step_mapped$target"$'\n'
+		step_mapped_count=$((step_mapped_count + 1))
+		while IFS= read -r a; do
+			[ -n "$a" ] || continue
+			if ! step_anchor_reached "$pinned_step" "$a"; then
+				hit=0
+				missing_anchors="$missing_anchors$a"$'\n'
+			fi
+		done <<<"$target_anchors"
+	else
+		# Its own category, never folded into `unreached` (the same rule the
+		# `unreadable` category follows): "CI does not run this" and "this guard
+		# was never told where CI runs it" are different claims, and the second
+		# one is about the map, not about CI. `continue` keeps it out of every
+		# count, and the refusal below is fatal before any count is printed.
+		step_unmapped="$step_unmapped$target"$'\n'
+		step_unmapped_count=$((step_unmapped_count + 1))
+		printf 'UNMAPPED %s\n' "$target"
+		continue
 	fi
 
 	if is_excused "$target"; then
@@ -1217,6 +1727,9 @@ while IFS= read -r target; do
 			stale_count=$((stale_count + 1))
 		else
 			excused_ok=$((excused_ok + 1))
+			if gate_step_of "$target" >/dev/null; then
+				excused_mapped="$excused_mapped$target"$'\n'
+			fi
 			printf 'excused  %-32s %s\n' "$target" "$(excuse_reason "$target")"
 		fi
 		continue
@@ -1231,7 +1744,16 @@ while IFS= read -r target; do
 		printf 'MISSING  %s\n' "$target"
 		while IFS= read -r a; do
 			[ -n "$a" ] || continue
-			printf '           no CI run: step matches `%s`\n' "$a"
+			if [ -n "$pinned_step" ]; then
+				printf '           CI step %s does not run `%s`\n' "'$pinned_step'" "$a"
+				step_elsewhere="$(steps_running_anchor "$a" | sort | awk 'NF { printf "%s%s", (n++ ? ", " : ""), "'"'"'" $0 "'"'"'" } END { print "" }')"
+				if [ -n "$step_elsewhere" ]; then
+					printf '             it IS run by: %s\n' "$step_elsewhere"
+					printf '             a recipe pointed at the gate of another step looks exactly like this\n'
+				fi
+			else
+				printf '           no CI run: step matches `%s`\n' "$a"
+			fi
 		done <<<"$missing_anchors"
 	fi
 done <<<"$closure"
@@ -1259,6 +1781,27 @@ if [ "$unreadable_count" -gt 0 ]; then
 	echo "An unreadable recipe is NOT a recipe with no gate in it. Left unread, each of" >&2
 	echo "these would have been reported as 'runs no checkable command' and stopped being" >&2
 	echo "required to appear in CI, with this script still exiting 0." >&2
+	exit 1
+fi
+
+# Members with no gate step map entry, fatal before any count for the same
+# reason the unreadable block above is: a member whose reach was never checked
+# inside a step was not checked the way this guard now claims to check, so
+# `$reached` is not a number this run is entitled to print (#lzcheckcireachguard).
+if [ "$step_unmapped_count" -gt 0 ]; then
+	echo >&2
+	echo "check-ci-reach: $step_unmapped_count target(s) run by 'make $ROOT_TARGET' that EXPECTED_GATE_STEPS" >&2
+	echo "                does not map to a CI step:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$step_unmapped"
+	echo >&2
+	echo "Each of these carries a gate, is not excused, and is not reached by CI invoking" >&2
+	echo "make by name — so its reach is checked against the CI STEP that is supposed to" >&2
+	echo "run it, and this script has not been told which step that is. Add an entry, or" >&2
+	echo "— if CI genuinely does not run it — add an excuse with a reason to $CONF" >&2
+	echo "(#lzcheckcireachguard)." >&2
 	exit 1
 fi
 
@@ -1445,6 +1988,46 @@ if [ -n "$nogate_gone" ]; then
 	oracle_status=1
 fi
 
+# The gate step map, reverse direction (#lzcheckcireachguard). An entry for a target
+# that was never step-checked asserts nothing, exactly as an excuse for a target
+# make never runs asserts nothing — and it is how the map rots. Four ways to get
+# here, all of them real: the target left the closure, it was renamed, its recipe
+# was emptied so it now reads as carrying no gate, or CI started invoking it
+# through make by name and it stopped being anchor-checked. The last one is the
+# one that matters for rs, because four members are in that state deliberately
+# and this is what keeps the deliberate set from growing by accident.
+#
+# EXCUSED targets are deliberately NOT orphans here, and that ordering was
+# measured rather than reasoned: an excuse is checked against the GLOBAL haystack
+# (see the walk), so an excused target is never step-checked and would land in
+# this list every time. With it in, excusing `test-shm` while CI still runs it
+# — the stale excuse this guard has caught since it was written — reported
+# `EXPECTED_GATE_STEPS entr(ies) ... NOT checked inside a pinned step` instead of
+# `'test-shm' is excused ... but CI DOES reach it`. Same verdict, wrong subject,
+# and the wrong remedy: it says remove the map entry when the fault is the
+# excuse. The excuse rungs own that subject; a leftover entry beside a GOOD
+# excuse is reported below, next to the excuse it belongs to.
+step_map_keys_sorted="$(printf '%s' "$step_map_keys" | awk 'NF' | sort)"
+step_mapped_sorted="$(printf '%s\n%s' "$step_mapped" "$(printf '%s\n' "${excused_targets[@]:-}")" | awk 'NF' | sort -u)"
+step_map_orphans="$(comm -23 <(printf '%s\n' "$step_map_keys_sorted" | awk 'NF') <(printf '%s\n' "$step_mapped_sorted" | awk 'NF'))"
+if [ -n "$step_map_orphans" ]; then
+	echo >&2
+	echo "check-ci-reach: EXPECTED_GATE_STEPS entr(ies) for target(s) whose reach was NOT checked" >&2
+	echo "                inside a pinned step on this run:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$step_map_orphans"
+	echo >&2
+	echo "An entry that is never consulted asserts nothing. Either the target left" >&2
+	echo "'$ROOT_TARGET''s closure or was renamed (the closure pin above says which), or its" >&2
+	echo "recipe was emptied and it now reads as carrying no gate, or it is now excused, or" >&2
+	echo "CI started invoking it as \`make <target>\` — which is faithful-by-construction and" >&2
+	echo "carries no CI-side spelling to scope, so the entry must go. Remove it in the same" >&2
+	echo "commit as whichever of those happened (#lzcheckcireachguard)." >&2
+	oracle_status=1
+fi
+
 if [ "$oracle_status" -ne 0 ]; then
 	exit 1
 fi
@@ -1455,6 +2038,9 @@ oracle_sig_count="$(awk 'NF { n++ } END { print n + 0 }' "$oracle_sig")"
 # DERIVED, not restated: printing the member count twice would prove nothing.
 oracle_sig_distinct="$(cut -f2 "$oracle_sig" | sort -u | awk 'NF { n++ } END { print n + 0 }')"
 echo "check-ci-reach: closure oracle matched — $oracle_root_count command line(s) in \`$MAKE_BIN -n $ROOT_TARGET\`, set-equal to the union of the closure members' own commands ($oracle_mask_count per-invocation token(s) masked); $oracle_sig_count member(s) reduce to $oracle_sig_distinct distinct command set(s); $nogate_count carrying no gate, set-equal to EXPECTED_NO_GATE_TARGETS"
+
+step_map_distinct="$(printf '%s\n' "${EXPECTED_GATE_STEPS[@]}" | awk -F'\t' 'NF { print $2 }' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
+echo "check-ci-reach: gate step map matched — $step_mapped_count member(s) checked inside their pinned CI step, $step_map_distinct distinct step name(s) each unique among the $ci_step_total run: step(s) in ${workflows[*]}; $makeinv_count reached by CI invoking make by name and deliberately unmapped"
 
 # A guard that examined nothing must not report OK — the same vacuity rule the
 # conformance guards apply (#lzvacuousrun).
@@ -1470,6 +2056,18 @@ if [ "$stale_count" -gt 0 ]; then
 		[ -n "$t" ] || continue
 		echo "check-ci-reach: '$t' is excused in $CONF but CI DOES reach it — remove the excuse" >&2
 	done <<<"$stale"
+	status=1
+fi
+
+if [ -n "$excused_mapped" ]; then
+	echo >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "check-ci-reach: '$t' is excused in $CONF — CI does not run it — and EXPECTED_GATE_STEPS" >&2
+		echo "                still pins it to a CI step. There is no step running it, so the entry" >&2
+		echo "                asserts nothing; drop it in the same commit as the excuse, and add it" >&2
+		echo "                back when the excuse goes (#lzcheckcireachguard)." >&2
+	done <<<"$excused_mapped"
 	status=1
 fi
 
