@@ -1133,6 +1133,45 @@ by_class = {}
 for _site, (klass, _reason) in excuses.items():
     by_class[klass] = by_class.get(klass, 0) + 1
 
+# A CEILING on the excused population — and the resolution of a disagreement
+# with lazily-kt, which pins a typed COUNT of its bind-pending set beside the
+# same set equality (`#lzrsbindpending`).
+#
+# A typed count that mirrors the current population is redundant with the set
+# equality above and can only ever drift away from it: if the sets are equal the
+# counts are equal, so the number adds no information and adds an edit site. That
+# is the `MIN_BLOCKS = 30` shape, and refusing it is right.
+#
+# But set equality alone has a hole a count does close: it is satisfied by ANY
+# consistent pair. A commit that detaches fifty binds AND writes fifty entries
+# passes both directions. Nothing above sees that — the magnitude rung does not
+# either, because the sites are still DECLARED, only no longer bound.
+#
+# The fix is not a count of what is excused; it is a CEILING on how much may be.
+# A ceiling is a policy rather than a measurement, so it does not drift with the
+# corpus and never needs re-pinning except deliberately, upward, in review. At
+# zero it also needs no maintenance at all. What it buys is that a regression and
+# its excuse can no longer land in the same commit unnoticed: raising this line is
+# the explicit act.
+#
+# Raise it ONLY for a genuinely unbindable block, with the `unreachable` class and
+# a reason, and expect to be asked why the capability cannot exist. Never raise it
+# to park a `bind-pending` site — that is the laundering this guard exists to
+# refuse.
+MAX_LEDGERED_BLOCKS = int(os.environ.get("MAX_LEDGERED_BLOCKS", "0"))
+if len(excuses) > MAX_LEDGERED_BLOCKS:
+    sys.stderr.write(
+        "FAIL: %d assertion-block site(s) are ledgered as unbound; the ceiling is %d.\n"
+        "      The set equality above only checks that the ledger and the run AGREE,\n"
+        "      which any consistent pair satisfies — a commit that detaches binds and\n"
+        "      writes the matching entries passes it. This ceiling is what makes\n"
+        "      enlarging the excused set an explicit act instead of a side effect.\n"
+        "      Bind the block. Raise this line only for a genuinely unbindable one,\n"
+        "      with the `unreachable` class and a reason:\n" % (len(excuses), MAX_LEDGERED_BLOCKS)
+    )
+    for site, (klass, reason) in sorted(excuses.items()):
+        sys.stderr.write("        %s [%s] %s\n" % (site, klass, reason))
+    sys.exit(1)
 
 # A bind a runner made that the LOADER never declared (`#lzrunnerownjsonclone`).
 #
@@ -1469,8 +1508,9 @@ if rebuilt:
 print(
     "assertion-block bind OK: %d sites / %d distinct blocks inventoried from OPENED "
     "fixtures under every block name at every depth (#lzrsblockwalk). %d site(s) BOUND "
-    "by a runner, %d ledgered (%s) — the ledger is an EQUALITY against the run, failing "
-    "on an unbound site nobody excused AND on an excuse the run outlived. %d bind(s) the "
+    "by a runner, %d ledgered of at most %d (%s) — the ledger is an EQUALITY against the "
+    "run, failing on an unbound site nobody excused AND on an excuse the run outlived, "
+    "under a CEILING that makes enlarging it an explicit act. %d bind(s) the "
     "loader never declared — %d below an emitted block, %d matching no corpus object "
     "(#lzrunnerownjsonclone). Both dimensions "
     "DERIVED from %d opened of %d canonical fixtures and asserted EQUAL, and the two "
@@ -1480,6 +1520,7 @@ print(
         len(declared),
         len(declared_sites) - len(excuses),
         len(excuses),
+        MAX_LEDGERED_BLOCKS,
         ", ".join(
             "%d %s" % (count, klass) for klass, count in sorted(by_class.items())
         )
