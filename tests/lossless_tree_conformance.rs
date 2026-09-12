@@ -14,6 +14,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture value fails instead of
+// coercing to a default that satisfies the assertion.
+use common::FixtureJson;
+
 use std::collections::HashMap;
 
 use common::Expect;
@@ -336,8 +341,13 @@ fn run_fixture(name: &str) {
         let tree = seed["tree"].clone();
         world.build_children(&tree, TreeNodeId::ROOT);
 
-        if let Some(steps) = scenario.get("steps").and_then(|v| v.as_array()) {
-            for step in steps {
+        // The `if let` is on PRESENCE (`.get`), and the type is required inside
+        // (`#lzsiblingrunnermasking`): `.and_then(|v| v.as_array())` folded
+        // "this scenario has no steps" together with "it has steps and they are
+        // not a list", and the second replayed ZERO steps against the
+        // scenario's own `expect` block.
+        if let Some(steps) = scenario.get("steps") {
+            for step in steps.fixture_array("scenario steps") {
                 apply_step(&mut world, step);
             }
         }

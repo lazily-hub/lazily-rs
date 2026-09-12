@@ -2,7 +2,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{Delta, DurableOutbox, InMemoryOutbox, IpcMessage};
 use serde_json::Value;
 
@@ -89,10 +93,13 @@ fn generic_outbox_replays_canonical_store_fixture() {
                 .collect::<Vec<_>>();
             expected.assert_key_with("epochs", |want| assert_eq!(epochs, u64s(want)));
         }
-        if let Some(acks) = scenario["ack_through"].as_array() {
-            for ack in acks {
-                outbox.ack_through(ack.as_u64().unwrap());
-            }
+        // ABSENT acks nothing; PRESENT requires the array
+        // (`#lzsiblingrunnermasking`). `as_array()` in an `if let` with no
+        // `else` let a mistyped `ack_through` ack NOTHING, and an outbox that
+        // acked nothing still replays every frame — which is what most of these
+        // scenarios expect.
+        for ack in scenario["ack_through"].fixture_array_or_null("ack_through") {
+            outbox.ack_through(ack.as_u64().unwrap());
         }
         // `cursor` and `loaded_cursor` are two spellings of the same fact and
         // `replay` / `replay_from_zero` likewise; whichever the scenario carries

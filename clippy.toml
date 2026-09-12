@@ -1,0 +1,25 @@
+# `serde_json::Value::as_bool` is BANNED (`#lzsiblingrunnermasking`).
+#
+# `Option<bool>` from a JSON accessor folds two different facts together: "the
+# fixture says nothing" and "the fixture says something and it is not a
+# boolean". Discharging it with `.unwrap_or(false)` reads the second as `false`,
+# and `false` in an `invalidates` block asserts the OPPOSITE of what the fixture
+# states — so `invalidates.membership: "true"` passed against a run that never
+# invalidated (`#lzflagcoercion`). That plant was caught only because a SIBLING
+# runner over the same fixture happened to require the type; the coverage was an
+# accident of which runners exist.
+#
+# lazily-cpp's fix (`97790fd`) deleted its `Json::as_bool()` so the weak
+# spelling is a compile error. Rust cannot delete an inherent method on a
+# foreign type, so this is the equivalent: `make check` runs
+# `cargo clippy --all-targets --all-features -- -D warnings`, which makes any
+# `Value::as_bool()` a hard failure. `src/` never called it, so the library pays
+# nothing. Tests read fixture flags through `tests/common/json.rs`'s
+# `FixtureJson` trait, the one file allowed to carry the local `#[allow]`.
+#
+# `tests/fixture_flag_hygiene.rs` guards this file: it fails if the entry below
+# is removed, if an `#[allow(clippy::disallowed_methods)]` appears anywhere else
+# under `tests/`, or if a coercing chain clippy cannot express reappears.
+disallowed-methods = [
+    { path = "serde_json::Value::as_bool", reason = "coerces a mistyped fixture flag to `false`, which asserts the opposite claim and passes; use common::FixtureJson::fixture_flag* (#lzsiblingrunnermasking)" },
+]

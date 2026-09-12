@@ -4,7 +4,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{
     BreakerState, BulkheadCell, CircuitBreakerCell, Context, RetryPolicyCell, TimeoutCell,
 };
@@ -61,12 +65,12 @@ fn circuit_breaker() {
         match op["type"].as_str().unwrap() {
             "record" => cb.record(
                 &ctx,
-                op["success"].as_bool().unwrap(),
+                op.fixture_flag_at("success"),
                 op["now"].as_u64().unwrap(),
             ),
             "allow" => {
                 let got = cb.allow(&ctx, op["now"].as_u64().unwrap());
-                assert_eq!(got, step["returns"].as_bool().unwrap(), "allow for {step}");
+                assert_eq!(got, step.fixture_flag_at("returns"), "allow for {step}");
             }
             other => panic!("unknown op {other}"),
         }
@@ -137,7 +141,7 @@ fn bulkhead() {
         let exp = expected("bulkhead.json", i, step);
         let inv = exp.sub("invalidates");
         match step["op"]["type"].as_str().unwrap() {
-            "acquire" => assert_eq!(b.acquire(&ctx), step["returns"].as_bool().unwrap()),
+            "acquire" => assert_eq!(b.acquire(&ctx), step.fixture_flag_at("returns")),
             "release" => b.release(&ctx),
             other => panic!("unknown op {other}"),
         }
@@ -173,7 +177,7 @@ fn timeout() {
             "tick" => t.tick(&ctx, now),
             other => panic!("unknown op {other}"),
         };
-        assert_eq!(got, step["returns"].as_bool().unwrap(), "edge for {step}");
+        assert_eq!(got, step.fixture_flag_at("returns"), "edge for {step}");
         exp.assert_key_at(
             "is_timed_out",
             t.is_timed_out(&ctx),

@@ -32,6 +32,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 use std::collections::HashMap;
 
 use common::Expect;
@@ -251,7 +256,7 @@ fn replay(path: &str, label: &str, scenario: &Value) -> usize {
         let got = last_merge_changed.expect("`changed` asserted but no merge ran");
         assert_eq!(
             got,
-            want.as_bool().expect("changed is a bool"),
+            want.fixture_flag("changed is a bool"),
             "changed (the CellCrdt projection bit of the last merge)"
         );
         asserted += 1;

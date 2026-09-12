@@ -4,6 +4,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 use std::collections::BTreeMap;
 
 use common::Expect;
@@ -71,8 +76,8 @@ fn health() {
             "set" => h.set(
                 &ctx,
                 op["name"].as_str().unwrap(),
-                op["up"].as_bool().unwrap(),
-                op["critical"].as_bool().unwrap(),
+                op.fixture_flag_at("up"),
+                op.fixture_flag_at("critical"),
             ),
             other => panic!("unknown op {other}"),
         }
@@ -111,7 +116,7 @@ fn readiness() {
             "set" => r.set(
                 &ctx,
                 op["name"].as_str().unwrap(),
-                op["ready"].as_bool().unwrap(),
+                op.fixture_flag_at("ready"),
             ),
             other => panic!("unknown op {other}"),
         }

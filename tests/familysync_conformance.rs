@@ -18,7 +18,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{Context, CrdtPlaneRuntime, PeerId};
 use serde_json::Value;
 
@@ -74,7 +78,7 @@ fn family_sync_materialize_on_ingest_conformance() {
         // Apply the origin's family writes in order.
         for set in scenario["origin_sets"].as_array().expect("origin_sets") {
             let key = set["key"].as_str().expect("set.key");
-            let value = set["value"].as_bool().expect("set.value");
+            let value = set["value"].fixture_flag("set.value");
             let now = set["now"].as_u64().expect("set.now");
             origin.family_set_lww::<bool>(&ctx_o, namespace, key, value, now);
         }
@@ -85,7 +89,7 @@ fn family_sync_materialize_on_ingest_conformance() {
         let applied = target.ingest(&ctx_t, &frame, 1_000);
         assert!(applied > 0, "[{name}] ingest applied at least one op");
 
-        if scenario["reingest"].as_bool().unwrap_or(false) {
+        if scenario.fixture_flag_opt("reingest") {
             let reapplied = target.ingest(&ctx_t, &frame, 1_001);
             expect.assert_key_at(
                 "reingest_applied",
@@ -132,7 +136,7 @@ fn family_sync_materialize_on_ingest_conformance() {
             target_values.assert_key_with(key.as_str(), |want| {
                 assert_eq!(
                     target.family_value_lww::<bool>(namespace, key),
-                    Some(want.as_bool().unwrap()),
+                    Some(want.fixture_flag(&format!("target_values.{key}"))),
                     "[{name}] value for {key}"
                 );
             });

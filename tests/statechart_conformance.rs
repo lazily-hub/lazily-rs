@@ -8,6 +8,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 use std::collections::HashMap;
 
 use common::Expect;
@@ -115,19 +120,18 @@ fn run_fixture(name: &str) {
         // other branch and the fixture's own `accepted`/`active` expectations —
         // written for the false branch — still passed. A mistyped guard makes
         // this a DIFFERENT scenario than the one the fixture reads as.
-        let guards: HashMap<String, bool> = step.raw()["guards"]
-            .as_object()
+        // The OBJECT was coerced too (`#lzsiblingrunnermasking`):
+        // `.as_object().map(..).unwrap_or_default()` read `"guards": "allowed"`
+        // as the EMPTY valuation, so every guard evaluated false-by-absence and
+        // the chart took the same branch a legitimately empty `guards` selects.
+        // `fixture_object_opt` keeps absence (legal: most steps send no guards)
+        // apart from a present-but-mistyped object.
+        let guards: HashMap<String, bool> = step
+            .raw()
+            .fixture_object_opt("guards")
             .map(|o| {
                 o.iter()
-                    .map(|(k, v)| {
-                        let b = v.as_bool().unwrap_or_else(|| {
-                            panic!(
-                                "step {i}: guards.{k} must be a JSON boolean, got {v} \
-                                 (#lzflagcoercion)"
-                            )
-                        });
-                        (k.clone(), b)
-                    })
+                    .map(|(k, v)| (k.clone(), v.fixture_flag(&format!("step {i}: guards.{k}"))))
                     .collect()
             })
             .unwrap_or_default();

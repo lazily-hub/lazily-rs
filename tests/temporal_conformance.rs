@@ -11,7 +11,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{Context, CronCell, DeadlineCell, Deadlined, IntervalCell, TimerCell};
 use serde_json::Value;
 
@@ -54,7 +58,7 @@ fn now_of(step: &Value) -> u64 {
 }
 
 fn edge_of(step: &Value) -> bool {
-    step["returns"].as_bool().unwrap()
+    step.fixture_flag_at("returns")
 }
 
 /// Guard one step's `expected` block (`#lzassertunknownkeys`): a key this runner

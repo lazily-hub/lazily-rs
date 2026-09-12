@@ -2,6 +2,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 use std::path::Path;
 
 use common::Expect;
@@ -180,7 +185,7 @@ fn run_fixture(name: &str) {
                     &op["worker"].as_str().expect("worker").to_owned(),
                     as_u64(&op["delivery_id"], "delivery_id"),
                 );
-                assert_eq!(actual, step["returns"].as_bool().expect("ack return"));
+                assert_eq!(actual, step["returns"].fixture_flag("ack return"));
             }
             "nack" => {
                 let actual = queue.nack(
@@ -188,7 +193,7 @@ fn run_fixture(name: &str) {
                     &op["worker"].as_str().expect("worker").to_owned(),
                     as_u64(&op["delivery_id"], "delivery_id"),
                 );
-                assert_eq!(actual, step["returns"].as_bool().expect("nack return"));
+                assert_eq!(actual, step["returns"].fixture_flag("nack return"));
             }
             "reap_expired" => {
                 let actual = queue.reap_expired(&ctx, as_u64(&op["now"], "now"));

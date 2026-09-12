@@ -2,7 +2,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{ClientMessage, ServerMessage};
 use serde::Deserialize;
 use serde_json::Value;
@@ -215,7 +219,7 @@ fn assert_frame_assertions(case: &FrameCase, actual: &Value) {
     exp.assert_key_if_present("has_capabilities", |want| {
         assert_eq!(
             actual.get("capabilities").is_some_and(|c| !c.is_null()),
-            want.as_bool().expect("has_capabilities"),
+            want.fixture_flag("has_capabilities"),
             "{}: has_capabilities",
             case.label
         );
@@ -247,7 +251,7 @@ fn assert_frame_assertions(case: &FrameCase, actual: &Value) {
             .all(|p| p.as_u64() != self_peer);
         assert_eq!(
             excluded,
-            want.as_bool().expect("roster_excludes_self"),
+            want.fixture_flag("roster_excludes_self"),
             "{}: roster_excludes_self",
             case.label
         );
@@ -259,7 +263,7 @@ fn assert_frame_assertions(case: &FrameCase, actual: &Value) {
             && !actual.get("to").is_some_and(|v| !v.is_null());
         assert_eq!(
             stamped,
-            want.as_bool().expect("server_stamped_from"),
+            want.fixture_flag("server_stamped_from"),
             "{}: server_stamped_from",
             case.label
         );

@@ -19,6 +19,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 use std::collections::BTreeMap;
 
 use common::Expect;
@@ -186,7 +191,7 @@ fn drive_harness_fixture(name: &str) {
             let left = &logs[op["left"].as_str().unwrap()];
             let right = &logs[op["right"].as_str().unwrap()];
             assert_eq!(
-                step["returns"].as_bool().unwrap(),
+                step.fixture_flag_at("returns"),
                 left.digest() == right.digest(),
                 "{where_}: returns"
             );
@@ -336,7 +341,7 @@ fn value_of(tagged: &Value) -> ReplayValue {
         "int" => ReplayValue::Int(tagged["v"].as_str().unwrap().parse().unwrap()),
         "str" => ReplayValue::Str(tagged["v"].as_str().unwrap().to_owned()),
         "float" => ReplayValue::Float(tagged["v"].as_str().unwrap().parse().unwrap()),
-        "bool" => ReplayValue::Bool(tagged["v"].as_bool().unwrap()),
+        "bool" => ReplayValue::Bool(tagged.fixture_flag_at("v")),
         "bytes" => ReplayValue::Bytes(hex_bytes(tagged["v"].as_str().unwrap())),
         "seq" => ReplayValue::Seq(
             tagged["v"]
@@ -416,17 +421,13 @@ fn canonical_encoding_equality_classes() {
                 let left = canonical_digest(&value_of(&values[op["left"].as_str().unwrap()]));
                 let right = canonical_digest(&value_of(&values[op["right"].as_str().unwrap()]));
                 let equal = left.as_ref().ok() == right.as_ref().ok() && left.is_ok();
-                assert_eq!(
-                    step["returns"].as_bool().unwrap(),
-                    equal,
-                    "{where_}: returns"
-                );
+                assert_eq!(step.fixture_flag_at("returns"), equal, "{where_}: returns");
                 outcomes.push(equal);
             }
             "digest_defined" => {
                 let result = canonical_digest(&value_of(&values[op["value"].as_str().unwrap()]));
                 assert_eq!(
-                    step["returns"].as_bool().unwrap(),
+                    step.fixture_flag_at("returns"),
                     result.is_ok(),
                     "{where_}: returns"
                 );

@@ -134,7 +134,10 @@ jsonschema = { version = "0.46.8", default-features = false }
 libc = "0.2"
 loom = "0.7"
 proptest = "1"
-proc-macro2 = "1"
+# `span-locations` so the fixture-flag hygiene rung can report a LINE for each
+# violation (`#lzsiblingrunnermasking`); dev-only, and a rung whose message says
+# only "somewhere in this 2000-line runner" is a rung nobody acts on.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 rmp-serde = "1"
 serde_json = "1"
 syn = { version = "2", features = ["full", "visit"] }

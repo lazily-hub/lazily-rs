@@ -641,10 +641,15 @@ fn value_u64(value: &Value) -> Option<u64> {
 }
 
 fn bool_field(value: &Value, field: &str) -> Result<bool, String> {
-    value
-        .get(field)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| format!("feature step requires boolean {field}"))
+    // Matched on the variant rather than read through `Value::as_bool`, which
+    // this crate bans (`#lzsiblingrunnermasking` — see `clippy.toml`). The
+    // behaviour is identical: absent and mistyped both fail. Unlike
+    // [`value_u64`] above, no stringified spelling is accepted, so a step that
+    // says `"true"` is a malformed step and not a `true`.
+    match value.get(field) {
+        Some(Value::Bool(flag)) => Ok(*flag),
+        _ => Err(format!("feature step requires boolean {field}")),
+    }
 }
 
 fn barrier_value(outcome: &str, barrier: &RevisionBarrier, reason: Option<&str>) -> Value {

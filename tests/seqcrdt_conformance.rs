@@ -17,6 +17,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture value fails instead of
+// coercing to a default that satisfies the assertion.
+use common::FixtureJson;
+
 use std::collections::HashMap;
 
 use common::Expect;
@@ -211,15 +216,24 @@ fn run_seqcrdt_fixture(name: &str) {
         // the first `orders_equal` pair when present, else `a`. That lookup goes
         // through `raw()` because it *selects a target*, not a value to compare;
         // `orders_equal` is asserted on its own below.
-        let target = expect
-            .raw()
-            .get("orders_equal")
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|v| v.as_str())
-            .unwrap_or("a");
+        // ABSENT: the scenario declares no pairing, so the converged replica is
+        // `a`. PRESENT: the type is REQUIRED at every level
+        // (`#lzsiblingrunnermasking`) — the old `.and_then(..).unwrap_or("a")`
+        // chain fell back to `a` on a mistype at any of five levels, and `a` is
+        // also the common answer, so selecting the WRONG target read exactly
+        // like selecting the right one.
+        let target = match expect.raw().get("orders_equal") {
+            None | Some(serde_json::Value::Null) => "a",
+            Some(pairs) => pairs
+                .fixture_array("orders_equal")
+                .first()
+                .expect("orders_equal declares at least one pair")
+                .fixture_array("orders_equal[0]")
+                .first()
+                .expect("orders_equal[0] names at least one replica")
+                .as_str()
+                .expect("orders_equal[0][0] is a replica name"),
+        };
         expect.assert_key_if_present("order", |want| {
             assert_order(
                 &replicas["a"],

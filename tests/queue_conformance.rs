@@ -13,7 +13,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{Context, QueueCell, QueuePopError, QueuePushError, QueueStorage};
 use serde_json::Value;
 
@@ -38,10 +42,14 @@ fn build_initial(ctx: &Context, initial: &Value) -> QueueCell<V> {
         Some(c) => QueueCell::with_capacity(ctx, c as usize),
         None => QueueCell::new(ctx),
     };
-    if let Some(elems) = initial.get("elements").and_then(|v| v.as_array()) {
-        for e in elems {
-            q.try_push(ctx, e.as_str().unwrap().to_string()).unwrap();
-        }
+    // ABSENT seeds nothing; PRESENT requires the array
+    // (`#lzsiblingrunnermasking`). `initial.get("elements").and_then(|v|
+    // v.as_array())` inside an `if let` with no `else` made a mistyped seed
+    // skip the loop and replay an EMPTY queue — and no sibling covered it: the
+    // two family flavors over these same five fixtures do not seed
+    // `initial.elements` at all, they refuse it.
+    for e in initial.fixture_array_opt("elements") {
+        q.try_push(ctx, e.as_str().unwrap().to_string()).unwrap();
     }
     // `closed` in initial is rare but supported: honor it.
     // ABSENT means "not closed"; PRESENT means the fixture states a closure,
@@ -49,12 +57,7 @@ fn build_initial(ctx: &Context, initial: &Value) -> QueueCell<V> {
     // (`#lzflagcoercion`). Folding both into `unwrap_or(false)` let
     // `closed: "true"` build an OPEN queue while the fixture read as starting
     // closed, and every expectation downstream still passed.
-    let closed = match initial.get("closed") {
-        None => false,
-        Some(v) => v.as_bool().unwrap_or_else(|| {
-            panic!("initial.closed must be a JSON boolean, got {v} (#lzflagcoercion)")
-        }),
-    };
+    let closed = initial.fixture_flag_opt("closed");
     if closed {
         q.close(ctx);
     }
@@ -149,9 +152,7 @@ fn assert_invalidation(ctx: &Context, readers: &Readers, invalidates: &Expect) {
             // "invalidated" passes against a run that did not invalidate. The
             // sibling `assert_state` comparisons below already require the
             // type; this one did not.
-            let expected_inv = node.as_bool().unwrap_or_else(|| {
-                panic!("invalidates.{name} must be a JSON boolean, got {node} (#lzflagcoercion)")
-            });
+            let expected_inv = node.fixture_flag(&format!("invalidates.{name}"));
             let cached = ctx.is_set(reader);
             if expected_inv {
                 assert!(
@@ -209,13 +210,13 @@ fn assert_state(ctx: &Context, q: &QueueCell<V>, expected: &Expect) {
         );
     });
     expected.assert_key_if_present("is_empty", |want| {
-        assert_eq!(q.is_empty(ctx), want.as_bool().expect("is_empty"));
+        assert_eq!(q.is_empty(ctx), want.fixture_flag("is_empty"));
     });
     expected.assert_key_if_present("is_full", |want| {
-        assert_eq!(q.is_full(ctx), want.as_bool().expect("is_full"));
+        assert_eq!(q.is_full(ctx), want.fixture_flag("is_full"));
     });
     expected.assert_key_if_present("closed", |want| {
-        assert_eq!(q.is_closed(ctx), want.as_bool().expect("closed"));
+        assert_eq!(q.is_closed(ctx), want.fixture_flag("closed"));
     });
 }
 

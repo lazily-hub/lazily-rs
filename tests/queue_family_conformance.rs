@@ -354,6 +354,7 @@ fn shipped_flavor_replays_the_corpus() {
 #[cfg(feature = "thread-safe")]
 mod thread_safe_flavor {
     use super::{QUEUE_FIXTURES, SPEC_DIR, returns_label, spec_fixtures_present};
+    use crate::common::FixtureJson;
     use lazily::{ThreadSafeContext, ThreadSafeQueueCell};
     use serde_json::Value;
 
@@ -399,14 +400,24 @@ mod thread_safe_flavor {
             Some(cap) => ThreadSafeQueueCell::<V>::with_capacity(&ctx, cap as usize),
             None => ThreadSafeQueueCell::<V>::new(&ctx),
         };
+        // `fixture_array_opt`, not `.as_array().map(..).unwrap_or(true)`
+        // (`#lzsiblingrunnermasking`): a mistyped `initial.elements` coerced to
+        // "empty" made this assertion PASS and the seed silently vanish, so the
+        // flavor replayed a different queue than the fixture declares.
         assert!(
-            initial["elements"]
-                .as_array()
-                .map(|a| a.is_empty())
-                .unwrap_or(true),
+            initial.fixture_array_opt("elements").is_empty(),
             "this runner does not seed initial.elements; a fixture needing it must \
              extend the runner rather than be skipped"
         );
+        // `initial.closed` (`#lzsiblingrunnermasking`). All five canonical
+        // fixtures declare it, and until now `queue_conformance.rs` was the ONLY
+        // one of the three runners over those fixtures that read it — the other
+        // two built an OPEN queue whatever the fixture said. A fixture flipped to
+        // `closed: true` would have replayed a different world here and still
+        // been covered, by accident, by the single-threaded runner alone.
+        if initial.fixture_flag_opt("closed") {
+            q.close(&ctx);
+        }
 
         let r = make_readers(&ctx, &q);
         let steps = fixture["steps"].as_array().expect("steps array");
@@ -479,7 +490,7 @@ mod thread_safe_flavor {
                     inv.assert_key_if_present(key, |want| {
                         assert_eq!(
                             !node_valid,
-                            want.as_bool().expect("invalidates flag"),
+                            want.fixture_flag("invalidates flag"),
                             "{name} step {i}: invalidates.{key} — thread-safe flavor \
                              disagrees with the canonical fixture"
                         );
@@ -488,9 +499,16 @@ mod thread_safe_flavor {
             }
 
             if let Some(want) = returns_label(step, name, i) {
+                // EXACT (`#lzsiblingrunnermasking`). This was
+                // `got == want || got.starts_with(want)`, and a prefix match is
+                // strictly weaker than what both siblings over these same five
+                // fixtures require: `queue_conformance.rs` compares the whole
+                // `Value` with `assert_eq!`, and this runner's own topic arm has
+                // an exhaustive `match (step.get("returns"), returns)`. A prefix
+                // also makes `returns: ""` pass against ANY return.
                 let got = got_returns.as_deref().unwrap_or("");
-                assert!(
-                    got == want || got.starts_with(want),
+                assert_eq!(
+                    got, want,
                     "{name} step {i}: returns `{got}`, fixture says `{want}`"
                 );
             }
@@ -505,21 +523,21 @@ mod thread_safe_flavor {
             expected.assert_key_if_present("is_empty", |want| {
                 assert_eq!(
                     q.is_empty(&ctx),
-                    want.as_bool().expect("is_empty"),
+                    want.fixture_flag("is_empty"),
                     "{name} step {i}: is_empty"
                 );
             });
             expected.assert_key_if_present("is_full", |want| {
                 assert_eq!(
                     q.is_full(&ctx),
-                    want.as_bool().expect("is_full"),
+                    want.fixture_flag("is_full"),
                     "{name} step {i}: is_full"
                 );
             });
             expected.assert_key_if_present("closed", |want| {
                 assert_eq!(
                     q.closed(&ctx),
-                    want.as_bool().expect("closed"),
+                    want.fixture_flag("closed"),
                     "{name} step {i}: closed"
                 );
             });
@@ -693,6 +711,7 @@ mod thread_safe_flavor {
 #[cfg(feature = "async")]
 mod async_flavor {
     use super::{QUEUE_FIXTURES, SPEC_DIR, returns_label, spec_fixtures_present};
+    use crate::common::FixtureJson;
     use lazily::{AsyncContext, AsyncQueueCell};
     use serde_json::Value;
 
@@ -719,13 +738,14 @@ mod async_flavor {
             Some(cap) => AsyncQueueCell::<V>::with_capacity(&ctx, cap as usize),
             None => AsyncQueueCell::<V>::new(&ctx),
         };
+        // As in the thread-safe replay above (`#lzsiblingrunnermasking`).
         assert!(
-            initial["elements"]
-                .as_array()
-                .map(|a| a.is_empty())
-                .unwrap_or(true),
+            initial.fixture_array_opt("elements").is_empty(),
             "this runner does not seed initial.elements"
         );
+        if initial.fixture_flag_opt("closed") {
+            q.close(&ctx);
+        }
 
         let r = q.reader_handles();
         let steps = fixture["steps"].as_array().expect("steps array");
@@ -790,7 +810,7 @@ mod async_flavor {
                     inv.assert_key_if_present(key, |want| {
                         assert_eq!(
                             !node_valid,
-                            want.as_bool().expect("invalidates flag"),
+                            want.fixture_flag("invalidates flag"),
                             "{name} step {i}: invalidates.{key} — async flavor \
                              disagrees with the canonical fixture"
                         );
@@ -810,9 +830,16 @@ mod async_flavor {
             }
 
             if let Some(want) = returns_label(step, name, i) {
+                // EXACT (`#lzsiblingrunnermasking`). This was
+                // `got == want || got.starts_with(want)`, and a prefix match is
+                // strictly weaker than what both siblings over these same five
+                // fixtures require: `queue_conformance.rs` compares the whole
+                // `Value` with `assert_eq!`, and this runner's own topic arm has
+                // an exhaustive `match (step.get("returns"), returns)`. A prefix
+                // also makes `returns: ""` pass against ANY return.
                 let got = got_returns.as_deref().unwrap_or("");
-                assert!(
-                    got == want || got.starts_with(want),
+                assert_eq!(
+                    got, want,
                     "{name} step {i}: returns `{got}`, fixture says `{want}`"
                 );
             }
@@ -826,21 +853,21 @@ mod async_flavor {
             expected.assert_key_if_present("is_empty", |want| {
                 assert_eq!(
                     q.is_empty(&ctx),
-                    want.as_bool().expect("is_empty"),
+                    want.fixture_flag("is_empty"),
                     "{name} step {i}: is_empty"
                 );
             });
             expected.assert_key_if_present("is_full", |want| {
                 assert_eq!(
                     q.is_full(&ctx),
-                    want.as_bool().expect("is_full"),
+                    want.fixture_flag("is_full"),
                     "{name} step {i}: is_full"
                 );
             });
             expected.assert_key_if_present("closed", |want| {
                 assert_eq!(
                     q.closed(&ctx),
-                    want.as_bool().expect("closed"),
+                    want.fixture_flag("closed"),
                     "{name} step {i}: closed"
                 );
             });
@@ -940,6 +967,7 @@ mod async_flavor {
 // the reactive-graph corpus.
 mod topic_flavors {
     use super::{SPEC_DIR, TOPIC_FIXTURES, spec_fixtures_present};
+    use crate::common::FixtureJson;
     use lazily::{TopicDurability, TopicSnapshot, TopicSubscriptionSnapshot};
     use serde_json::Value;
     use std::collections::{BTreeSet, HashMap};
@@ -979,28 +1007,33 @@ mod topic_flavors {
 
     fn snapshot_from(initial: &Value) -> TopicSnapshot<String> {
         let mut subscriptions = HashMap::new();
-        if let Some(map) = initial["subscriptions"].as_object() {
+        // ABSENT means no subscribers; PRESENT requires the object
+        // (`#lzsiblingrunnermasking`) — a mistyped `subscriptions` skipped the
+        // loop and seeded NO subscribers, and a topic with no subscribers
+        // satisfies every per-subscriber expectation vacuously.
+        if let Some(map) = initial.fixture_object_opt("subscriptions") {
             for (id, sub) in map {
                 subscriptions.insert(
                     id.clone(),
                     TopicSubscriptionSnapshot {
                         cursor: sub["cursor"].as_u64().expect("cursor"),
                         durability: durability_of(&sub["durability"]),
-                        connected: sub["connected"].as_bool().expect("connected"),
+                        connected: sub["connected"].fixture_flag("connected"),
                     },
                 );
             }
         }
         TopicSnapshot {
             base_offset: initial["base_offset"].as_u64().unwrap_or(0),
-            elements: initial["elements"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|v| v.as_str().expect("element string").to_owned())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            // ABSENT seeds nothing; PRESENT requires the array
+            // (`#lzsiblingrunnermasking`). `.unwrap_or_default()` read a
+            // mistyped `initial.elements` as the EMPTY seed, so the topic
+            // replayed from an empty log while the fixture declares a history.
+            elements: initial
+                .fixture_array_opt("elements")
+                .iter()
+                .map(|v| v.as_str().expect("element string").to_owned())
+                .collect(),
             subscriptions,
         }
     }
@@ -1104,7 +1137,7 @@ mod topic_flavors {
                     inv.assert_key_with(id.as_str(), |want| {
                         assert_eq!(
                             !topic.is_reader_valid(id),
-                            want.as_bool().expect("invalidates flag"),
+                            want.fixture_flag("invalidates flag"),
                             "{flavor} {name} step {i}: invalidates.{id} disagrees with \
                              the canonical fixture"
                         );
@@ -1580,6 +1613,7 @@ mod topic_async {
 // that owned a timer could not replay these fixtures deterministically at all.
 mod work_queue_flavors {
     use super::{SPEC_DIR, WORK_QUEUE_FIXTURES, spec_fixtures_present};
+    use crate::common::FixtureJson;
     use lazily::{
         WorkQueueDeadLetter, WorkQueueDeadLetterReason, WorkQueueDelivery, WorkQueueItem,
     };
@@ -1708,14 +1742,14 @@ mod work_queue_flavors {
                         op["worker"].as_str().expect("worker"),
                         as_u64(&op["delivery_id"], "delivery_id"),
                     );
-                    assert_eq!(got, step["returns"].as_bool().expect("ack return"));
+                    assert_eq!(got, step["returns"].fixture_flag("ack return"));
                 }
                 "nack" => {
                     let got = queue.nack(
                         op["worker"].as_str().expect("worker"),
                         as_u64(&op["delivery_id"], "delivery_id"),
                     );
-                    assert_eq!(got, step["returns"].as_bool().expect("nack return"));
+                    assert_eq!(got, step["returns"].fixture_flag("nack return"));
                 }
                 "reap_expired" => {
                     let got = queue.reap_expired(as_u64(&op["now"], "now"));
@@ -1748,8 +1782,7 @@ mod work_queue_flavors {
                 invalidates.assert_key_with(kind, |want| {
                     assert_eq!(
                         !valid,
-                        want.as_bool()
-                            .unwrap_or_else(|| panic!("{name} step {i}: no invalidates.{kind}")),
+                        want.fixture_flag(&format!("{name} step {i}: invalidates.{kind}")),
                         "{flavor} {name} step {i}: invalidates.{kind} disagrees with the \
                          canonical fixture"
                     );

@@ -11,7 +11,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{
     DurableOutbox, InMemoryOutbox, IpcMessage, IpcValue, NodeState, OrSet, OutboxAck, ResyncAction,
     ResyncCoordinator, ResyncRequest, WireLwwRegister, WireStamp,
@@ -291,10 +295,9 @@ fn resync_gap_converge_fixture() {
         let mut state = NodeState64::new();
         let mut seen_requests = 0usize;
         for frame in sc["inbound"].as_array().unwrap() {
-            let dropped = frame
-                .get("dropped")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            // ABSENT means the corpus states no drop; PRESENT means it states
+            // one (`#lzsiblingrunnermasking`).
+            let dropped = frame.fixture_flag_opt("dropped");
             if dropped {
                 if drop_suffix {
                     continue; // receiver A never sees this delta
@@ -685,7 +688,7 @@ impl LivenessReplica {
             "lww" => {
                 let pid = pid_of(op["key"].as_str().expect("key"));
                 let s = stamp(&op["stamp"]);
-                let v = op["value"].as_bool().expect("value");
+                let v = op["value"].fixture_flag("value");
                 match self.alive.get_mut(&pid) {
                     Some(reg) => reg.set(s, v),
                     None => {
@@ -820,9 +823,9 @@ fn liveness_orset_lww_fixture() {
     let exp = expect("liveness_orset_lww.json", sc.value());
     let ops = sc["ops"].as_array().unwrap();
     let first = &ops[0];
-    let mut reg = WireLwwRegister::new(stamp(&first["stamp"]), first["value"].as_bool().unwrap());
+    let mut reg = WireLwwRegister::new(stamp(&first["stamp"]), first.fixture_flag_at("value"));
     for op in &ops[1..] {
-        reg.set(stamp(&op["stamp"]), op["value"].as_bool().unwrap());
+        reg.set(stamp(&op["stamp"]), op.fixture_flag_at("value"));
     }
     exp.assert_key("value", *reg.value());
     // `resolution`: the winner is the op with the greatest stamp, asserted
@@ -837,7 +840,7 @@ fn liveness_orset_lww_fixture() {
                         (s.wall_time, s.logical, s.peer)
                     })
                     .unwrap();
-                assert_eq!(*reg.value(), winner["value"].as_bool().unwrap());
+                assert_eq!(*reg.value(), winner.fixture_flag_at("value"));
             }
             other => panic!("unknown resolution {other}"),
         }
@@ -846,7 +849,7 @@ fn liveness_orset_lww_fixture() {
     let mut reg_rev: Option<WireLwwRegister<bool>> = None;
     for op in ops.iter().rev() {
         let s = stamp(&op["stamp"]);
-        let v = op["value"].as_bool().unwrap();
+        let v = op.fixture_flag_at("value");
         match reg_rev.as_mut() {
             Some(r) => r.set(s, v),
             None => reg_rev = Some(WireLwwRegister::new(s, v)),
@@ -870,7 +873,7 @@ fn liveness_orset_lww_fixture() {
     // present (doc, pid) pairs from the fixture open_set
     let mut open: Vec<(String, u64)> = Vec::new();
     for entry in sc["open_set"].as_array().unwrap() {
-        if entry["present"].as_bool().unwrap() {
+        if entry.fixture_flag_at("present") {
             let key = entry["key"].as_str().unwrap();
             let (doc, pid) = key.split_once('/').unwrap();
             let pid = pid.trim_start_matches("pid").parse::<u64>().unwrap();
@@ -888,7 +891,7 @@ fn liveness_orset_lww_fixture() {
                     logical: 0,
                     peer: 1,
                 },
-                v.as_bool().unwrap(),
+                v.fixture_flag(&format!("alive_before.{pid}")),
             ),
         );
     }
@@ -918,7 +921,7 @@ fn liveness_orset_lww_fixture() {
     alive
         .get_mut(&pid)
         .unwrap()
-        .set(stamp(&op["stamp"]), op["value"].as_bool().unwrap());
+        .set(stamp(&op["stamp"]), op.fixture_flag_at("value"));
     // Derived: doc is live iff some present (doc,pid) has alive[pid] == true.
     let live = live_of(&alive);
     exp.assert_key_with("live_docs_after", |want| assert_eq!(live, strs(want)));
@@ -957,7 +960,7 @@ fn liveness_orset_lww_fixture() {
     // `reverse_order_equivalent` drives the second replica: same op multiset,
     // opposite order. The join is a semilattice, so the aggregate must not move.
     assert!(
-        sc["reverse_order_equivalent"].as_bool().expect("flag"),
+        sc["reverse_order_equivalent"].fixture_flag("flag"),
         "fixture pins the reverse-order replica"
     );
     let mut reversed = LivenessReplica::default();
@@ -981,7 +984,7 @@ fn liveness_orset_lww_fixture() {
     // that re-inserted the same tag would still be at zero, which is the point of
     // an idempotent join.
     assert!(
-        sc["redeliver"].as_bool().expect("redeliver"),
+        sc["redeliver"].fixture_flag("redeliver"),
         "fixture pins re-delivery"
     );
     let mut applied = 0u64;

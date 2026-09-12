@@ -7,7 +7,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{BarrierCell, Context, LeaderCell, LeaderRole, LeaseCell, LockCell, SemaphoreCell};
 use serde_json::Value;
 
@@ -69,11 +73,11 @@ fn lease() {
                     now,
                     op["ttl"].as_u64().unwrap(),
                 );
-                assert_eq!(got, step["returns"].as_bool().unwrap());
+                assert_eq!(got, step.fixture_flag_at("returns"));
             }
             "tick" => {
                 let got = lease.tick(&ctx, now);
-                assert_eq!(got, step["returns"].as_bool().unwrap());
+                assert_eq!(got, step.fixture_flag_at("returns"));
             }
             other => panic!("unknown op {other}"),
         }
@@ -166,11 +170,11 @@ fn lock() {
             }
             "validate" => {
                 let got = lock.validate(op["fence"].as_u64().unwrap());
-                assert_eq!(got, step["returns"].as_bool().unwrap());
+                assert_eq!(got, step.fixture_flag_at("returns"));
             }
             "tick" => {
                 let got = lock.tick(&ctx, now);
-                assert_eq!(got, step["returns"].as_bool().unwrap());
+                assert_eq!(got, step.fixture_flag_at("returns"));
             }
             other => panic!("unknown op {other}"),
         }
@@ -200,7 +204,7 @@ fn semaphore() {
 
     for (i, step) in steps(&fx).iter().enumerate() {
         match step["op"]["type"].as_str().unwrap() {
-            "acquire" => assert_eq!(sem.acquire(&ctx), step["returns"].as_bool().unwrap()),
+            "acquire" => assert_eq!(sem.acquire(&ctx), step.fixture_flag_at("returns")),
             "release" => sem.release(&ctx),
             other => panic!("unknown op {other}"),
         }
@@ -237,7 +241,7 @@ fn quorum() {
             "vote" => q.arrive(&ctx, op["peer"].as_u64().unwrap()),
             other => panic!("unknown op {other}"),
         };
-        assert_eq!(got, step["returns"].as_bool().unwrap());
+        assert_eq!(got, step.fixture_flag_at("returns"));
         let exp = expected("quorum.json", i, step);
         let inv = exp.sub("invalidates");
         exp.assert_key("votes", q.count());

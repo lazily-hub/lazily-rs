@@ -2,7 +2,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 #[cfg(feature = "async")]
 use lazily::{AsyncBoundaryIngressCell, AsyncContext};
 use lazily::{
@@ -408,11 +412,7 @@ fn assert_delivery(actual: Option<&BoundaryDeliveryReceipt>, expect: &Expect, wh
         )
     });
     expect.assert_key_if_present("converged", |value| {
-        assert_eq!(
-            actual.converged(),
-            value.as_bool().expect("bool"),
-            "{where_}"
-        )
+        assert_eq!(actual.converged(), value.fixture_flag("bool"), "{where_}")
     });
 }
 
@@ -469,14 +469,14 @@ fn assert_expected(actual: &BoundaryIngressProjection<String>, expect: &Expect, 
     expect.assert_key_if_present("ready", |value| {
         assert_eq!(
             actual.readiness() == BoundaryIngressReadiness::Ready,
-            value.as_bool().expect("ready"),
+            value.fixture_flag("ready"),
             "{where_}"
         )
     });
     expect.assert_key_if_present("fresh", |value| {
         assert_eq!(
             actual.freshness == BoundaryFreshness::Fresh,
-            value.as_bool().expect("fresh"),
+            value.fixture_flag("fresh"),
             "{where_}"
         )
     });

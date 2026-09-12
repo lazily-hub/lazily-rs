@@ -13,6 +13,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 use std::cell::Cell as StdCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -208,9 +213,7 @@ fn assert_invalidation(
     }
 
     let mem_inv = invalidates
-        .assert_key_if_present("membership", |v| {
-            v.as_bool().expect("invalidates.membership")
-        })
+        .assert_key_if_present("membership", |v| v.fixture_flag("invalidates.membership"))
         .unwrap_or(false);
     let mem_cached = ctx.is_set(membership_reader);
     if mem_inv {
@@ -226,7 +229,7 @@ fn assert_invalidation(
     }
 
     let ord_inv = invalidates
-        .assert_key_if_present("order", |v| v.as_bool().expect("invalidates.order"))
+        .assert_key_if_present("order", |v| v.fixture_flag("invalidates.order"))
         .unwrap_or(false);
     let ord_cached = ctx.is_set(order_reader);
     if ord_inv {
@@ -267,7 +270,7 @@ fn assert_handle_stable_inner(
             // so `false` is a fixture the runner does not know how to check
             // rather than a silent pass.
             assert!(
-                want.as_bool() == Some(true),
+                want.fixture_flag(&format!("handle_stable{{{key}}}")),
                 "handle_stable{{{key}}}: only `true` has a defined meaning here \
                  (got {want}); a `false` claim needs a runner that can assert it"
             );
@@ -677,9 +680,8 @@ fn run_semtree_fixture(name: &str) {
                 );
                 expect_after.assert_key("root", sums.value(&ctx));
                 expect_after.assert_key_if_present("sibling_a_cached", |want| {
-                    let sibling_cached = want
-                        .as_bool()
-                        .expect("expect_after.sibling_a_cached is a bool");
+                    let sibling_cached =
+                        want.fixture_flag("expect_after.sibling_a_cached is a bool");
                     let a_slot =
                         a_slot.expect("scenario checks sibling_a_cached but no `a` node slot");
                     assert_eq!(
@@ -746,9 +748,8 @@ fn run_semtree_fixture(name: &str) {
                 expect_after.assert_key("root", count.value(&ctx) as u64);
                 let _ = ctx.get(&observer); // pull observer
                 expect_after.assert_key_if_present("downstream_consumer_reran", |want| {
-                    let reran = want
-                        .as_bool()
-                        .expect("expect_after.downstream_consumer_reran is a bool");
+                    let reran =
+                        want.fixture_flag("expect_after.downstream_consumer_reran is a bool");
                     let did_rerun = calls.get() > calls_before;
                     assert_eq!(
                         did_rerun, reran,
@@ -776,12 +777,7 @@ fn conformance_semtree_incremental() {
 /// cannot catch it either: the type check has to live here.
 fn changed_flag(step: &Value, scenario: usize) -> Option<bool> {
     let want = step.get("expect_changed")?;
-    Some(want.as_bool().unwrap_or_else(|| {
-        panic!(
-            "scenario {scenario}: expect_changed must be a JSON boolean, got {want} \
-             (#lzflagcoercion)"
-        )
-    }))
+    Some(want.fixture_flag(&format!("scenario {scenario}: expect_changed")))
 }
 
 /// `expect_collected`, on the same terms as [`changed_flag`]
@@ -1280,7 +1276,7 @@ fn apply_textcrdt_op(t: &mut TextCrdt, op: &Value) {
             t.delete(index);
         }
         "gc" => {
-            let stable = op.get("stable").and_then(|v| v.as_bool()).unwrap();
+            let stable = op.fixture_flag_at("stable");
             let collected = t.gc_with(|_| stable);
             if let Some(expect) = collected_count(op) {
                 assert_eq!(collected as u64, expect, "gc expect_collected mismatch");

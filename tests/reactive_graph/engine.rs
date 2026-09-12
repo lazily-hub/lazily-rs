@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 
-use crate::common::Expect;
+use crate::common::{Expect, FixtureJson};
 use serde_json::Value;
 
 use super::model::{
@@ -21,11 +21,17 @@ use super::model::{
 /// Collected up front so the child tracker can be borrowed inside the loop
 /// (`#lzsubblockkeyset`).
 fn node_ids(block: &Expect) -> Vec<String> {
+    // REQUIRE the object (`#lzsiblingrunnermasking`):
+    // `.as_object().map(..).unwrap_or_default()` read a mistyped block — an
+    // ARRAY where the corpus declares a per-node map — as ZERO node ids, so the
+    // loop below never ran and the block asserted nothing. An array-valued block
+    // also carries no object keys, so the unconsumed-key tracker stayed clean.
     block
         .raw()
-        .as_object()
-        .map(|o| o.keys().cloned().collect())
-        .unwrap_or_default()
+        .fixture_object("a per-node assertion block")
+        .keys()
+        .cloned()
+        .collect()
 }
 
 /// A fixture assertion the implementation does not currently satisfy.
@@ -54,8 +60,12 @@ pub struct Report {
     pub observation: Observation,
 }
 
+/// REQUIRE the array (`#lzsiblingrunnermasking`). This is the engine runner's
+/// only fixture-array reader, and `.unwrap_or(&[])` made every mistyped list
+/// read as EMPTY — which for an expectation list is the claim "nothing was
+/// observed", true of any run that observed nothing.
 pub fn arr(v: &Value) -> &[Value] {
-    v.as_array().map(|a| a.as_slice()).unwrap_or(&[])
+    v.fixture_array_or_null("a fixture array")
 }
 
 fn strs(v: &Value) -> Vec<String> {
@@ -591,7 +601,7 @@ pub fn replay<'a, M: GraphModel>(
             check!(
                 "drain_exhausted",
                 model.drain_exhausted(),
-                want.as_bool().unwrap()
+                want.fixture_flag("drain_exhausted")
             );
         });
 
@@ -712,7 +722,11 @@ pub fn replay<'a, M: GraphModel>(
                     }
                 };
                 want.assert_key_with(id.as_str(), |v| {
-                    check!(format!("readable.{id}"), alive, v.as_bool().unwrap());
+                    check!(
+                        format!("readable.{id}"),
+                        alive,
+                        v.fixture_flag(&format!("readable.{id}"))
+                    );
                 });
             }
             want.finish();
@@ -798,7 +812,11 @@ pub fn replay<'a, M: GraphModel>(
                     Some(_) => read_id!(id.as_str()).is_ok(),
                 };
                 want.assert_key_with(id.as_str(), |v| {
-                    check!(format!("final.readable.{id}"), alive, v.as_bool().unwrap());
+                    check!(
+                        format!("final.readable.{id}"),
+                        alive,
+                        v.fixture_flag(&format!("final.readable.{id}"))
+                    );
                 });
                 observation.readable.insert(id.clone(), alive);
             }

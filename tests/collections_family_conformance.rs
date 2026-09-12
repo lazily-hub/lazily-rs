@@ -29,6 +29,11 @@
 
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
@@ -432,13 +437,7 @@ impl MapModel for AsyncModel {
 /// (`collections_conformance.rs`) already required the type; these two family
 /// call sites were the coerced copies.
 fn bool_flag(want: &Value, flavor: &str, step: usize, key: &str) -> bool {
-    want.as_bool().unwrap_or_else(|| {
-        panic!(
-            "{flavor} step {step}: invalidates.{key} must be a JSON boolean, got \
-             {want} — a non-boolean coerced to `false` inverts the claim \
-             (#lzflagcoercion)"
-        )
-    })
+    want.fixture_flag(&format!("{flavor} step {step}: invalidates.{key}"))
 }
 
 fn str_of(v: &Value, field: &str) -> String {
@@ -607,7 +606,7 @@ async fn run_steps_fixture<M: MapModel>(name: &str) {
                     // stability, so `false` is a fixture this runner cannot check
                     // rather than a silent pass.
                     assert!(
-                        want.as_bool() == Some(true),
+                        want.fixture_flag(&format!("{flavor} step {i}: handle_stable{{{key}}}")),
                         "{flavor} step {i}: handle_stable{{{key}}}: only `true` has a \
                          defined meaning here (got {want})"
                     );

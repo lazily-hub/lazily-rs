@@ -88,11 +88,17 @@
 #![allow(dead_code)]
 
 pub mod expect;
+pub mod json;
 
 // Re-exported for `use common::Expect;`. Not every test binary that compiles
 // this module opens a fixture, so the re-export is unused in some of them.
 #[allow(unused_imports)]
 pub use expect::{Expect, ProseLedger};
+
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`). `Value::as_bool` is
+// banned by `clippy.toml`, so every fixture flag arrives through this trait.
+#[allow(unused_imports)]
+pub use json::FixtureJson;
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -759,6 +765,26 @@ impl<'a> ScenarioView<'a> {
     /// way to reach the payload — that is the skip this rung exists to catch.
     pub fn peek(&self) -> &'a serde_json::Value {
         self.scenario
+    }
+
+    /// A scenario INPUT flag, booked, with the JSON type REQUIRED
+    /// (`#lzsiblingrunnermasking`).
+    ///
+    /// Inherent rather than a `FixtureJson` impl so the booking is not
+    /// bypassable: the trait would have to take `&Value`, and reaching for the
+    /// `Value` to call it is exactly the unbooked read `peek` warns about.
+    pub fn fixture_flag_at(&self, key: &str) -> bool {
+        self.touch(key);
+        crate::common::json::FixtureJson::fixture_flag_at(self.scenario, key)
+    }
+
+    /// A scenario input flag where ABSENT (or JSON `null`) means `false` and
+    /// PRESENT requires the boolean. These flags GATE assertions — a coerced
+    /// `"true"` skipped the whole reversed replay, and the block it gates was
+    /// then the only thing that could have noticed.
+    pub fn fixture_flag_opt(&self, key: &str) -> bool {
+        self.touch(key);
+        crate::common::json::FixtureJson::fixture_flag_opt(self.scenario, key)
     }
 }
 

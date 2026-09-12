@@ -18,7 +18,11 @@
 
 mod common;
 
-use common::Expect;
+// `FixtureJson` holds the SANCTIONED fixture reads
+// (`#lzsiblingrunnermasking`): `Value::as_bool` is banned by `clippy.toml`, so a
+// mistyped fixture value fails instead of coercing to a default that satisfies
+// the assertion.
+use common::{Expect, FixtureJson};
 use lazily::{
     Context, CrdtOp, CrdtPlaneRuntime, HlcStamp, IpcValue, LwwRegister, NodeId, NodeKey, PeerId,
     ReplicatedCell, WireStamp,
@@ -156,11 +160,12 @@ fn anti_entropy_converge_conformance() {
         );
         checked_counts += 1;
 
-        if sc
-            .get("redeliver")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
+        // ABSENT means the scenario states no redelivery; PRESENT means it
+        // states one, so a non-boolean is a mistyped input and not a `false`
+        // that skips the whole check (`#lzsiblingrunnermasking`). The sibling
+        // `reliable_sync_conformance.rs` required this exact key outright; this
+        // runner coerced it.
+        if sc.fixture_flag_opt("redeliver") {
             let again = ingest_ops(&mut rt, &ctx, &ops);
             exp.assert_key_at(
                 "redeliver_applied_count",
@@ -211,11 +216,11 @@ fn anti_entropy_converge_conformance() {
         // `false` (`#lzconsumednotasserted`).
         if exp.raw().get("order_independent").is_some() {
             assert!(
-                sc["reverse_order_equivalent"].as_bool().unwrap_or(false),
+                sc.fixture_flag_opt("reverse_order_equivalent"),
                 "{name}: expect.order_independent without reverse_order_equivalent"
             );
         }
-        if sc["reverse_order_equivalent"].as_bool().unwrap_or(false) {
+        if sc.fixture_flag_opt("reverse_order_equivalent") {
             let reversed: Vec<CrdtOp> = ops.iter().rev().cloned().collect();
             let rev_ctx = Context::new();
             let mut rev_rt = seeded_runtime(&rev_ctx, &reversed);
@@ -339,7 +344,7 @@ fn crdt_sync_frames_conformance() {
             .assert_key_if_present("frontier_omitted", |want| {
                 assert_eq!(
                     wire.get("frontier").is_none(),
-                    want.as_bool().expect("frontier_omitted"),
+                    want.fixture_flag("frontier_omitted"),
                     "{label}: frontier_omitted describes the wire shape"
                 );
                 assert!(
@@ -355,7 +360,7 @@ fn crdt_sync_frames_conformance() {
             .assert_key_if_present("has_keyed_op", |want| {
                 assert_eq!(
                     sync.ops.iter().any(|o| o.key.is_some()),
-                    want.as_bool().expect("has_keyed_op"),
+                    want.fixture_flag("has_keyed_op"),
                     "{label}: has_keyed_op"
                 )
             })
@@ -367,7 +372,7 @@ fn crdt_sync_frames_conformance() {
             .assert_key_if_present("has_keyless_op", |want| {
                 assert_eq!(
                     sync.ops.iter().any(|o| o.key.is_none()),
-                    want.as_bool().expect("has_keyless_op"),
+                    want.fixture_flag("has_keyless_op"),
                     "{label}: has_keyless_op"
                 )
             })

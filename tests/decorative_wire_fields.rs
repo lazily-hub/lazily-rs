@@ -6,6 +6,17 @@ use lazily::{
 };
 use serde_json::Value;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`). This runner replays a
+// LOCAL fixture (`tests/fixtures/`), not the canonical corpus, so it did not
+// previously compile `common` at all — but `Value::as_bool` is banned crate-wide
+// and the ban is worth more than one file's independence.
+mod common;
+
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 const FIXTURE: &str = include_str!("fixtures/decorative_wire_fields.json");
 
 fn merge_json(base: &mut Value, overrides: &Value) {
@@ -61,8 +72,7 @@ fn assert_submit_decision(scenario_id: &str, expected: &Value, actual: CommandAd
             assert_eq!(
                 cancel_existing,
                 expected["cancel_existing"]
-                    .as_bool()
-                    .expect("supersede expectation needs cancel_existing"),
+                    .fixture_flag("supersede expectation needs cancel_existing"),
                 "{scenario_id}"
             );
         }

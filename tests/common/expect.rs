@@ -879,15 +879,18 @@ impl<'a> Expect<'a> {
         let declared = self.declared.clone();
         let claims = self.claims.borrow().clone();
         let excused: BTreeSet<String> = self.excused.borrow().keys().cloned().collect();
-        let non_prose_keys = self
-            .value
-            .as_object()
-            .map(|o| {
-                o.keys()
-                    .filter(|k| k.as_str() != PROSE_DECLARATION_KEY && !declared.contains(*k))
-                    .count()
-            })
-            .unwrap_or(0);
+        // A SCALAR block has no keys, and that is not a coercion to hide from
+        // the fixture-flag hygiene rung (`#lzsiblingrunnermasking`): `assert_key`
+        // on a scalar block is a supported shape, so `None` here means "this
+        // block is not an object" and zero is the right count. Spelled as a
+        // `match` so the intent is stated rather than defaulted.
+        let non_prose_keys = match self.value.as_object() {
+            Some(o) => o
+                .keys()
+                .filter(|k| k.as_str() != PROSE_DECLARATION_KEY && !declared.contains(*k))
+                .count(),
+            None => 0,
+        };
         let label = self.label.clone();
         with_ledger(&self.fixture, |l| {
             l.asserted.extend(asserted.iter().cloned());

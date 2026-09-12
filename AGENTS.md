@@ -443,6 +443,125 @@ this repo.
   each satisfy it; a planted sub-key reddens under each; both set directions;
   array values untouched), and mutation-checked by neutering the descend /
   key-set bookkeeping, which names 25 sites instead of reporting clean
+- `tests/fixture_flag_hygiene.rs` + `clippy.toml` + `tests/common/json.rs` — the
+  **fixture-flag hygiene** rung (`#lzsiblingrunnermasking`), one level BELOW the
+  assertion-key guard: having consumed a key, did the runner require its JSON
+  TYPE? `#lzflagcoercion` fixed every coerced site it found, and the coverage
+  that found them was an accident of which runners exist — the plant
+  `invalidates.membership: "true"` was a named failure in
+  `collections_conformance.rs` and GREEN in `collections_family_conformance.rs`
+  over the same fixture, because the family runner was a copy of a runner that
+  already required the type, coerced. A sibling mask like that is not a property
+  of any assertion: it disappears the moment a runner is renamed, split, deleted
+  or skipped. lazily-cpp (`97790fd`) deleted its `Json::as_bool()` so the weak
+  spelling is a compile error; Rust cannot delete an inherent method on a foreign
+  type, so `clippy.toml` bans `serde_json::Value::as_bool` — `make check` runs
+  clippy with `-D warnings`, `src/` never called it, and the ~85 test call sites
+  route through `tests/common/json.rs`'s `FixtureJson` trait (`fixture_flag`,
+  `fixture_flag_at`, `fixture_flag_opt`, `fixture_array`, `fixture_array_opt`,
+  `fixture_array_or_null`, `fixture_object`, `fixture_object_opt` — every one
+  requires the type when the value is PRESENT, and only the `_opt` forms treat
+  ABSENCE as a default). The rung guards the ban, because clippy alone has three
+  escapes: a local `#[allow(clippy::disallowed_methods)]`, a deleted
+  `clippy.toml` entry, and a COERCING CHAIN no lint can express
+  (`.unwrap_or(false)` / `.unwrap_or_default()` hung off `as_bool` / `as_array` /
+  `as_object` — the three accessors whose default SATISFIES an assertion rather
+  than contradicting it) plus the SILENT SKIP (`if let Some(x) = v.as_array()`
+  with no `else`, where nothing is substituted and the body simply does not run).
+  `syn` parses every source under `tests/` INCLUDING subdirectories and macro
+  TOKEN STREAMS — an AST-only walk saw 39 of the 86 `as_bool()` sites and
+  reported the other 47 clean, because most fixture comparisons in this binding
+  live inside `assert_eq!`. Two floors, so a scan that matched nothing cannot
+  pass: `MIN_SCANNED_SOURCES` fails a walk that lost the tree, and
+  `MIN_SANCTIONED_READS` fails a visitor whose `MethodCall` arm stopped firing.
+  One allowlist entry, `common/json.rs`, because it IS the sanctioned reader.
+  Falsified seven ways: the planted weak spelling (clippy AND the rung fail); the
+  `#[allow]` escape and the emptied `clippy.toml` (clippy PASSES, the rung
+  fails); the `as_array`+`unwrap_or_default` chain and the `if let` silent skip
+  (clippy has no lint at all); and each floor raised past the real count, plus
+  the walk pointed at a directory with ten sources
+
+  **The runner-pair enumeration** (`#lzsiblingrunnermasking`), written down here
+  for the first time. Fixtures this binding opens from MORE THAN ONE runner —
+  `expect_guard.rs` is excluded, it borrows fixture NAMES as labels for synthetic
+  values and opens nothing:
+
+  1. `collections/cellmap_{atomic_move,independence}.json` —
+     `collections_conformance.rs` ↔ `collections_family_conformance.rs` (3
+     flavors).
+  2. `collections/queuecell_*.json` (5) — `queue_conformance.rs` ↔
+     `queue_family_conformance.rs::thread_safe_flavor` ↔ `::async_flavor`.
+  3. `collections/workqueue_{competing_delivery,lease_deadletter}.json` —
+     `work_queue_conformance.rs` ↔ `queue_family_conformance.rs::work_queue_*`
+     (3 flavors).
+  4. `materialization/observational_transparency.json` —
+     `materialization_conformance.rs` ↔ `materialization_threadsafe_*` ↔
+     `materialization_async_*`.
+  5. `materialization/deferral_not_deallocation.json` —
+     `materialization_conformance.rs` ↔ `materialization_threadsafe_*`.
+  6. `collections/topiccell_*.json` (4) — NOT a pair. One runner file with three
+     flavor modules; `topic_conformance.rs` names them in its module docs and
+     opens nothing (the original `#lazilyupgradeconformance` finding).
+
+  What shrinks the search: `Expect` fails at drop on any key of a guarded block
+  the runner did not consume, and every runner in every pair above guards the
+  block it replays. So key-level asymmetry INSIDE `expected` / `expect` /
+  `assertions` is impossible here — a runner asserting fewer keys than its
+  sibling fails on its own. The residual surface is exactly (a) values read off
+  the raw `Value` outside any tracker (`initial`, `op`, `steps[].returns`) and
+  (b) the STRENGTH of the comparison at a key both runners consume.
+
+  Pair 2 carried every mask found, all in class (a):
+  * `initial.closed` was read by `queue_conformance.rs` **alone**; both family
+    flavors built an OPEN queue whatever the fixture said, and all five fixtures
+    declare the key. Proved against a scratch corpus with `closed: true`
+    planted: `queue_family_conformance` 23 passed / 0 failed BEFORE, 21 / 2
+    AFTER, while `queue_conformance` reddened in both — accidental coverage
+    exactly as described. Both flavors now honour it.
+  * `initial.elements` — `queue_conformance.rs` seeded it through
+    `if let Some(..) = .and_then(|v| v.as_array())` with NO else (a mistype seeds
+    nothing, silently); the two family flavors REFUSED it through
+    `.as_array().map(|a| a.is_empty()).unwrap_or(true)` (a mistype passes the
+    refusal). Neither side had a sibling covering it. Proved on the family side
+    with `elements: "a"` planted: 23 / 0 BEFORE, 21 / 2 AFTER.
+  * `steps[].returns` — the family's two queue arms matched with
+    `got == want || got.starts_with(want)`, strictly weaker than BOTH siblings
+    over the same five fixtures: `queue_conformance.rs` compares the whole
+    `Value` with `assert_eq!`, and this runner's own topic arm has an exhaustive
+    `match (step.get("returns"), returns)` whose `(Some(want), None)` panics. A
+    prefix also let `returns: ""` pass against any return. Now exact.
+  * LEGITIMATE division: the family flavors do not seed `initial.elements`, they
+    REFUSE it with a named message ("a fixture needing it must extend the runner
+    rather than be skipped"). A stated refusal that fails loudly is not a mask.
+
+  Pair 1 is **redundant** after `#lzflagcoercion`: both runners require the
+  boolean on `invalidates.{membership,order}`, require the array on
+  `invalidates.value`, and hold `handle_stable{k}` to `true`-only with the same
+  reason. Op vocabulary matches (the family also handles `move_after`, which the
+  corpus does not carry). Pair 3 is **redundant**: the same five ops, the same
+  `op` fields, `returns` compared per op kind, and one shared `assert_delivery`
+  shape. Pairs 4/5 are a **legitimate division of labour and say so**:
+  `deferral_not_deallocation_async` names the keys it does not read through
+  `excuse_key("asserted by eventual_transparency_async in this binary, under its
+  own guard")`, an excuse that runs in both directions, and all three
+  `default_mode` arms are the same flip-detector (the `lazy` arm produces 0
+  present while the assertion demands `keys.len()`, so a corpus that renamed its
+  default reddens).
+
+  One cross-family asymmetry on NON-shared fixtures, recorded because it is the
+  same defect one step out: `reliable_sync_conformance.rs` required
+  `sc["reverse_order_equivalent"]` and `sc["redeliver"]` outright while
+  `distributed_conformance.rs` coerced both with `.unwrap_or(false)`, so a
+  `"true"` there skipped the reversed replay and the redelivery count. Different
+  fixtures, so neither masked the other; both now go through
+  `ScenarioView::fixture_flag_opt`, which books the read and requires the type.
+
+  And one honest negative: a mistyped `initial.elements` on
+  `topiccell_durable_replay_gc.json` reddens BEFORE the fix as well as after —
+  `src/topic_core.rs` catches the empty seed — so that `.unwrap_or_default()` was
+  a latent weak spelling, not a demonstrated mask. The fix moves the failure from
+  a library internal assert to a named fixture error, which is better diagnosis
+  and not more coverage.
 - `tests/state_table_pilot.rs` — the `#lazilystatetable` pilot: Agent Doc's
   retained-document-transition decision as a typed table (Phase 1 — written
   *before* any Agent Doc runtime change, so nothing here reaches into that repo).

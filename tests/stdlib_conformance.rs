@@ -1,5 +1,10 @@
 mod common;
 
+// The SANCTIONED fixture reads (`#lzsiblingrunnermasking`): `Value::as_bool` is
+// banned by `clippy.toml`, so a mistyped fixture flag fails instead of
+// coercing to `false` and asserting the opposite claim.
+use common::FixtureJson;
+
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -401,7 +406,7 @@ fn replay_barriers(path: &str, fixture: &Value) {
                     let observed = step["observed_revision"]
                         .as_u64()
                         .expect("observed revision");
-                    let predicate = step["predicate"].as_bool().expect("predicate");
+                    let predicate = step["predicate"].fixture_flag("predicate");
                     let after = required_revision.saturating_sub(1);
                     let _ = current.advance(observed);
                     if predicate && current.revision() >= required_revision {
@@ -416,7 +421,7 @@ fn replay_barriers(path: &str, fixture: &Value) {
                 "advance" => {
                     let current = barrier.as_ref().unwrap();
                     let revision = step["revision"].as_u64().expect("revision");
-                    let predicate = step["predicate"].as_bool().expect("predicate");
+                    let predicate = step["predicate"].fixture_flag("predicate");
                     let _ = current.advance(revision);
                     if current.is_disposed() {
                         barrier_observation("disposed", current, None)
@@ -448,7 +453,7 @@ fn replay_barriers(path: &str, fixture: &Value) {
                         observation
                     } else {
                         let reached = deadline.is_some_and(|value| now >= value);
-                        let predicate = step["predicate"].as_bool().expect("predicate");
+                        let predicate = step["predicate"].fixture_flag("predicate");
                         let cancellation = step["cancellation"].as_str().expect("cancellation");
                         let mut timer = reached.then(|| Timer::after(Duration::ZERO));
                         let owned = current.cancellation();
