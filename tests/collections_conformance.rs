@@ -574,10 +574,11 @@ fn run_semtree_fixture(name: &str) {
         return;
     }
     let fixture = load_fixture(name);
+    let path = format!("{SPEC_DIR}/{name}");
     // Per-scenario replay ledger (`#lzscenariocoverage`): recording happens as
     // the helper yields, so a scenario this loop never reaches is a build
     // failure rather than an invisible gap under a fixture that "was opened".
-    for (i, _id, scenario) in common::scenarios(&format!("{SPEC_DIR}/{name}"), &fixture) {
+    for (i, _id, scenario) in common::scenarios(&path, &fixture) {
         let fold = scenario
             .get("fold")
             .and_then(|v| v.as_str())
@@ -591,18 +592,33 @@ fn run_semtree_fixture(name: &str) {
                 let sums = SemTree::build(&ctx, &root, |v: &i64, kids: &[i64]| {
                     v + kids.iter().sum::<i64>()
                 });
-                let expect_initial = scenario.get("expect_initial").unwrap();
-                assert_eq!(
-                    sums.value(&ctx),
-                    expect_field_i64(expect_initial, "root"),
-                    "scenario {i} initial root"
+                // BOUND to the tracker (`#lzrsbindpending`). Every key was
+                // already compared; what was missing is the booking, and without
+                // it rung 0 saw nothing and every rung above was scoped past this
+                // block. The optional keys go through `assert_key_if_present`
+                // rather than `if let Some(..)` so a key the corpus grows here is
+                // an unconsumed-key failure instead of a silent skip.
+                let expect_initial = Expect::new(
+                    path.clone(),
+                    format!("scenarios[{i}].expect_initial"),
+                    scenario.get("expect_initial").unwrap(),
                 );
-                if let Some(a) = expect_initial.get("a").and_then(|v| v.as_i64()) {
-                    assert_eq!(
-                        sums.node_value(&ctx, &"a".to_string()),
-                        Some(a),
-                        "scenario {i} initial a"
-                    );
+                expect_initial.assert_key("root", sums.value(&ctx));
+                for node_id in ["a", "b"] {
+                    // `b` was a REAL gap this bind exposed, not a routing one: the
+                    // corpus asserts the initial fold at `b` and the runner only
+                    // ever read `a`, so `expect_initial.b` was compared by nothing
+                    // and nothing could report it. Both nodes now go through the
+                    // same path.
+                    expect_initial.assert_key_if_present(node_id, |want| {
+                        assert_eq!(
+                            sums.node_value(&ctx, &node_id.to_string()),
+                            Some(want.as_i64().unwrap_or_else(|| panic!(
+                                "expect_initial.{node_id} is an integer"
+                            ))),
+                            "scenario {i} initial {node_id}"
+                        );
+                    });
                 }
 
                 // Prime sibling slot cache before edit so we can verify isolation.
@@ -635,17 +651,16 @@ fn run_semtree_fixture(name: &str) {
                     );
                 }
 
-                let expect_after = scenario.get("expect_after").unwrap();
-                assert_eq!(
-                    sums.value(&ctx),
-                    expect_field_i64(expect_after, "root"),
-                    "scenario {i}: root after edit"
+                let expect_after = Expect::new(
+                    path.clone(),
+                    format!("scenarios[{i}].expect_after"),
+                    scenario.get("expect_after").unwrap(),
                 );
-
-                if let Some(sibling_cached) = expect_after
-                    .get("sibling_a_cached")
-                    .and_then(|v| v.as_bool())
-                {
+                expect_after.assert_key("root", sums.value(&ctx));
+                expect_after.assert_key_if_present("sibling_a_cached", |want| {
+                    let sibling_cached = want
+                        .as_bool()
+                        .expect("expect_after.sibling_a_cached is a bool");
                     let a_slot =
                         a_slot.expect("scenario checks sibling_a_cached but no `a` node slot");
                     assert_eq!(
@@ -654,26 +669,34 @@ fn run_semtree_fixture(name: &str) {
                         "scenario {i}: sibling_a_cached contract ({}cached expected)",
                         if sibling_cached { "" } else { "un" }
                     );
-                }
-                if let Some(b) = expect_after.get("b").and_then(|v| v.as_i64()) {
+                });
+                expect_after.assert_key_if_present("b", |want| {
                     let b_slot = b_slot.expect("expect_after.b present but no `b` slot");
-                    assert_eq!(ctx.get(&b_slot), b, "scenario {i}: b after edit");
-                }
-                if let Some(a) = expect_after.get("a").and_then(|v| v.as_i64()) {
+                    assert_eq!(
+                        ctx.get(&b_slot),
+                        want.as_i64().expect("expect_after.b is an integer"),
+                        "scenario {i}: b after edit"
+                    );
+                });
+                expect_after.assert_key_if_present("a", |want| {
                     let a_slot = a_slot.expect("expect_after.a present but no `a` slot");
-                    assert_eq!(ctx.get(&a_slot), a, "scenario {i}: a unchanged after edit");
-                }
+                    assert_eq!(
+                        ctx.get(&a_slot),
+                        want.as_i64().expect("expect_after.a is an integer"),
+                        "scenario {i}: a unchanged after edit"
+                    );
+                });
             }
             "count_positive" => {
                 let count = SemTree::build(&ctx, &root, |v: &i64, kids: &[usize]| {
                     (if *v > 0 { 1usize } else { 0 }) + kids.iter().sum::<usize>()
                 });
-                let expect_initial = scenario.get("expect_initial").unwrap();
-                assert_eq!(
-                    count.value(&ctx),
-                    expect_field_i64(expect_initial, "root") as usize,
-                    "scenario {i}: initial positive count"
+                let expect_initial = Expect::new(
+                    path.clone(),
+                    format!("scenarios[{i}].expect_initial"),
+                    scenario.get("expect_initial").unwrap(),
                 );
+                expect_initial.assert_key("root", count.value(&ctx) as u64);
 
                 // Downstream consumer of the derived root; count how often it re-runs.
                 let calls = Rc::new(StdCell::new(0usize));
@@ -696,33 +719,27 @@ fn run_semtree_fixture(name: &str) {
                     node.set(&ctx, value);
                 }
 
-                let expect_after = scenario.get("expect_after").unwrap();
-                assert_eq!(
-                    count.value(&ctx),
-                    expect_field_i64(expect_after, "root") as usize,
-                    "scenario {i}: positive count after edit"
+                let expect_after = Expect::new(
+                    path.clone(),
+                    format!("scenarios[{i}].expect_after"),
+                    scenario.get("expect_after").unwrap(),
                 );
+                expect_after.assert_key("root", count.value(&ctx) as u64);
                 let _ = ctx.get(&observer); // pull observer
-                if let Some(reran) = expect_after
-                    .get("downstream_consumer_reran")
-                    .and_then(|v| v.as_bool())
-                {
+                expect_after.assert_key_if_present("downstream_consumer_reran", |want| {
+                    let reran = want
+                        .as_bool()
+                        .expect("expect_after.downstream_consumer_reran is a bool");
                     let did_rerun = calls.get() > calls_before;
                     assert_eq!(
                         did_rerun, reran,
                         "scenario {i}: downstream_consumer_reran contract ({reran} expected)"
                     );
-                }
+                });
             }
             other => panic!("scenario {i}: unknown fold {other}"),
         }
     }
-}
-
-fn expect_field_i64(v: &Value, field: &str) -> i64 {
-    v.get(field)
-        .and_then(|v| v.as_i64())
-        .unwrap_or_else(|| panic!("missing {field}: {v}"))
 }
 
 #[test]

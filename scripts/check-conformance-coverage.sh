@@ -956,12 +956,12 @@ PY
 # without deleting entries and coverage cannot regress upward without someone
 # adding one by hand.
 #
-# 201 entries, all `bind-pending`, all reachable: every one is a per-step or
-# per-scenario expectation its runner already reads and compares — what is
-# missing is the routing through `Expect`, not the assertion. Three step loops
-# account for 195 of them. This list is expected to SHRINK; shrinking it is the
-# work, and `#lzrsblockwalk` widened the walk precisely so that the work is
-# countable instead of invisible.
+# 195 entries, all `bind-pending`, all reachable: every one is a per-step
+# expectation its runner already reads and compares — what is missing is the
+# routing through `Expect`, not the assertion. Two step loops account for all of
+# them: ingress 28, stdlib 54, reactive-graph 113 (`#lzrsbindpending`). This list is expected
+# to SHRINK; shrinking it is the work, and `#lzrsblockwalk` widened the walk
+# precisely so that the work is countable instead of invisible.
 #
 # lazily-kt is the warning about how this shrinks: its first migration pass
 # measured a 100 percent higher-rung failure rate — every block it bound then
@@ -972,14 +972,8 @@ PY
 # key (`#lzsubblockkeyset`), and one failed rung 2 as an assertion key never
 # consumed. Budget for the rung above, not for a mechanical edit.
 KNOWN_UNBOUND_BLOCKS=(
-  # collections — 6 sites in semtree_incremental.json.
-  # read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present
-  "collections/semtree_incremental.json|scenarios[0].expect_after|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
-  "collections/semtree_incremental.json|scenarios[0].expect_initial|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
-  "collections/semtree_incremental.json|scenarios[1].expect_after|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
-  "collections/semtree_incremental.json|scenarios[1].expect_initial|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
-  "collections/semtree_incremental.json|scenarios[2].expect_after|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
-  "collections/semtree_incremental.json|scenarios[2].expect_initial|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
+
+  # ingress — 28 sites in boundary_ingress_adapter.json, one step loop.
 
   # ingress — 28 sites in boundary_ingress_adapter.json, one step loop.
   # per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration
@@ -1011,7 +1005,6 @@ KNOWN_UNBOUND_BLOCKS=(
   "ingress/boundary_ingress_adapter.json|scenarios[6].steps[1].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
   "ingress/boundary_ingress_adapter.json|scenarios[6].steps[2].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
   "ingress/boundary_ingress_adapter.json|scenarios[6].steps[3].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
-
   # reactive-graph — 113 sites across 21 fixtures, one step loop.
   # per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration
   "reactive-graph/churn_returns_to_baseline.json|steps[1].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
