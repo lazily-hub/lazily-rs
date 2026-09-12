@@ -544,16 +544,53 @@ require_run_id() {
 # identically; that is true only of a guard that counts records. So the guard
 # counts records, and the two spellings stay interchangeable.
 #
-# A record is a line that is neither the stamp nor blank. `|| true` keeps
-# `grep -c`'s exit 1 on zero matches from killing the script under `set -e`; the
-# `0` it printed is still what the substitution captures.
+# A record is a line that is neither the stamp nor blank. `awk`, not
+# `sed ... | grep -c ... || true` (#lzgrepcpipefail): `grep -c` prints its count
+# and exits 1 when that count is zero, so under `set -e` the measurement had to
+# be rescued with `|| true` -- and one `|| true` cannot rescue the count without
+# also rescuing a `sed` that could not READ the file.
+#
+# That was measured, not argued. With the manifest present but unreadable, `sed`
+# printed `Permission denied`, the substitution captured grep's `0` regardless,
+# and this guard reported "Its content is the run-id stamp and/or blank lines, so
+# the recorder attached and opened nothing" -- a claim about bytes it had never
+# read. Fail-closed, wrong subject.
+#
+# awk exits 0 when it counts zero and NONZERO when it cannot open the file, so
+# the status now means "could this be measured" and stdout means "what was
+# measured". The prefix is matched LITERALLY with `index`, rather than as the
+# regex `sed` was taking it to be.
 evidence_records() {
   local file="$1"
   [ -f "$file" ] || { printf '0\n'; return 0; }
-  sed "/^${RUN_ID_PREFIX}/d" "$file" | grep -c '[^[:space:]]' || true
+  awk -v prefix="$RUN_ID_PREFIX" '
+    index($0, prefix) == 1 { next }
+    /[^[:space:]]/ { n++ }
+    END { print n + 0 }
+  ' "$file"
 }
 
-if [ "$(evidence_records "$MANIFEST")" -eq 0 ]; then
+# Status and value are read SEPARATELY, and neither is allowed to stand in for
+# the other. A failed substitution yields an EMPTY string, and `[ "" -eq 0 ]`
+# exits 2 -- which inside an `if` condition is not an error but a FALSE, so an
+# unreadable ledger would walk straight past the guard below and be counted as
+# carrying records.
+if ! manifest_records="$(evidence_records "$MANIFEST")"; then
+  echo "FAIL: the fixture manifest at $MANIFEST could not be READ to count its" >&2
+  echo "      records (the reason is on stderr above). An unreadable file is not" >&2
+  echo "      a file with nothing in it, and this guard will not report it as one" >&2
+  echo "      (#lzgrepcpipefail)." >&2
+  exit 1
+fi
+case "$manifest_records" in
+'' | *[!0-9]*)
+  echo "FAIL: counting records in $MANIFEST yielded '$manifest_records', which is" >&2
+  echo "      not a count. Refusing to compare a non-number with zero." >&2
+  exit 1
+  ;;
+esac
+
+if [ "$manifest_records" -eq 0 ]; then
   if [ -s "$MANIFEST" ]; then
     echo "FAIL: the fixture manifest at $MANIFEST carries NO records" >&2
     echo "      (#lzstampsatisfiesnonempty). Its content is the run-id stamp" >&2

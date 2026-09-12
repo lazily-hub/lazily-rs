@@ -200,6 +200,15 @@ jobs:
 
       - name: Test reactive-graph disposal/teardown conformance against canonical spec fixtures (#lzspecedgeindex)
         run: |
+          # `pipefail` (#lzgrepcpipefail). GitHub's default shell is `bash -e {0}`:
+          # `-e` is on, `pipefail` is NOT, so `cargo test ... | tee /tmp/rg.log`
+          # below reported TEE's status and a failing test run in the
+          # `thread-safe async` feature set — the only place that combination is
+          # exercised — passed this step green. Every pipeline in this body is
+          # now written so its exit status is the producer's: `find` and `awk`
+          # exit 0 when they select nothing, so switching this on does not turn a
+          # zero measurement into a failure.
+          set -o pipefail
           test -d ../lazily-spec/conformance/reactive-graph || { echo "::error::../lazily-spec/conformance/reactive-graph missing — reactive_graph_conformance.rs would silently skip the whole disposal/teardown corpus"; exit 1; }
           # The corpus is parameterised over the execution model, and the
           # ThreadSafeContext / AsyncContext models are feature-gated. Running
@@ -224,12 +233,26 @@ jobs:
           # they are the opposite of the silent skip this guard exists to catch —
           # but they are not replays, so they are counted separately. What must
           # hold exactly is replayed + declared-skips == corpus.
-          expected=$(ls ../lazily-spec/conformance/reactive-graph/*.json | wc -l)
+          # `find`, not `ls <glob>`: an unmatched glob makes `ls` exit 2, which
+          # under the `pipefail` above would kill this step before the
+          # `-gt 0` check below could name the empty corpus (#lzgrepcpipefail).
+          # `find` exits 0 and prints nothing, so zero stays a measurement.
+          expected=$(find ../lazily-spec/conformance/reactive-graph -maxdepth 1 -name '*.json' | wc -l)
           test "$expected" -gt 0 || { echo "::error::no reactive-graph fixtures found — the corpus is empty or the path is wrong"; exit 1; }
           for model in Context ThreadSafeContext AsyncContext; do
             replayed=$(sed -n "s/^reactive-graph\[$model\]: \([0-9]\+\) fixtures.*/\1/p" /tmp/rg.log | tail -1)
             test -n "$replayed" || { echo "::error::reactive-graph corpus did not report a summary line for $model — the model never ran"; exit 1; }
-            skipped=$(grep -c "^SKIP reactive-graph\[$model\] " /tmp/rg.log || true)
+            # `awk`, not `grep -c ... || true`: zero declared skips is the NORMAL
+            # state and a legitimate measurement, but `grep -c` signals it with
+            # exit 1, so the count had to be rescued with `|| true` — which also
+            # rescued a `grep` that could not READ the log. Measured: with
+            # /tmp/rg.log unreadable, `skipped` came back empty, bash's
+            # arithmetic read the empty string as 0, and this step reported
+            # "accounted for 20 replayed + declared-skipped = 20 of 21" — a
+            # shortfall in the corpus, which is not what happened. awk exits 0 on
+            # zero matches and NONZERO when it cannot open the file, so an
+            # unreadable log fails as an unreadable log (#lzgrepcpipefail).
+            skipped=$(awk -v m="$model" 'index($0, "SKIP reactive-graph[" m "] ") == 1 { n++ } END { print n + 0 }' /tmp/rg.log)
             test "$((replayed + skipped))" -eq "$expected" || { echo "::error::reactive-graph corpus accounted for $replayed replayed + $skipped declared-skipped = $((replayed + skipped)) of $expected fixtures against $model"; exit 1; }
           done
 
@@ -381,11 +404,24 @@ jobs:
       # second spelling of the stamp (#lzstampprefixdrift).
       - name: Conformance coverage + scenario replay ledger (#lzguardsnotinci)
         run: |
+          # `awk`, not `grep -c`: it exits 0 when it counts zero, so nothing here
+          # needs a `|| true` and the status stays the answer to "could this be
+          # read" rather than "was it non-empty" (#lzgrepcpipefail). The three
+          # states are reported separately — `2>/dev/null || echo 0` used to fold
+          # an unreadable ledger into the same sentence as a stamp-only one,
+          # which is fail-closed with the wrong subject.
           require_records() {
             what="$1"; file="$2"; computes="$3"
-            n="$(awk '!/^#/ && NF { n++ } END { print n + 0 }' "$file" 2>/dev/null || echo 0)"
-            if [ "${n:-0}" -eq 0 ]; then
-              echo "::error::$what $file carries no records (absent, empty, or stamp-only) — the recorder never attached, so $computes cannot be computed"
+            if [ ! -f "$file" ]; then
+              echo "::error::$what $file does not exist — the recorder never attached, so $computes cannot be computed"
+              exit 1
+            fi
+            if ! n="$(awk '!/^#/ && NF { n++ } END { print n + 0 }' "$file")"; then
+              echo "::error::$what $file could not be READ (reason above) — an unreadable ledger is not an empty one, so $computes cannot be computed"
+              exit 1
+            fi
+            if [ "$n" -eq 0 ]; then
+              echo "::error::$what $file carries no records (empty or stamp-only) — the recorder never attached, so $computes cannot be computed"
               exit 1
             fi
           }
@@ -407,7 +443,12 @@ jobs:
         run: |
           out=$(./scripts/check-ci-reach.sh 2>&1) || { echo "$out"; echo "::error::a make check gate is unreachable from CI"; exit 1; }
           echo "$out"
-          echo "$out" | grep -q "check-ci-reach: OK" || {
+          # Here-string, NOT a pipe. `grep -q` exits on its first hit, `echo` then
+          # takes SIGPIPE, and under `set -o pipefail` the pipeline reports
+          # ECHO's death — so a step that switched pipefail on would read a
+          # PRESENT verdict as a missing one. The same inversion is documented at
+          # scripts/check-conformance-coverage.sh's covered-check.
+          grep -q "check-ci-reach: OK" <<< "$out" || {
             echo "::error::the CI-reachability guard exited 0 without reaching its verdict"
             exit 1
           }

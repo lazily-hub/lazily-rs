@@ -136,6 +136,56 @@ for wf in "${workflows[@]}"; do
 	fi
 done
 
+# --------------------------------------------- the dry run must be readable AT ALL
+#
+# Everything below reads recipe lines out of `make -n`, and every one of those
+# reads discards make's stderr (`2>/dev/null`) because make's own `make[1]:`
+# chatter would otherwise be scraped as recipe text. So this one invocation runs
+# FIRST, in the main shell, with stderr LEFT ALONE: if the dry run cannot be
+# produced, the operator gets make's actual sentence here rather than this
+# script's paraphrase of it from inside a command substitution.
+#
+# This probe is DIAGNOSTIC, not the catch, and that distinction was measured
+# rather than assumed (#lzgrepcpipefail). The per-target refusal in the closure
+# walk below catches every case this one does: with this block deleted, a scratch
+# copy of this Makefile carrying `test-shm: nonexistent.stamp` -- the ordinary
+# shape of a half-finished edit -- still exits 1 and lists `check` and `test-shm`
+# as unreadable. What this block adds is make's OWN sentence
+# (`No rule to make target 'nonexistent.stamp', needed by 'test-shm'`), printed
+# once, up front, instead of this script's paraphrase arriving after fifty more
+# `make -n` invocations.
+#
+# It is NOT sufficient on its own, which was also measured: `make -n check` can
+# exit 0 while `make -n <one member>` exits 2 (see the goal-conditional attack
+# documented at the per-target refusal), and against that this probe passes
+# silently while a target drops out of the reached count. Root and per-target
+# cover different failures; neither replaces the other.
+#
+# What the unfixed script did with an unreadable recipe was measured too:
+# `no gate  test-shm  recipe runs no checkable command`, then
+# `check-ci-reach: OK -- 49 target(s) reached by CI, 0 excused, 3 carrying no
+# gate`, at exit 0. The target carrying the shm and blob-backend rungs stopped
+# being required to appear in CI, the reached count fell 50 -> 49, and the words
+# "make" and "No rule" appeared nowhere. lazily-py, zig, gd, cs and js each
+# reproduced the same drop-out in their own closures.
+#
+# TODAY'S Makefile cannot reach the missing-prerequisite form: every prerequisite
+# of `check` is a .PHONY recipe-bearing rule with no prerequisites of its own and
+# there is no `$(MAKE)` recursion anywhere, so `make -n <any target>` works for
+# all of them or for none. That is a property of the file this guard exists to
+# watch, which is exactly the kind of property not to depend on -- and the
+# goal-conditional form does not need even that much, since it leaves the root
+# dry run exiting 0.
+if ! "$MAKE_BIN" -n "$ROOT_TARGET" >/dev/null; then
+	echo >&2
+	echo "check-ci-reach: \`$MAKE_BIN -n $ROOT_TARGET\` FAILED (its error is above)." >&2
+	echo "                Every check below reads recipe lines from \`make -n\` with" >&2
+	echo "                stderr discarded, so an unreadable dry run would be" >&2
+	echo "                reported as targets that 'run no checkable command' —" >&2
+	echo "                which passes. Fix the Makefile first." >&2
+	exit 1
+fi
+
 # ------------------------------------------------------- make target extraction
 
 # A Makefile may set .RECIPEPREFIX to something other than tab (lazily-rs uses
@@ -242,8 +292,36 @@ join_continuations() {
 	'
 }
 
+# `awk`, not `grep -v`, and NO `|| true` (#lzgrepcpipefail).
+#
+# This line used to be
+# `make -n | grep -v -e '^make\[' -e '^make:' | join_continuations || true`, and
+# that one `|| true` had to absorb two opposite meanings at once:
+#
+#   * `grep -v` selecting NOTHING -- a recipe whose entire dry-run output is
+#     make's own `make[1]:` / `make:` noise -- exits 1, and under
+#     `set -o pipefail` that fails the pipeline. Zero selected lines is a
+#     legitimate MEASUREMENT here, so the status had to be discarded;
+#   * `make -n "$@"` itself FAILING. Its stderr is already thrown away by
+#     `2>/dev/null`, so with the status discarded too, a make that could not
+#     expand the recipe was indistinguishable from a recipe with nothing in it.
+#
+# The second one is a false green, and it was measured: fail `make -n <target>`
+# for one dep-free gate and this script printed
+# `no gate  <target>  recipe runs no checkable command`, dropped the target from
+# the reached count, and exited 0 with `check-ci-reach: OK`. The one thing that
+# could not be read was reported as the one thing that needs no reading.
+#
+# awk exits 0 when it selects nothing, so the pipeline's status now means make's
+# status and nothing else, and the failure can be named.
 dry_run() {
-	"$MAKE_BIN" -n "$@" 2>/dev/null | grep -v -e '^make\[' -e '^make:' | join_continuations || true
+	if ! "$MAKE_BIN" -n "$@" 2>/dev/null | awk '!/^make\[/ && !/^make:/' | join_continuations; then
+		printf 'check-ci-reach: `%s -n %s` FAILED -- its recipe lines cannot be read.\n' "$MAKE_BIN" "$*" >&2
+		printf '                Re-run that command to see why (this script discards its stderr).\n' >&2
+		printf '                Refusing to continue: an unreadable recipe looks exactly like a\n' >&2
+		printf '                recipe that runs no checkable command, which passes.\n' >&2
+		return 1
+	fi
 }
 
 own_commands() {
@@ -262,8 +340,24 @@ own_commands() {
 		dry_run "$target"
 		return
 	fi
+	# The MULTI-GOAL dry run is deliberately NOT probed (#lzgrepcpipefail). When it
+	# fails, `wc -l` still prints a count -- 0 -- so `tail -n +1` hands back every
+	# line of the target's own dry run INCLUDING its prerequisites', and the target
+	# is credited with more anchors than it owns. Over-reporting anchors fails
+	# CLOSED: each extra anchor must be matched in CI or the target reads as
+	# unreached. Only the SINGLE-target invocation on the last line turns a make
+	# failure into SILENCE, and that is the one the per-target probe in the closure
+	# walk mirrors. `dry_run` has already put its diagnostic on stderr either way.
+	#
+	# Probing it would also MANUFACTURE failures. `make -n` with several goals sets
+	# `MAKECMDGOALS` to the whole list, so a healthy goal-conditional prerequisite
+	# can behave here as it behaves in no real invocation. A probe on this call is a
+	# false-red generator with nothing to catch (lazily-dart's finding).
+	#
+	# `|| true` so the failing assignment does not depend on `set -e` being
+	# suppressed at whatever call site reaches this function.
 	local prefix
-	prefix="$(dry_run "${deps[@]}" | wc -l)"
+	prefix="$(dry_run "${deps[@]}" | wc -l)" || true
 	dry_run "$target" | tail -n +"$((prefix + 1))"
 }
 
@@ -479,13 +573,43 @@ stale=""
 stale_count=0
 nogate=""
 nogate_count=0
+# Targets whose recipe could not be READ. Kept as its own category, never folded
+# into `nogate` (#lzgrepcpipefail): "I looked and there was no gate" and "I could
+# not look" are different claims, and only the first one is allowed to pass.
+unreadable=""
+unreadable_count=0
 reached=0
 excused_ok=0
 
 while IFS= read -r target; do
 	[ -n "$target" ] || continue
 
-	target_anchors="$(own_commands "$target" | anchors | sort -u || true)"
+	# PER-TARGET, and NOT `|| true` (#lzgrepcpipefail). `anchors` and `sort -u`
+	# exit 0 whatever they select, so this pipeline's status is `own_commands`'
+	# status, which is `make -n`'s. Swallowing it sent an unreadable recipe straight
+	# into the `-z` branch below, to be reported as carrying no gate.
+	#
+	# The up-front `make -n $ROOT_TARGET` probe does NOT subsume this one, and that
+	# was measured rather than assumed. `make -n check` can exit 0 while
+	# `make -n <one member>` exits 2 -- a goal-conditional prerequisite does it:
+	#
+	#   ifeq ($(MAKECMDGOALS),test-shm)
+	#   test-shm: only-when-test-shm-is-the-goal
+	#   endif
+	#
+	# Against that, the root probe alone still printed `no gate  test-shm` and
+	# `check-ci-reach: OK -- 49 target(s) reached` at exit 0, byte-identical to the
+	# unfixed script. lazily-js found the attack; the same shape drops any one of
+	# these 50 targets. The two probes cover different failures and both are needed.
+	#
+	# Accumulated rather than fatal on the spot, so the report names EVERY target
+	# that dropped instead of only the first.
+	if ! target_anchors="$(own_commands "$target" | anchors | sort -u)"; then
+		unreadable="$unreadable$target"$'\n'
+		unreadable_count=$((unreadable_count + 1))
+		printf 'UNREADABLE %s\n' "$target"
+		continue
+	fi
 
 	if [ -z "$target_anchors" ]; then
 		nogate="$nogate$target"$'\n'
@@ -534,6 +658,27 @@ while IFS= read -r target; do
 	[ -n "$target" ] || continue
 	printf 'no gate  %-32s recipe runs no checkable command\n' "$target"
 done <<<"$nogate"
+
+# An unreadable recipe is fatal BEFORE any count is reported. Everything below
+# is a statement about the closure this script walked, and a target whose recipe
+# could not be read was not walked — so `$reached` is not a number this run is
+# entitled to print, and the vacuity guard below would misreport an all-unreadable
+# run as "no prerequisite target carrying a gate".
+if [ "$unreadable_count" -gt 0 ]; then
+	echo >&2
+	echo "check-ci-reach: $unreadable_count target(s) run by 'make $ROOT_TARGET' whose recipe" >&2
+	echo "                could not be read (\`$MAKE_BIN -n <target>\` failed; the reason is" >&2
+	echo "                above each refusal):" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$unreadable"
+	echo >&2
+	echo "An unreadable recipe is NOT a recipe with no gate in it. Left unread, each of" >&2
+	echo "these would have been reported as 'runs no checkable command' and stopped being" >&2
+	echo "required to appear in CI, with this script still exiting 0." >&2
+	exit 1
+fi
 
 # A guard that examined nothing must not report OK — the same vacuity rule the
 # conformance guards apply (#lzvacuousrun).
