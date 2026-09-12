@@ -504,14 +504,35 @@ EXPECTED_GATE_STEPS=(
 # deleted one's anchor. So the anchor collision is not merely kept out of this
 # rung -- inside this rung it stops being exploitable.
 #
-# THE POSITIONAL INVOCATION MASK IS UNAFFECTED BY A MODE FLIP, also measured. The
-# mask is derived from two `make -n $ROOT_TARGET` dry runs, so it is a property of
-# the Makefile alone; a mode flip edits ci.yml and this script and touches neither
-# dry run. With both lean targets flipped, the oracle line still read `63 command
-# line(s)` and `0 per-invocation token(s) masked`, byte-identical to a clean run.
-# A member does not change which side of the mask it is evaluated on, because the
-# mask has no sides: it is applied to both sides of every oracle comparison, and
-# the oracle does not consult reach mode at all.
+# THE POSITIONAL INVOCATION MASK IS NOT EVALUATED PER CELL and does not move when
+# a member changes mode. Measured NON-VACUOUSLY, which mattered: today the mask is
+# EMPTY, so "0 before, 0 after" would not distinguish "unaffected" from "nothing
+# there to affect". So the mask was first made non-zero -- `--run-id
+# $(LAZILY_CONFORMANCE_RUN_ID)` appended to `test-shm`'s recipe, a per-invocation
+# value at a fixed token position, giving `1 per-invocation token(s) masked` --
+# and THEN both lean targets were flipped from make-invoked to anchor-reached:
+#
+#   modes 46 anchor / 4 make-invoked -> 63 command line(s), 1 token masked
+#   modes 48 anchor / 2 make-invoked -> 63 command line(s), 1 token masked
+#
+# identical, with a mask that could have registered a change. The reason is
+# structural: the mask is derived from two `make -n $ROOT_TARGET` dry runs, so it
+# is a property of the Makefile alone, and a mode flip edits ci.yml and this
+# script and touches neither run. A member does not change which SIDE of the mask
+# it is compared on either, because the mask has no sides -- `oracle_line_matches`
+# applies it to both arguments, in both oracle directions, and the oracle never
+# consults reach mode.
+#
+# THE TRADE THIS SET RECORDS, stated plainly (lazily-cs recorded it). Retiring a
+# member into make-invoked mode gives up the repoint close FOR THAT MEMBER,
+# permanently -- the same reason lazily-gd is excluded from this design entirely.
+# CI then says "run the target" and faithfully runs whatever the recipe says, so
+# nothing on the CI side can contradict a swapped recipe. rs has the family's
+# largest population where that trade is already taken: four of fifty. It is the
+# right trade for these four (two Lean builds behind a `cd`, two benchmark
+# scripts), and it is a trade, not a free choice -- which is why moving a fifth
+# member into it has to be an edit to this array rather than a consequence of
+# editing a CI step.
 EXPECTED_MAKE_INVOKED=(
 	"benchmark-check"
 	"benchmark-evidence"
@@ -1687,6 +1708,16 @@ step_unmapped_count=0
 makeinv_count=0
 # Members observed to be reached by CI invoking make by name, for the mode pin.
 makeinv_seen=""
+# THE THREE-WAY PARTITION (#lzcheckcireachguard). `gated_seen` is every
+# gate-carrying member, accumulated before the classification branch;
+# `step_mapped`, `makeinv_seen` and `excused_seen` are the three cells. Asserted
+# exclusive and total against `gated_seen` after the walk, never inferred from
+# the branch that assigned them.
+gated_seen=""
+excused_seen=""
+# The ANCHOR-REACHED cell: members CI is supposed to reach by spelling the gate's
+# command, whether or not that spelling was found. MODE, not outcome.
+anchor_mode_seen=""
 # Targets whose excuse is GOOD and which still carry a map entry.
 excused_mapped=""
 stale=""
@@ -1816,6 +1847,19 @@ while IFS= read -r target; do
 		continue
 	fi
 
+	# THE GATED POPULATION, accumulated HERE -- before the classification branch
+	# below, and deliberately not derived from it (#lzcheckcireachguard). Every
+	# member past this line carries a gate, and the partition rung after the walk
+	# asserts that the three mode cells are exclusive and together equal exactly
+	# this set. Accumulating it inside the branch instead is what lazily-dart
+	# measured and discarded: classified through one if/else the cells are
+	# disjoint and exhaustive BY CONSTRUCTION, the totality can never disagree,
+	# and adding a branch that leaves a member reached and accounted for but
+	# recorded in NEITHER cell exits 0 -- each set equality still holds, against
+	# a population the member is no longer in. A property that holds by
+	# construction is not a property the guard checks.
+	gated_seen="$gated_seen$target"$'\n'
+
 	hit=1
 	missing_anchors=""
 	# Non-empty only when this target's reach was checked INSIDE a pinned step;
@@ -1844,6 +1888,7 @@ while IFS= read -r target; do
 			fi
 		done <<<"$target_anchors"
 	elif pinned_step="$(gate_step_of "$target")"; then
+		anchor_mode_seen="$anchor_mode_seen$target"$'\n'
 		step_mapped="$step_mapped$target"$'\n'
 		step_mapped_count=$((step_mapped_count + 1))
 		while IFS= read -r a; do
@@ -1875,6 +1920,15 @@ while IFS= read -r target; do
 		# CI does not run it at all, so the missing entry is a consequence, not
 		# the fault. Fall through to the pre-existing unreached verdict, which
 		# names the anchors no CI step runs.
+		#
+		# STILL ANCHOR-MODE for the partition: the cells record which WAY a
+		# member is meant to be reached, not whether the reach succeeded. Left
+		# out, this member was in no cell and the partition rung fired FIRST
+		# with `recorded in NO reach-mode cell` -- fatal before the count, and
+		# pointing the reader at this script's bookkeeping instead of at the CI
+		# step that is missing. Measured after the partition rung landed, which
+		# is the second time ordering has bitten this map.
+		anchor_mode_seen="$anchor_mode_seen$target"$'\n'
 		hit=0
 		while IFS= read -r a; do
 			[ -n "$a" ] || continue
@@ -1883,6 +1937,16 @@ while IFS= read -r target; do
 	fi
 
 	if is_excused "$target"; then
+		# THE EXCUSED CELL. An excused member has NO MODE -- an excuse is the
+		# claim that CI does not reach the gate at all, so there is no CI-side
+		# spelling to be scoped and no make invocation to pin. What has to be
+		# pinned is membership of THIS set, and that is already explicit in
+		# $CONF, by name, with a required reason (lazily-dart's retraction of
+		# its own reported gap). Recorded whether or not the excuse turns out to
+		# be stale: a stale excuse is a different fault, reported below, and
+		# leaving the member out of every cell here would report it as a
+		# partition hole instead.
+		excused_seen="$excused_seen$target"$'\n'
 		if [ "$hit" -eq 1 ]; then
 			stale="$stale$target"$'\n'
 			stale_count=$((stale_count + 1))
@@ -1998,6 +2062,73 @@ if [ -n "$makeinv_gone" ]; then
 fi
 
 if [ "$mode_status" -ne 0 ]; then
+	exit 1
+fi
+
+# THE THREE-WAY PARTITION, asserted (#lzcheckcireachguard).
+#
+#   {gate-carrying} = {anchor-reached} + {make-invoked} + {excused}
+#
+# EXCLUSIVE and TOTAL, over the OBSERVED sets, against a `gated_seen` that was
+# accumulated before the branch which assigned the cells. Both halves carry a
+# distinct failure, and neither is implied by the set equalities above: those
+# compare each cell against its own pin, so they all keep holding while a member
+# quietly belongs to no cell at all.
+partition_status=0
+gated_sorted="$(printf '%s' "$gated_seen" | awk 'NF' | sort -u)"
+cells_all="$(printf '%s\n%s\n%s' "$anchor_mode_seen" "$makeinv_seen" "$excused_seen" | awk 'NF' | sort)"
+cells_uniq="$(printf '%s\n' "$cells_all" | awk 'NF' | sort -u)"
+
+# EXCLUSIVE: a member in two cells at once.
+cells_dupe="$(printf '%s\n' "$cells_all" | awk 'NF' | uniq -d)"
+if [ -n "$cells_dupe" ]; then
+	echo >&2
+	echo "check-ci-reach: target(s) recorded in more than one reach-mode cell:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$cells_dupe"
+	echo "A member is reached exactly one way. Two cells means each can look complete" >&2
+	echo "while the other is what is really in force (#lzcheckcireachguard)." >&2
+	partition_status=1
+fi
+
+# TOTAL, forward: a gate-carrying member in NO cell -- dart's residual.
+cells_missing="$(comm -23 <(printf '%s\n' "$gated_sorted" | awk 'NF') <(printf '%s\n' "$cells_uniq" | awk 'NF'))"
+if [ -n "$cells_missing" ]; then
+	echo >&2
+	echo "check-ci-reach: gate-carrying target(s) recorded in NO reach-mode cell:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$cells_missing"
+	echo >&2
+	echo "Each of these carries a gate and was walked, but was classified as neither" >&2
+	echo "anchor-reached, nor make-invoked, nor excused — so every set equality above" >&2
+	echo "still holds while this member's reach is checked by nothing. This is the" >&2
+	echo "residual lazily-dart measured: with the cells derived from the classification" >&2
+	echo "branch the hole is invisible, because the branch is what defines the" >&2
+	echo "populations the equalities are checked against (#lzcheckcireachguard)." >&2
+	partition_status=1
+fi
+
+# TOTAL, reverse: a cell naming a member the walk did not count as gate-carrying.
+cells_extra="$(comm -13 <(printf '%s\n' "$gated_sorted" | awk 'NF') <(printf '%s\n' "$cells_uniq" | awk 'NF'))"
+if [ -n "$cells_extra" ]; then
+	echo >&2
+	echo "check-ci-reach: reach-mode cell(s) naming target(s) that are not gate-carrying" >&2
+	echo "                members of this walk:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$cells_extra"
+	echo "A cell is a record of what the walk DID; a name in one that the walk never" >&2
+	echo "classified means the two disagree about what was examined" >&2
+	echo "(#lzcheckcireachguard)." >&2
+	partition_status=1
+fi
+
+if [ "$partition_status" -ne 0 ]; then
 	exit 1
 fi
 
@@ -2267,8 +2398,13 @@ echo "check-ci-reach: closure oracle matched — $oracle_root_count command line
 step_map_distinct="$(printf '%s\n' "${EXPECTED_GATE_STEPS[@]}" | awk -F'\t' 'NF { print $2 }' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
 step_map_pinned="$(printf '%s\n' "${EXPECTED_GATE_STEPS[@]}" | awk -F'\t' 'NF { print $1 }' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
 makeinv_pinned="$(printf '%s\n' "${EXPECTED_MAKE_INVOKED[@]:-}" | awk 'NF' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
-step_partition_total="$((step_mapped_count + makeinv_count + excused_ok))"
-echo "check-ci-reach: gate step map matched — $step_mapped_count member(s) checked inside their pinned CI step of $step_map_pinned pinned in EXPECTED_GATE_STEPS, over $step_map_distinct distinct step name(s) each unique among the $ci_step_total run: step(s) in ${workflows[*]}; $makeinv_count reached by CI invoking make by name of $makeinv_pinned pinned in EXPECTED_MAKE_INVOKED; the two are disjoint and together with $excused_ok excused partition the $step_partition_total gate-carrying member(s)"
+# DERIVED FROM `gated_seen`, not from the sum of the three counters. Printing the
+# sum and calling it the gate-carrying total restates one number twice and can
+# never disagree -- the same by-construction tautology the partition rung above
+# exists to avoid, reappearing in the sentence that reports it.
+step_gated_total="$(printf '%s' "$gated_seen" | awk 'NF' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
+step_cells_total="$(printf '%s\n%s\n%s' "$anchor_mode_seen" "$makeinv_seen" "$excused_seen" | awk 'NF' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
+echo "check-ci-reach: gate step map matched — $step_mapped_count member(s) checked inside their pinned CI step of $step_map_pinned pinned in EXPECTED_GATE_STEPS, over $step_map_distinct distinct step name(s) each unique among the $ci_step_total run: step(s) in ${workflows[*]}; $makeinv_count reached by CI invoking make by name of $makeinv_pinned pinned in EXPECTED_MAKE_INVOKED; the three cells hold $step_cells_total member(s), exclusive and set-equal to the $step_gated_total gate-carrying member(s) counted before classification"
 
 # A guard that examined nothing must not report OK — the same vacuity rule the
 # conformance guards apply (#lzvacuousrun).
