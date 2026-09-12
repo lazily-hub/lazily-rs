@@ -265,9 +265,14 @@ this repo.
   without deleting entries, and coverage cannot regress upward without someone
   writing one by hand. There is deliberately no separate typed count beside it.
   Expect the shrinking to be expensive: lazily-kt measured a 100 percent
-  higher-rung failure rate on its first migration pass, and two of the three
-  blocks bound in this pass hit the same thing (a missing key-set check on an
-  object-valued key; a hand-rolled per-runner copy of rung 2).
+  higher-rung failure rate on its first migration pass, and this pass reproduced
+  that rate exactly: ALL THREE blocks bound here needed a fix above rung 0, each
+  demonstrated by removing the fix and watching the rung fire —
+  `protobuf/graph_boundary_traces.json` `cells` and
+  `registers_convergence.json` `stamp_on`/`value_on` owed a key-set check
+  (`#lzsubblockkeyset`), and `arena_blob.json` `descriptor` failed rung 2 as an
+  assertion key never consumed. Binding a block is not a routing edit; budget for
+  the rung above it.
   A RUNNER'S OWN JSON CLONE (`#lzrunnerownjsonclone`). This binding's loader
   hands runners TEXT, so every runner re-parses and the block a runner binds is
   never the same allocation the loader declared — only ever the same VALUE, and

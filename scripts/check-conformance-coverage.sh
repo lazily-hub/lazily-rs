@@ -966,10 +966,11 @@ PY
 # lazily-kt is the warning about how this shrinks: its first migration pass
 # measured a 100 percent higher-rung failure rate — every block it bound then
 # failed a rung ABOVE rung 0 once it became visible, and half needed a real fix
-# rather than a routing change. Two of the three blocks migrated in this pass hit
-# the same thing (a missing key-set check on an object-valued key; a hand-rolled
-# per-runner copy of rung 2), so budget for that rather than for a mechanical
-# edit.
+# rather than a routing change. This pass reproduced that rate exactly: all THREE
+# blocks bound here needed a fix above rung 0, each demonstrated by removing the
+# fix and watching the rung fire — two owed a key-set check on an object-valued
+# key (`#lzsubblockkeyset`), and one failed rung 2 as an assertion key never
+# consumed. Budget for the rung above, not for a mechanical edit.
 KNOWN_UNBOUND_BLOCKS=(
   # collections — 6 sites in semtree_incremental.json.
   # read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present
