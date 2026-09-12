@@ -945,10 +945,244 @@ PY
 # inconsistently, and a label-keyed ledger would silently miss the mismatch
 # rather than report it.
 #
-# An unbindable block belongs HERE, as a documented excuse the guard reads every
+# An unbound block belongs HERE, as a documented excuse the guard reads every
 # run, not as a runner fabricated to manufacture coverage.
-# Format: "fixture|where|reason".
+#
+# Format: "fixture|where|class|reason". Both the class and the reason are
+# REQUIRED, the class must be one the guard knows, and BOTH directions are
+# enforced (see the python phase below): an unbound site missing from this list
+# fails, and an entry for a site the run DID bind fails as stale. That makes the
+# list an EQUALITY against the run rather than a floor, so a migration cannot land
+# without deleting entries and coverage cannot regress upward without someone
+# adding one by hand.
+#
+# 201 entries, all `bind-pending`, all reachable: every one is a per-step or
+# per-scenario expectation its runner already reads and compares — what is
+# missing is the routing through `Expect`, not the assertion. Three step loops
+# account for 195 of them. This list is expected to SHRINK; shrinking it is the
+# work, and `#lzrsblockwalk` widened the walk precisely so that the work is
+# countable instead of invisible.
+#
+# lazily-kt is the warning about how this shrinks: its first migration pass
+# measured a 100 percent higher-rung failure rate — every block it bound then
+# failed a rung ABOVE rung 0 once it became visible, and half needed a real fix
+# rather than a routing change. Two of the three blocks migrated in this pass hit
+# the same thing (a missing key-set check on an object-valued key; a hand-rolled
+# per-runner copy of rung 2), so budget for that rather than for a mechanical
+# edit.
 KNOWN_UNBOUND_BLOCKS=(
+  # collections — 6 sites in semtree_incremental.json.
+  # read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present
+  "collections/semtree_incremental.json|scenarios[0].expect_after|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
+  "collections/semtree_incremental.json|scenarios[0].expect_initial|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
+  "collections/semtree_incremental.json|scenarios[1].expect_after|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
+  "collections/semtree_incremental.json|scenarios[1].expect_initial|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
+  "collections/semtree_incremental.json|scenarios[2].expect_after|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
+  "collections/semtree_incremental.json|scenarios[2].expect_initial|bind-pending|read with optional get() probes in collections_conformance::run_semtree_fixture; binding it needs those probes routed through assert_key_if_present"
+
+  # ingress — 28 sites in boundary_ingress_adapter.json, one step loop.
+  # per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration
+  "ingress/boundary_ingress_adapter.json|scenarios[0].steps[0].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[0].steps[1].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[0].steps[2].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[0].steps[3].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[0].steps[4].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[1].steps[0].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[1].steps[1].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[1].steps[2].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[1].steps[3].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[2].steps[0].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[2].steps[1].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[2].steps[2].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[2].steps[3].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[2].steps[4].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[2].steps[5].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[2].steps[6].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[3].steps[0].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[3].steps[1].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[3].steps[2].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[4].steps[0].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[4].steps[1].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[5].steps[0].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[5].steps[1].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[5].steps[2].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[6].steps[0].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[6].steps[1].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[6].steps[2].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+  "ingress/boundary_ingress_adapter.json|scenarios[6].steps[3].expected|bind-pending|per-step expectation compared against the adapter observation in boundary_ingress_conformance's step loop; binding it is the step-loop migration"
+
+  # reactive-graph — 113 sites across 21 fixtures, one step loop.
+  # per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration
+  "reactive-graph/churn_returns_to_baseline.json|steps[1].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/churn_returns_to_baseline.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/churn_returns_to_baseline.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/churn_returns_to_baseline.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/churn_returns_to_baseline.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/cross_scope_teardown_hazard.json|steps[11].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/cross_scope_teardown_hazard.json|steps[12].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/cross_scope_teardown_hazard.json|steps[13].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/cross_scope_teardown_hazard.json|steps[14].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/cross_scope_teardown_hazard.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/cross_scope_teardown_hazard.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/cross_scope_teardown_hazard.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disarm_disposes_nothing.json|steps[12].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disarm_disposes_nothing.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disarm_disposes_nothing.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disarm_disposes_nothing.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disarm_disposes_nothing.json|steps[8].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disarm_disposes_nothing.json|steps[9].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disposal_does_not_run_surviving_effects.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disposal_does_not_run_surviving_effects.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/disposal_does_not_run_surviving_effects.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_detaches_edges_both_directions.json|steps[10].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_detaches_edges_both_directions.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_detaches_edges_both_directions.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_detaches_edges_both_directions.json|steps[8].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_detaches_edges_both_directions.json|steps[9].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_signal_reverts_to_lazy.json|steps[1].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_signal_reverts_to_lazy.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_signal_reverts_to_lazy.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_signal_reverts_to_lazy.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/dispose_signal_reverts_to_lazy.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/exact_fold_paths_stay_exact.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/exact_fold_paths_stay_exact.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/exact_fold_paths_stay_exact.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[11].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[12].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[13].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[15].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/failed_compute_is_never_cached.json|steps[8].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/feedback_drain_bound_reports_exhaustion.json|steps[1].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/feedback_drain_bound_reports_exhaustion.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/feedback_drain_bound_reports_exhaustion.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_cell_acquires_no_dependency_edge.json|steps[1].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_cell_acquires_no_dependency_edge.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_cell_acquires_no_dependency_edge.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_cell_acquires_no_dependency_edge.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_feed_through_a_formula_coalesces.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_feed_through_a_formula_coalesces.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_feed_through_a_formula_coalesces.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_feed_through_a_formula_coalesces.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_feed_through_a_formula_coalesces.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_feed_through_a_formula_coalesces.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_folds_synchronously_in_batch.json|steps[1].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_folds_synchronously_in_batch.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_folds_synchronously_in_batch.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_per_settled_cone_not_per_write.json|steps[1].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_per_settled_cone_not_per_write.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_per_settled_cone_not_per_write.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_per_settled_cone_not_per_write.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_per_settled_cone_not_per_write.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/merge_per_settled_cone_not_per_write.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/read_after_dispose_is_an_error.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/read_after_dispose_is_an_error.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/read_after_dispose_is_an_error.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/read_after_dispose_is_an_error.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/read_after_dispose_is_an_error.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/read_after_dispose_is_an_error.json|steps[8].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/read_after_dispose_is_an_error.json|steps[9].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/recycled_id_inherits_nothing.json|steps[11].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/recycled_id_inherits_nothing.json|steps[12].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/recycled_id_inherits_nothing.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/recycled_id_inherits_nothing.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/recycled_id_inherits_nothing.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/recycled_id_inherits_nothing.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/recycled_id_inherits_nothing.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/recycled_id_inherits_nothing.json|steps[8].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scope_teardown_equals_fold_of_disposals.json|scenarios[0].steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scope_teardown_equals_fold_of_disposals.json|scenarios[0].steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scope_teardown_equals_fold_of_disposals.json|scenarios[0].steps[8].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scope_teardown_equals_fold_of_disposals.json|scenarios[1].steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scope_teardown_equals_fold_of_disposals.json|scenarios[1].steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scope_teardown_equals_fold_of_disposals.json|scenarios[1].steps[9].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scoping_bounds_teardown_not_visibility.json|steps[10].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scoping_bounds_teardown_not_visibility.json|steps[11].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scoping_bounds_teardown_not_visibility.json|steps[12].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scoping_bounds_teardown_not_visibility.json|steps[13].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scoping_bounds_teardown_not_visibility.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scoping_bounds_teardown_not_visibility.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scoping_bounds_teardown_not_visibility.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/scoping_bounds_teardown_not_visibility.json|steps[9].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_once_per_batch.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_once_per_batch.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_once_per_batch.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_once_per_batch.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_once_per_batch.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_without_a_read.json|steps[1].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_without_a_read.json|steps[2].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_without_a_read.json|steps[3].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_without_a_read.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/signal_materializes_without_a_read.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/teardown_runs_members_in_reverse_creation_order.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/teardown_runs_members_in_reverse_creation_order.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/teardown_runs_members_in_reverse_creation_order.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/transitive_invalidation_reaches_depth.json|steps[4].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/transitive_invalidation_reaches_depth.json|steps[5].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/transitive_invalidation_reaches_depth.json|steps[6].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/transitive_invalidation_reaches_depth.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+  "reactive-graph/transitive_invalidation_reaches_depth.json|steps[8].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
+
+  # stdlib — 54 sites across 3 fixtures, one step loop.
+  # per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration
+  "stdlib/revision_barrier.json|scenarios[0].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[0].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[1].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[1].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[2].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[2].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[2].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[3].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[3].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[4].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[4].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[5].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[5].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[5].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[6].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[6].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[7].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[7].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[7].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[7].steps[3].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[8].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/revision_barrier.json|scenarios[8].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[0].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[0].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[1].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[1].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[2].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[2].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[3].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[3].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[4].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[4].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[5].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[5].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[6].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[6].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[6].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[7].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[7].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timeout.json|scenarios[7].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[0].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[0].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[1].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[1].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[2].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[2].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[3].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[3].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[3].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[4].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[4].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[4].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[4].steps[3].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
+  "stdlib/timer.json|scenarios[5].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
 )
 
 BLOCK_LEDGER="${LAZILY_CONFORMANCE_BLOCKS:-build/conformance-assertion-blocks.txt}"
@@ -971,53 +1205,157 @@ if not os.path.isfile(ledger_path) or os.path.getsize(ledger_path) == 0:
     )
     sys.exit(1)
 
-declared = {}   # digest -> set of "fixture|where"
-bound = set()   # digest
+declared = {}      # digest -> set of "fixture|where" the LOADER declared
+bound = set()      # digest a runner bound
+bound_where = {}   # digest -> set of "fixture|label" the RUNNER called it
 for line in open(ledger_path):
     parts = line.rstrip("\n").split("\t")
     if parts[0] == "declared" and len(parts) == 4:
         declared.setdefault(parts[2], set()).add("%s|%s" % (parts[1], parts[3]))
-    elif parts[0] == "bound" and len(parts) == 2:
+    elif parts[0] == "bound" and len(parts) >= 2:
         bound.add(parts[1])
+        if len(parts) == 4:
+            bound_where.setdefault(parts[1], set()).add("%s|%s" % (parts[2], parts[3]))
+
+# ---------------------------------------------------------------------------
+# The bind-pending ledger and its two enforced directions (`#lzrsblockwalk`)
+# ---------------------------------------------------------------------------
+#
+# Widening the walk took the inventory from 36 sites to 771, and 201 of those
+# are carried by an opened fixture and bound by no runner. A list of 201 excuses
+# is worth exactly as much as the guard that reads it, so both directions are
+# enforced and the reason is a CLASS rather than free prose:
+#
+#   * FORWARD. An unbound site that is not in the ledger FAILS, naming it. That
+#     is the direction the rung always had.
+#   * BACKWARD. A ledger entry for a site the run DID bind FAILS as stale, and so
+#     does an entry for a site the corpus does not carry. Nothing else catches
+#     either: the forward loop `continue`s before it consults the ledger, so a
+#     stale entry costs nothing, is invisible, and silently re-absorbs the
+#     failure if that block later stops being bound.
+#
+# Together those two make the ledger an EQUALITY against the RUN rather than a
+# floor: the ledger set and the unbound set must be the same set. A migration
+# cannot land without deleting entries, and coverage cannot regress upward
+# without a new entry being written by hand. There is deliberately no separate
+# typed count — a number beside a set equality is a second source of truth that
+# can only ever be wrong, and it is the exact defect (`MIN_BLOCKS = 30`) this
+# rung was rebuilt to remove.
+CLASS_REASONS = {
+    # Reachable. The runner reads the block; routing it through `Expect` is a
+    # migration that has not happened yet. This class is expected to SHRINK, and
+    # shrinking it is the work.
+    "bind-pending": True,
+    # Not reachable by this binding at all — the block belongs to a shape, model
+    # or transport lazily-rs does not implement, so no runner can bind it without
+    # first implementing the feature. Never use this for "not done yet".
+    "unreachable": True,
+}
 
 excuses = {}
 for raw in os.environ.get("BLOCK_EXCUSES", "").splitlines():
     raw = raw.strip()
     if not raw:
         continue
-    parts = raw.split("|", 2)
-    if len(parts) != 3 or not parts[2].strip():
+    parts = raw.split("|", 3)
+    if len(parts) != 4 or not parts[3].strip():
         sys.stderr.write(
-            "ERROR: KNOWN_UNBOUND_BLOCKS entry %r must be 'fixture|where|reason'.\n"
-            "       An excuse with no reason is an unexplained gap wearing a green badge.\n"
-            % raw
+            "ERROR: KNOWN_UNBOUND_BLOCKS entry %r must be\n"
+            "       'fixture|where|class|reason', with a non-empty reason. An excuse\n"
+            "       with no reason is an unexplained gap wearing a green badge, and an\n"
+            "       excuse with no class is a gap nobody can count.\n" % raw
         )
         sys.exit(1)
-    excuses["%s|%s" % (parts[0], parts[1])] = parts[2]
+    fixture, where, klass, reason = parts
+    if klass not in CLASS_REASONS:
+        sys.stderr.write(
+            "ERROR: KNOWN_UNBOUND_BLOCKS entry %r uses class %r, which is not one of\n"
+            "       %s. A free-form class cannot be counted, and a gap nobody counts\n"
+            "       is a gap nobody closes.\n"
+            % (raw, klass, ", ".join(sorted(CLASS_REASONS)))
+        )
+        sys.exit(1)
+    site = "%s|%s" % (fixture, where)
+    if site in excuses:
+        sys.stderr.write(
+            "ERROR: KNOWN_UNBOUND_BLOCKS names '%s' twice. A duplicated excuse hides\n"
+            "       how many sites are really outstanding and makes the count below\n"
+            "       disagree with the list above it.\n" % site
+        )
+        sys.exit(1)
+    excuses[site] = (klass, reason)
 
-unbound = []
-for digest, sites in sorted(declared.items()):
-    if digest in bound:
-        continue
-    for site in sorted(sites):
-        if site in excuses:
-            continue
-        unbound.append(site)
+declared_sites = {site for sites in declared.values() for site in sites}
+unbound_sites = {
+    site
+    for digest, sites in declared.items()
+    if digest not in bound
+    for site in sites
+}
 
-if unbound:
+# FORWARD: an unbound site nobody excused.
+missing = sorted(unbound_sites - set(excuses))
+if missing:
     sys.stderr.write(
-        "FAIL: %d assertion block(s) were carried by an OPENED fixture and bound by\n"
-        "      no runner. Every other guard is scoped to blocks a runner bound, so\n"
-        "      these report nothing at all rather than reporting a gap:\n" % len(unbound)
+        "FAIL: %d assertion block site(s) were carried by an OPENED fixture and bound\n"
+        "      by no runner. Every other rung is scoped to blocks a runner bound, so\n"
+        "      these report nothing at all rather than reporting a gap:\n" % len(missing)
     )
-    for site in unbound:
+    for site in missing:
         sys.stderr.write("        %s\n" % site)
     sys.stderr.write(
-        "      Bind each with `Expect::new(..., \"assertions\", &block)` and assert its\n"
-        "      keys, or add it to KNOWN_UNBOUND_BLOCKS with a reason so the gap is\n"
-        "      visible every run instead of invisible.\n"
+        "      Bind each with `Expect::new(fixture, where, &block)` and assert its\n"
+        "      keys, or add it to KNOWN_UNBOUND_BLOCKS as\n"
+        "      'fixture|where|bind-pending|<reason>' so the gap is visible every run\n"
+        "      instead of invisible.\n"
     )
     sys.exit(1)
+
+# BACKWARD: an excuse that has outlived its gap, or that names nothing.
+stale = []
+for site, (klass, _reason) in sorted(excuses.items()):
+    if site not in declared_sites:
+        stale.append(
+            "%s — the corpus carries no such block site; the fixture moved or the\n"
+            "          block was deleted upstream and the excuse was not" % site
+        )
+    elif site not in unbound_sites:
+        stale.append(
+            "%s — the suite DID bind it (class %s). The excuse outlived the gap it\n"
+            "          described: delete the entry" % (site, klass)
+        )
+if stale:
+    sys.stderr.write(
+        "FAIL: %d stale KNOWN_UNBOUND_BLOCKS entr%s. A stale excuse understates the\n"
+        "      gap AND re-arms the original drift, because it silently absorbs the\n"
+        "      failure if that block ever stops being bound:\n"
+        % (len(stale), "y" if len(stale) == 1 else "ies")
+    )
+    for entry in stale:
+        sys.stderr.write("        %s\n" % entry)
+    sys.exit(1)
+
+by_class = {}
+for _site, (klass, _reason) in excuses.items():
+    by_class[klass] = by_class.get(klass, 0) + 1
+
+# A bind a runner made that the LOADER never declared (`#lzrunnerownjsonclone`).
+#
+# Two very different causes, and the runner's own label is what tells them apart:
+# a block the corpus carries at a path the declaring walk does not treat as a
+# site (a sub-object inside a block already emitted, a whole `steps[n]` element
+# a runner chose to guard) — expected and harmless; or a value the runner REBUILT
+# rather than the loader's own parse, rendering differently. lazily-cpp lost 71
+# sites to the second, and they read as 71 unrelated coverage gaps because
+# nothing recorded which runner made the bind.
+#
+# This is REPORTED, not failed. A runner legitimately guards sub-blocks, so a
+# non-zero count is normal; what the count buys is that a sudden jump has a
+# named source to look at. The digest contract itself — that a runner's own
+# re-parse reproduces the loader's digest, and that the digest SEPARATES `5` from
+# `5.0` rather than folding the divergence it is looking for — is pinned by
+# `tests/expect_guard.rs` rather than inferred from this number.
+bound_not_declared = sorted(bound - set(declared))
 
 # ---- Positive-evidence MAGNITUDE, DERIVED from the corpus (#lzblocksitepin) ----
 #
@@ -1061,45 +1399,41 @@ if unbound:
 # KNOWN_UNCOVERED entry the suite DID open, so by the time control reaches here
 # the two sets are provably the same 150 files.
 
-# The walk rule, ONE definition. `record_declared_blocks()` in tests/common/mod.rs
-# is the other half and they must agree exactly: a derivation that walked the
-# corpus differently from the inventory it is compared against would be worse
-# than the typed constant it replaced. That agreement is not asserted by comment —
-# the site/digest set identity cross-check at the bottom of this block fails if
-# the two implementations ever diverge.
+# The walk rule, ONE definition, two callers. `walk_declared_blocks()` in
+# tests/common/mod.rs is the other half and they must agree exactly: a derivation
+# that walked the corpus differently from the inventory it is compared against
+# would be worse than the typed constant it replaced. That agreement is not
+# asserted by comment — the set-identity cross-check at the bottom of this block
+# fails when the two agree on HOW MANY blocks exist and disagree on WHICH, which
+# is the only way a divergent twin can look from a cardinality.
 #
-# The rule is deliberately NARROW, matching what tests/common/mod.rs does TODAY:
-# the top-level `assertions` object, plus the `assertions` object of each element
-# of the top-level `frames`, `scenarios` and `rejects` arrays. Nothing else, at no
-# other depth, under no other name. That narrowness is a KNOWN gap, not an
-# endorsement: the same 150 opened fixtures carry 771
-# sites / 661 digests when every block name is read at every depth, so this rung
-# reaches 36 of 771 sites (4.7%) and 30 of 661 digests (4.5%). The whole
-# remainder is the four names this walk never looks at — `expected` (434 sites /
-# 359 digests), `expect` (295 / 266), `expect_initial` (3 / 3) and `expect_after`
-# (3 / 3) — and ZERO `assertions` blocks are missed at any depth. Widening the
-# walk is its own item, because in lazily-zig the same widening surfaced 204
-# unbound digests over 239 sites and took a full cycle across nine runners.
-# Deriving the magnitude is what stops the narrow rung drifting WHILE that is
-# pending.
-BLOCK_CONTAINERS = ("frames", "scenarios", "rejects")
+# Every name in BLOCK_NAMES, at every depth (`#lzrsblockwalk`). Three rules, each
+# of which changes the count:
+#
+#   * OBJECT-VALUED ONLY. A tracked name whose value is an array or a scalar
+#     carries no keys, so `Expect` is inert on it and there is no obligation to
+#     book. `expected: [1, 2, 3]` is a value, not an assertion block.
+#   * EMIT AND DO NOT DESCEND. A block's own `expect` sub-object is part of the
+#     block its runner binds, not a second site.
+#   * DESCEND INTO ARRAYS. `scenarios[3].steps[2].expect` is where most of this
+#     corpus's blocks live.
+BLOCK_NAMES = ("assertions", "expect", "expect_after", "expect_initial", "expected")
 
 
-def iter_declared_blocks(doc):
-    """Yield `(where, block)` exactly as `record_declared_blocks()` declares them."""
-    block = doc.get("assertions")
-    if isinstance(block, dict):
-        yield "assertions", block
-    for container in BLOCK_CONTAINERS:
-        items = doc.get(container)
-        if not isinstance(items, list):
-            continue
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
+def iter_declared_blocks(node, path=""):
+    """Yield `(where, block)` exactly as `walk_declared_blocks()` declares them."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = key if not path else "%s.%s" % (path, key)
+            if key in BLOCK_NAMES and isinstance(value, dict):
+                yield child, value
                 continue
-            block = item.get("assertions")
-            if isinstance(block, dict):
-                yield "%s[%d].assertions" % (container, index), block
+            for site in iter_declared_blocks(value, child):
+                yield site
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            for site in iter_declared_blocks(item, "%s[%d]" % (path, index)):
+                yield site
 
 
 def block_digest(block):
@@ -1147,7 +1481,28 @@ for walk_root, _walk_dirs, walk_names in os.walk(corpus_dir):
 canonical.sort()
 opened = [fixture for fixture in canonical if fixture not in uncovered]
 
-expected_sites = {}   # "fixture|where" -> digest
+expected_sites = {}       # "fixture|where" -> digest
+corpus_objects = set()    # digest of EVERY object at every depth, block or not
+
+
+def collect_objects(node):
+    """Every object in the corpus, whether or not the walk treats it as a site.
+
+    Used only to classify a bind the loader never declared
+    (`#lzrunnerownjsonclone`). A runner that guards a sub-object of a block it
+    already bound produces a digest the corpus DOES carry; a runner that rebuilt
+    the value, or a self-test that fabricated one, produces a digest the corpus
+    carries nowhere. Those are the two causes, and they need telling apart.
+    """
+    if isinstance(node, dict):
+        corpus_objects.add(block_digest(node))
+        for value in node.values():
+            collect_objects(value)
+    elif isinstance(node, list):
+        for item in node:
+            collect_objects(item)
+
+
 for fixture in opened:
     try:
         with open(os.path.join(corpus_dir, fixture), encoding="utf-8") as handle:
@@ -1167,11 +1522,11 @@ for fixture in opened:
         continue
     if not isinstance(document, dict):
         continue
+    collect_objects(document)
     for where, block in iter_declared_blocks(document):
         expected_sites["%s|%s" % (fixture, where)] = block_digest(block)
 
 expected_digests = set(expected_sites.values())
-declared_sites = {site for sites in declared.values() for site in sites}
 
 # Zero-guard on each dimension. A derived expectation of zero is a hard error, not
 # a satisfied one: zero == zero reports OK having compared nothing.
@@ -1272,16 +1627,71 @@ if set(expected_sites) != declared_sites or expected_digests != set(declared):
         sys.stderr.write("        digest %s (%s)\n" % (digest, side))
     sys.exit(1)
 
+# Classify every bind the loader never DECLARED (`#lzrunnerownjsonclone`).
+#
+# `corpus_objects` is every object the opened fixtures carry at every depth, so
+# the split is exact rather than inferred:
+#
+#   * BELOW AN EMITTED BLOCK. The digest is an object the corpus really carries,
+#     at a path the declaring walk deliberately does not treat as a site — a
+#     sub-object a runner descended into with `Expect::sub`, or a whole
+#     `steps[n]` element a runner chose to guard. Expected, and harmless.
+#   * NOT IN THE CORPUS AT ALL. The runner bound a value that appears nowhere in
+#     the bytes it read. Two causes: the guard's own self-tests in
+#     tests/expect_guard.rs, which fabricate `json!` blocks and label them with
+#     borrowed fixture names; or a runner that REBUILT the block rather than
+#     handing over its own parse, and whose rebuild renders differently. That
+#     second case cost lazily-cpp 71 sites — its runner's re-parse dropped the raw
+#     number token, so `"value": 5` digested as `5.000000` — and it read as 71
+#     unrelated coverage gaps because nothing recorded which runner made the bind.
+#
+# REPORTED, not failed, and deliberately: the self-tests make a non-zero count
+# normal, and an equality on it would be the typed constant this rung was rebuilt
+# to remove. What the report buys is that a NEW one arrives with the runner's own
+# fixture and label attached. The digest contract itself — that a runner's own
+# re-parse reproduces the loader's digest, and that the digest SEPARATES `5` from
+# `5.0` rather than folding the divergence it is looking for — is pinned by
+# tests/expect_guard.rs, not inferred from this number.
+rebuilt = [d for d in bound_not_declared if d not in corpus_objects]
+below_block = len(bound_not_declared) - len(rebuilt)
+if rebuilt:
+    print(
+        "assertion-block bind NOTE: %d bind(s) match no object in the opened corpus "
+        "(#lzrunnerownjsonclone). Expected from the guard's own self-tests, which "
+        "fabricate blocks under borrowed fixture names; a CORPUS runner appearing here "
+        "means it rebuilt the block instead of binding its own parse:" % len(rebuilt)
+    )
+    # Listed, but not all of them every run: the self-tests contribute a stable
+    # population and thirty-odd unchanging lines per run train a reader to skip
+    # the whole block, including the line that matters. The COUNT above is the
+    # assertion-free signal; this is the handle for chasing a change in it.
+    for digest in rebuilt[:10]:
+        where = sorted(bound_where.get(digest, set())) or ["<no label recorded>"]
+        print("    %s  %s" % (digest, "; ".join(where)))
+    if len(rebuilt) > 10:
+        print("    ... and %d more (re-run with the ledger to list them all)" % (len(rebuilt) - 10))
+
 print(
     "assertion-block bind OK: %d sites / %d distinct blocks inventoried from OPENED "
-    "fixtures, every one BOUND by a runner (%d excused; matched by content digest, "
-    "not by label). Both dimensions DERIVED from %d opened of %d canonical fixtures "
-    "and asserted EQUAL, and the two walks agree on WHICH blocks, not merely how many "
-    "(#lzblocksitepin)"
+    "fixtures under every block name at every depth (#lzrsblockwalk). %d site(s) BOUND "
+    "by a runner, %d ledgered (%s) — the ledger is an EQUALITY against the run, failing "
+    "on an unbound site nobody excused AND on an excuse the run outlived. %d bind(s) the "
+    "loader never declared — %d below an emitted block, %d matching no corpus object "
+    "(#lzrunnerownjsonclone). Both dimensions "
+    "DERIVED from %d opened of %d canonical fixtures and asserted EQUAL, and the two "
+    "walks agree on WHICH blocks, not merely how many (#lzblocksitepin)"
     % (
         len(declared_sites),
         len(declared),
+        len(declared_sites) - len(excuses),
         len(excuses),
+        ", ".join(
+            "%d %s" % (count, klass) for klass, count in sorted(by_class.items())
+        )
+        or "none",
+        len(bound_not_declared),
+        below_block,
+        len(rebuilt),
         len(opened),
         len(canonical),
     )

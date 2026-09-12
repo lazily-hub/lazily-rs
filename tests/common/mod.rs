@@ -390,7 +390,7 @@ pub fn fnv1a64_hex(bytes: &[u8]) -> String {
 
 /// FNV-1a over a block's canonical JSON. A content key, so a block is booked by
 /// what it SAYS rather than by what a runner chose to call it.
-fn block_digest(value: &serde_json::Value) -> String {
+pub fn block_digest(value: &serde_json::Value) -> String {
     let text = serde_json::to_string(value).unwrap_or_default();
     fnv1a64_hex(text.as_bytes())
 }
@@ -409,40 +409,121 @@ fn append_block_record(line: &str) {
     }
 }
 
-/// Inventory every `assertions` block in a freshly read fixture: the top-level
-/// one plus any carried per-frame or per-scenario.
+/// Every key under which a canonical fixture carries an assertion block
+/// (`#lzrsblockwalk`).
+///
+/// This list is the whole of the widening. The walk read ONE of these names
+/// (`assertions`) at ONE depth (top level, plus one level into `frames`,
+/// `scenarios` and `rejects`), which inventoried 36 sites / 30 distinct digests
+/// of the 771 / 661 the same 150 opened fixtures actually carry — 4.7%. Every
+/// rung above rung 0 is scoped to a block a runner BOUND, and rung 0 is scoped
+/// to a block the loader DECLARED, so the other 735 sites reported exactly
+/// nothing: their keys were not unread, nothing read them.
+///
+/// Notably the narrow walk was not missing `assertions` blocks at greater depth
+/// — it inventoried all 36 of them. The entire gap was the four names it never
+/// looked at: `expected` (434 sites / 359 digests), `expect` (295 / 266),
+/// `expect_initial` (3 / 3) and `expect_after` (3 / 3).
+pub const BLOCK_NAMES: [&str; 5] = [
+    "assertions",
+    "expect",
+    "expect_after",
+    "expect_initial",
+    "expected",
+];
+
+/// The walk rule, ONE definition, two callers. The other caller is the
+/// derivation in `scripts/check-conformance-coverage.sh`, which walks the corpus
+/// on disk to derive what this inventory MUST contain; a derivation that walked
+/// the corpus differently from the inventory it is compared against would be
+/// worse than the typed constant it replaced. The guard's set-identity
+/// cross-check fails if the two ever disagree about WHICH blocks exist rather
+/// than merely how many.
+///
+/// Three rules, each of which changes the count:
+///
+/// * OBJECT-VALUED ONLY. A tracked name whose value is an array or a scalar
+///   carries no keys, so `Expect` is inert on it and there is no obligation to
+///   book. `expected: [1, 2, 3]` is a value, not an assertion block.
+/// * EMIT AND DO NOT DESCEND. A block's own `expect` sub-object is part of the
+///   block its runner binds, not a second site: counting it separately would
+///   demand a bind no runner can make without first unwrapping the outer block.
+/// * DESCEND INTO ARRAYS. `scenarios[3].steps[2].expect` is where most of this
+///   corpus's blocks live; an object-only walk would miss them and a
+///   fixed-container walk (the old `frames`/`scenarios`/`rejects` list) misses
+///   every container the corpus grows next.
+pub fn walk_declared_blocks<'a>(
+    node: &'a serde_json::Value,
+    path: &str,
+    out: &mut Vec<(String, &'a serde_json::Value)>,
+) {
+    match node {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                let child = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if BLOCK_NAMES.contains(&key.as_str()) && value.is_object() {
+                    out.push((child, value));
+                    continue;
+                }
+                walk_declared_blocks(value, &child, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                walk_declared_blocks(item, &format!("{path}[{index}]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Inventory every assertion block a freshly read fixture carries, under any of
+/// [`BLOCK_NAMES`], at any depth.
 fn record_declared_blocks(id: &str, text: &str) {
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
-    let declare = |where_: String, block: &serde_json::Value| {
+    let mut blocks = Vec::new();
+    walk_declared_blocks(&doc, "", &mut blocks);
+    for (where_, block) in blocks {
         append_block_record(&format!(
             "declared\t{id}\t{}\t{where_}",
             block_digest(block)
         ));
-    };
-    if let Some(block) = doc.get("assertions").filter(|v| v.is_object()) {
-        declare("assertions".to_owned(), block);
-    }
-    for container in ["frames", "scenarios", "rejects"] {
-        let Some(items) = doc.get(container).and_then(|v| v.as_array()) else {
-            continue;
-        };
-        for (i, item) in items.iter().enumerate() {
-            if let Some(block) = item.get("assertions").filter(|v| v.is_object()) {
-                declare(format!("{container}[{i}].assertions"), block);
-            }
-        }
     }
 }
 
-/// Book an `assertions` block as BOUND. Called by `Expect::new`, so every block
-/// a runner hands to the tracker is booked whatever it calls it.
-pub fn record_block_bind(value: &serde_json::Value) {
+/// Book an assertion block as BOUND. Called by `Expect::new`, so every block a
+/// runner hands to the tracker is booked whatever it calls it.
+///
+/// The digest is the ledger's key and the only thing the bind rung compares —
+/// matching by CONTENT is what stops the ledger inheriting the inconsistent
+/// `where` spellings runners give the same block. The runner's own
+/// fixture/label are recorded ALONGSIDE it, never instead of it, because a
+/// digest a runner bound that the loader never DECLARED has two very different
+/// causes and the label is what tells them apart (`#lzrunnerownjsonclone`):
+///
+/// * the runner bound something the corpus carries at a path the declaring walk
+///   does not treat as a site — a sub-object inside a block it already emitted,
+///   or a whole `steps[n]` element. Expected, and harmless;
+/// * the runner bound a value it REBUILT rather than the loader's own parse,
+///   and the rebuild renders differently. lazily-cpp lost 71 sites to exactly
+///   this: its runner re-parsed and dropped the raw number token, digesting
+///   `"value": 5` as `5.000000` where its loader digested `5`. Without the
+///   label that case is indistinguishable from the first, which is how it went
+///   unnoticed.
+pub fn record_block_bind(fixture: &str, label: &str, value: &serde_json::Value) {
     if !value.is_object() {
         return;
     }
-    append_block_record(&format!("bound\t{}", block_digest(value)));
+    append_block_record(&format!(
+        "bound\t{}\t{fixture}\t{label}",
+        block_digest(value)
+    ));
 }
 
 /// Resolve `path` to absolute and, when it lives in the canonical corpus, append

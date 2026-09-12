@@ -691,3 +691,195 @@ fn scenario_id_refuses_a_blank_identifier() {
     let sc = json!({ "id": "  ", "name": "" });
     let _ = common::scenario_id(&sc, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Rung 0's walk and its digest contract (`#lzrsblockwalk`,
+// `#lzrunnerownjsonclone`)
+// ---------------------------------------------------------------------------
+//
+// Two obligations live here, and the second exists because the first can be
+// satisfied vacuously.
+//
+// THE WALK. `walk_declared_blocks` is one half of a rule with two
+// implementations — the other is the derivation in
+// `scripts/check-conformance-coverage.sh`, which walks the corpus on disk to
+// derive what the run's inventory MUST contain. The guard's set-identity
+// cross-check fails when the two disagree about WHICH blocks exist, but only
+// over the corpus as it happens to be shaped today. These cases pin each rule
+// against a shape chosen to exercise it, so a rule that the corpus does not
+// currently reach is still held.
+//
+// THE DIGEST. This binding's loader hands runners TEXT
+// (`spec_read_to_string`), so every runner re-parses the fixture for itself and
+// the block a runner binds is NEVER the same allocation the loader declared. It
+// is only ever the same VALUE, and the ledger only ever compares digests. That
+// is the `#lzrunnerownjsonclone` exposure: lazily-cpp lost 71 sites to a runner
+// whose re-parse dropped the raw number token, so the clone digested
+// `"value": 5` as `5.000000` where the loader digested `5` — 71 blocks that
+// were bound, reported unbound, and looked like 71 separate coverage gaps.
+//
+// Asserting only that a re-parse reproduces the loader's digest would be
+// satisfied by a digest that folds the very divergence it is looking for: a
+// number-blind digest passes that test and hides cpp's bug completely. So the
+// separation is asserted too, in both directions — what the digest MUST
+// distinguish, and what it provably folds.
+
+#[test]
+fn the_walk_finds_every_tracked_name() {
+    let doc = json!({
+        "assertions": {"a": 1},
+        "expect": {"b": 1},
+        "expect_after": {"c": 1},
+        "expect_initial": {"d": 1},
+        "expected": {"e": 1},
+    });
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    let mut found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
+    found.sort_unstable();
+    assert_eq!(found, common::BLOCK_NAMES.to_vec());
+}
+
+#[test]
+fn the_walk_reaches_a_block_at_any_depth() {
+    // The old walk read one level into a fixed list of containers, so a block
+    // under any other key — or two levels down — was invisible. Most of this
+    // corpus's blocks are `scenarios[n].steps[m].expect`.
+    let doc = json!({
+        "scenarios": [{"steps": [{"expect": {"deep": true}}]}],
+        "some_container_the_old_walk_never_named": {"nested": {"expected": {"deeper": true}}},
+    });
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    let mut found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        vec![
+            "scenarios[0].steps[0].expect",
+            "some_container_the_old_walk_never_named.nested.expected",
+        ]
+    );
+}
+
+#[test]
+fn the_walk_emits_a_block_without_descending_into_it() {
+    // A block's own `expect` sub-object is part of the block its runner binds,
+    // not a second site. Counting it separately would demand a bind no runner
+    // can make without first unwrapping the outer block.
+    let doc = json!({"expected": {"expect": {"inner": 1}, "outer": 2}});
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    assert_eq!(out.len(), 1, "the inner `expect` is not a second site");
+    assert_eq!(out[0].0, "expected");
+}
+
+#[test]
+fn the_walk_ignores_a_tracked_name_that_is_not_an_object() {
+    // A tracked name whose value is an array or a scalar carries no keys, so
+    // `Expect` is inert on it and there is no obligation to book. Arrays are
+    // still DESCENDED into — that is where `steps[n].expect` lives — so the
+    // array case has to be distinguished from the object case rather than
+    // skipped wholesale.
+    let doc = json!({
+        "expected": [1, 2, 3],
+        "expect": "not a block",
+        "steps": [{"expect": {"real": true}}],
+    });
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    let found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(found, vec!["steps[0].expect"]);
+}
+
+#[test]
+fn a_runners_own_reparse_digests_identically_to_the_loaders() {
+    // The property the whole ledger rests on. Both sides parse the SAME bytes
+    // with `serde_json::from_str`, and the text below carries every shape that
+    // has moved a digest somewhere in this family: an integer, a float, an
+    // exponent, a negative, a large unsigned, a string with an escape, a
+    // non-ASCII string, a nested object whose keys are in non-sorted order, and
+    // an array.
+    const TEXT: &str = r#"{
+      "expected": {
+        "zeta": 1,
+        "alpha": {"y": 5, "x": 5.0, "w": 5e0},
+        "ratio": 0.5,
+        "below": -7,
+        "checksum": 13098019626228322701,
+        "escaped": "ello\nworld\n",
+        "unicode": "Título café 12€",
+        "list": [1, "two", {"three": 3}]
+      }
+    }"#;
+    let loader: Value = serde_json::from_str(TEXT).expect("loader parse");
+    let runner: Value = serde_json::from_str(TEXT).expect("runner parse");
+    let mut loader_blocks = Vec::new();
+    common::walk_declared_blocks(&loader, "", &mut loader_blocks);
+    assert_eq!(loader_blocks.len(), 1);
+    assert_eq!(
+        common::block_digest(loader_blocks[0].1),
+        common::block_digest(&runner["expected"]),
+        "a runner's own parse of the loader's text must book the same digest"
+    );
+}
+
+#[test]
+fn the_digest_separates_an_integer_from_its_float_spelling() {
+    // The half that stops the assertion above being vacuous. A number-blind
+    // digest reproduces a re-parse perfectly and folds exactly the divergence
+    // the ledger exists to surface — it is what let lazily-cpp's 71 sites read
+    // as 71 unrelated coverage gaps.
+    assert_ne!(
+        common::block_digest(&json!({"value": 5})),
+        common::block_digest(&json!({"value": 5.0})),
+        "`5` and `5.0` are the divergence cpp hit; a digest that folds them is blind"
+    );
+    assert_ne!(
+        common::block_digest(&json!({"value": 5})),
+        common::block_digest(&json!({"value": "5"})),
+        "a number and its string spelling are different claims"
+    );
+}
+
+#[test]
+fn the_digest_folds_5_0_and_5e0_and_that_is_pinned_not_assumed() {
+    // What this digest provably does NOT separate, asserted so it is a recorded
+    // property rather than something a later reader discovers. `serde_json`
+    // normalises both spellings to the same `f64` at PARSE time, before any
+    // digest runs.
+    //
+    // This folding cannot hide a clone divergence, which is the case that
+    // matters here: the loader parses the same bytes through the same parser, so
+    // it folds them identically. What it can hide is a corpus EDIT that respells
+    // `5e0` as `5.0` — invisible to the digest dimension of the magnitude rung.
+    let exponent: Value = serde_json::from_str(r#"{"value": 5e0}"#).expect("parse");
+    let decimal: Value = serde_json::from_str(r#"{"value": 5.0}"#).expect("parse");
+    assert_eq!(
+        common::block_digest(&exponent),
+        common::block_digest(&decimal),
+        "serde_json normalises both to f64 5.0 before the digest sees them"
+    );
+}
+
+#[test]
+fn source_key_order_does_not_move_the_digest() {
+    // `serde_json::Value` is a `BTreeMap` here (no `preserve_order` feature), so
+    // re-serialising sorts every object's keys at every depth. The guard's
+    // Python twin reproduces the digest by sorting too, and would be wrong the
+    // day this changed — so the property is pinned from the Rust side rather
+    // than left as a note in the shell script.
+    let a: Value = serde_json::from_str(r#"{"b": {"n": 2, "m": 1}, "a": 1}"#).expect("parse");
+    let b: Value = serde_json::from_str(r#"{"a": 1, "b": {"m": 1, "n": 2}}"#).expect("parse");
+    assert_eq!(common::block_digest(&a), common::block_digest(&b));
+}
+
+#[test]
+fn the_digest_is_inert_on_a_non_object() {
+    // `record_block_bind` refuses a non-object, so a runner that hands the
+    // tracker an array cannot book a digest that no declared site can match.
+    let doc = json!({"expected": []});
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    assert!(out.is_empty());
+}

@@ -34,6 +34,7 @@ mod common;
 
 use std::collections::HashMap;
 
+use common::Expect;
 use lazily::{CellCrdt, HlcStamp, LwwRegister, MvRegister, PeerId, PnCounter};
 use serde_json::Value;
 
@@ -162,7 +163,7 @@ impl Replica {
     }
 }
 
-fn replay(scenario: &Value) -> usize {
+fn replay(path: &str, label: &str, scenario: &Value) -> usize {
     let register = str_at(scenario, "register");
     let seed = scenario.get("seed").expect("scenario.seed");
     let mut world: HashMap<String, Replica> = HashMap::new();
@@ -199,56 +200,73 @@ fn replay(scenario: &Value) -> usize {
         world.get_mut(&on).expect("op target").apply(step);
     }
 
-    let expect = scenario.get("expect").expect("scenario.expect");
+    // BOUND to the tracker (`#lzrsblockwalk`). This loop used to be a
+    // hand-rolled rung 2: it matched every key and panicked on an unrecognised
+    // one, which is the right instinct and the wrong place for it. A per-runner
+    // copy of the guard holds only while that runner remembers, and rung 0 still
+    // saw nothing — nine blocks read, none booked, so every rung above was
+    // scoped past them. The `Expect` below is the same obligation, enforced once
+    // and reported by the ledger.
+    let expect = Expect::new(
+        path.to_owned(),
+        label.to_owned(),
+        scenario.get("expect").expect("scenario.expect"),
+    );
     let mut asserted = 0usize;
-    for (key, want) in expect.as_object().expect("expect is an object") {
-        match key.as_str() {
-            "note" => {}
-            "value_on" => {
-                for (name, v) in want.as_object().expect("value_on is an object") {
-                    let got = world.get(name).expect("value_on names a replica").scalar();
-                    assert_eq!(&got, v, "value_on.{name}");
-                    asserted += 1;
-                }
-            }
-            "values_on" => {
-                for (name, v) in want.as_object().expect("values_on is an object") {
-                    let mut wanted: Vec<String> = v
-                        .as_array()
-                        .expect("values_on entry is an array")
-                        .iter()
-                        .map(|e| e.as_str().expect("values_on entry item").to_string())
-                        .collect();
-                    wanted.sort();
-                    let got = world.get(name).expect("values_on names a replica").values();
-                    assert_eq!(got, wanted, "values_on.{name}");
-                    asserted += 1;
-                }
-            }
-            "stamp_on" => {
-                for (name, v) in want.as_object().expect("stamp_on is an object") {
-                    let got = world.get(name).expect("stamp_on names a replica").stamp();
-                    assert_eq!(got.wall_time, u64_at(v, "wall"), "stamp_on.{name}.wall");
-                    assert_eq!(got.logical, u64_at(v, "logical"), "stamp_on.{name}.logical");
-                    assert_eq!(got.peer.0, u64_at(v, "peer"), "stamp_on.{name}.peer");
-                    asserted += 1;
-                }
-            }
-            "changed" => {
-                let got = last_merge_changed.expect("`changed` asserted but no merge ran");
-                assert_eq!(
-                    got,
-                    want.as_bool().expect("changed is a bool"),
-                    "changed (the CellCrdt projection bit of the last merge)"
-                );
-                asserted += 1;
-            }
-            other => panic!(
-                "unsupported expect key `{other}` — implement it rather than \
-                 letting the corpus grow a claim this runner does not check"
-            ),
+    // `note` is this block's prose: human-readable, asserted by nothing, and
+    // deliberately so. Excused by NAME with a reason rather than skipped in a
+    // match arm, so it is visible in the ledger every run.
+    expect.excuse_key("note", "prose restating the scenario, asserted by nothing");
+    expect.assert_key_if_present("value_on", |want| {
+        for (name, v) in want.as_object().expect("value_on is an object") {
+            let got = world.get(name).expect("value_on names a replica").scalar();
+            assert_eq!(&got, v, "value_on.{name}");
+            asserted += 1;
+        }
+    });
+    expect.assert_key_if_present("values_on", |want| {
+        for (name, v) in want.as_object().expect("values_on is an object") {
+            let mut wanted: Vec<String> = v
+                .as_array()
+                .expect("values_on entry is an array")
+                .iter()
+                .map(|e| e.as_str().expect("values_on entry item").to_string())
+                .collect();
+            wanted.sort();
+            let got = world.get(name).expect("values_on names a replica").values();
+            assert_eq!(got, wanted, "values_on.{name}");
+            asserted += 1;
+        }
+    });
+    expect.assert_key_if_present("stamp_on", |want| {
+        for (name, v) in want.as_object().expect("stamp_on is an object") {
+            let got = world.get(name).expect("stamp_on names a replica").stamp();
+            assert_eq!(got.wall_time, u64_at(v, "wall"), "stamp_on.{name}.wall");
+            assert_eq!(got.logical, u64_at(v, "logical"), "stamp_on.{name}.logical");
+            assert_eq!(got.peer.0, u64_at(v, "peer"), "stamp_on.{name}.peer");
+            asserted += 1;
+        }
+    });
+    expect.assert_key_if_present("changed", |want| {
+        let got = last_merge_changed.expect("`changed` asserted but no merge ran");
+        assert_eq!(
+            got,
+            want.as_bool().expect("changed is a bool"),
+            "changed (the CellCrdt projection bit of the last merge)"
+        );
+        asserted += 1;
+    });
+    // Each `value_on`/`values_on`/`stamp_on` map is object-valued and consumed
+    // by iterating it, so the key VOCABULARY is what a new replica name would
+    // slip past (`#lzsubblockkeyset`) — the loops above compare every entry they
+    // find and would simply not find a replica nobody named.
+    let block = scenario.get("expect").expect("scenario.expect");
+    for key in ["value_on", "values_on", "stamp_on"] {
+        if let Some(map) = block.get(key).and_then(Value::as_object) {
+            expect.assert_key_set(key, map.keys().cloned());
         }
     }
+    expect.finish();
     assert!(asserted > 0, "scenario asserted nothing");
     asserted
 }
@@ -274,8 +292,8 @@ fn registers_convergence_replays_every_scenario() {
     // `conformance/` segment, and a bare relative string resolves to None and
     // books nothing — silently, because bookkeeping never fails a suite.
     let path = format!("{SPEC_DIR}/registers_convergence.json");
-    for (_index, _id, view) in common::scenarios(&path, &fixture) {
-        checks += replay(view.value());
+    for (index, _id, view) in common::scenarios(&path, &fixture) {
+        checks += replay(&path, &format!("scenarios[{index}].expect"), view.value());
         replayed += 1;
     }
     // A positive count, not just "no failures": a fixture whose scenarios all

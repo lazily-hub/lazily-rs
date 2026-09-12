@@ -226,39 +226,75 @@ this repo.
   keys are not unread, nothing reads them, and the fixture reports exactly
   nothing. lazily-dart found two such blocks carrying eight silent keys, one of
   them the anti-spoof invariant its fixture exists for. So `spec_read_to_string`
-  inventories every `assertions` block at READ time (top-level plus per-frame
-  and per-scenario) and `Expect::new` books one as BOUND, the two sides matched
-  by the block's **CONTENT digest, never by its `where` label** — runners spell
-  those labels inconsistently and a label-keyed ledger would silently miss the
-  mismatch rather than report it. `$LAZILY_CONFORMANCE_BLOCKS` carries the
-  ledger on the manifest's terms, and `check-conformance-coverage.sh` fails on
-  any inventoried block with no bind, carries a `KNOWN_UNBOUND_BLOCKS` excuse
-  list (currently EMPTY, reason REQUIRED) so an unbindable block is visible
-  every run rather than invisible, and asserts the inventory's MAGNITUDE because
+  inventories every assertion block at READ time and `Expect::new` books one as
+  BOUND, the two sides matched by the block's **CONTENT digest, never by its
+  `where` label** — runners spell those labels inconsistently and a label-keyed
+  ledger would silently miss the mismatch rather than report it.
+  WHAT COUNTS AS A BLOCK (`#lzrsblockwalk`). Every name in
+  `{assertions, expect, expect_after, expect_initial, expected}`, at every depth,
+  object-valued only, emitted and NOT descended into, with arrays descended
+  (`scenarios[3].steps[2].expect` is where most of this corpus's blocks live).
+  The walk used to read ONE name at ONE depth and inventoried 36 sites / 30
+  digests of the 771 / 661 the same 150 opened fixtures carry — 4.7%. Notably it
+  was not missing `assertions` blocks at depth; the whole gap was the four names
+  it never looked at (`expected` 434 sites / 359 digests, `expect` 295 / 266,
+  `expect_initial` 3 / 3, `expect_after` 3 / 3).
+  `$LAZILY_CONFORMANCE_BLOCKS` carries the ledger on the manifest's terms, each
+  `bound` line recording the runner's own fixture and label alongside the digest
+  (`#lzrunnerownjsonclone`, below). `check-conformance-coverage.sh` fails on any
+  inventoried block with no bind, and asserts the inventory's MAGNITUDE because
   zero declared blocks means zero unbound blocks reported OK over nothing. That
-  magnitude is no longer a `MIN_BLOCKS` floor (`#lzblockmagnitudeaudit`): a typed
+  magnitude is not a `MIN_BLOCKS` floor (`#lzblockmagnitudeaudit`): a typed
   number drifts by hand and a `>=` cannot see a shrink that stays above it. It is
   DERIVED from the corpus listing minus this crate's own `KNOWN_UNCOVERED`, on
-  TWO dimensions — 36 assertion-block SITES and 30 distinct DIGESTS — each an
-  EQUALITY. Both are needed: a digest count absorbs the deletion of a block whose
-  bytes recur elsewhere (ten of the 36 sites carry a recurring shape;
-  `signaling/frames.json` spells `{"to": 2}` four times), and a site count
-  absorbs a content edit that collapses two distinct claims into one.
-  36/36 sites bound. Validated in five directions: a declared block with no bind
-  FAILS naming it; deleting a recurring-digest block moves SITES alone; collapsing
-  a unique-digest block moves DIGESTS alone; a corpus with every narrow-walk block
-  stripped FAILS on the zero-guard rather than passing over an empty comparison;
-  and a digest twin that hashes the same shape differently FAILS the set-identity
-  cross-check, which neither cardinality can see. An absent ledger FAILS as
-  missing evidence, and the real ledger passes.
-  SCOPE — the walk is NARROW and deriving the number does not settle that: it
-  reads the top-level `assertions` object plus the `assertions` object of each
-  element of the top-level `frames`/`scenarios`/`rejects` arrays, which is 36 of
-  the 771 sites the same 150 opened fixtures carry when every block name is read
-  at every depth (4.7%). The whole remainder is the four names this walk never
-  looks at — `expected` 434 sites, `expect` 295, `expect_initial` 3,
-  `expect_after` 3 — and ZERO `assertions` blocks are missed at any depth, so the
-  gap is block NAMES, not depth. Widening it is its own separate piece of work
+  TWO dimensions — **771 assertion-block SITES and 661 distinct DIGESTS** — each
+  an EQUALITY. Both are needed: a digest count absorbs the deletion of a block
+  whose bytes recur elsewhere (167 of the 771 sites carry a recurring shape), and
+  a site count absorbs a content edit that collapses two distinct claims into
+  one.
+  THE BIND-PENDING LEDGER. 570 of the 771 sites are BOUND; the other 201 are in
+  `KNOWN_UNBOUND_BLOCKS` as `fixture|where|class|reason`, class from a fixed
+  vocabulary (`bind-pending`, `unreachable`), reason REQUIRED. All 201 are
+  `bind-pending` and reachable — each is a per-step or per-scenario expectation
+  its runner already reads and compares, missing only the routing through
+  `Expect`; three step loops (reactive-graph 113, stdlib 54, ingress 28) account
+  for 195 of them, and `collections/semtree_incremental.json` for the last 6.
+  The ledger is an EQUALITY against the RUN, not a floor: an unbound site missing
+  from it FAILS, and an entry for a site the run DID bind — or for a site the
+  corpus does not carry — FAILS as stale. A migration therefore cannot land
+  without deleting entries, and coverage cannot regress upward without someone
+  writing one by hand. There is deliberately no separate typed count beside it.
+  Expect the shrinking to be expensive: lazily-kt measured a 100 percent
+  higher-rung failure rate on its first migration pass, and two of the three
+  blocks bound in this pass hit the same thing (a missing key-set check on an
+  object-valued key; a hand-rolled per-runner copy of rung 2).
+  A RUNNER'S OWN JSON CLONE (`#lzrunnerownjsonclone`). This binding's loader
+  hands runners TEXT, so every runner re-parses and the block a runner binds is
+  never the same allocation the loader declared — only ever the same VALUE, and
+  the ledger only ever compares digests. lazily-cpp lost 71 sites to a runner
+  whose re-parse dropped the raw number token (`"value": 5` digesting as
+  `5.000000`), and they read as 71 unrelated coverage gaps. Here the guard
+  classifies every bind the loader never declared against every object the corpus
+  carries at every depth: 397 such binds, 363 of them below an already-emitted
+  block (a sub-object reached with `Expect::sub`, a whole `steps[n]` element) and
+  34 matching no corpus object at all — all 34 from `tests/expect_guard.rs`,
+  which fabricates `json!` blocks under borrowed fixture names. **Zero clone
+  divergences.** Reported, not failed: the self-tests make a non-zero count
+  normal. The digest contract itself is pinned by unit tests rather than inferred
+  from that number — a runner's own re-parse reproduces the loader's digest, the
+  digest SEPARATES `5` from `5.0` (without which the first assertion is satisfied
+  by a digest that folds the very divergence it looks for), and `5.0`/`5e0` are
+  pinned as FOLDING because `serde_json` normalises both to one `f64` at parse.
+  571/771 sites bound or, with the ledger, 771/771 accounted. Validated in ten
+  directions: a declared block with no bind FAILS naming it; a stale excuse FAILS
+  in both its directions (bound-after-all, and naming no such site); an unknown
+  class, an empty reason and a duplicated entry each FAIL; deleting a
+  recurring-digest block moves SITES alone; collapsing a unique-digest block
+  moves DIGESTS alone; a block respelled to a shape the corpus does not carry
+  moves NEITHER cardinality and FAILS the set-identity cross-check; a corpus with
+  every tracked block stripped FAILS on the zero-guard rather than passing over
+  an empty comparison; an absent ledger FAILS as missing evidence; and the real
+  ledger passes.
 - `tests/common/expect.rs` — the assertion-key guard
   (`#lzassertunknownkeys`, `#lzconsumednotasserted`), the two rungs below the
   manifest. Rung 2: having OPENED a fixture, did the runner CONSUME the keys it

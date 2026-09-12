@@ -242,12 +242,22 @@ struct ArenaExpected {
     payload_region: Vec<u8>,
 }
 
-fn load_arena_fixture(name: &str) -> ArenaFixture {
+/// The arena fixture twice over: once typed, once as the raw tree.
+///
+/// The typed form is what the byte-contract assertions compare against. The raw
+/// tree is what rung 0 can BIND (`#lzrsblockwalk`): a block consumed only by a
+/// `serde` deserialize is read, and asserted, and still invisible to every rung
+/// of the guard, because nothing ever handed it to the tracker. `expected` was
+/// exactly that — three fields all compared below, none of them booked.
+fn load_arena_fixture(name: &str) -> (ArenaFixture, serde_json::Value) {
     let path = fixture_path(name);
     let raw = crate::common::spec_read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read fixture {path}: {e}"));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("failed to parse arena fixture {path}: {e}"))
+    let typed = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("failed to parse arena fixture {path}: {e}"));
+    let tree = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("failed to parse arena fixture {path}: {e}"));
+    (typed, tree)
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +645,7 @@ fn conformance_msgpack_round_trips_canonical_fixtures() {
 
 #[test]
 fn conformance_arena_blob_descriptor_and_header() {
-    let fixture = load_arena_fixture("arena_blob.json");
+    let (fixture, tree) = load_arena_fixture("arena_blob.json");
     assert_eq!(fixture.protocol_version, 1);
     assert_eq!(fixture.kind, "Arena");
 
@@ -644,7 +654,23 @@ fn conformance_arena_blob_descriptor_and_header() {
         .write_blob(fixture.input.epoch, &fixture.input.payload)
         .unwrap();
 
+    // BIND the `expected` block, then compare through it. The typed struct is
+    // still what the byte comparisons below use; what changes is that the block
+    // is now booked, so a key that stops being read here reddens rung 2 instead
+    // of reporting nothing.
+    let e = Expect::new(
+        fixture_path("arena_blob.json"),
+        "expected",
+        &tree["expected"],
+    );
     let expected = &fixture.expected.descriptor;
+    let ed = e.sub("descriptor");
+    ed.assert_key("offset", desc.offset);
+    ed.assert_key("len", desc.len);
+    ed.assert_key("generation", desc.generation);
+    ed.assert_key("epoch", desc.epoch);
+    ed.assert_key("checksum", desc.checksum);
+    ed.finish();
     assert_eq!(desc.offset, expected.offset);
     assert_eq!(desc.len, expected.len);
     assert_eq!(desc.generation, expected.generation);
@@ -695,14 +721,33 @@ fn conformance_arena_blob_descriptor_and_header() {
         "magic",
         core::str::from_utf8(&magic_le.to_be_bytes()).unwrap(),
     );
-    assert_eq!(
-        &bytes[..SHM_BLOB_HEADER_LEN],
-        &fixture.expected.header_bytes[..]
-    );
+    // Compared against the BOUND value rather than against the typed struct's
+    // copy of it. A closure that ignores `want` and compares two paths through
+    // the same serde deserialize would satisfy the tracker while asserting
+    // nothing about the bytes the block actually carries.
+    let byte_array = |want: &serde_json::Value| -> Vec<u8> {
+        want.as_array()
+            .expect("a byte region is a JSON array")
+            .iter()
+            .map(|v| u8::try_from(v.as_u64().expect("a byte is a number")).expect("0..=255"))
+            .collect()
+    };
+    e.assert_key_with("header_bytes", |want| {
+        assert_eq!(&bytes[..SHM_BLOB_HEADER_LEN], &byte_array(want)[..]);
+    });
     let plen = fixture.input.payload.len();
+    e.assert_key_with("payload_region", |want| {
+        assert_eq!(
+            &bytes[SHM_BLOB_HEADER_LEN..SHM_BLOB_HEADER_LEN + plen],
+            &byte_array(want)[..]
+        );
+    });
+    // The typed deserialize must agree with the bytes the block carries — the
+    // two spellings of the same region, now cross-checked rather than assumed.
+    assert_eq!(fixture.expected.header_bytes, bytes[..SHM_BLOB_HEADER_LEN]);
     assert_eq!(
-        &bytes[SHM_BLOB_HEADER_LEN..SHM_BLOB_HEADER_LEN + plen],
-        &fixture.expected.payload_region[..]
+        fixture.expected.payload_region,
+        bytes[SHM_BLOB_HEADER_LEN..SHM_BLOB_HEADER_LEN + plen]
     );
 
     // round-trip

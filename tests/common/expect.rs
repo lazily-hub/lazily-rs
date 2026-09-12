@@ -479,13 +479,17 @@ impl<'a> Expect<'a> {
     /// error, because "this fixture has no assertion block" is a shape question
     /// the runner already answers.
     pub fn new(fixture: impl Into<String>, label: impl Into<String>, value: &'a Value) -> Self {
+        let fixture = fixture.into();
+        let label = label.into();
         // Rung 0 (`#lznullformblind`): book this block as BOUND, keyed by its
         // CONTENT rather than by `label`. Every other rung is scoped to blocks a
         // runner already bound, so a block nothing binds reports nothing at all
         // — its keys are not unread, nothing reads them. Content keying is what
         // stops the ledger inheriting the inconsistent spellings runners give
-        // the `where` label.
-        super::record_block_bind(value);
+        // the `where` label; the fixture/label go alongside the digest so a bind
+        // the loader never declared can be traced back to the runner that made
+        // it (`#lzrunnerownjsonclone`).
+        super::record_block_bind(&fixture, &label, value);
         let declared: BTreeSet<String> = value
             .get(PROSE_DECLARATION_KEY)
             .and_then(Value::as_array)
@@ -500,8 +504,8 @@ impl<'a> Expect<'a> {
             })
             .unwrap_or_default();
         Self {
-            fixture: fixture.into(),
-            label: label.into(),
+            fixture,
+            label,
             value,
             read: RefCell::new(BTreeSet::new()),
             asserted: RefCell::new(BTreeSet::new()),

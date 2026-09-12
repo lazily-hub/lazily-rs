@@ -4,6 +4,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
+use common::Expect;
 use lazily::protobuf::{
     BoundaryDecision, GraphBoundaryProjection, PROTOBUF_GRAPH_BOUNDARY_FEATURE,
     wire::{
@@ -149,30 +150,47 @@ fn generated_protobuf_roundtrips_and_replays_canonical_logical_traces() {
             decisions.push(decision_name(decision));
         }
 
-        let expected = &scenario["expect"];
+        // Bound to the tracker rather than indexed directly (`#lzrsblockwalk`).
+        // All four keys were already asserted below, so this is a routing change
+        // and not a coverage change — but until the block was BOUND, rung 0 had
+        // no record of it and every rung above was scoped to blocks a runner
+        // bound, so a key that stopped being read here would have reported
+        // nothing at all.
+        let expected = Expect::new(
+            FIXTURE.to_string(),
+            format!("scenarios[{id}].expect"),
+            &scenario["expect"],
+        );
         let actual_cells = projection
             .cells()
             .iter()
             .map(|(id, cell)| (id.clone(), cell.text.clone()))
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(actual_cells, strings(&expected["cells"]), "{id}");
-        assert_eq!(
-            decisions,
-            expected["decisions"]
-                .as_array()
-                .expect("decisions")
-                .iter()
-                .map(|value| value.as_str().expect("decision"))
-                .collect::<Vec<_>>(),
-            "{id}"
+        // `cells` is object-valued, so the comparison owes a key-set claim as
+        // well as a value claim (`#lzsubblockkeyset`): a cell the corpus adds
+        // upstream would otherwise be compared by nothing. The map equality
+        // below already fails on a vocabulary difference — `assert_key_set` is
+        // what makes that visible to the guard instead of leaving it implied by
+        // the shape of a `BTreeMap` comparison.
+        expected.assert_key_with("cells", |want| {
+            assert_eq!(actual_cells, strings(want), "{id}");
+        });
+        expected.assert_key_set("cells", actual_cells.keys().cloned());
+        expected.assert_key_with("decisions", |want| {
+            assert_eq!(
+                decisions,
+                want.as_array()
+                    .expect("decisions")
+                    .iter()
+                    .map(|value| value.as_str().expect("decision"))
+                    .collect::<Vec<_>>(),
+                "{id}"
+            );
+        });
+        expected.assert_key(
+            "logical_projection",
+            projection.logical_projection().to_owned(),
         );
-        assert_eq!(
-            projection.logical_projection(),
-            expected["logical_projection"]
-                .as_str()
-                .expect("logical projection"),
-            "{id}"
-        );
-        assert_eq!(expected["ordinary_snapshot_count"], 0, "{id}");
+        expected.assert_key("ordinary_snapshot_count", 0u64);
     }
 }
