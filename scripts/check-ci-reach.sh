@@ -2009,12 +2009,97 @@ if [ "$unreadable_count" -gt 0 ]; then
 	exit 1
 fi
 
+# ORDERED BEFORE THE PARTITION, deliberately. The pin-derived domain below is
+# `EXPECTED_CLOSURE_TARGETS - EXPECTED_NO_GATE_TARGETS`, so it only describes the
+# real gate-carrying set while THIS pin holds -- which makes this pin a
+# PRECONDITION of the partition rather than a peer of it. Measured: with it
+# checked afterwards, NEUTERING a recipe (`test-shm: true`) was reported by the
+# partition as `recorded in NO reach-mode cell`, pre-empting the pin that explains
+# what actually happened -- a gutted recipe -- and sending the reader to reach-mode
+# bookkeeping instead. Fourth ordering fix in this map, and they all have the same
+# shape: every one of these rungs is fatal before any count, so the first to fire
+# owns the subject.
+nogate_pin_status=0
+# The classification pin (#lzpinreachclosure). Membership does not imply
+# enforcement: a target reported as carrying no gate is not required to appear in
+# CI, so which targets may be in that category is pinned by name, by set
+# equality, exactly like membership.
+nogate_sorted="$(printf '%s' "$nogate" | awk 'NF' | sort)"
+nogate_pin_sorted="$(printf '%s\n' "${EXPECTED_NO_GATE_TARGETS[@]}" | sort)"
+
+nogate_new="$(comm -13 <(printf '%s\n' "$nogate_pin_sorted" | awk 'NF') <(printf '%s\n' "$nogate_sorted" | awk 'NF'))"
+if [ -n "$nogate_new" ]; then
+	echo >&2
+	echo "check-ci-reach: target(s) reported as carrying NO GATE that EXPECTED_NO_GATE_TARGETS does not pin:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$nogate_new"
+	echo >&2
+	echo "A target in this category is NOT required to appear in CI, so a gate that" >&2
+	echo "lands here has stopped being enforced while keeping its name on the" >&2
+	echo "'$ROOT_TARGET:' line — which is why the membership pin cannot see it. Emptying" >&2
+	echo "a recipe (\`true\`, or a mkdir-only body) does this." >&2
+	echo >&2
+	echo "  - the recipe was gutted by MISTAKE: restore it. Do not touch the pin." >&2
+	echo "  - the target genuinely carries no gate now: add it to" >&2
+	echo "    EXPECTED_NO_GATE_TARGETS with a reason, in the same commit, so the diff" >&2
+	echo "    shows a gate leaving enforcement on purpose (#lzpinreachclosure)." >&2
+	nogate_pin_status=1
+fi
+
+nogate_gone="$(comm -23 <(printf '%s\n' "$nogate_pin_sorted" | awk 'NF') <(printf '%s\n' "$nogate_sorted" | awk 'NF'))"
+if [ -n "$nogate_gone" ]; then
+	echo >&2
+	echo "check-ci-reach: target(s) pinned in EXPECTED_NO_GATE_TARGETS that no longer read as carrying no gate:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$nogate_gone"
+	echo >&2
+	echo "Usually GOOD news — a gateless target grew a gate — and then the remedy is to" >&2
+	echo "remove the entry so the pin keeps describing the real set. It is also what a" >&2
+	echo "rename looks like from this side, and what an entry left behind after a target" >&2
+	echo "was deleted looks like; the membership pin above says which." >&2
+	echo >&2
+	echo "One case is NOT good news: if the target named is the root '$ROOT_TARGET'," >&2
+	echo "make is running a command that no other closure member owns, and the root" >&2
+	echo "absorbed it. Read the ORACLE MISMATCH above — that is the real fault" >&2
+	echo "(#lzpinreachclosure)." >&2
+	nogate_pin_status=1
+fi
+
+if [ "$nogate_pin_status" -ne 0 ]; then
+	exit 1
+fi
+
 # THE REACH MODE PIN, set-equal in both directions, and ordered BEFORE the
 # unpinned rung below (#lzcheckcireachguard). The order is load-bearing: a member
 # that switched to `make <target>` and lost its entry in the same edit must be
 # reported as a MODE CHANGE, not as a missing pin, or the remedy the reader is
 # handed is "add an entry" -- which would re-pin a gate CI no longer spells and
 # make the false green permanent.
+#
+# WHICH DIRECTION IS LOAD-BEARING WAS MEASURED, not assumed, because lazily-kt
+# and lazily-cs reached opposite answers on their own bindings. In rs BOTH
+# directions change the EXIT CODE, for different states -- which is why they
+# disagreed: they measured different states, and rs has both. Each row is a
+# single rung deleted from an otherwise-current script, inputs verified against
+# their git objects first:
+#
+#   state                                          both present   one removed
+#   ---------------------------------------------  ------------   -----------
+#   CI spells out a pinned make-invoked member     exit 1         exit 1  (*)
+#   a pinned make-invoked member becomes EXCUSED   exit 1         exit 0
+#   the two-part mode edit (step->make + entry)    exit 1         exit 0
+#
+# (*) pinned-but-not-observed is MESSAGE-ONLY for that first state -- the
+# partition rung catches it independently, as `recorded in NO reach-mode cell`,
+# because a spelled-out member with no gate-step entry is anchor-mode and
+# unmapped. That is kt's result. The second row is cs's: a dead mode-pin entry
+# beside a VALID excuse is caught by nothing else, since the excused cell keeps
+# the partition satisfied. Both are kept regardless -- a message-only difference
+# still decides whether the reader is told to fix CI or to fix a pin.
 mode_status=0
 makeinv_seen_sorted="$(printf '%s' "$makeinv_seen" | awk 'NF' | sort)"
 makeinv_pin_sorted="$(printf '%s\n' "${EXPECTED_MAKE_INVOKED[@]:-}" | awk 'NF' | sort)"
@@ -2075,7 +2160,86 @@ fi
 # compare each cell against its own pin, so they all keep holding while a member
 # quietly belongs to no cell at all.
 partition_status=0
+
+# THE DOMAIN COMES FROM THE PINS, not from the walk (lazily-kt's finding). An
+# asserted partition is still vacuous if its left-hand side is a variable the
+# audited code assigns: move the probe ONE LINE EARLIER, before `gated_seen` is
+# accumulated, and the member is in no cell AND in no domain, so the equation
+# holds with both sides moved together. Measured here -- `test-shm` credited as
+# reached before the accumulation, with its gate-step entry dropped, printed
+#
+#   three cells hold 49 member(s) ... set-equal to the 49 gate-carrying member(s)
+#   check-ci-reach: OK — 50 target(s) reached by CI, 0 excused, 2 carrying no gate
+#
+# at exit 0 with stderr empty, `reached  test-shm` in the listing, and the gate
+# unexamined. 49 against 49 is a true equation about the wrong set.
+#
+# So the domain is `EXPECTED_CLOSURE_TARGETS - EXPECTED_NO_GATE_TARGETS`: two
+# pinned constants, each already set-equal to what the run observed (membership
+# above, classification below) and the first also checked against make by the
+# oracle. Every cell now terminates in a pin rather than in a variable this loop
+# populates. `gated_seen` is still compared -- against the same pin-derived
+# domain -- because "the walk skipped a pinned member" is a distinct subject from
+# "a walked member landed in no cell", and the residual above is exactly the
+# former.
+#
+# Over MEMBERS, never over pin ENTRIES (kt's second finding: its `test` member
+# carries two step entries, so entry arithmetic is off by one against member
+# arithmetic). These are comparisons of NAME SETS, and the duplicate-target rung
+# above refuses a second entry for one member, so in rs entries and members
+# coincide at 46 -- enforced, not assumed.
+domain_pinned="$(comm -23 \
+	<(printf '%s\n' "${EXPECTED_CLOSURE_TARGETS[@]}" | awk 'NF' | sort -u) \
+	<(printf '%s\n' "${EXPECTED_NO_GATE_TARGETS[@]}" | awk 'NF' | sort -u))"
+if [ -z "$domain_pinned" ]; then
+	echo "check-ci-reach: EXPECTED_CLOSURE_TARGETS minus EXPECTED_NO_GATE_TARGETS is EMPTY --" >&2
+	echo "                the partition below would hold vacuously (#lzcheckcireachguard)." >&2
+	exit 1
+fi
+
 gated_sorted="$(printf '%s' "$gated_seen" | awk 'NF' | sort -u)"
+
+# EVERY PINNED CLOSURE MEMBER MUST BE ACCOUNTED FOR BY THE WALK, as gate-carrying
+# or as carrying no gate. Stated over the WHOLE closure rather than over
+# `domain_pinned`, and that is a subject fix rather than a strengthening: against
+# `domain_pinned` alone, NEUTERING a recipe (`test-shm: true`) fired this rung --
+# the member is genuinely absent from the gate-carrying walk -- and pre-empted the
+# no-gate classification pin below, which owns that subject and says "the recipe
+# was gutted; restore it, or pin it with a reason". Measured, and the third time
+# ordering has bitten this map. Accounting for the no-gate members here leaves
+# that case to the pin that explains it, while still catching kt's residual,
+# where the member lands in NEITHER set.
+walk_accounted="$(printf '%s\n%s' "$gated_sorted" "$(printf '%s' "$nogate" | awk 'NF')" | awk 'NF' | sort -u)"
+closure_pinned="$(printf '%s\n' "${EXPECTED_CLOSURE_TARGETS[@]}" | awk 'NF' | sort -u)"
+domain_skipped="$(comm -23 <(printf '%s\n' "$closure_pinned" | awk 'NF') <(printf '%s\n' "$walk_accounted" | awk 'NF'))"
+if [ -n "$domain_skipped" ]; then
+	echo >&2
+	echo "check-ci-reach: pinned closure member(s) this walk never accounted for, as either" >&2
+	echo "                gate-carrying or carrying no gate:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$domain_skipped"
+	echo >&2
+	echo "Each of these is pinned in EXPECTED_CLOSURE_TARGETS and yet the walk classified it" >&2
+	echo "neither way, so it was never assigned a reach mode AND never reported as gateless." >&2
+	echo "Every set equality below would still hold -- about a smaller set, because the" >&2
+	echo "populations they compare would have lost the member together" >&2
+	echo "(#lzcheckcireachguard)." >&2
+	partition_status=1
+fi
+domain_extra="$(comm -13 <(printf '%s\n' "$closure_pinned" | awk 'NF') <(printf '%s\n' "$walk_accounted" | awk 'NF'))"
+if [ -n "$domain_extra" ]; then
+	echo >&2
+	echo "check-ci-reach: member(s) this walk accounted for that EXPECTED_CLOSURE_TARGETS does not pin:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$domain_extra"
+	echo "The closure pin and the walk disagree about which targets were examined at all" >&2
+	echo "(#lzcheckcireachguard)." >&2
+	partition_status=1
+fi
 cells_all="$(printf '%s\n%s\n%s' "$anchor_mode_seen" "$makeinv_seen" "$excused_seen" | awk 'NF' | sort)"
 cells_uniq="$(printf '%s\n' "$cells_all" | awk 'NF' | sort -u)"
 
@@ -2094,10 +2258,10 @@ if [ -n "$cells_dupe" ]; then
 fi
 
 # TOTAL, forward: a gate-carrying member in NO cell -- dart's residual.
-cells_missing="$(comm -23 <(printf '%s\n' "$gated_sorted" | awk 'NF') <(printf '%s\n' "$cells_uniq" | awk 'NF'))"
+cells_missing="$(comm -23 <(printf '%s\n' "$domain_pinned" | awk 'NF') <(printf '%s\n' "$cells_uniq" | awk 'NF'))"
 if [ -n "$cells_missing" ]; then
 	echo >&2
-	echo "check-ci-reach: gate-carrying target(s) recorded in NO reach-mode cell:" >&2
+	echo "check-ci-reach: pinned gate-carrying target(s) recorded in NO reach-mode cell:" >&2
 	while IFS= read -r t; do
 		[ -n "$t" ] || continue
 		echo "  - $t" >&2
@@ -2113,11 +2277,11 @@ if [ -n "$cells_missing" ]; then
 fi
 
 # TOTAL, reverse: a cell naming a member the walk did not count as gate-carrying.
-cells_extra="$(comm -13 <(printf '%s\n' "$gated_sorted" | awk 'NF') <(printf '%s\n' "$cells_uniq" | awk 'NF'))"
+cells_extra="$(comm -13 <(printf '%s\n' "$domain_pinned" | awk 'NF') <(printf '%s\n' "$cells_uniq" | awk 'NF'))"
 if [ -n "$cells_extra" ]; then
 	echo >&2
-	echo "check-ci-reach: reach-mode cell(s) naming target(s) that are not gate-carrying" >&2
-	echo "                members of this walk:" >&2
+	echo "check-ci-reach: reach-mode cell(s) naming target(s) the PINNED domain does not" >&2
+	echo "                admit as gate-carrying:" >&2
 	while IFS= read -r t; do
 		[ -n "$t" ] || continue
 		echo "  - $t" >&2
@@ -2287,54 +2451,6 @@ if [ -n "$oracle_unowned" ]; then
 	oracle_status=1
 fi
 
-# The classification pin (#lzpinreachclosure). Membership does not imply
-# enforcement: a target reported as carrying no gate is not required to appear in
-# CI, so which targets may be in that category is pinned by name, by set
-# equality, exactly like membership.
-nogate_sorted="$(printf '%s' "$nogate" | awk 'NF' | sort)"
-nogate_pin_sorted="$(printf '%s\n' "${EXPECTED_NO_GATE_TARGETS[@]}" | sort)"
-
-nogate_new="$(comm -13 <(printf '%s\n' "$nogate_pin_sorted" | awk 'NF') <(printf '%s\n' "$nogate_sorted" | awk 'NF'))"
-if [ -n "$nogate_new" ]; then
-	echo >&2
-	echo "check-ci-reach: target(s) reported as carrying NO GATE that EXPECTED_NO_GATE_TARGETS does not pin:" >&2
-	while IFS= read -r t; do
-		[ -n "$t" ] || continue
-		echo "  - $t" >&2
-	done <<<"$nogate_new"
-	echo >&2
-	echo "A target in this category is NOT required to appear in CI, so a gate that" >&2
-	echo "lands here has stopped being enforced while keeping its name on the" >&2
-	echo "'$ROOT_TARGET:' line — which is why the membership pin cannot see it. Emptying" >&2
-	echo "a recipe (\`true\`, or a mkdir-only body) does this." >&2
-	echo >&2
-	echo "  - the recipe was gutted by MISTAKE: restore it. Do not touch the pin." >&2
-	echo "  - the target genuinely carries no gate now: add it to" >&2
-	echo "    EXPECTED_NO_GATE_TARGETS with a reason, in the same commit, so the diff" >&2
-	echo "    shows a gate leaving enforcement on purpose (#lzpinreachclosure)." >&2
-	oracle_status=1
-fi
-
-nogate_gone="$(comm -23 <(printf '%s\n' "$nogate_pin_sorted" | awk 'NF') <(printf '%s\n' "$nogate_sorted" | awk 'NF'))"
-if [ -n "$nogate_gone" ]; then
-	echo >&2
-	echo "check-ci-reach: target(s) pinned in EXPECTED_NO_GATE_TARGETS that no longer read as carrying no gate:" >&2
-	while IFS= read -r t; do
-		[ -n "$t" ] || continue
-		echo "  - $t" >&2
-	done <<<"$nogate_gone"
-	echo >&2
-	echo "Usually GOOD news — a gateless target grew a gate — and then the remedy is to" >&2
-	echo "remove the entry so the pin keeps describing the real set. It is also what a" >&2
-	echo "rename looks like from this side, and what an entry left behind after a target" >&2
-	echo "was deleted looks like; the membership pin above says which." >&2
-	echo >&2
-	echo "One case is NOT good news: if the target named is the root '$ROOT_TARGET'," >&2
-	echo "make is running a command that no other closure member owns, and the root" >&2
-	echo "absorbed it. Read the ORACLE MISMATCH above — that is the real fault" >&2
-	echo "(#lzpinreachclosure)." >&2
-	oracle_status=1
-fi
 
 # The gate step map, reverse direction (#lzcheckcireachguard). An entry for a target
 # that was never step-checked asserts nothing, exactly as an excuse for a target
@@ -2402,9 +2518,9 @@ makeinv_pinned="$(printf '%s\n' "${EXPECTED_MAKE_INVOKED[@]:-}" | awk 'NF' | sor
 # sum and calling it the gate-carrying total restates one number twice and can
 # never disagree -- the same by-construction tautology the partition rung above
 # exists to avoid, reappearing in the sentence that reports it.
-step_gated_total="$(printf '%s' "$gated_seen" | awk 'NF' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
+step_gated_total="$(printf '%s\n' "$domain_pinned" | awk 'NF { n++ } END { print n + 0 }')"
 step_cells_total="$(printf '%s\n%s\n%s' "$anchor_mode_seen" "$makeinv_seen" "$excused_seen" | awk 'NF' | sort -u | awk 'NF { n++ } END { print n + 0 }')"
-echo "check-ci-reach: gate step map matched — $step_mapped_count member(s) checked inside their pinned CI step of $step_map_pinned pinned in EXPECTED_GATE_STEPS, over $step_map_distinct distinct step name(s) each unique among the $ci_step_total run: step(s) in ${workflows[*]}; $makeinv_count reached by CI invoking make by name of $makeinv_pinned pinned in EXPECTED_MAKE_INVOKED; the three cells hold $step_cells_total member(s), exclusive and set-equal to the $step_gated_total gate-carrying member(s) counted before classification"
+echo "check-ci-reach: gate step map matched — $step_mapped_count member(s) checked inside their pinned CI step of $step_map_pinned pinned in EXPECTED_GATE_STEPS, over $step_map_distinct distinct step name(s) each unique among the $ci_step_total run: step(s) in ${workflows[*]}; $makeinv_count reached by CI invoking make by name of $makeinv_pinned pinned in EXPECTED_MAKE_INVOKED; the three cells hold $step_cells_total member(s), exclusive and set-equal to the $step_gated_total member(s) of EXPECTED_CLOSURE_TARGETS minus EXPECTED_NO_GATE_TARGETS"
 
 # A guard that examined nothing must not report OK — the same vacuity rule the
 # conformance guards apply (#lzvacuousrun).
