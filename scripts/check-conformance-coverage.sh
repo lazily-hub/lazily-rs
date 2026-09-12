@@ -956,10 +956,10 @@ PY
 # without deleting entries and coverage cannot regress upward without someone
 # adding one by hand.
 #
-# 167 entries, all `bind-pending`, all reachable: every one is a per-step
+# 113 entries, all `bind-pending`, all reachable: every one is a per-step
 # expectation its runner already reads and compares — what is missing is the
 # routing through `Expect`, not the assertion. Two step loops account for all of
-# them: stdlib 54, reactive-graph 113 (`#lzrsbindpending`). This list is expected
+# them: reactive-graph 113 (`#lzrsbindpending`). This list is expected
 # to SHRINK; shrinking it is the work, and `#lzrsblockwalk` widened the walk
 # precisely so that the work is countable instead of invisible.
 #
@@ -1092,62 +1092,6 @@ KNOWN_UNBOUND_BLOCKS=(
   "reactive-graph/transitive_invalidation_reaches_depth.json|steps[7].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
   "reactive-graph/transitive_invalidation_reaches_depth.json|steps[8].expect|bind-pending|per-step expectation compared key by key against the model report in reactive_graph_conformance::replay; binding it is the step-loop migration"
 
-  # stdlib — 54 sites across 3 fixtures, one step loop.
-  # per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration
-  "stdlib/revision_barrier.json|scenarios[0].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[0].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[1].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[1].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[2].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[2].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[2].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[3].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[3].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[4].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[4].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[5].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[5].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[5].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[6].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[6].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[7].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[7].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[7].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[7].steps[3].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[8].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/revision_barrier.json|scenarios[8].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[0].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[0].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[1].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[1].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[2].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[2].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[3].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[3].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[4].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[4].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[5].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[5].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[6].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[6].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[6].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[7].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[7].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timeout.json|scenarios[7].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[0].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[0].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[1].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[1].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[2].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[2].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[3].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[3].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[3].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[4].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[4].steps[1].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[4].steps[2].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[4].steps[3].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
-  "stdlib/timer.json|scenarios[5].steps[0].expect|bind-pending|per-step expectation compared against the runtime observation in stdlib_conformance's step loop; binding it is the step-loop migration"
 )
 
 BLOCK_LEDGER="${LAZILY_CONFORMANCE_BLOCKS:-build/conformance-assertion-blocks.txt}"

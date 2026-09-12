@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
+use common::Expect;
 use lazily::stdlib::{
     RevisionBarrier, RevisionCheck, RevisionWaitOutcome, Timeout, TimeoutCancellation,
     TimeoutOperation, TimeoutPoll, TimeoutUnavailableReason, Timer, TimerError, TimerPoll,
@@ -105,17 +106,58 @@ fn replay_production(path: &str, fixture: &Value) {
     }
 }
 
-fn assert_step(feature: &str, scenario: &Value, index: usize, actual: Value) {
-    assert_eq!(
-        actual,
-        scenario["steps"][index]["expect"],
+/// Assert one step's produced observation against its `expect` block, BOUND to
+/// the tracker (`#lzrsbindpending`).
+///
+/// This was one whole-value `assert_eq!`, which is a complete comparison and an
+/// invisible one: rung 0 had no record of the block, so every rung above was
+/// scoped past all 54 of this area's sites. Splitting it per key is what makes
+/// them visible, and the key-set equality below is what keeps the comparison
+/// whole — per-key assertions alone cannot see a key the RUN produced that the
+/// block does not carry, which is the half of `assert_eq!` that would otherwise
+/// be lost.
+fn assert_step(
+    path: &str,
+    feature: &str,
+    scenario_index: usize,
+    scenario: &Value,
+    index: usize,
+    actual: Value,
+) {
+    let where_ = format!(
         "{feature}/{} step {index}",
         scenario["id"].as_str().expect("scenario id")
     );
+    let block = &scenario["steps"][index]["expect"];
+    let expect = Expect::new(
+        path.to_owned(),
+        format!("scenarios[{scenario_index}].steps[{index}].expect"),
+        block,
+    );
+    let want = block
+        .as_object()
+        .unwrap_or_else(|| panic!("{where_}: `expect` is not an object: {block}"));
+    let produced = actual
+        .as_object()
+        .unwrap_or_else(|| panic!("{where_}: a step observation is not an object: {actual}"));
+    assert_eq!(
+        produced.keys().collect::<Vec<_>>(),
+        want.keys().collect::<Vec<_>>(),
+        "{where_}: the observation's key set"
+    );
+    for key in want.keys() {
+        // Compared against the value the TRACKER handed over, never against a
+        // second read of the same block: a closure that ignores `want`
+        // satisfies the tracker while asserting nothing.
+        expect.assert_key_with(key, |want| {
+            assert_eq!(&produced[key], want, "{where_}: {key}");
+        });
+    }
+    expect.finish();
 }
 
 fn replay_timers(path: &str, fixture: &Value) {
-    for (_index, _id, scenario) in scenarios(path, fixture) {
+    for (scenario_index, _id, scenario) in scenarios(path, fixture) {
         let base = Instant::now();
         let mut timer = None;
         let mut logical_deadline = None;
@@ -162,13 +204,20 @@ fn replay_timers(path: &str, fixture: &Value) {
                 }
                 op => panic!("unknown timer op {op}"),
             };
-            assert_step("stdlib_timer_v1", scenario.value(), index, actual);
+            assert_step(
+                path,
+                "stdlib_timer_v1",
+                scenario_index,
+                scenario.value(),
+                index,
+                actual,
+            );
         }
     }
 }
 
 fn replay_timeouts(path: &str, fixture: &Value) {
-    for (_index, _id, scenario) in scenarios(path, fixture) {
+    for (scenario_index, _id, scenario) in scenarios(path, fixture) {
         let base = Instant::now();
         let mut timeout = None::<Timeout<String>>;
         let mut logical_deadline = None;
@@ -274,7 +323,14 @@ fn replay_timeouts(path: &str, fixture: &Value) {
                 }
                 op => panic!("unknown timeout op {op}"),
             };
-            assert_step("stdlib_timeout_v1", scenario.value(), index, actual);
+            assert_step(
+                path,
+                "stdlib_timeout_v1",
+                scenario_index,
+                scenario.value(),
+                index,
+                actual,
+            );
         }
     }
 }
@@ -309,7 +365,7 @@ fn map_wait(outcome: RevisionWaitOutcome, barrier: &RevisionBarrier) -> Value {
 }
 
 fn replay_barriers(path: &str, fixture: &Value) {
-    for (_index, _id, scenario) in scenarios(path, fixture) {
+    for (scenario_index, _id, scenario) in scenarios(path, fixture) {
         let mut barrier = None;
         let mut required_revision = 0_u64;
         let mut deadline = None;
@@ -333,7 +389,9 @@ fn replay_barriers(path: &str, fixture: &Value) {
                         };
                         let actual = barrier_observation(outcome, &current, reason);
                         assert_step(
+                            path,
                             "stdlib_revision_barrier_v1",
+                            scenario_index,
                             scenario.value(),
                             index,
                             actual,
@@ -445,7 +503,9 @@ fn replay_barriers(path: &str, fixture: &Value) {
                 op => panic!("unknown barrier op {op}"),
             };
             assert_step(
+                path,
                 "stdlib_revision_barrier_v1",
+                scenario_index,
                 scenario.value(),
                 index,
                 actual,
@@ -457,7 +517,7 @@ fn replay_barriers(path: &str, fixture: &Value) {
 fn independent_failures(path: &str, fixture: &Value, mutation: Option<&str>) -> BTreeSet<String> {
     let feature = fixture["feature"].as_str().expect("feature");
     let mut failures = BTreeSet::new();
-    for (_index, _id, scenario) in scenarios(path, fixture) {
+    for (_scenario_index, _id, scenario) in scenarios(path, fixture) {
         let mut state = Map::new();
         for step in steps(scenario.value()) {
             let actual = independent_step(feature, &mut state, step, mutation);
