@@ -57,7 +57,7 @@
 //!
 //! # Allowlist
 //!
-//! `common/json.rs` only. It IS the sanctioned reader, so it is the one
+//! `tests/common/json.rs` only. It IS the sanctioned reader, so it is the one
 //! legitimate caller of the banned accessors and the one place the local
 //! `#[allow]` belongs. Everything else under `tests/` is scanned, including
 //! `common/expect.rs` (the assertion tracker) and the subdirectory runners
