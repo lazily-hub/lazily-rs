@@ -6,7 +6,7 @@ use common::Expect;
 use lazily::{ClientMessage, ServerMessage};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const FRAMES_PATH: common::SpecDir = common::SpecDir("signaling/frames.json");
 const SESSION_PATH: common::SpecDir = common::SpecDir("signaling/anti_spoof_session.json");
@@ -71,22 +71,21 @@ struct SessionReject {
     session_reason: String,
 }
 
-/// One frame the session emits, and the connection it goes to.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionEmit {
-    #[allow(dead_code)]
-    #[serde(rename = "to")]
-    emit_to: String,
-    frame: Value,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionStep {
     input: SessionInput,
+    /// The frames this step expects the server to emit, one element per
+    /// emission. Kept as raw `Value`s rather than a typed `SessionEmit` struct
+    /// (`#lzarrayelementsites`): each element is an assertion block in its own
+    /// right, and it is the tracker — not a `deny_unknown_fields` attribute —
+    /// that has to own the key obligation. The attribute refused an unknown key
+    /// at PARSE time and was invisible to every rung above, so the two keys it
+    /// did carry (`to`, `frame`) reached no comparison: `to` was bound to a
+    /// field named `emit_to` and read by nothing, and `frame` was consulted
+    /// per-key for `type` / `peer` / `peers` / `from` and never as a whole.
     #[serde(default)]
-    expect: Vec<SessionEmit>,
+    expect: Vec<Value>,
 }
 
 #[derive(Deserialize)]
@@ -300,6 +299,8 @@ fn anti_spoof_fixture_rejects_client_supplied_from() {
     let mut registry: BTreeMap<String, u64> = BTreeMap::new();
     let mut rosters_checked = 0usize;
     let mut forwarded_checked = 0usize;
+    let mut emissions_bound = 0usize;
+    let mut broadcast_steps_checked = 0usize;
     let mut roster_excludes_self = true;
     let mut roster_sorted = true;
     let mut from_is_registered = true;
@@ -314,16 +315,107 @@ fn anti_spoof_fixture_rejects_client_supplied_from() {
         // the registry to a decode rather than to the fixture's text.
         let recv = decode("client", &step.input.recv)
             .unwrap_or_else(|e| panic!("step {i}: session input should decode: {e}"));
-        if recv["type"] == "join" {
+        let input_type = recv["type"]
+            .as_str()
+            .unwrap_or_else(|| panic!("step {i}: a decoded input names its type"))
+            .to_owned();
+        // The roster a welcome must carry is the registry BEFORE this join, in
+        // ascending peer order — so it has to be read here, ahead of the insert.
+        let mut roster_before: Vec<u64> = registry.values().copied().collect();
+        roster_before.sort_unstable();
+        if input_type == "join" {
             registry.insert(
                 conn.clone(),
                 recv["peer"].as_u64().expect("a join names its peer"),
             );
         }
+        // The peer id the SERVER has bound to this connection. Every `from` the
+        // server stamps and every membership broadcast it sends about this step
+        // names this value, and never anything the client wrote.
+        let sender_peer = registry
+            .get(&conn)
+            .copied()
+            .unwrap_or_else(|| panic!("step {i}: connection {conn:?} joined no session"));
+        // The peer this input addressed, when it is directed, and the connection
+        // registered for it. `None` for the second is the `unknown_target` case.
+        let addressed = recv.get("to").and_then(Value::as_u64);
+        let addressed_conn = addressed.and_then(|peer| {
+            registry
+                .iter()
+                .find(|(_, registered)| **registered == peer)
+                .map(|(target, _)| target.clone())
+        });
 
-        for emit in &step.expect {
-            let frame = decode("server", &emit.frame)
+        // The destinations this step's BROADCAST frames name. Collected so the
+        // whole set can be compared against the roster in both directions after
+        // the emissions — a per-frame membership check cannot see a peer the
+        // server should have told and did not.
+        let mut broadcast_to: BTreeSet<String> = BTreeSet::new();
+        let mut step_broadcasts = false;
+
+        for (j, emit) in step.expect.iter().enumerate() {
+            // RUNG 0 (`#lzarrayelementsites`). Each element of `steps[n].expect`
+            // is an assertion block: an expected emission carrying a routing
+            // target and a frame. The walk in `tests/common/mod.rs` declares one
+            // site per plain-object element, so each is bound here individually
+            // and the label carries the index — a per-ARRAY label would collapse
+            // the three emissions of step 2 into one name.
+            let exp = Expect::new(SESSION_PATH, format!("steps[{i}].expect[{j}]"), emit);
+            let declared = exp.get("frame");
+            let frame = decode("server", declared)
                 .unwrap_or_else(|e| panic!("step {i}: emitted frame should decode: {e}"));
+
+            // THE KEY SET FIRST, in BOTH directions, before any value reaches a
+            // comparison (`#lzsubblockkeyset`). The arms below used to read
+            // `type`, `peer`, `peers` and `from` — only the keys the FIXTURE
+            // happens to name — so a field the codec produced that the fixture
+            // omits was compared by nothing. The descent below carries the
+            // fixture-declares-it direction (an unconsumed sub-key fails); this
+            // is the other one, and it names the offending key.
+            let declared_keys: BTreeSet<&str> = declared
+                .as_object()
+                .unwrap_or_else(|| panic!("step {i} emission {j}: `frame` must be a JSON object"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let produced_keys: BTreeSet<&str> = frame
+                .as_object()
+                .expect("a decoded server frame is a JSON object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                declared_keys,
+                produced_keys,
+                "step {i} emission {j}: the fixture's frame keys and the keys the \
+                 codec produced disagree (#lzsubblockkeyset). Declared but not \
+                 produced: {:?}; produced but not declared: {:?}.",
+                declared_keys
+                    .difference(&produced_keys)
+                    .collect::<Vec<&&str>>(),
+                produced_keys
+                    .difference(&declared_keys)
+                    .collect::<Vec<&&str>>(),
+            );
+            // ...then the frame's own bytes against the codec's, which is the
+            // ROUND-TRIP claim and nothing more. It is stated separately from the
+            // content claims below on purpose: `frame` decoded and re-serialised
+            // is the fixture's own value, so this comparison is satisfied by any
+            // transcript the codec can read and sees no corpus edit at all. It
+            // was the whole of the frame's bind in the first draft here, and a
+            // scratch-corpus probe that respelled an expected `sdp` stayed GREEN
+            // under it — the exact `#lznullformblind` shape this family refuses.
+            assert_eq!(
+                frame, *declared,
+                "step {i} emission {j}: the frame does not round-trip through the \
+                 shipped server codec"
+            );
+
+            // THE CONTENT CLAIMS, every one of them derived from the DECODED
+            // INPUT and the server-side registry, never from the frame's own
+            // bytes. `Expect::sub` moves the key obligation down, so a frame key
+            // no arm below consumes fails as an unconsumed key.
+            let f = exp.sub("frame");
             match frame["type"].as_str() {
                 Some("welcome") => {
                     let self_peer = frame["peer"].as_u64().expect("welcome names its peer");
@@ -336,6 +428,79 @@ fn anti_spoof_fixture_rejects_client_supplied_from() {
                     roster_excludes_self &= !peers.contains(&self_peer);
                     roster_sorted &= peers.windows(2).all(|w| w[0] < w[1]);
                     rosters_checked += 1;
+                    assert_eq!(
+                        input_type, "join",
+                        "step {i}: a welcome answers a join and nothing else"
+                    );
+                    // A welcome answers the join that caused it, so it goes back
+                    // to the connection that sent it and nowhere else.
+                    exp.assert_key_at("to", conn.as_str(), &format!("step {i} welcome"));
+                    f.assert_key("type", "welcome");
+                    // The joining peer is the one the REGISTRY bound to this
+                    // connection, and the roster is who was already in the
+                    // session — which is `roster_excludes_self` and
+                    // `roster_sorted_ascending` derived rather than read off the
+                    // same frame they describe.
+                    f.assert_key("peer", sender_peer);
+                    f.assert_key("peers", roster_before.clone());
+                }
+                // A refusal answers the sender too — this arm used to be the
+                // `_ => {}` fall-through, so step 6's whole emission reached
+                // nothing at all.
+                Some("error") => {
+                    let addressed = addressed
+                        .unwrap_or_else(|| panic!("step {i}: an error answers a directed input"));
+                    assert!(
+                        addressed_conn.is_none(),
+                        "step {i}: the input addressed peer {addressed}, which IS \
+                         registered — a routable frame must be forwarded, not refused"
+                    );
+                    exp.assert_key_at("to", conn.as_str(), &format!("step {i} error"));
+                    f.assert_key("type", "error");
+                    // The protocol's token for this condition, pinned by
+                    // agreement rather than produced by a run — lazily-rs ships
+                    // the codec, not the server that chooses the code. Unlike a
+                    // self-comparison it is still falsifiable from the corpus
+                    // side: respelling the fixture's code reddens here.
+                    f.assert_key("code", "unknown_target");
+                    f.assert_key_with("message", |want| {
+                        let text = want.as_str().expect("an error message is prose");
+                        assert!(
+                            text.contains(&addressed.to_string()),
+                            "step {i}: the refusal must name the peer the sender \
+                             addressed ({addressed}); it says {text:?}"
+                        );
+                    });
+                }
+                Some(kind @ ("peer-joined" | "peer-left")) => {
+                    let expected = if input_type == "join" {
+                        "peer-joined"
+                    } else {
+                        "peer-left"
+                    };
+                    assert_eq!(
+                        kind, expected,
+                        "step {i}: an input of type {input_type:?} broadcasts \
+                         {expected:?}"
+                    );
+                    step_broadcasts = true;
+                    exp.assert_key_with("to", |want| {
+                        let target = want.as_str().expect("a routing target names a connection");
+                        assert!(
+                            registry.contains_key(target),
+                            "step {i}: a broadcast names connection {target:?}, which \
+                             joined no session in this transcript"
+                        );
+                        assert_ne!(
+                            target,
+                            conn.as_str(),
+                            "step {i}: a membership broadcast never returns to the \
+                             connection that caused it"
+                        );
+                        broadcast_to.insert(target.to_owned());
+                    });
+                    f.assert_key("type", expected);
+                    f.assert_key("peer", sender_peer);
                 }
                 // A forwarded frame is one carrying `from`. The server stamps it;
                 // the sender never supplies it (the `rejects` half below is the
@@ -347,9 +512,64 @@ fn anti_spoof_fixture_rejects_client_supplied_from() {
                     // the input happened to carry.
                     from_is_registered &= step.input.recv.get("from").is_none();
                     forwarded_checked += 1;
+                    // The other half of the routing claim: the frame is DELIVERED
+                    // to the connection registered for the peer id the sender
+                    // addressed. `from` says who it came from; `to` says the
+                    // server resolved the target through the same registry.
+                    let target = addressed_conn.clone().unwrap_or_else(|| {
+                        panic!(
+                            "step {i}: a forwarded frame whose input addressed no \
+                             registered peer"
+                        )
+                    });
+                    exp.assert_key_at("to", target.as_str(), &format!("step {i} forward"));
+                    // A forward preserves the frame type and the body verbatim,
+                    // replacing only the client's `to` with the server's `from`.
+                    // Every remaining key is compared against the INPUT's value
+                    // for the same key, so a respelled `sdp`, `candidate` or
+                    // `payload` in the corpus reddens — the probe that caught
+                    // the round-trip comparison above being vacuous.
+                    f.assert_key("type", input_type.as_str());
+                    f.assert_key("from", sender_peer);
+                    for key in declared
+                        .as_object()
+                        .expect("a frame is an object")
+                        .keys()
+                        .filter(|key| *key != "type" && *key != "from")
+                    {
+                        f.assert_key_at(
+                            key,
+                            recv.get(key).cloned().unwrap_or(Value::Null),
+                            &format!("step {i} forwarded body"),
+                        );
+                    }
                 }
-                _ => {}
+                other => panic!(
+                    "step {i} emission {j}: frame type {other:?} reaches no routing rule. \
+                     A new emitted shape must be classified, not silently ignored — the \
+                     fall-through arm this replaces is what let the `error` emission go \
+                     unexamined."
+                ),
             }
+            f.finish();
+            emissions_bound += 1;
+        }
+
+        if step_broadcasts {
+            // BOTH directions. A connection the server told that it should not
+            // have, and a connection it should have told and did not, are both
+            // failures; the per-frame membership check above sees only the first.
+            let expected: BTreeSet<String> = registry
+                .keys()
+                .filter(|target| *target != &conn)
+                .cloned()
+                .collect();
+            assert_eq!(
+                broadcast_to, expected,
+                "step {i}: the membership broadcast reached {broadcast_to:?}; every \
+                 connection in the session except the sender {conn:?} is {expected:?}"
+            );
+            broadcast_steps_checked += 1;
         }
     }
 
@@ -365,6 +585,20 @@ fn anti_spoof_fixture_rejects_client_supplied_from() {
         forwarded_checked >= 3,
         "the anti-spoof rule this fixture exists for was never asked: \
          {forwarded_checked} forwarded frames reached the check"
+    );
+    assert!(
+        broadcast_steps_checked >= 3,
+        "the broadcast-fanout rule was never asked: {broadcast_steps_checked} steps \
+         reached the set comparison"
+    );
+    // Every emission this transcript declares reached a bind AND a routing rule.
+    // The block ledger pins the same 12 from the corpus side
+    // (`#lzarrayelementsites`); this is the runner's own half, and it is what a
+    // `continue` added to the loop above would fail.
+    assert_eq!(
+        emissions_bound, 12,
+        "the transcript declares 12 emissions across its 8 steps; {emissions_bound} \
+         reached the tracker"
     );
 
     let exp = Expect::new(SESSION_PATH, "assertions", &fixture.assertions);

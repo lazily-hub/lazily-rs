@@ -97,10 +97,17 @@ fn conformance_struct_fields_are_read() {
             "signaling_negative_conformance.rs:SessionReject.session_reason",
             "negative-case prose: explains why the session must reject the input",
         ),
-        (
-            "signaling_negative_conformance.rs:SessionEmit.emit_to",
-            "server-routing transcript metadata; lazily-rs ships the signaling codec but not the server session that produces the route",
-        ),
+        // `SessionEmit.emit_to` was excused here as "transcript metadata the
+        // server session produces and this crate cannot", and that excuse was
+        // false (`#lzarrayelementsites`): the route is derivable from the
+        // conn→peer registry the runner already builds off the CLIENT codec, and
+        // it is now asserted per emission — a welcome and an error answer their
+        // sender, a membership broadcast reaches the roster minus the sender in
+        // both set directions, and a forwarded frame reaches the connection
+        // registered for the peer the sender addressed. The struct is gone with
+        // it: `steps[n].expect` holds raw `Value`s so the TRACKER owns the key
+        // obligation instead of a parse-time `deny_unknown_fields` attribute no
+        // rung above could see.
         (
             "signaling_negative_conformance.rs:SessionFixture.session_description",
             "corpus prose: free-form fixture documentation",

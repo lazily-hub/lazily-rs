@@ -775,12 +775,12 @@ fn the_walk_emits_a_block_without_descending_into_it() {
 }
 
 #[test]
-fn the_walk_ignores_a_tracked_name_that_is_not_an_object() {
-    // A tracked name whose value is an array or a scalar carries no keys, so
-    // `Expect` is inert on it and there is no obligation to book. Arrays are
-    // still DESCENDED into — that is where `steps[n].expect` lives — so the
-    // array case has to be distinguished from the object case rather than
-    // skipped wholesale.
+fn the_walk_ignores_a_tracked_name_that_is_not_an_object_or_a_list_of_objects() {
+    // A tracked name whose value is a scalar, or an array of scalars, carries no
+    // keys anywhere, so `Expect` is inert on it and there is no obligation to
+    // book. Arrays under UNTRACKED names are still descended into — that is
+    // where `steps[n].expect` lives — so the two array cases have to be
+    // distinguished rather than handled wholesale in either direction.
     let doc = json!({
         "expected": [1, 2, 3],
         "expect": "not a block",
@@ -790,6 +790,138 @@ fn the_walk_ignores_a_tracked_name_that_is_not_an_object() {
     common::walk_declared_blocks(&doc, "", &mut out);
     let found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
     assert_eq!(found, vec!["steps[0].expect"]);
+}
+
+// ---------------------------------------------------------------------------
+// Array-element sites (`#lzarrayelementsites`)
+// ---------------------------------------------------------------------------
+//
+// The corpus exercises exactly ONE array-valued tracked key — the eight
+// `steps[n].expect` lists in `signaling/anti_spoof_session.json`, twelve
+// plain-object elements between them — so the set-identity cross-check in
+// `scripts/check-conformance-coverage.sh` cannot catch an OVER-widening. Every
+// shape the rule refuses is pinned here instead, because a rule the corpus does
+// not reach is still a rule both halves of the walk have to agree on.
+
+#[test]
+fn the_walk_emits_one_site_per_plain_object_element_of_a_tracked_array() {
+    // The shape the corpus carries. A runner binds the ELEMENTS — each is an
+    // expected emission with its own keys — not the list, which has no keys for
+    // `Expect` to guard at all.
+    let doc = json!({"expect": [{"a": 1}, {"b": 2}]});
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    let found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(found, vec!["expect[0]", "expect[1]"]);
+    // ...and each site carries its OWN element, not the array.
+    assert_eq!(out[0].1, &json!({"a": 1}));
+    assert_eq!(out[1].1, &json!({"b": 2}));
+}
+
+#[test]
+fn a_tracked_array_of_scalars_emits_nothing() {
+    // `expected: [1, 2, 3]` is a value, not a list of blocks. Stated separately
+    // from the mixed case below because this is the shape a "descend into every
+    // array element" reading would wrongly widen to.
+    let doc = json!({"expected": [1, "two", true, null]});
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    assert!(out.is_empty(), "found {:?}", out);
+}
+
+#[test]
+fn a_mixed_tracked_array_indexes_by_position_and_not_by_emission_order() {
+    // TRUE INDEXES. The sites of `[{…}, 3, {…}]` are `[0]` and `[2]`. A walk
+    // that numbered the sites it emitted would call them `[0]` and `[1]`, which
+    // reads as a two-element array and names a site the corpus does not carry —
+    // invisible to both cardinalities and caught only by set identity.
+    let doc = json!({"expect": [{"first": 1}, 3, {"third": 3}]});
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    let found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(found, vec!["expect[0]", "expect[2]"]);
+    assert_eq!(out[1].1, &json!({"third": 3}));
+}
+
+#[test]
+fn a_nested_tracked_array_emits_nothing() {
+    // ONE LEVEL ONLY. An element that is itself an array is not a plain object,
+    // and the walk does not descend past it looking for one — a site two levels
+    // into a list is a bind no runner makes, and emitting it would demand an
+    // excuse rather than an assertion.
+    let doc = json!({"expect": [[{"buried": true}]]});
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    assert!(out.is_empty(), "found {:?}", out);
+}
+
+#[test]
+fn an_untracked_name_holding_a_list_of_objects_is_still_not_a_block() {
+    // The widening is scoped to BLOCK_NAMES. `steps` holds a list of objects
+    // too, and it is a container the walk descends — the `expect` inside it is
+    // the site, never `steps[0]` itself.
+    let doc = json!({"steps": [{"expect": {"real": true}}, {"input": 1}]});
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    let found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(found, vec!["steps[0].expect"]);
+}
+
+#[test]
+fn an_object_valued_tracked_name_is_unchanged_by_the_array_rule() {
+    // The regression half of the table: widening to array elements must leave
+    // the object case emitting the bare key and not descending into it.
+    let doc = json!({"expect": {"a": 1, "nested": {"b": 2}}});
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    let found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(found, vec!["expect"]);
+}
+
+#[test]
+fn two_elements_of_the_same_array_are_named_separately() {
+    // LABEL DISAMBIGUATION, the property a per-array label collapses. The shape
+    // is the corpus's own three-emission step: `steps[2].expect` holds three
+    // elements, and the walk must name each so the set-identity cross-check can
+    // tell "the run declared a different element" from "the run declared the
+    // same one twice".
+    //
+    // Elements 0 and 2 carry DIFFERENT content and element 1 is content-equal to
+    // element 0, so the site set and the digest set disagree on cardinality —
+    // which is exactly why the guard asserts both dimensions.
+    let doc = json!({
+        "steps": [
+            {"input": "join"},
+            {"input": "join"},
+            {"expect": [
+                {"to": "a", "frame": {"type": "peer-joined", "peer": 9}},
+                {"to": "a", "frame": {"type": "peer-joined", "peer": 9}},
+                {"to": "b", "frame": {"type": "peer-joined", "peer": 9}},
+            ]},
+        ],
+    });
+    let mut out = Vec::new();
+    common::walk_declared_blocks(&doc, "", &mut out);
+    let found: Vec<&str> = out.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(
+        found,
+        vec![
+            "steps[2].expect[0]",
+            "steps[2].expect[1]",
+            "steps[2].expect[2]",
+        ],
+        "a per-array label would report one site for the whole list"
+    );
+    let sites: std::collections::BTreeSet<&str> = found.iter().copied().collect();
+    assert_eq!(sites.len(), 3, "three distinct site NAMES");
+    let digests: std::collections::BTreeSet<String> =
+        out.iter().map(|(_, v)| common::block_digest(v)).collect();
+    assert_eq!(
+        digests.len(),
+        2,
+        "two distinct DIGESTS — content keying folds the duplicated element, \
+         which is why the site dimension exists beside it"
+    );
 }
 
 #[test]

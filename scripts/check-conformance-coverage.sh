@@ -1346,16 +1346,22 @@ bound_not_declared = sorted(bound - set(declared))
 # fails when the two agree on HOW MANY blocks exist and disagree on WHICH, which
 # is the only way a divergent twin can look from a cardinality.
 #
-# Every name in BLOCK_NAMES, at every depth (`#lzrsblockwalk`). Three rules, each
+# Every name in BLOCK_NAMES, at every depth (`#lzrsblockwalk`). Four rules, each
 # of which changes the count:
 #
-#   * OBJECT-VALUED ONLY. A tracked name whose value is an array or a scalar
-#     carries no keys, so `Expect` is inert on it and there is no obligation to
-#     book. `expected: [1, 2, 3]` is a value, not an assertion block.
+#   * AN OBJECT IS ONE SITE, emitted under its own path.
+#   * AN ARRAY IS ONE SITE PER PLAIN-OBJECT ELEMENT (`#lzarrayelementsites`), at
+#     `<path>[<index>]`. A runner binds the ELEMENTS of `steps[n].expect`, not the
+#     list, because an array carries no keys for `Expect` to guard. ONE LEVEL
+#     ONLY (`[[{…}]]` emits nothing), PLAIN OBJECTS ONLY (a scalar / array / null
+#     element emits nothing), TRUE INDEXES (`[{…}, 3, {…}]` is `[0]` and `[2]`,
+#     never `[0]` and `[1]`). `expected: [1, 2, 3]` still emits nothing.
 #   * EMIT AND DO NOT DESCEND. A block's own `expect` sub-object is part of the
-#     block its runner binds, not a second site.
-#   * DESCEND INTO ARRAYS. `scenarios[3].steps[2].expect` is where most of this
-#     corpus's blocks live.
+#     block its runner binds, not a second site. A tracked name is never
+#     descended into, array-valued included — that is what makes ONE LEVEL ONLY
+#     hold rather than merely be stated.
+#   * DESCEND INTO ARRAYS THAT ARE NOT BLOCKS. `scenarios[3].steps[2].expect` is
+#     where most of this corpus's blocks live.
 BLOCK_NAMES = ("assertions", "expect", "expect_after", "expect_initial", "expected")
 
 
@@ -1364,8 +1370,13 @@ def iter_declared_blocks(node, path=""):
     if isinstance(node, dict):
         for key, value in node.items():
             child = key if not path else "%s.%s" % (path, key)
-            if key in BLOCK_NAMES and isinstance(value, dict):
-                yield child, value
+            if key in BLOCK_NAMES:
+                if isinstance(value, dict):
+                    yield child, value
+                elif isinstance(value, list):
+                    for index, item in enumerate(value):
+                        if isinstance(item, dict):
+                            yield "%s[%d]" % (child, index), item
                 continue
             for site in iter_declared_blocks(value, child):
                 yield site

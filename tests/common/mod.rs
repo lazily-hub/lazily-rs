@@ -440,18 +440,32 @@ pub const BLOCK_NAMES: [&str; 5] = [
 /// cross-check fails if the two ever disagree about WHICH blocks exist rather
 /// than merely how many.
 ///
-/// Three rules, each of which changes the count:
+/// Four rules, each of which changes the count:
 ///
-/// * OBJECT-VALUED ONLY. A tracked name whose value is an array or a scalar
-///   carries no keys, so `Expect` is inert on it and there is no obligation to
-///   book. `expected: [1, 2, 3]` is a value, not an assertion block.
+/// * AN OBJECT IS ONE SITE. A tracked name whose value is a JSON object is the
+///   block, emitted under its own path.
+/// * AN ARRAY IS ONE SITE PER PLAIN-OBJECT ELEMENT (`#lzarrayelementsites`). A
+///   runner binds the ELEMENTS of `steps[n].expect`, not the list — each element
+///   is an expected emission with its own keys, and a whole-array bind is a shape
+///   no `Expect` can guard because an array carries no keys. Three sub-rules,
+///   identical in every binding: ONE LEVEL ONLY, so `[[{…}]]` emits nothing;
+///   PLAIN OBJECTS ONLY, so a scalar, an array or a null element emits nothing;
+///   and TRUE INDEXES, so the sites of `[{…}, 3, {…}]` are `[0]` and `[2]` and
+///   never `[0]` and `[1]` — a re-indexed label collapses two elements of one
+///   array into one site name, which is exactly the set-identity failure the
+///   cross-check below exists to catch. The label is `<path>[<index>]`.
+///   `expected: [1, 2, 3]` still emits nothing: it is a value, not a list of
+///   blocks.
 /// * EMIT AND DO NOT DESCEND. A block's own `expect` sub-object is part of the
 ///   block its runner binds, not a second site: counting it separately would
 ///   demand a bind no runner can make without first unwrapping the outer block.
-/// * DESCEND INTO ARRAYS. `scenarios[3].steps[2].expect` is where most of this
-///   corpus's blocks live; an object-only walk would miss them and a
-///   fixed-container walk (the old `frames`/`scenarios`/`rejects` list) misses
-///   every container the corpus grows next.
+///   This holds for an array-valued tracked name too — a tracked name is never
+///   descended into, which is what makes ONE LEVEL ONLY true of the array case
+///   rather than merely stated.
+/// * DESCEND INTO ARRAYS THAT ARE NOT BLOCKS. `scenarios[3].steps[2].expect` is
+///   where most of this corpus's blocks live; an object-only walk would miss them
+///   and a fixed-container walk (the old `frames`/`scenarios`/`rejects` list)
+///   misses every container the corpus grows next.
 pub fn walk_declared_blocks<'a>(
     node: &'a serde_json::Value,
     path: &str,
@@ -465,8 +479,19 @@ pub fn walk_declared_blocks<'a>(
                 } else {
                     format!("{path}.{key}")
                 };
-                if BLOCK_NAMES.contains(&key.as_str()) && value.is_object() {
-                    out.push((child, value));
+                if BLOCK_NAMES.contains(&key.as_str()) {
+                    match value {
+                        serde_json::Value::Object(_) => out.push((child, value)),
+                        serde_json::Value::Array(items) => {
+                            for (index, item) in items.iter().enumerate() {
+                                if item.is_object() {
+                                    out.push((format!("{child}[{index}]"), item));
+                                }
+                            }
+                        }
+                        // A scalar tracked name carries no keys at all.
+                        _ => {}
+                    }
                     continue;
                 }
                 walk_declared_blocks(value, &child, out);
