@@ -540,8 +540,14 @@ fi
 # corpus or the recorder shrank, which is the finding.
 #
 # DERIVED, and an EQUALITY (#lzrstypedfloors). This used to be
-# `MIN_FIXTURES="${MIN_FIXTURES:-150}"` compared with `-lt`, and both halves were
+# a hand-typed `MIN_FIXTURES` defaulting to 150, compared with `-lt`. Both halves
+# were
 # wrong in the way the assertion-block magnitude above them was
+# (#lzblockmagnitudeaudit); the retired spellings are DESCRIBED rather than
+# quoted because lazily-spec/scripts/check-corpus-floors.mjs greps scripts/ for
+# the literal assignment form, so a verbatim quote in a comment keeps that audit
+# deriving and comparing a floor nothing runs. It read 150 and 166 out of these
+# two comments until #lzgotypedfloors noticed.
 # (#lzblockmagnitudeaudit):
 #
 #   * a TYPED number is re-pinned by hand, so it drifts by hand. The comment that
@@ -824,7 +830,8 @@ if problems:
 # having compared nothing. Assert the magnitude before claiming green.
 #
 # DERIVED, and an EQUALITY (#lzrstypedfloors). This used to be
-# `MIN_SCENARIOS = int(os.environ.get("MIN_SCENARIOS", "166"))` compared with
+# a hand-typed `MIN_SCENARIOS` read from the environment with a default of 166,
+# compared with
 # `<`, typed and floored for the same two reasons the fixture rung above was.
 #
 # `total` above is NOT the independent witness: it walks `opened`, which comes
