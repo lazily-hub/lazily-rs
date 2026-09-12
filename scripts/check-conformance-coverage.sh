@@ -524,7 +524,43 @@ require_run_id() {
   fi
 }
 
-if [ ! -s "$MANIFEST" ]; then
+# ---------------------------------------------------------------------------
+# Emptiness is counted in RECORDS, not in bytes (#lzstampsatisfiesnonempty)
+# ---------------------------------------------------------------------------
+#
+# The stamp above makes an evidence file NON-EMPTY, so every `[ -s ... ]` over
+# these ledgers stopped being able to tell a real run from a recorder that
+# attached, wrote its stamp and recorded nothing. lazily-js hit that directly (a
+# 33-byte stamp-only manifest satisfied its size test) and lazily-cpp hit it in
+# CI, whose "manifest written" step tested `-s`.
+#
+# This binding cannot reach that state THROUGH ITS PRODUCER: the stamp and the
+# first record leave `append_evidence` in one `write_all`, so a stamped ledger
+# always carries a record, and a ledger `conformance-manifest-reset` truncated
+# and no test process wrote stays 0 bytes. That is what made the byte test still
+# correct here -- correct BY THE PRODUCER'S SPELLING, which is the coupling this
+# series keeps removing. tests/common/mod.rs states that stamping per process and
+# stamping from the first writer after the reset close the stale-evidence hole
+# identically; that is true only of a guard that counts records. So the guard
+# counts records, and the two spellings stay interchangeable.
+#
+# A record is a line that is neither the stamp nor blank. `|| true` keeps
+# `grep -c`'s exit 1 on zero matches from killing the script under `set -e`; the
+# `0` it printed is still what the substitution captures.
+evidence_records() {
+  local file="$1"
+  [ -f "$file" ] || { printf '0\n'; return 0; }
+  sed "/^${RUN_ID_PREFIX}/d" "$file" | grep -c '[^[:space:]]' || true
+}
+
+if [ "$(evidence_records "$MANIFEST")" -eq 0 ]; then
+  if [ -s "$MANIFEST" ]; then
+    echo "FAIL: the fixture manifest at $MANIFEST carries NO records" >&2
+    echo "      (#lzstampsatisfiesnonempty). Its content is the run-id stamp" >&2
+    echo "      and/or blank lines, so the recorder attached and opened nothing." >&2
+    echo "      A size test accepts this file; coverage cannot be computed from it." >&2
+    exit 1
+  fi
   echo "FAIL: no conformance manifest at $MANIFEST." >&2
   echo "      Run the suite with LAZILY_CONFORMANCE_MANIFEST set to an ABSOLUTE" >&2
   echo "      path so the recorder attaches (\`make check\` does this). An absent" >&2
@@ -731,6 +767,7 @@ fi
 
 SCENARIO_EXCUSES="$(printf '%s\n' "${KNOWN_UNREPLAYED_SCENARIOS[@]:-}")" \
 UNCOVERED_FIXTURES="$(printf '%s\n' "${KNOWN_UNCOVERED[@]:-}")" \
+RUN_ID_PREFIX="$RUN_ID_PREFIX" \
 python3 - "$SPEC_DIR" "$MANIFEST" "$SCENARIO_LEDGER" <<'PY'
 import json
 import os
@@ -738,32 +775,54 @@ import sys
 
 spec_dir, manifest_path, ledger_path = sys.argv[1:4]
 
-if not os.path.isfile(ledger_path) or os.path.getsize(ledger_path) == 0:
+# The `# lazily-run-id <value>` stamp is checked in bash before this block
+# (`require_run_id`, #lzstalemanifest); here it is simply not an entry.
+#
+# The prefix comes from the ONE definition in this script (`RUN_ID_PREFIX`,
+# passed through the environment) rather than from a second literal here
+# (#lzstampprefixdrift): two spellings of one string held together by a comment
+# is the shape that drifts, and a drift between the recorder and the guard
+# presents as STALE EVIDENCE rather than as the typo it is.
+# `os.environ[...]`, never `.get(...)`: an unset value must be a KeyError here,
+# not a prefix that matches nothing and turns every stamp into a record.
+STAMP_PREFIX = os.environ["RUN_ID_PREFIX"]
+
+
+def evidence_records(path):
+    """The record lines of `path` — every line that is neither stamp nor empty.
+
+    Emptiness is counted in RECORDS, not bytes (#lzstampsatisfiesnonempty). The
+    stamp makes a ledger non-empty, so `getsize(...) == 0` can no longer tell a
+    real run from a recorder that attached, stamped and recorded nothing. Lines
+    are returned RAW: this ledger is tab-separated and a trailing empty field is
+    a malformed line to report, not whitespace to trim away.
+    """
+    if not os.path.isfile(path):
+        return []
+    with open(path) as handle:
+        return [
+            line
+            for line in handle
+            if line.rstrip("\n") != "" and not line.startswith(STAMP_PREFIX)
+        ]
+
+
+if not evidence_records(ledger_path):
     sys.stderr.write(
-        "FAIL: no scenario ledger at %s.\n"
+        "FAIL: no scenario replay RECORDS at %s.\n"
         "      Run the suite with LAZILY_CONFORMANCE_SCENARIOS set to an ABSOLUTE\n"
-        "      path so the recorder attaches (`make check` does this). An absent\n"
-        "      ledger is missing evidence, not evidence of absence.\n" % ledger_path
+        "      path so the recorder attaches (`make check` does this). An absent,\n"
+        "      empty or stamp-only ledger is missing evidence, not evidence of\n"
+        "      absence (#lzstampsatisfiesnonempty).\n" % ledger_path
     )
     sys.exit(1)
 
-# The `# lazily-run-id <value>` stamp is checked in bash before this block
-# (`require_run_id`, #lzstalemanifest); here it is simply not an entry.
-STAMP_PREFIX = "# lazily-run-id "
-
-opened = set()
-with open(manifest_path) as handle:
-    for line in handle:
-        line = line.strip()
-        if line and not line.startswith(STAMP_PREFIX):
-            opened.add(line)
+opened = {line.strip() for line in evidence_records(manifest_path) if line.strip()}
 
 # fixture -> {scenario id: source} as RECORDED at the point of replay.
 ledger = {}
-for line in open(ledger_path):
+for line in evidence_records(ledger_path):
     line = line.rstrip("\n")
-    if not line or line.startswith(STAMP_PREFIX):
-        continue
     parts = line.split("\t")
     if len(parts) != 3:
         sys.stderr.write("ERROR: malformed scenario ledger line %r\n" % line)
@@ -1096,6 +1155,7 @@ require_run_id "$BLOCK_LEDGER" "assertion-block bind ledger"
 
 BLOCK_EXCUSES="$(printf '%s\n' "${KNOWN_UNBOUND_BLOCKS[@]:-}")" \
 KNOWN_UNCOVERED_LEDGER="$(printf '%s\n' "${KNOWN_UNCOVERED[@]:-}")" \
+RUN_ID_PREFIX="$RUN_ID_PREFIX" \
 python3 - "$BLOCK_LEDGER" "$SPEC_DIR" <<'PY'
 import json
 import os
@@ -1103,24 +1163,39 @@ import sys
 
 ledger_path = sys.argv[1]
 corpus_dir = sys.argv[2]
-if not os.path.isfile(ledger_path) or os.path.getsize(ledger_path) == 0:
+
+# The prefix comes from the ONE definition in this script (`RUN_ID_PREFIX`,
+# passed through the environment) rather than from a second literal here
+# (#lzstampprefixdrift). `os.environ[...]`, never `.get(...)`: an unset value
+# must be a KeyError, not a prefix that matches nothing.
+STAMP_PREFIX = os.environ["RUN_ID_PREFIX"]
+
+raw_lines = list(open(ledger_path)) if os.path.isfile(ledger_path) else []
+
+# Emptiness is counted in RECORDS, not bytes (#lzstampsatisfiesnonempty): the
+# run-id stamp makes a ledger non-empty, so `getsize(...) == 0` can no longer
+# tell a real run from a recorder that attached, stamped and recorded nothing.
+if not [
+    line for line in raw_lines if line.strip() and not line.startswith(STAMP_PREFIX)
+]:
     sys.stderr.write(
-        "FAIL: no assertion-block ledger at %s.\n"
+        "FAIL: no assertion-block RECORDS at %s.\n"
         "      Run the suite with LAZILY_CONFORMANCE_BLOCKS set to an ABSOLUTE\n"
-        "      path so the recorder attaches (`make check` does this). An absent\n"
-        "      ledger is missing evidence, not evidence of absence.\n" % ledger_path
+        "      path so the recorder attaches (`make check` does this). An absent,\n"
+        "      empty or stamp-only ledger is missing evidence, not evidence of\n"
+        "      absence (#lzstampsatisfiesnonempty).\n" % ledger_path
     )
     sys.exit(1)
 
 declared = {}      # digest -> set of "fixture|where" the LOADER declared
 bound = set()      # digest a runner bound
 bound_where = {}   # digest -> set of "fixture|label" the RUNNER called it
-for line in open(ledger_path):
+for line in raw_lines:
     # The `# lazily-run-id <value>` stamp is checked in bash before this block
     # (`require_run_id`, #lzstalemanifest). Skipped EXPLICITLY: the dispatch
     # below would drop it silently, which is the same look-away that let a
     # malformed line cost nothing.
-    if line.startswith("# lazily-run-id "):
+    if line.startswith(STAMP_PREFIX):
         continue
     parts = line.rstrip("\n").split("\t")
     if parts[0] == "declared" and len(parts) == 4:

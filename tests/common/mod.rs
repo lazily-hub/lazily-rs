@@ -137,12 +137,33 @@ use std::sync::{Mutex, OnceLock};
 // line per file keeps a ledger an operator reads (1107 manifest lines, 31526
 // block-ledger lines, ~850 contributing test binaries) free of ~850 identical
 // comments.
+//
+// The stamp makes a ledger NON-EMPTY, which is what #lzstampsatisfiesnonempty
+// is about: a byte or size test over a stamped file can no longer tell a real
+// run from a recorder that attached, stamped and recorded nothing. The guards
+// therefore count RECORDS -- lines that are not the stamp -- and the "both
+// spellings" claim above is only true of guards that do.
+//
+// This producer never writes a stamp alone: `append_evidence` puts the stamp and
+// the record that triggered it into ONE `write_all`, so a stamped ledger always
+// carries at least one record, and a ledger `conformance-manifest-reset`
+// truncated that no test process wrote stays 0 bytes -- empty, never
+// stamped-and-empty. No guard is allowed to depend on that; it is a property of
+// this spelling, and the point of the "both spellings" claim is that it can
+// change.
 
 /// Names the run id for this `make check` invocation (`#lzstalemanifest`).
 const RUN_ID_ENV: &str = "LAZILY_CONFORMANCE_RUN_ID";
 
 /// Fixed stamp prefix. Identical in every binding, so the guards agree.
-const RUN_ID_PREFIX: &str = "# lazily-run-id ";
+///
+/// `pub` because this is the PRODUCER's definition and the guard's single
+/// definition in `scripts/check-conformance-coverage.sh` is coupled to it by
+/// `tests/expect_guard.rs` (`#lzstampprefixdrift`). A drift between the two
+/// fails closed -- the guard refuses evidence it cannot attribute -- and
+/// presents as stale evidence rather than as the one-character typo it is, which
+/// is why the pair is machine-checked rather than held together by this comment.
+pub const RUN_ID_PREFIX: &str = "# lazily-run-id ";
 
 /// The stamp line for this invocation, or `None` when no run id is in scope.
 ///

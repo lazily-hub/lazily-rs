@@ -1015,3 +1015,97 @@ fn the_digest_is_inert_on_a_non_object() {
     common::walk_declared_blocks(&doc, "", &mut out);
     assert!(out.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// The stamp prefix has ONE definition per side, and they are coupled
+// (`#lzstampprefixdrift`)
+// ---------------------------------------------------------------------------
+//
+// `# lazily-run-id ` is WRITTEN by `tests/common/mod.rs` and RECOGNISED by
+// `scripts/check-conformance-coverage.sh`. A drift between the two fails closed
+// — the guard refuses evidence it cannot attribute — so it is safe and
+// undiagnosable: a one-character typo presents as STALE EVIDENCE, sending the
+// reader to the build graph instead of to the string. lazily-kt flagged the
+// shape; lazily-go pins the pair (`TestGuardAndRecorderAgreeOnTheStampPrefix`)
+// and it is one of four mutations that redden its probe suite. This is that rung.
+//
+// Both sides are read from their REAL definitions. Restating the literal here
+// would add a third place to drift, so the SHAPE is asserted too: exactly one
+// assignment in the script, and no other spelling of the prefix in any of its
+// code lines. The script's two python rungs take the prefix from that one
+// assignment through the environment, which is why there is nothing else left to
+// read — before `#lzstampprefixdrift` they each carried their own literal, three
+// copies of one string in two languages.
+const COVERAGE_GUARD: &str = include_str!("../scripts/check-conformance-coverage.sh");
+
+/// The value of a `RUN_ID_PREFIX='...'` assignment, or `None` for any other
+/// line.
+///
+/// Single-quoted because that is how the script spells it. A line that assigns
+/// the variable some other way is deliberately NOT a definition here, so the
+/// stray-spelling rung below REPORTS it instead of exempting it — an exemption
+/// keyed on the variable name alone would wave through
+/// `RUN_ID_PREFIX="# lazily-run-id "`, a second literal by another spelling,
+/// which is the whole defect. The `RUN_ID_PREFIX="$RUN_ID_PREFIX"` lines that
+/// hand the prefix to the python rungs carry no literal and so are reported by
+/// neither.
+fn prefix_definition(line: &str) -> Option<&str> {
+    line.strip_prefix("RUN_ID_PREFIX=")?
+        .strip_prefix('\'')?
+        .strip_suffix('\'')
+}
+
+/// Every `RUN_ID_PREFIX='...'` assignment the guard makes, read out of the
+/// script rather than restated here.
+fn guard_prefix_definitions() -> Vec<&'static str> {
+    COVERAGE_GUARD
+        .lines()
+        .filter_map(prefix_definition)
+        .collect()
+}
+
+#[test]
+fn the_guard_and_the_recorder_agree_on_the_stamp_prefix() {
+    let defined = guard_prefix_definitions();
+    assert_eq!(
+        defined.len(),
+        1,
+        "scripts/check-conformance-coverage.sh must define RUN_ID_PREFIX exactly once \
+         (a renamed or duplicated definition leaves this rung reading the wrong side) \
+         — found {defined:?}"
+    );
+    assert_eq!(
+        defined[0],
+        common::RUN_ID_PREFIX,
+        "the recorder stamps {:?} and the guard recognises {:?}. Every ledger this \
+         invocation wrote would be refused as unattributable STALE evidence, which \
+         reads as a build-graph failure rather than as this typo (#lzstampprefixdrift)",
+        common::RUN_ID_PREFIX,
+        defined[0],
+    );
+}
+
+#[test]
+fn the_guard_spells_the_stamp_prefix_in_one_place_only() {
+    // The assertion above couples the recorder to ONE definition. A second
+    // spelling anywhere else in the script is a place the first can drift away
+    // from while both this rung and the guard stay green, which is how the
+    // python rungs each came to hold their own copy. Comments are exempt: the
+    // header quotes the stamp while explaining it, and so does the copy-pasteable
+    // `sed` recipe for re-running a rung against a previous suite's evidence.
+    let strays: Vec<String> = COVERAGE_GUARD
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with('#'))
+        .filter(|(_, line)| prefix_definition(line).is_none())
+        .filter(|(_, line)| line.contains(common::RUN_ID_PREFIX))
+        .map(|(index, line)| format!("  {}: {}", index + 1, line.trim()))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "scripts/check-conformance-coverage.sh spells the stamp prefix outside its one \
+         definition; pass `RUN_ID_PREFIX` to the rung instead of copying the literal \
+         (#lzstampprefixdrift):\n{}",
+        strays.join("\n")
+    );
+}

@@ -367,15 +367,32 @@ jobs:
       # The script itself SKIPs when the corpus is absent, so the corpus is
       # asserted here rather than trusted — a guard that exits 0 because its input
       # vanished is the vacuous green the whole ladder exists to reject. Same for
-      # the evidence files: the script fails on an absent or empty manifest or
-      # ledger, and the assertions below name which of the two is missing before
-      # it has to.
+      # the evidence files: the script fails on a manifest or ledger carrying no
+      # records, and the assertions below name which of the three is missing
+      # before it has to.
+      #
+      # Those assertions count RECORDS rather than bytes (#lzstampsatisfiesnonempty).
+      # They were `test -s`, and the run-id stamp (#lzstalemanifest) makes a
+      # ledger non-empty: a recorder that attached, wrote its stamp and recorded
+      # nothing satisfies a size test. lazily-cpp had exactly this step and
+      # exactly this weakening. A record here is a line that is neither a comment
+      # nor blank — the ledgers carry corpus-relative ids and tab-separated
+      # tuples, never a `#` — so this stays prefix-agnostic instead of becoming a
+      # second spelling of the stamp (#lzstampprefixdrift).
       - name: Conformance coverage + scenario replay ledger (#lzguardsnotinci)
         run: |
+          require_records() {
+            what="$1"; file="$2"; computes="$3"
+            n="$(awk '!/^#/ && NF { n++ } END { print n + 0 }' "$file" 2>/dev/null || echo 0)"
+            if [ "${n:-0}" -eq 0 ]; then
+              echo "::error::$what $file carries no records (absent, empty, or stamp-only) — the recorder never attached, so $computes cannot be computed"
+              exit 1
+            fi
+          }
           test -d ../lazily-spec/conformance || { echo "::error::../lazily-spec/conformance missing — check-conformance-coverage.sh would SKIP and exit 0"; exit 1; }
-          test -s "$LAZILY_CONFORMANCE_MANIFEST" || { echo "::error::fixture manifest $LAZILY_CONFORMANCE_MANIFEST is absent or empty — the recorder never attached, so coverage cannot be computed"; exit 1; }
-          test -s "$LAZILY_CONFORMANCE_SCENARIOS" || { echo "::error::scenario ledger $LAZILY_CONFORMANCE_SCENARIOS is absent or empty — the recorder never attached, so scenario coverage cannot be computed"; exit 1; }
-          test -s "$LAZILY_CONFORMANCE_BLOCKS" || { echo "::error::assertion-block ledger $LAZILY_CONFORMANCE_BLOCKS is absent or empty — the recorder never attached, so the bind rung cannot be computed"; exit 1; }
+          require_records "fixture manifest" "$LAZILY_CONFORMANCE_MANIFEST" "coverage"
+          require_records "scenario ledger" "$LAZILY_CONFORMANCE_SCENARIOS" "scenario coverage"
+          require_records "assertion-block ledger" "$LAZILY_CONFORMANCE_BLOCKS" "the bind rung"
           ./scripts/check-conformance-coverage.sh
 
       - name: Assertion observation ordering (#lzassertordering)
