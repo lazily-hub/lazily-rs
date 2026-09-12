@@ -252,27 +252,52 @@ this repo.
   whose bytes recur elsewhere (167 of the 771 sites carry a recurring shape), and
   a site count absorbs a content edit that collapses two distinct claims into
   one.
-  THE BIND-PENDING LEDGER. 570 of the 771 sites are BOUND; the other 201 are in
-  `KNOWN_UNBOUND_BLOCKS` as `fixture|where|class|reason`, class from a fixed
-  vocabulary (`bind-pending`, `unreachable`), reason REQUIRED. All 201 are
-  `bind-pending` and reachable — each is a per-step or per-scenario expectation
-  its runner already reads and compares, missing only the routing through
-  `Expect`; three step loops (reactive-graph 113, stdlib 54, ingress 28) account
-  for 195 of them, and `collections/semtree_incremental.json` for the last 6.
-  The ledger is an EQUALITY against the RUN, not a floor: an unbound site missing
-  from it FAILS, and an entry for a site the run DID bind — or for a site the
-  corpus does not carry — FAILS as stale. A migration therefore cannot land
-  without deleting entries, and coverage cannot regress upward without someone
-  writing one by hand. There is deliberately no separate typed count beside it.
-  Expect the shrinking to be expensive: lazily-kt measured a 100 percent
-  higher-rung failure rate on its first migration pass, and this pass reproduced
-  that rate exactly: ALL THREE blocks bound here needed a fix above rung 0, each
-  demonstrated by removing the fix and watching the rung fire —
-  `protobuf/graph_boundary_traces.json` `cells` and
-  `registers_convergence.json` `stamp_on`/`value_on` owed a key-set check
-  (`#lzsubblockkeyset`), and `arena_blob.json` `descriptor` failed rung 2 as an
-  assertion key never consumed. Binding a block is not a routing edit; budget for
-  the rung above it.
+  THE LEDGER, NOW EMPTY (`#lzrsbindpending`). **771 of 771 sites are BOUND and
+  nothing is excused.** `KNOWN_UNBOUND_BLOCKS` held 201 entries when the walk was
+  widened; all 201 have been migrated — `semtree_incremental` 6,
+  `boundary_ingress_adapter` 28, stdlib 54, reactive-graph 113. Its format is
+  `fixture|where|class|reason`, class from a fixed vocabulary (`bind-pending`,
+  `unreachable`), reason REQUIRED, duplicates refused.
+  Three things enforce it, and they are not interchangeable. (1) FORWARD: an
+  unbound site with no entry FAILS naming the site. (2) BACKWARD: an entry for a
+  site the run DID bind — or for a site the corpus does not carry — FAILS as
+  stale. Nothing else catches that one, because the forward loop `continue`s
+  before it consults the ledger, and with the list empty it is the live
+  direction. (3) CEILING: `MAX_LEDGERED_BLOCKS`, default **0**. Set equality
+  alone is satisfied by any CONSISTENT PAIR, so a commit that detaches fifty
+  binds and writes the fifty matching entries passes both directions, and the
+  magnitude rung does not see it either — the sites are still DECLARED, just no
+  longer bound. Demonstrated: dropping one `bound` line and adding its entry gets
+  past both directions and is refused only by the ceiling. A ceiling is a POLICY
+  rather than a measurement, so unlike a typed count of the current population it
+  does not drift with the corpus and never needs re-pinning except deliberately,
+  upward, in review. That is also the answer carried to `#lzktbindpending`, where
+  kt pins a mirroring count instead: drop the count, add the ceiling — unless the
+  pending set is matched by PATTERN rather than enumerated, since a pattern can
+  widen silently and set equality cannot see it.
+  WHAT THE MIGRATION COST, measured rather than predicted. lazily-kt's 28-of-28
+  higher-rung failure rate did NOT generalise. Across the seven blocks rs
+  migrated, 4 needed a real fix and 3 were pure routing, and the split follows how
+  the runner consumed the block BEFORE binding, not its site count:
+  - PER-KEY OPTIONAL (`if let Some(k) = block.get("k")`) — every one hid a real
+    gap. `graph_boundary_traces` `cells` and `registers_convergence`
+    `stamp_on`/`value_on` owed key-set checks (`#lzsubblockkeyset`),
+    `arena_blob` `descriptor` failed rung 2 as a key never consumed, and
+    `semtree_incremental` `expect_initial.b` was asserted by the corpus and read
+    by nothing at all. An optional read is silent on absence AND on a key the
+    runner forgot.
+  - EXHAUSTIVE (a whole-value `assert_eq!`, or a hand-rolled key loop that
+    `panic!`s on an unknown key) — none hid a gap. stdlib's whole-value equality
+    and the hand-rolled rung 2s in `boundary_ingress_conformance` and the
+    reactive-graph engine (three in all, 195 sites between them) were each WRONG
+    IN PLACE, not in effect: blind to rung 3, unreusable, and leaving rung 0
+    blind, but they did close the unconsumed-key hole. All three are deleted.
+  Splitting a whole-value `assert_eq!` per key is STRICTLY WEAKER unless the key
+  SET is asserted beside it — per-key comparisons cannot see a key the RUN
+  produced that the block does not carry. stdlib asserts both.
+  And always compare against the value the tracker hands over: a closure that
+  ignores `want` satisfies the tracker while asserting nothing, which at 771 sites
+  is the cheapest possible way to manufacture fake coverage.
   A RUNNER'S OWN JSON CLONE (`#lzrunnerownjsonclone`). This binding's loader
   hands runners TEXT, so every runner re-parses and the block a runner binds is
   never the same allocation the loader declared — only ever the same VALUE, and
@@ -280,19 +305,23 @@ this repo.
   whose re-parse dropped the raw number token (`"value": 5` digesting as
   `5.000000`), and they read as 71 unrelated coverage gaps. Here the guard
   classifies every bind the loader never declared against every object the corpus
-  carries at every depth: 397 such binds, 363 of them below an already-emitted
+  carries at every depth: 460 such binds, 426 of them below an already-emitted
   block (a sub-object reached with `Expect::sub`, a whole `steps[n]` element) and
   34 matching no corpus object at all — all 34 from `tests/expect_guard.rs`,
   which fabricates `json!` blocks under borrowed fixture names. **Zero clone
-  divergences.** Reported, not failed: the self-tests make a non-zero count
+  divergences**, and the classification held through `#lzrsbindpending`: binding
+  201 more sites took the undeclared-bind count from 397 to 460 with every one of
+  the 63 new binds landing in the below-an-emitted-block half and the
+  no-corpus-object half unchanged at 34. Reported, not failed: the self-tests make a non-zero count
   normal. The digest contract itself is pinned by unit tests rather than inferred
   from that number — a runner's own re-parse reproduces the loader's digest, the
   digest SEPARATES `5` from `5.0` (without which the first assertion is satisfied
   by a digest that folds the very divergence it looks for), and `5.0`/`5e0` are
   pinned as FOLDING because `serde_json` normalises both to one `f64` at parse.
-  570/771 sites bound or, with the ledger, 771/771 accounted. Validated in ten
-  directions: a declared block with no bind FAILS naming it; a stale excuse FAILS
-  in both its directions (bound-after-all, and naming no such site); an unknown
+  771/771 sites bound, nothing excused. Validated in twelve directions: a
+  declared block with no bind FAILS naming it; a stale excuse FAILS in both its
+  directions (bound-after-all, and naming no such site); a detached bind with a
+  matching entry passes both directions and FAILS the ceiling; an unknown
   class, an empty reason and a duplicated entry each FAIL; deleting a
   recurring-digest block moves SITES alone; collapsing a unique-digest block
   moves DIGESTS alone; a block respelled to a shape the corpus does not carry
