@@ -422,6 +422,25 @@ impl MapModel for AsyncModel {
 // The replay engine — one body, three models
 // ---------------------------------------------------------------------------
 
+/// An invalidation FLAG, with the JSON boolean required rather than coerced
+/// (`#lzflagcoercion`).
+///
+/// `want.as_bool().unwrap_or(false)` read every non-boolean as `false`, and
+/// `false` here asserts the reader STAYED CACHED — so `membership: "true"`
+/// asserted the exact opposite of what the fixture says, and passed on a run
+/// that did not invalidate. The single-flavor runner
+/// (`collections_conformance.rs`) already required the type; these two family
+/// call sites were the coerced copies.
+fn bool_flag(want: &Value, flavor: &str, step: usize, key: &str) -> bool {
+    want.as_bool().unwrap_or_else(|| {
+        panic!(
+            "{flavor} step {step}: invalidates.{key} must be a JSON boolean, got \
+             {want} — a non-boolean coerced to `false` inverts the claim \
+             (#lzflagcoercion)"
+        )
+    })
+}
+
 fn str_of(v: &Value, field: &str) -> String {
     v.get(field)
         .and_then(|v| v.as_str())
@@ -522,10 +541,23 @@ async fn run_steps_fixture<M: MapModel>(name: &str) {
         );
         let survivors: HashSet<String> = model.keys().into_iter().collect();
         invalidates.assert_key_with("value", |want| {
+            // REQUIRE the array (`#lzflagcoercion`): `.unwrap_or_default()`
+            // turned a non-array into the EMPTY set, which reads as "nothing
+            // was invalidated" and passes for every fixture whose `value` list
+            // is empty. The single-flavor runner already requires it
+            // (`collections_conformance.rs`'s `.expect("invalidates.value")`);
+            // this family copy did not.
             let value_invalidated: HashSet<String> = want
                 .as_array()
-                .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{flavor} step {i}: invalidates.value must be a JSON array, got \
+                         {want} (#lzflagcoercion)"
+                    )
+                })
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
             for key in &survivors {
                 let Some(reader) = value_readers.get(key) else {
                     continue; // key added by this op: no reader existed to invalidate
@@ -549,7 +581,7 @@ async fn run_steps_fixture<M: MapModel>(name: &str) {
         invalidates.assert_key_with("membership", |want| {
             assert_eq!(
                 !model.membership_cached(&membership_reader),
-                want.as_bool().unwrap_or(false),
+                bool_flag(want, flavor, i, "membership"),
                 "{flavor} step {i}: membership reader invalidation mismatch \
                  (a pure reorder must NOT invalidate set-identity readers)"
             )
@@ -558,7 +590,7 @@ async fn run_steps_fixture<M: MapModel>(name: &str) {
         invalidates.assert_key_with("order", |want| {
             assert_eq!(
                 !model.order_cached(&order_reader),
-                want.as_bool().unwrap_or(false),
+                bool_flag(want, flavor, i, "order"),
                 "{flavor} step {i}: order reader invalidation mismatch"
             )
         });

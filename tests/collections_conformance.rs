@@ -469,9 +469,28 @@ fn run_reconcile_fixture(name: &str) {
 
     // 3. Stable entries' value cells are NOT invalidated by the sibling reorder.
     let stable: Vec<String> = expected.assert_key_with("stable_keys_not_invalidated", |want| {
-        want.as_array()
-            .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
-            .unwrap_or_default()
+        // REQUIRE the array, and require it non-empty (`#lzflagcoercion`).
+        // `.unwrap_or_default()` turned a non-array into the empty list, and the
+        // `if !stable.is_empty()` below then SKIPPED the whole check — so
+        // `stable_keys_not_invalidated: "b,c"` asserted nothing at all while
+        // reading as a claim about two keys.
+        let keys: Vec<String> = want
+            .as_array()
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected.stable_keys_not_invalidated must be a JSON array, got \
+                     {want} (#lzflagcoercion)"
+                )
+            })
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !keys.is_empty(),
+            "expected.stable_keys_not_invalidated is empty; an empty list skips the \
+             stability check entirely (#lzflagcoercion)"
+        );
+        keys
     });
     if !stable.is_empty() {
         let ctx = Context::new();
@@ -747,6 +766,33 @@ fn conformance_semtree_incremental() {
     run_semtree_fixture("semtree_incremental.json");
 }
 
+/// `expect_changed`, with ABSENCE and WRONG TYPE kept apart
+/// (`#lzflagcoercion`).
+///
+/// `step.get("expect_changed").and_then(|v| v.as_bool())` collapsed both into
+/// `None`, and the `if let Some(..)` had no `else` — so `expect_changed: "true"`
+/// silently skipped the assertion entirely. These textcrdt steps are walked as
+/// raw `Value`s rather than through `Expect`, so the unconsumed-key tracker
+/// cannot catch it either: the type check has to live here.
+fn changed_flag(step: &Value, scenario: usize) -> Option<bool> {
+    let want = step.get("expect_changed")?;
+    Some(want.as_bool().unwrap_or_else(|| {
+        panic!(
+            "scenario {scenario}: expect_changed must be a JSON boolean, got {want} \
+             (#lzflagcoercion)"
+        )
+    }))
+}
+
+/// `expect_collected`, on the same terms as [`changed_flag`]
+/// (`#lzflagcoercion`): a present-but-non-integer count skipped the comparison.
+fn collected_count(op: &Value) -> Option<u64> {
+    let want = op.get("expect_collected")?;
+    Some(want.as_u64().unwrap_or_else(|| {
+        panic!("expect_collected must be a JSON integer, got {want} (#lzflagcoercion)")
+    }))
+}
+
 // === StableId (manufactured text identity) =================================
 // Replay `stableid_alignment.json`: anchor/content/similarity layers.
 
@@ -1012,7 +1058,7 @@ fn run_textcrdt_fixture(name: &str) {
                     .get_mut(into)
                     .unwrap_or_else(|| panic!("scenario {i}: delta into missing `{into}`"))
                     .apply_delta(&ops);
-                if let Some(expect) = step.get("expect_changed").and_then(|v| v.as_bool()) {
+                if let Some(expect) = changed_flag(step, i) {
                     assert_eq!(
                         changed, expect,
                         "scenario {i}: delta {from}->{into} expect_changed={expect} got={changed}"
@@ -1042,7 +1088,7 @@ fn run_textcrdt_fixture(name: &str) {
                 let mut replica = TextCrdt::new(peer);
                 let changed = replica.apply_delta(&ops);
                 replicas.insert(into.to_string(), replica);
-                if let Some(expect) = step.get("expect_changed").and_then(|v| v.as_bool()) {
+                if let Some(expect) = changed_flag(step, i) {
                     assert_eq!(
                         changed, expect,
                         "scenario {i}: snapshot {from}->{into} expect_changed={expect} got={changed}"
@@ -1236,7 +1282,7 @@ fn apply_textcrdt_op(t: &mut TextCrdt, op: &Value) {
         "gc" => {
             let stable = op.get("stable").and_then(|v| v.as_bool()).unwrap();
             let collected = t.gc_with(|_| stable);
-            if let Some(expect) = op.get("expect_collected").and_then(|v| v.as_u64()) {
+            if let Some(expect) = collected_count(op) {
                 assert_eq!(collected as u64, expect, "gc expect_collected mismatch");
             }
         }

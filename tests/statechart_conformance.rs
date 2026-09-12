@@ -109,11 +109,25 @@ fn run_fixture(name: &str) {
             "the guard valuation supplied to the send; an input, not a value to compare",
         );
         let event = step.raw()["event"].as_str().expect("event");
+        // The `guards` OBJECT is optional; its VALUES are not
+        // (`#lzflagcoercion`). `v.as_bool().unwrap_or(false)` read
+        // `{"allowed": "true"}` as `allowed = false`, so the chart took the
+        // other branch and the fixture's own `accepted`/`active` expectations —
+        // written for the false branch — still passed. A mistyped guard makes
+        // this a DIFFERENT scenario than the one the fixture reads as.
         let guards: HashMap<String, bool> = step.raw()["guards"]
             .as_object()
             .map(|o| {
                 o.iter()
-                    .map(|(k, v)| (k.clone(), v.as_bool().unwrap_or(false)))
+                    .map(|(k, v)| {
+                        let b = v.as_bool().unwrap_or_else(|| {
+                            panic!(
+                                "step {i}: guards.{k} must be a JSON boolean, got {v} \
+                                 (#lzflagcoercion)"
+                            )
+                        });
+                        (k.clone(), b)
+                    })
                     .collect()
             })
             .unwrap_or_default();

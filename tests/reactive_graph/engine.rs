@@ -654,7 +654,21 @@ pub fn replay<'a, M: GraphModel>(
                     Some(v) => Some(v),
                     None => read_target.and_then(|id| read_id!(id).ok()),
                 };
-                check!("value", got, want.as_i64());
+                // REQUIRE the integer (`#lzflagcoercion`). Comparing
+                // `Option<i64>` against `want.as_i64()` folded TWO different
+                // `None`s together: "the read failed" on the left and "this
+                // expectation is not a number" on the right. So `value: "9"` on
+                // a step whose read errors compared `None == None` and passed,
+                // while the fixture reads as pinning the number 9. Every
+                // `value` in this corpus is a JSON integer; a non-integer is a
+                // fixture defect, and it is now named as one.
+                let want_value = want.as_i64().unwrap_or_else(|| {
+                    panic!(
+                        "{fixture}: expect.value must be a JSON integer, got {want} \
+                         (#lzflagcoercion)"
+                    )
+                });
+                check!("value", got, Some(want_value));
             });
         }
         // No `else` excusing `value`: no block in this corpus carries a string
@@ -681,7 +695,18 @@ pub fn replay<'a, M: GraphModel>(
                     read_id!(id.as_str()).is_ok()
                 } else {
                     match nodes.get(id.as_str()) {
-                        None => false,
+                        // NOT `false` (`#lzflagcoercion`). A `dispose` leaves
+                        // its entry in `nodes` precisely so a disposed id stays
+                        // readable-as-an-error, so `None` here means the run
+                        // NEVER CREATED this node — and answering `false` let
+                        // `readable: {"ghost": false}` be satisfied by the
+                        // node's non-existence instead of by its readability.
+                        // Every sibling accessor (`read`, `computes_of`,
+                        // `degree!`) already panics on an unknown id; this was
+                        // the one that swallowed it.
+                        None => {
+                            panic!("{fixture}: readable of unknown node {id} (#lzflagcoercion)")
+                        }
                         Some(Ref::Effect(h)) => model.is_effect_active(*h),
                         Some(_) => read_id!(id.as_str()).is_ok(),
                     }
@@ -762,7 +787,13 @@ pub fn replay<'a, M: GraphModel>(
         if let Some(want) = fin.sub_if_present("readable") {
             for id in node_ids(&want) {
                 let alive = match nodes.get(id.as_str()) {
-                    None => false,
+                    // As per-step `readable` above (`#lzflagcoercion`): absence
+                    // is a fixture naming a node this run never built, not a
+                    // measurement of `false`.
+                    None => panic!(
+                        "{fixture}: final_state.readable of unknown node {id} \
+                         (#lzflagcoercion)"
+                    ),
                     Some(Ref::Effect(h)) => model.is_effect_active(*h),
                     Some(_) => read_id!(id.as_str()).is_ok(),
                 };

@@ -141,6 +141,30 @@ const LEDGER: &[Flavor] = &[
     },
 ];
 
+/// The step's `returns` LABEL, with absence and wrong type kept apart
+/// (`#lzflagcoercion`).
+///
+/// `step.get("returns").and_then(|v| v.as_str())` folded "the fixture states no
+/// return" together with "the fixture states one and it is not a string", and
+/// the `if let Some(..)` had no `else` — so `returns: ["a"]` skipped the
+/// comparison silently. `returns` is a STEP-level key read off the raw `Value`,
+/// outside the `Expect` tracker, so nothing else reports it either. The
+/// topic arm of this same runner already had the exhaustive shape (the
+/// `match (step.get("returns"), returns)` below, whose `(Some(want), None)` arm
+/// panics); these two arms did not.
+fn returns_label<'a>(step: &'a serde_json::Value, name: &str, idx: usize) -> Option<&'a str> {
+    let want = step.get("returns")?;
+    if want.is_null() {
+        return None;
+    }
+    Some(want.as_str().unwrap_or_else(|| {
+        panic!(
+            "{name} step {idx}: `returns` must be a JSON string or null, got {want} \
+             (#lzflagcoercion)"
+        )
+    }))
+}
+
 /// Every fixture the family owns, across all three primitives.
 fn all_fixtures() -> Vec<&'static str> {
     QUEUE_FIXTURES
@@ -329,7 +353,7 @@ fn shipped_flavor_replays_the_corpus() {
 // lives under `expected`; a runner reading it at step level would find nothing.
 #[cfg(feature = "thread-safe")]
 mod thread_safe_flavor {
-    use super::{QUEUE_FIXTURES, SPEC_DIR, spec_fixtures_present};
+    use super::{QUEUE_FIXTURES, SPEC_DIR, returns_label, spec_fixtures_present};
     use lazily::{ThreadSafeContext, ThreadSafeQueueCell};
     use serde_json::Value;
 
@@ -463,7 +487,7 @@ mod thread_safe_flavor {
                 }
             }
 
-            if let Some(want) = step.get("returns").and_then(|v| v.as_str()) {
+            if let Some(want) = returns_label(step, name, i) {
                 let got = got_returns.as_deref().unwrap_or("");
                 assert!(
                     got == want || got.starts_with(want),
@@ -668,7 +692,7 @@ mod thread_safe_flavor {
 // reason to add an await.
 #[cfg(feature = "async")]
 mod async_flavor {
-    use super::{QUEUE_FIXTURES, SPEC_DIR, spec_fixtures_present};
+    use super::{QUEUE_FIXTURES, SPEC_DIR, returns_label, spec_fixtures_present};
     use lazily::{AsyncContext, AsyncQueueCell};
     use serde_json::Value;
 
@@ -785,7 +809,7 @@ mod async_flavor {
                 }
             }
 
-            if let Some(want) = step.get("returns").and_then(|v| v.as_str()) {
+            if let Some(want) = returns_label(step, name, i) {
                 let got = got_returns.as_deref().unwrap_or("");
                 assert!(
                     got == want || got.starts_with(want),

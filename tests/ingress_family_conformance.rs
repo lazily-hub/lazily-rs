@@ -381,11 +381,28 @@ fn replay<Model: IngressModel>(fixture: &Value, label: &str) -> usize {
             "drain" => {
                 let drained = model.drain(op["key"].as_str().expect("key"));
                 if let Some(expected) = step.get("returns") {
-                    assert_eq!(
-                        drained,
-                        expected["drained"].as_u64(),
-                        "{where_}: drained value"
-                    );
+                    // REQUIRE the key and the type (`#lzflagcoercion`).
+                    // `expected["drained"].as_u64()` yielded `None` for an
+                    // ABSENT key, an explicit `null`, AND a wrong-typed one,
+                    // then compared that against `Option<u64>` — so
+                    // `drained: "12"` against a drain that returned nothing
+                    // compared `None == None` and passed. `null` keeps its
+                    // meaning ("drained nothing"); the other two are now named.
+                    let want = &expected["drained"];
+                    let want = match want {
+                        Value::Null if expected.get("drained").is_some() => None,
+                        Value::Null => panic!(
+                            "{where_}: `returns` carries no `drained` key \
+                             (#lzflagcoercion)"
+                        ),
+                        v => Some(v.as_u64().unwrap_or_else(|| {
+                            panic!(
+                                "{where_}: returns.drained must be a JSON integer or \
+                                 null, got {v} (#lzflagcoercion)"
+                            )
+                        })),
+                    };
+                    assert_eq!(drained, want, "{where_}: drained value");
                 }
             }
             "suspend" => {
@@ -393,7 +410,7 @@ fn replay<Model: IngressModel>(fixture: &Value, label: &str) -> usize {
                 if let Some(expected) = step.get("returns") {
                     assert_eq!(
                         request,
-                        expected_replay(&expected["replay"]),
+                        replay_of(expected, &where_),
                         "{where_}: replay request"
                     );
                 }
@@ -406,7 +423,7 @@ fn replay<Model: IngressModel>(fixture: &Value, label: &str) -> usize {
                 if let Some(expected) = step.get("returns") {
                     assert_eq!(
                         Some(request),
-                        expected_replay(&expected["replay"]),
+                        replay_of(expected, &where_),
                         "{where_}: replay request"
                     );
                 }
@@ -435,6 +452,22 @@ fn replay<Model: IngressModel>(fixture: &Value, label: &str) -> usize {
     }
 
     steps
+}
+
+/// `returns.replay`, where an ABSENT key is a fixture defect rather than a
+/// measurement of "no replay request" (`#lzflagcoercion`).
+///
+/// Callers pass `&expected["replay"]`, which is `Value::Null` both for an
+/// explicit `null` and for a key that is not there at all — so a `returns` block
+/// that omits `replay` (or misspells it) asserted "the model requested no
+/// replay" and passed whenever it requested none. `replay_of` reads the key
+/// itself so the two are distinguishable; `expected_replay` keeps the
+/// null-means-None decode.
+fn replay_of(expected: &Value, where_: &str) -> Option<ReplayRequest> {
+    let value = expected
+        .get("replay")
+        .unwrap_or_else(|| panic!("{where_}: `returns` carries no `replay` key (#lzflagcoercion)"));
+    expected_replay(value)
 }
 
 fn expected_replay(value: &Value) -> Option<ReplayRequest> {

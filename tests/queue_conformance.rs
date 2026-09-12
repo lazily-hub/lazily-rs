@@ -44,11 +44,18 @@ fn build_initial(ctx: &Context, initial: &Value) -> QueueCell<V> {
         }
     }
     // `closed` in initial is rare but supported: honor it.
-    if initial
-        .get("closed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    // ABSENT means "not closed"; PRESENT means the fixture states a closure,
+    // and a non-boolean there is a mistyped input, not a `false`
+    // (`#lzflagcoercion`). Folding both into `unwrap_or(false)` let
+    // `closed: "true"` build an OPEN queue while the fixture read as starting
+    // closed, and every expectation downstream still passed.
+    let closed = match initial.get("closed") {
+        None => false,
+        Some(v) => v.as_bool().unwrap_or_else(|| {
+            panic!("initial.closed must be a JSON boolean, got {v} (#lzflagcoercion)")
+        }),
+    };
+    if closed {
         q.close(ctx);
     }
     q
@@ -136,7 +143,15 @@ fn assert_invalidation(ctx: &Context, readers: &Readers, invalidates: &Expect) {
     let check = |name: &str, reader: &Reader| {
         // Only assert reader kinds the fixture explicitly declares.
         invalidates.assert_key_if_present(name, |node| {
-            let expected_inv = node.as_bool().unwrap_or(false);
+            // A non-boolean coerced to `false` INVERTS the claim
+            // (`#lzflagcoercion`): `invalidates.head: "true"` read as `false`
+            // asserts the reader stayed cached, so a fixture that says
+            // "invalidated" passes against a run that did not invalidate. The
+            // sibling `assert_state` comparisons below already require the
+            // type; this one did not.
+            let expected_inv = node.as_bool().unwrap_or_else(|| {
+                panic!("invalidates.{name} must be a JSON boolean, got {node} (#lzflagcoercion)")
+            });
             let cached = ctx.is_set(reader);
             if expected_inv {
                 assert!(
