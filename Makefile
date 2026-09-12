@@ -34,6 +34,31 @@ export LAZILY_CONFORMANCE_SCENARIOS = $(CONFORMANCE_SCENARIOS)
 CONFORMANCE_BLOCKS ?= $(CURDIR)/build/conformance-assertion-blocks.txt
 export LAZILY_CONFORMANCE_BLOCKS = $(CONFORMANCE_BLOCKS)
 
+# ONE run id per `make` invocation (#lzstalemanifest). Every guard over the three
+# ledgers above asserts "these bytes were really read", which is a claim about
+# THIS invocation, and nothing in those files said which invocation wrote them.
+#
+# `cargo` cannot produce the lazily-kt failure — it caches COMPILATION, never
+# test execution, so a `cargo test` step always re-runs its binaries, and
+# `conformance-manifest-reset` truncates all three ledgers before the suite, so a
+# skipped step would leave them EMPTY, which every guard already fails on. The
+# exposed path is the guard invoked ALONE: `make conformance-coverage` with no
+# suite ahead of it reads whatever the last `make check` left.
+#
+# So the first test process to write each truncated ledger stamps
+# `# lazily-run-id <value>` as its first line, and the guards require it to equal
+# this value. An unset run id makes them REFUSE rather than skip.
+#
+# It MUST be simply-expanded: `?=` and `=` are recursive, so `$(shell ...)` would
+# re-run at every reference and hand the stamp and the guard different ids — a
+# failure that is closed but baffling. `origin` rather than `?=` so CI (which
+# passes `${{ github.run_id }}-${{ github.run_attempt }}` in the job env) can
+# override it without losing simple expansion.
+ifeq ($(origin LAZILY_CONFORMANCE_RUN_ID),undefined)
+LAZILY_CONFORMANCE_RUN_ID := $(shell echo "$$$$-$$(date +%s%N)")
+endif
+export LAZILY_CONFORMANCE_RUN_ID
+
 .PHONY: \
 conformance-coverage \
 assertion-ordering-check \

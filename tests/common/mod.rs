@@ -104,7 +104,85 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+// ---------------------------------------------------------------------------
+// Per-invocation run id (`#lzstalemanifest`)
+// ---------------------------------------------------------------------------
+//
+// Every guard over these ledgers asserts "these bytes were really read", which
+// is a claim about THIS invocation. Nothing in the file said which invocation
+// wrote it. lazily-kt proved that concretely: a cached Gradle `:test` left the
+// PREVIOUS run's manifest on disk and every rung accepted it as evidence of the
+// current one.
+//
+// lazily-rs is not exposed on that path -- `cargo` caches COMPILATION, never
+// test execution, so a `cargo test` invocation always re-runs its binaries, and
+// `conformance-manifest-reset` truncates all three ledgers at the head of
+// `make check` so a skipped suite would leave them EMPTY rather than stale
+// (which every guard already fails on). What IS exposed is the guard invoked on
+// its own: `make conformance-coverage` with no suite ahead of it reads whatever
+// the last `make check` left, and reports OK over it.
+//
+// So each ledger carries the invocation's id as its FIRST line, with the
+// cross-binding prefix `# lazily-run-id `, and every guard requires it to equal
+// the current `LAZILY_CONFORMANCE_RUN_ID`.
+//
+// The stamp is written by whichever test process finds the ledger EMPTY -- that
+// is, the first writer after the reset truncated it -- rather than by every
+// process. Both spellings close the hole identically, because the reset is what
+// begins the file's life: a stamp-less non-empty ledger means the reset did NOT
+// run and the file is a union across invocations, which is the same failure. One
+// line per file keeps a ledger an operator reads (1107 manifest lines, 31526
+// block-ledger lines, ~850 contributing test binaries) free of ~850 identical
+// comments.
+
+/// Names the run id for this `make check` invocation (`#lzstalemanifest`).
+const RUN_ID_ENV: &str = "LAZILY_CONFORMANCE_RUN_ID";
+
+/// Fixed stamp prefix. Identical in every binding, so the guards agree.
+const RUN_ID_PREFIX: &str = "# lazily-run-id ";
+
+/// The stamp line for this invocation, or `None` when no run id is in scope.
+///
+/// `None` is not a silent accept: a guard reading an unstamped ledger refuses,
+/// and so does a guard whose own `LAZILY_CONFORMANCE_RUN_ID` is unset.
+fn run_id_stamp() -> Option<String> {
+    let id = std::env::var(RUN_ID_ENV).ok()?;
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(format!("{RUN_ID_PREFIX}{id}\n"))
+}
+
+/// Append `line` to the evidence file at `out`, stamping the run id first when
+/// this process is the first writer since the ledger was truncated.
+///
+/// `decided` is per-ledger and per-process: the emptiness test costs one `stat`
+/// on a process's first append rather than one per line.
+///
+/// Bookkeeping never fails a suite. An unwritable ledger surfaces downstream as
+/// missing evidence, which is the outcome the guard wants.
+fn append_evidence(out: &str, line: &str, decided: &AtomicBool) {
+    let Ok(mut f) = OpenOptions::new().create(true).append(true).open(out) else {
+        return;
+    };
+    let mut payload = String::new();
+    if !decided.swap(true, Ordering::SeqCst) {
+        let empty = std::fs::metadata(out).map(|m| m.len() == 0).unwrap_or(true);
+        if let Some(stamp) = run_id_stamp().filter(|_| empty) {
+            payload.push_str(&stamp);
+        }
+    }
+    payload.push_str(line);
+    payload.push('\n');
+    // One `write_all` to an O_APPEND handle, so the stamp cannot interleave
+    // between another process's lines -- the same atomicity the concurrent
+    // appends below already rely on.
+    let _ = f.write_all(payload.as_bytes());
+}
 
 /// Path segment that marks a read as belonging to the canonical corpus. Ids are
 /// recorded relative to the directory that follows it, e.g.
@@ -410,9 +488,8 @@ fn append_block_record(line: &str) {
     }
     // Bookkeeping never fails a suite; an unwritable ledger surfaces downstream
     // as missing evidence, which is the outcome the guard wants.
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&out) {
-        let _ = f.write_all(format!("{line}\n").as_bytes());
-    }
+    static STAMPED: AtomicBool = AtomicBool::new(false);
+    append_evidence(&out, line, &STAMPED);
 }
 
 /// Every key under which a canonical fixture carries an assertion block
@@ -579,9 +656,8 @@ pub fn record_conformance_read(path: &Path) {
     }
     // Never fail a suite over bookkeeping — an unwritable manifest shows up
     // downstream as missing evidence, which is what the guard wants.
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&out) {
-        let _ = f.write_all(format!("{id}\n").as_bytes());
-    }
+    static STAMPED: AtomicBool = AtomicBool::new(false);
+    append_evidence(&out, &id, &STAMPED);
 }
 
 // ---------------------------------------------------------------------------
@@ -685,9 +761,8 @@ pub fn record_scenario(path: impl AsRef<Path>, id: &str, source: ScenarioIdSourc
     }
     // Same contract as the fixture manifest: bookkeeping never fails a suite.
     // An unwritable ledger surfaces downstream as missing evidence.
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&out) {
-        let _ = f.write_all(format!("{line}\n").as_bytes());
-    }
+    static STAMPED: AtomicBool = AtomicBool::new(false);
+    append_evidence(&out, &line, &STAMPED);
 }
 
 /// Keys that IDENTIFY or narrate a scenario rather than drive one

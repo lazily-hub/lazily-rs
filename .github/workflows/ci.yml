@@ -46,10 +46,22 @@ jobs:
     # written — and a guard whose evidence is absent must fail rather than pass
     # vacuously, which is why the script treats an absent or empty file as a
     # failure rather than as "nothing was read".
+    # The evidence must also say WHICH invocation wrote it (#lzstalemanifest).
+    # The first test process to write each truncated ledger stamps
+    # `# lazily-run-id <value>` as its first line, and the coverage step below
+    # refuses evidence carrying any other value — or none. It lives at JOB level
+    # because every step here is a separate shell: the reset, the ~45 cargo
+    # steps and the guard step all have to agree on one id, and
+    # `run_id`-`run_attempt` is unique per invocation and stable across them
+    # (a re-run of this job gets a new `run_attempt`).
+    #
+    # Unset makes the guard REFUSE rather than skip, so deleting this line
+    # reddens CI instead of quietly restoring the hole.
     env:
       LAZILY_CONFORMANCE_MANIFEST: ${{ github.workspace }}/build/conformance-fixtures-loaded.txt
       LAZILY_CONFORMANCE_SCENARIOS: ${{ github.workspace }}/build/conformance-scenarios-replayed.txt
       LAZILY_CONFORMANCE_BLOCKS: ${{ github.workspace }}/build/conformance-assertion-blocks.txt
+      LAZILY_CONFORMANCE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Checkout

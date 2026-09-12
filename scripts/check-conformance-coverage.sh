@@ -440,6 +440,90 @@ KNOWN_UNREPLAYED_SCENARIOS=(
 MANIFEST="${LAZILY_CONFORMANCE_MANIFEST:-build/conformance-fixtures-loaded.txt}"
 SCENARIO_LEDGER="${LAZILY_CONFORMANCE_SCENARIOS:-build/conformance-scenarios-replayed.txt}"
 
+# ---------------------------------------------------------------------------
+# Evidence freshness: the run id (#lzstalemanifest)
+# ---------------------------------------------------------------------------
+#
+# Every rung below asserts "these bytes were really read", which is a claim
+# about THIS invocation, and until now nothing in the evidence said which
+# invocation wrote it. lazily-kt is the confirmed instance: a cached Gradle
+# `:test` left the PREVIOUS run's manifest on disk and every rung accepted it.
+#
+# lazily-rs is NOT exposed on that path, and the argument is from the build
+# graph rather than from "it has never happened":
+#
+#   * `cargo` caches COMPILATION, never test execution. A second `cargo test`
+#     with nothing touched prints no `Compiling` line and still prints
+#     `Running tests/<name>.rs` and re-appends every ledger line. There is no
+#     cargo analogue of `> Task :test UP-TO-DATE`.
+#   * `conformance-manifest-reset` truncates all three ledgers at the head of
+#     `make check`, so a hypothetically skipped suite would leave them EMPTY,
+#     and all three rungs already fail closed on an empty ledger.
+#
+# What IS exposed is a rung invoked ALONE. `make conformance-coverage`, or this
+# script by hand, with no suite ahead of it, reads whatever the last `make check`
+# left and reports OK over it — the kt failure reached by a different route.
+#
+# So the first test process to write each truncated ledger stamps
+# `# lazily-run-id <value>` as its first line (tests/common/mod.rs), and every
+# rung here requires that value to equal this invocation's. A ledger with NO
+# stamp fails too: it either predates this change or was appended to without a
+# reset, which makes it a union across invocations.
+#
+# An unset LAZILY_CONFORMANCE_RUN_ID REFUSES rather than skips. A rung that
+# accepts unstamped evidence when the variable is unset is the same hole with an
+# extra step. There is deliberately NO boolean opt-out: to re-run a rung against
+# the evidence of a previous suite, read that suite's id out of the ledger and
+# pass it back —
+#
+#   LAZILY_CONFORMANCE_RUN_ID="$(sed -n 's/^# lazily-run-id //p' \
+#     build/conformance-fixtures-loaded.txt | head -1)" \
+#     ./scripts/check-conformance-coverage.sh
+#
+# which cannot be set blindly in a Makefile or a workflow, because it requires
+# having looked at the stamp.
+RUN_ID_PREFIX='# lazily-run-id '
+RUN_ID="${LAZILY_CONFORMANCE_RUN_ID:-}"
+if [ -z "$RUN_ID" ]; then
+  echo "FAIL: LAZILY_CONFORMANCE_RUN_ID is unset, so no rung here can tell this" >&2
+  echo "      invocation's evidence from a previous one (#lzstalemanifest)." >&2
+  echo "      \`make check\` generates one per invocation and exports it; CI passes" >&2
+  echo "      \${{ github.run_id }}-\${{ github.run_attempt }} in the job env." >&2
+  echo "      Refusing rather than skipping: a rung that accepts unstamped" >&2
+  echo "      evidence when this is unset is the hole it exists to close." >&2
+  exit 1
+fi
+
+# Fails when `$1` carries no run-id stamp, or carries one that is not this
+# invocation's. An EMPTY or absent ledger returns, so the rung's own
+# missing-evidence failure keeps its better message.
+require_run_id() {
+  local file="$1"
+  local what="$2"
+  [ -s "$file" ] || return 0
+  local found
+  found="$(sed -n "s|^${RUN_ID_PREFIX}||p" "$file" | sort -u)"
+  if [ -z "$found" ]; then
+    echo "FAIL: the $what at $file carries no '${RUN_ID_PREFIX}<id>' line," >&2
+    echo "      so it cannot be attributed to this invocation" >&2
+    echo "      (#lzstalemanifest). Either it predates the stamp, or it was" >&2
+    echo "      appended to without \`conformance-manifest-reset\` truncating it" >&2
+    echo "      first, which makes it a union across invocations." >&2
+    echo "      wanted: $RUN_ID" >&2
+    echo "      Run the suite through \`make check\`." >&2
+    exit 1
+  fi
+  if [ "$found" != "$RUN_ID" ]; then
+    echo "FAIL: the $what at $file is STALE evidence (#lzstalemanifest)." >&2
+    echo "      found : $(printf '%s' "$found" | tr '\n' ' ')" >&2
+    echo "      wanted: $RUN_ID" >&2
+    echo "      It was written by a different invocation, so it says nothing" >&2
+    echo "      about what THIS run replayed. Run the suite through" >&2
+    echo "      \`make check\` rather than the rung alone." >&2
+    exit 1
+  fi
+}
+
 if [ ! -s "$MANIFEST" ]; then
   echo "FAIL: no conformance manifest at $MANIFEST." >&2
   echo "      Run the suite with LAZILY_CONFORMANCE_MANIFEST set to an ABSOLUTE" >&2
@@ -447,7 +531,12 @@ if [ ! -s "$MANIFEST" ]; then
   echo "      manifest is missing evidence, not evidence of absence." >&2
   exit 1
 fi
-OPENED="$(sort -u "$MANIFEST")"
+require_run_id "$MANIFEST" "fixture manifest"
+require_run_id "$SCENARIO_LEDGER" "scenario replay ledger"
+# `sed`, not `grep -v`: under `set -o pipefail` a `grep -v` that selects nothing
+# — a ledger holding only its stamp — exits 1 and kills the script before the
+# zero-coverage rung below can report it.
+OPENED="$(sed "/^${RUN_ID_PREFIX}/d" "$MANIFEST" | sort -u)"
 
 missing=0
 total=0
@@ -658,18 +747,22 @@ if not os.path.isfile(ledger_path) or os.path.getsize(ledger_path) == 0:
     )
     sys.exit(1)
 
+# The `# lazily-run-id <value>` stamp is checked in bash before this block
+# (`require_run_id`, #lzstalemanifest); here it is simply not an entry.
+STAMP_PREFIX = "# lazily-run-id "
+
 opened = set()
 with open(manifest_path) as handle:
     for line in handle:
         line = line.strip()
-        if line:
+        if line and not line.startswith(STAMP_PREFIX):
             opened.add(line)
 
 # fixture -> {scenario id: source} as RECORDED at the point of replay.
 ledger = {}
 for line in open(ledger_path):
     line = line.rstrip("\n")
-    if not line:
+    if not line or line.startswith(STAMP_PREFIX):
         continue
     parts = line.split("\t")
     if len(parts) != 3:
@@ -999,6 +1092,7 @@ KNOWN_UNBOUND_BLOCKS=(
 )
 
 BLOCK_LEDGER="${LAZILY_CONFORMANCE_BLOCKS:-build/conformance-assertion-blocks.txt}"
+require_run_id "$BLOCK_LEDGER" "assertion-block bind ledger"
 
 BLOCK_EXCUSES="$(printf '%s\n' "${KNOWN_UNBOUND_BLOCKS[@]:-}")" \
 KNOWN_UNCOVERED_LEDGER="$(printf '%s\n' "${KNOWN_UNCOVERED[@]:-}")" \
@@ -1022,6 +1116,12 @@ declared = {}      # digest -> set of "fixture|where" the LOADER declared
 bound = set()      # digest a runner bound
 bound_where = {}   # digest -> set of "fixture|label" the RUNNER called it
 for line in open(ledger_path):
+    # The `# lazily-run-id <value>` stamp is checked in bash before this block
+    # (`require_run_id`, #lzstalemanifest). Skipped EXPLICITLY: the dispatch
+    # below would drop it silently, which is the same look-away that let a
+    # malformed line cost nothing.
+    if line.startswith("# lazily-run-id "):
+        continue
     parts = line.rstrip("\n").split("\t")
     if parts[0] == "declared" and len(parts) == 4:
         declared.setdefault(parts[2], set()).add("%s|%s" % (parts[1], parts[3]))
