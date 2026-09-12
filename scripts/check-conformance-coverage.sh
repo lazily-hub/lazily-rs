@@ -1042,15 +1042,24 @@ for line in open(ledger_path):
 # typed count — a number beside a set equality is a second source of truth that
 # can only ever be wrong, and it is the exact defect (`MIN_BLOCKS = 30`) this
 # rung was rebuilt to remove.
-CLASS_REASONS = {
+# The class is DESCRIPTIVE and enforced only as a membership check: no rung
+# branches on which class an entry carries, and suppression is the same code for
+# both. It is a SET rather than a map because nothing reads a value — spelled as
+# a map with every value `True`, it invited the reading that `unreachable` has a
+# distinct enforced path, and an audit of that non-existent path is what
+# #lzunreachableunprobed was filed to do. What the class buys is a visible
+# distinction in the diff, which is why the vocabulary stays even while this
+# binding carries zero entries: without it, a genuinely unbindable site gets
+# labelled `bind-pending`, which is the laundering the pin below refuses.
+LEDGER_CLASSES = {
     # Reachable. The runner reads the block; routing it through `Expect` is a
     # migration that has not happened yet. This class is expected to SHRINK, and
     # shrinking it is the work.
-    "bind-pending": True,
+    "bind-pending",
     # Not reachable by this binding at all — the block belongs to a shape, model
     # or transport lazily-rs does not implement, so no runner can bind it without
     # first implementing the feature. Never use this for "not done yet".
-    "unreachable": True,
+    "unreachable",
 }
 
 excuses = {}
@@ -1068,12 +1077,12 @@ for raw in os.environ.get("BLOCK_EXCUSES", "").splitlines():
         )
         sys.exit(1)
     fixture, where, klass, reason = parts
-    if klass not in CLASS_REASONS:
+    if klass not in LEDGER_CLASSES:
         sys.stderr.write(
             "ERROR: KNOWN_UNBOUND_BLOCKS entry %r uses class %r, which is not one of\n"
             "       %s. A free-form class cannot be counted, and a gap nobody counts\n"
             "       is a gap nobody closes.\n"
-            % (raw, klass, ", ".join(sorted(CLASS_REASONS)))
+            % (raw, klass, ", ".join(sorted(LEDGER_CLASSES)))
         )
         sys.exit(1)
     site = "%s|%s" % (fixture, where)
