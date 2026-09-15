@@ -131,7 +131,11 @@ const MIN_SCANNED_SOURCES: usize = 60;
 /// Every fixture flag in the binding now routes through the trait — 101 reads at
 /// the time of writing — so a run that sees none of them did not inspect what it
 /// claims to have inspected.
-const MIN_SANCTIONED_READS: usize = 40;
+// Pinned to the real population, not merely above zero. The typed `syn` walk
+// alone sees 39; the other 62 live inside macro token streams. Keeping the
+// measured 101 here makes losing `visit_macro` a red run instead of a clean
+// report over 39% of the reads this rung claims to inspect (#lzastscanundercount).
+const MIN_SANCTIONED_READS: usize = 101;
 
 #[derive(Default)]
 struct Scan {
@@ -342,6 +346,38 @@ fn quote_attr(attribute: &syn::Attribute) -> String {
         rendered.push_str(&list.tokens.to_string());
     }
     rendered
+}
+
+#[test]
+fn scanner_covers_macro_tokens_and_function_paths() {
+    let syntax = syn::parse_file(
+        r#"
+        fn probe(value: Value, fixture: FixtureJson) {
+            let _ = Some(value).and_then(Value::as_bool);
+            assert_eq!(value.as_bool(), Some(true));
+            assert_eq!(fixture.fixture_flag("enabled"), true);
+            assert_eq!(value.as_array().unwrap_or_default(), Vec::new());
+        }
+        "#,
+    )
+    .expect("parse synthetic scanner probe");
+    let mut scan = Scan::default();
+    scan.visit_file(&syntax);
+
+    assert_eq!(
+        scan.banned.len(),
+        2,
+        "must see both `Value::as_bool` as a function path and `.as_bool()` inside assert_eq!"
+    );
+    assert_eq!(
+        scan.sanctioned, 1,
+        "must count sanctioned fixture reads inside macro token streams"
+    );
+    assert_eq!(
+        scan.coercing.len(),
+        1,
+        "must see defaulting chains inside macro token streams"
+    );
 }
 
 fn rust_sources(root: &Path) -> Vec<PathBuf> {

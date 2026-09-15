@@ -79,6 +79,28 @@ impl<'ast> Visit<'ast> for SourceScan {
 }
 
 #[test]
+fn source_scan_counts_field_reads_inside_macros() {
+    let syntax = syn::parse_file(
+        r#"
+        #[derive(Deserialize)]
+        struct Fixture { expected: bool }
+
+        fn probe(fixture: Fixture) {
+            assert_eq!(fixture.expected, true);
+        }
+        "#,
+    )
+    .expect("parse synthetic macro-read probe");
+    let mut scan = SourceScan::default();
+    scan.visit_file(&syntax);
+
+    assert!(
+        scan.reads.contains("expected"),
+        "syn does not descend into assert_eq! tokens; the explicit macro scan must"
+    );
+}
+
+#[test]
 fn conformance_struct_fields_are_read() {
     let excuses = BTreeMap::from([
         (
