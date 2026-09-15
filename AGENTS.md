@@ -232,12 +232,13 @@ this repo.
   ledger would silently miss the mismatch rather than report it.
   WHAT COUNTS AS A BLOCK (`#lzrsblockwalk`). Every name in
   `{assertions, expect, expect_after, expect_initial, expected}`, at every depth,
-  object-valued only, emitted and NOT descended into, with arrays descended
+  object-valued or a plain-object element of an array-valued block; every emitted
+  block is also descended into before the traversal continues
   (`scenarios[3].steps[2].expect` is where most of this corpus's blocks live).
   The walk used to read ONE name at ONE depth and inventoried 36 sites / 30
-  digests of the 771 / 661 the same 150 opened fixtures carry — 4.7%. Notably it
+  digests of the 783 / 673 the same 150 opened fixtures carry — 4.6%. Notably it
   was not missing `assertions` blocks at depth; the whole gap was the four names
-  it never looked at (`expected` 434 sites / 359 digests, `expect` 295 / 266,
+  it never looked at (`expected` 434 sites / 359 digests, `expect` 307 / 276,
   `expect_initial` 3 / 3, `expect_after` 3 / 3).
   `$LAZILY_CONFORMANCE_BLOCKS` carries the ledger on the manifest's terms, each
   `bound` line recording the runner's own fixture and label alongside the digest
@@ -247,12 +248,12 @@ this repo.
   magnitude is not a `MIN_BLOCKS` floor (`#lzblockmagnitudeaudit`): a typed
   number drifts by hand and a `>=` cannot see a shrink that stays above it. It is
   DERIVED from the corpus listing minus this crate's own `KNOWN_UNCOVERED`, on
-  TWO dimensions — **771 assertion-block SITES and 661 distinct DIGESTS** — each
+  TWO dimensions — **783 assertion-block SITES and 673 distinct DIGESTS** — each
   an EQUALITY. Both are needed: a digest count absorbs the deletion of a block
-  whose bytes recur elsewhere (167 of the 771 sites carry a recurring shape), and
+  whose bytes recur elsewhere (167 of the 783 sites carry a recurring shape), and
   a site count absorbs a content edit that collapses two distinct claims into
   one.
-  THE LEDGER, NOW EMPTY (`#lzrsbindpending`). **771 of 771 sites are BOUND and
+  THE LEDGER, NOW EMPTY (`#lzrsbindpending`). **783 of 783 sites are BOUND and
   nothing is excused.** `KNOWN_UNBOUND_BLOCKS` held 201 entries when the walk was
   widened; all 201 have been migrated — `semtree_incremental` 6,
   `boundary_ingress_adapter` 28, stdlib 54, reactive-graph 113. Its format is
@@ -318,7 +319,7 @@ this repo.
   SET is asserted beside it — per-key comparisons cannot see a key the RUN
   produced that the block does not carry. stdlib asserts both.
   And always compare against the value the tracker hands over: a closure that
-  ignores `want` satisfies the tracker while asserting nothing, which at 771 sites
+  ignores `want` satisfies the tracker while asserting nothing, which at 783 sites
   is the cheapest possible way to manufacture fake coverage.
   A RUNNER'S OWN JSON CLONE (`#lzrunnerownjsonclone`). This binding's loader
   hands runners TEXT, so every runner re-parses and the block a runner binds is
@@ -327,20 +328,21 @@ this repo.
   whose re-parse dropped the raw number token (`"value": 5` digesting as
   `5.000000`), and they read as 71 unrelated coverage gaps. Here the guard
   classifies every bind the loader never declared against every object the corpus
-  carries at every depth: 460 such binds, 426 of them below an already-emitted
+  carries at every depth: 470 such binds, 436 of them below an already-emitted
   block (a sub-object reached with `Expect::sub`, a whole `steps[n]` element) and
   34 matching no corpus object at all — all 34 from `tests/expect_guard.rs`,
   which fabricates `json!` blocks under borrowed fixture names. **Zero clone
   divergences**, and the classification held through `#lzrsbindpending`: binding
   201 more sites took the undeclared-bind count from 397 to 460 with every one of
-  the 63 new binds landing in the below-an-emitted-block half and the
-  no-corpus-object half unchanged at 34. Reported, not failed: the self-tests make a non-zero count
+  the 63 new binds landing in the below-an-emitted-block half. The array-element
+  widening then took it from 460 to 470: all ten new distinct digests landed in
+  that same half, with the no-corpus-object half unchanged at 34. Reported, not failed: the self-tests make a non-zero count
   normal. The digest contract itself is pinned by unit tests rather than inferred
   from that number — a runner's own re-parse reproduces the loader's digest, the
   digest SEPARATES `5` from `5.0` (without which the first assertion is satisfied
   by a digest that folds the very divergence it looks for), and `5.0`/`5e0` are
   pinned as FOLDING because `serde_json` normalises both to one `f64` at parse.
-  771/771 sites bound, nothing excused. Validated in twelve directions: a
+  783/783 sites bound, nothing excused. Validated in twelve directions: a
   declared block with no bind FAILS naming it; a stale excuse FAILS in both its
   directions (bound-after-all, and naming no such site); a detached bind with a
   matching entry passes both directions and FAILS the ceiling; an unknown
