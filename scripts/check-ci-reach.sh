@@ -37,7 +37,8 @@
 #   its subcommands and flag NAMES (values dropped), with path arguments reduced to
 #   basenames and bare path globs discarded. A target is reached when EVERY one of
 #   its anchors is a subsequence of some CI command's token list, or when CI runs
-#   `make <target>` directly. Every, not any: a target that runs two gates and is
+#   `make <target>` or an ancestor whose closure contains it. Every, not any: a
+#   target that runs two gates and is
 #   half-covered by CI is a gap, and "any" would report it green.
 #
 #   Keeping flag names in the anchor is what makes the guard falsifiable rather
@@ -304,11 +305,11 @@ EXPECTED_NO_GATE_TARGETS=(
 #     that broke a gate. Read the `workflow:` KEYS, not a grep for the filename --
 #     the conf mentions regressions.yml only in the comment explaining its
 #     exclusion, so a grep for the name finds a hit that means the opposite.
-#   * this binding has no ancestor-invocation credit at all. `make_invokes`
-#     matches the target's OWN name, so unlike lazily-gd -- whose guard credits
-#     reach through `make_invokes_ancestor` and which is excluded from this design
-#     for that reason -- a `make check` step here would credit only the `check`
-#     target itself, which carries no gate.
+#   * ancestor-invocation credit changes no current member: ci.yml invokes no
+#     ancestor such as `make check`. The shared `make_invokes_ancestor` path is
+#     nevertheless present so a future aggregate step is classified by what make
+#     actually runs; the exact mode-set pins below would then require that change
+#     to be reviewed explicitly.
 #
 # THE ANCHOR COLLISION DOES NOT REACH THIS RUNG. `test-lean-formal` and
 # `test-lazily-formal` both reduce to the anchor `lake build` -- the measurement
@@ -1454,6 +1455,39 @@ make_invokes() {
 	' "$ci_anchor"
 }
 
+# CI also reaches a target by invoking any ancestor whose prerequisite closure
+# contains it. This is definitional: `make check` runs every gate in `check`'s
+# closure, so reporting those gates unreachable is a false red.
+make_invokes_ancestor() {
+	local target="$1" ancestor
+	while IFS= read -r ancestor; do
+		[ -n "$ancestor" ] || continue
+		[ "$ancestor" = "$target" ] && continue
+		if make_invokes "$ancestor" && in_closure_of "$ancestor" "$target"; then
+			return 0
+		fi
+	done <<<"$closure"
+	return 1
+}
+
+# Breadth-first over the same prereqs_of relation used by the main closure.
+in_closure_of() {
+	local ancestor="$1" descendant="$2" seen="" queue="$ancestor" current prereq
+	while [ -n "$queue" ]; do
+		current="${queue%%$'\n'*}"
+		if [ "$current" = "$queue" ]; then queue=""; else queue="${queue#*$'\n'}"; fi
+		[ -n "$current" ] || continue
+		case $'\n'"$seen" in *$'\n'"$current"$'\n'*) continue;; esac
+		seen="$seen$current"$'\n'
+		[ "$current" = "$descendant" ] && return 0
+		while IFS= read -r prereq; do
+			[ -n "$prereq" ] || continue
+			queue="$queue$prereq"$'\n'
+		done < <(prereqs_of "$current")
+	done
+	return 1
+}
+
 # Does the CI step NAMED $1 run a command containing anchor $2? Same subsequence
 # rule and same either-side wildcard as `anchor_reached`, with the haystack cut
 # down to one step (#lzcheckcireachguard).
@@ -1871,7 +1905,7 @@ while IFS= read -r target; do
 	# Non-empty only when this target's reach was checked INSIDE a pinned step;
 	# it is what the MISSING diagnostic below reads to say which step was asked.
 	pinned_step=""
-	if make_invokes "$target"; then
+	if make_invokes "$target" || make_invokes_ancestor "$target"; then
 		# CI names the target and lets make decide what that means, so there is
 		# no CI-side spelling of the gate to scope. Deliberately unmapped, and
 		# the mode set-equality rung below is what keeps it deliberate rather
