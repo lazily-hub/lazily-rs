@@ -625,16 +625,20 @@ fn run_semtree_fixture(name: &str) {
                     format!("scenarios[{i}].expect_initial"),
                     scenario.get("expect_initial").unwrap(),
                 );
-                expect_initial.assert_key("root", sums.value(&ctx));
-                for node_id in ["a", "b"] {
-                    // `b` was a REAL gap this bind exposed, not a routing one: the
-                    // corpus asserts the initial fold at `b` and the runner only
-                    // ever read `a`, so `expect_initial.b` was compared by nothing
-                    // and nothing could report it. Both nodes now go through the
-                    // same path.
-                    expect_initial.assert_key_if_present(node_id, |want| {
+                let initial_nodes = scenario
+                    .get("expect_initial")
+                    .and_then(Value::as_object)
+                    .expect("expect_initial is an object")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for node_id in initial_nodes {
+                    // `expect_initial` is an exact node-value map
+                    // (`#lzsemtreesubset`), so every fixture key takes the same
+                    // existence-first assertion path.
+                    expect_initial.assert_key_if_present(&node_id, |want| {
                         assert_eq!(
-                            sums.node_value(&ctx, &node_id.to_string()),
+                            sums.node_value(&ctx, &node_id),
                             Some(want.as_i64().unwrap_or_else(|| panic!(
                                 "expect_initial.{node_id} is an integer"
                             ))),
@@ -645,7 +649,6 @@ fn run_semtree_fixture(name: &str) {
 
                 // Prime sibling slot cache before edit so we can verify isolation.
                 let a_slot = sums.node(&"a".to_string());
-                let b_slot = sums.node(&"b".to_string());
 
                 if let Some(edit) = scenario.get("edit") {
                     let id = edit.get("id").and_then(|v| v.as_str()).unwrap().to_string();
@@ -678,7 +681,6 @@ fn run_semtree_fixture(name: &str) {
                     format!("scenarios[{i}].expect_after"),
                     scenario.get("expect_after").unwrap(),
                 );
-                expect_after.assert_key("root", sums.value(&ctx));
                 expect_after.assert_key_if_present("sibling_a_cached", |want| {
                     let sibling_cached =
                         want.fixture_flag("expect_after.sibling_a_cached is a bool");
@@ -691,22 +693,27 @@ fn run_semtree_fixture(name: &str) {
                         if sibling_cached { "" } else { "un" }
                     );
                 });
-                expect_after.assert_key_if_present("b", |want| {
-                    let b_slot = b_slot.expect("expect_after.b present but no `b` slot");
-                    assert_eq!(
-                        ctx.get(&b_slot),
-                        want.as_i64().expect("expect_after.b is an integer"),
-                        "scenario {i}: b after edit"
-                    );
-                });
-                expect_after.assert_key_if_present("a", |want| {
-                    let a_slot = a_slot.expect("expect_after.a present but no `a` slot");
-                    assert_eq!(
-                        ctx.get(&a_slot),
-                        want.as_i64().expect("expect_after.a is an integer"),
-                        "scenario {i}: a unchanged after edit"
-                    );
-                });
+                let after_nodes = scenario
+                    .get("expect_after")
+                    .and_then(Value::as_object)
+                    .expect("expect_after is an object")
+                    .keys()
+                    .filter(|key| key.as_str() != "sibling_a_cached")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for node_id in after_nodes {
+                    expect_after.assert_key_if_present(&node_id, |want| {
+                        assert_eq!(
+                            sums.node_value(&ctx, &node_id),
+                            Some(
+                                want.as_i64().unwrap_or_else(|| panic!(
+                                    "expect_after.{node_id} is an integer"
+                                ))
+                            ),
+                            "scenario {i} after {node_id}"
+                        );
+                    });
+                }
             }
             "count_positive" => {
                 let count = SemTree::build(&ctx, &root, |v: &i64, kids: &[usize]| {
@@ -717,7 +724,24 @@ fn run_semtree_fixture(name: &str) {
                     format!("scenarios[{i}].expect_initial"),
                     scenario.get("expect_initial").unwrap(),
                 );
-                expect_initial.assert_key("root", count.value(&ctx) as u64);
+                let initial_nodes = scenario
+                    .get("expect_initial")
+                    .and_then(Value::as_object)
+                    .expect("expect_initial is an object")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for node_id in initial_nodes {
+                    expect_initial.assert_key_if_present(&node_id, |want| {
+                        assert_eq!(
+                            count.node_value(&ctx, &node_id),
+                            Some(want.as_u64().unwrap_or_else(|| panic!(
+                                "expect_initial.{node_id} is a non-negative integer"
+                            )) as usize),
+                            "scenario {i} initial {node_id}"
+                        );
+                    });
+                }
 
                 // Downstream consumer of the derived root; count how often it re-runs.
                 let calls = Rc::new(StdCell::new(0usize));
@@ -745,7 +769,6 @@ fn run_semtree_fixture(name: &str) {
                     format!("scenarios[{i}].expect_after"),
                     scenario.get("expect_after").unwrap(),
                 );
-                expect_after.assert_key("root", count.value(&ctx) as u64);
                 let _ = ctx.get(&observer); // pull observer
                 expect_after.assert_key_if_present("downstream_consumer_reran", |want| {
                     let reran =
@@ -756,6 +779,25 @@ fn run_semtree_fixture(name: &str) {
                         "scenario {i}: downstream_consumer_reran contract ({reran} expected)"
                     );
                 });
+                let after_nodes = scenario
+                    .get("expect_after")
+                    .and_then(Value::as_object)
+                    .expect("expect_after is an object")
+                    .keys()
+                    .filter(|key| key.as_str() != "downstream_consumer_reran")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for node_id in after_nodes {
+                    expect_after.assert_key_if_present(&node_id, |want| {
+                        assert_eq!(
+                            count.node_value(&ctx, &node_id),
+                            Some(want.as_u64().unwrap_or_else(|| panic!(
+                                "expect_after.{node_id} is a non-negative integer"
+                            )) as usize),
+                            "scenario {i} after {node_id}"
+                        );
+                    });
+                }
             }
             other => panic!("scenario {i}: unknown fold {other}"),
         }
