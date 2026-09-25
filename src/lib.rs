@@ -97,6 +97,7 @@ mod crdt_plane;
 mod crdt_tree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
+mod durable_owner;
 mod effect;
 mod egress;
 mod egress_core;
@@ -258,6 +259,14 @@ pub use crdt_plane::CrdtPlaneRuntime;
 pub use crdt_tree::CrdtTree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
+pub use durable_owner::{
+    CodecVersion, DurableCommit, DurableCommitOutcome, DurableContractError, DurableEffect,
+    DurableEffectIntent, DurableEffectOutcome, DurableFingerprintError, DurableInboxRecord,
+    DurableOwnerCore, DurableOwnerId, DurableOwnerImage, DurableOwnerMode, DurableOwnerStore,
+    DurablePosition, DurableProjectionFingerprint, DurableReceipt, DurableReceiptIntent,
+    DurableReceiptOutcome, DurableRecord, DurableStateMutation, EffectIdentity, FenceToken,
+    InboxIdentity, ProjectionCompleteness, ReceiptIdentity, SchemaVersion, VersionedBytes,
+};
 pub use effect::{Effect, EffectCallbackResult};
 pub use egress::{EgressCell, EgressTransport};
 pub use egress_core::{
