@@ -144,6 +144,15 @@ exercises the same path in tests; the `durable-sqlite` feature adds
 `SqliteStore`/`SqliteOutbox`, partitioned by document hash, so acknowledged
 epochs remain pruned across process restarts.
 
+The `durable-postgres` feature adds the reference multi-owner durable host. A
+serializable transaction claims an inbox identity and atomically persists the
+accepted owner image, projection version, effect intents, timer changes,
+fencing token, and local receipts. Relay workers lease effects through
+`FOR UPDATE SKIP LOCKED`; delivery retries retain the original effect identity
+until a publication receipt is durably recorded. Run
+`./scripts/test-durable-postgres.sh` to exercise rollback, serialization retry,
+crash redelivery, relay retry, and full-history recovery against PostgreSQL.
+
 ### Decorator-style typed factories
 
 `#[lazily::source]` and `#[lazily::computed]` provide the same factory style as

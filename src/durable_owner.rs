@@ -50,6 +50,7 @@ stable_identity!(DurableOwnerId, "owner");
 stable_identity!(InboxIdentity, "inbox");
 stable_identity!(EffectIdentity, "effect");
 stable_identity!(ReceiptIdentity, "receipt");
+stable_identity!(TimerIdentity, "timer");
 
 /// Monotone durable state/event position. Position zero is the empty owner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

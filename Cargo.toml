@@ -48,6 +48,10 @@ ffi = ["ipc", "dep:serde_json"]
 instrumentation = []
 ipc = ["serde", "dep:serde_json"]
 durable-sqlite = ["ipc", "dep:rusqlite"]
+# Reference Postgres durable-owner host. The synchronous driver keeps the
+# transaction boundary explicit; async scheduling belongs to the later runner
+# phase rather than the persistence contract.
+durable-postgres = ["serde", "dep:postgres", "dep:serde_json"]
 ipc-binary = ["ipc", "dep:postcard"]
 ipc-msgpack = ["ipc", "dep:rmp-serde"]
 # #lzspecbase64: over the JSON codec, encode `Inline`/`Payload` byte arrays as
@@ -117,6 +121,7 @@ base64 = { version = "0.22", optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
 libc = { version = "0.2", optional = true }
 parking_lot = { version = "0.12", optional = true }
+postgres = { version = "0.19", optional = true, features = ["with-serde_json-1"] }
 postcard = { version = "1", optional = true, features = ["alloc"] }
 prost = { version = "0.14.4", optional = true }
 rmp-serde = { version = "1", optional = true }

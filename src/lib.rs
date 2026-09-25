@@ -98,6 +98,8 @@ mod crdt_tree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
 mod durable_owner;
+#[cfg(feature = "durable-postgres")]
+mod durable_postgres;
 mod effect;
 mod egress;
 mod egress_core;
@@ -265,7 +267,14 @@ pub use durable_owner::{
     DurableOwnerCore, DurableOwnerId, DurableOwnerImage, DurableOwnerMode, DurableOwnerStore,
     DurablePosition, DurableProjectionFingerprint, DurableReceipt, DurableReceiptIntent,
     DurableReceiptOutcome, DurableRecord, DurableStateMutation, EffectIdentity, FenceToken,
-    InboxIdentity, ProjectionCompleteness, ReceiptIdentity, SchemaVersion, VersionedBytes,
+    InboxIdentity, ProjectionCompleteness, ReceiptIdentity, SchemaVersion, TimerIdentity,
+    VersionedBytes,
+};
+#[cfg(feature = "durable-postgres")]
+pub use durable_postgres::{
+    DurableProjectionUpdate, DurableTimerChange, DurableTimerRecord, POSTGRES_DURABLE_MIGRATION,
+    PostgresDurableError, PostgresDurableHost, PostgresDurableOwner, PostgresDurableUnitOfWork,
+    PostgresOutboxClaim, PostgresRetryPolicy, StoredProjection,
 };
 pub use effect::{Effect, EffectCallbackResult};
 pub use egress::{EgressCell, EgressTransport};
