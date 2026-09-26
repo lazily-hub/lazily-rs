@@ -97,6 +97,8 @@ mod crdt_plane;
 mod crdt_tree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
+#[cfg(feature = "durable-jetstream")]
+mod durable_jetstream;
 mod durable_owner;
 #[cfg(feature = "durable-postgres")]
 mod durable_postgres;
@@ -261,6 +263,12 @@ pub use crdt_plane::CrdtPlaneRuntime;
 pub use crdt_tree::CrdtTree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
+#[cfg(feature = "durable-jetstream")]
+pub use durable_jetstream::{
+    JetStreamAdapterError, JetStreamDeadLetterSink, JetStreamDelivery, JetStreamDeliveryMetadata,
+    JetStreamEnvelope, JetStreamIngress, JetStreamIngressConfig, JetStreamOutboxRelay,
+    JetStreamPublication, JetStreamPublisher, JetStreamRelayOutcome, JetStreamWakeupSource,
+};
 pub use durable_owner::{
     CodecVersion, DurableCommit, DurableCommitOutcome, DurableContractError, DurableEffect,
     DurableEffectIntent, DurableEffectOutcome, DurableFingerprintError, DurableInboxRecord,
@@ -274,7 +282,7 @@ pub use durable_owner::{
 pub use durable_postgres::{
     DurableProjectionUpdate, DurableTimerChange, DurableTimerRecord, POSTGRES_DURABLE_MIGRATION,
     PostgresDurableError, PostgresDurableHost, PostgresDurableOwner, PostgresDurableUnitOfWork,
-    PostgresOutboxClaim, PostgresRetryPolicy, StoredProjection,
+    PostgresIngressDisposition, PostgresOutboxClaim, PostgresRetryPolicy, StoredProjection,
 };
 pub use effect::{Effect, EffectCallbackResult};
 pub use egress::{EgressCell, EgressTransport};

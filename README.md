@@ -153,6 +153,16 @@ until a publication receipt is durably recorded. Run
 `./scripts/test-durable-postgres.sh` to exercise rollback, serialization retry,
 crash redelivery, relay retry, and full-history recovery against PostgreSQL.
 
+The `durable-jetstream` feature adds typed NATS JetStream pull ingress and an
+outbox publisher without moving durable authority out of PostgreSQL. A delivery
+is acknowledged only after its unit of work commits; redelivery enters through
+the same inbox identity, and publications use a stable `Nats-Msg-Id` until their
+PostgreSQL receipt is stored. Progress ACKs extend only the broker lease,
+`MaxAckPending` bounds in-flight work, drain stops new pulls, and poison messages
+are durably classified before TERM. See [the JetStream transport contract](docs/durable-jetstream.md)
+and run `./scripts/test-durable-jetstream.sh` for the real NATS/PostgreSQL crash
+window corpus.
+
 ### Decorator-style typed factories
 
 `#[lazily::source]` and `#[lazily::computed]` provide the same factory style as

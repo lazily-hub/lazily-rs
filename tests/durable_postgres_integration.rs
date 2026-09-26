@@ -24,6 +24,7 @@ fn reset_database() -> PostgresDurableHost {
         .batch_execute(
             "DROP FUNCTION IF EXISTS lazily_fail_first_serializable() CASCADE;
              DROP SEQUENCE IF EXISTS lazily_retry_once;
+             DROP TABLE IF EXISTS lazily_durable_ingress_disposition;
              DROP TABLE IF EXISTS lazily_durable_timer;
              DROP TABLE IF EXISTS lazily_durable_outbox;
              DROP TABLE IF EXISTS lazily_durable_owner;",

@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS lazily_durable_timer (
 
 CREATE INDEX IF NOT EXISTS lazily_durable_timer_due
     ON lazily_durable_timer (deadline_epoch_millis, owner_id, timer_id);
+
+CREATE TABLE IF NOT EXISTS lazily_durable_ingress_disposition (
+    transport TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome = 'poison'),
+    diagnostic TEXT NOT NULL,
+    payload BYTEA NOT NULL,
+    disposed_at_epoch_millis BIGINT NOT NULL,
+    PRIMARY KEY (transport, delivery_id)
+);
 "#;
 
 #[derive(Debug)]
@@ -93,6 +103,7 @@ pub enum PostgresDurableError {
         actual: u64,
     },
     DuplicateTimerIdentity(TimerIdentity),
+    IngressDispositionConflict,
     Conversion(&'static str),
     RetryExhausted {
         attempts: u32,
@@ -125,6 +136,9 @@ impl fmt::Display for PostgresDurableError {
                     "timer identity {:?} is repeated in one commit",
                     identity
                 )
+            }
+            Self::IngressDispositionConflict => {
+                write!(formatter, "durable ingress disposition identity conflict")
             }
             Self::Conversion(message) => {
                 write!(formatter, "durable Postgres conversion: {message}")
@@ -225,6 +239,17 @@ pub struct StoredProjection {
     pub version: u64,
     pub payload: VersionedBytes,
     pub fingerprint: Vec<u8>,
+}
+
+/// Transport-neutral durable poison disposition. Persisting this record is a
+/// prerequisite for terminal broker handling; it is not a broker ACK.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresIngressDisposition {
+    pub transport: String,
+    pub delivery_id: String,
+    pub diagnostic: String,
+    pub payload: Vec<u8>,
+    pub disposed_at_epoch_millis: i64,
 }
 
 /// Multi-owner reference host. The synchronous `postgres` client is wrapped in
@@ -497,6 +522,69 @@ impl PostgresDurableHost {
         }
         transaction.commit()?;
         Ok(outcome)
+    }
+
+    /// Persist a terminal poison disposition independently of broker state.
+    /// Repeating identical bytes is idempotent; identity reuse with different
+    /// diagnostic or payload bytes fails closed.
+    pub fn record_ingress_poison(
+        &self,
+        disposition: &PostgresIngressDisposition,
+    ) -> Result<bool, PostgresDurableError> {
+        if disposition.transport.is_empty() || disposition.delivery_id.is_empty() {
+            return Err(PostgresDurableError::Conversion(
+                "ingress disposition needs transport and delivery identity",
+            ));
+        }
+        let mut client = self.client.borrow_mut();
+        let inserted = client.execute(
+            "INSERT INTO lazily_durable_ingress_disposition
+			    (transport, delivery_id, outcome, diagnostic, payload, disposed_at_epoch_millis)
+			 VALUES ($1, $2, 'poison', $3, $4, $5)
+			 ON CONFLICT (transport, delivery_id) DO NOTHING",
+            &[
+                &disposition.transport,
+                &disposition.delivery_id,
+                &disposition.diagnostic,
+                &disposition.payload,
+                &disposition.disposed_at_epoch_millis,
+            ],
+        )?;
+        if inserted == 1 {
+            return Ok(true);
+        }
+        let row = client.query_one(
+            "SELECT diagnostic, payload FROM lazily_durable_ingress_disposition
+			 WHERE transport = $1 AND delivery_id = $2",
+            &[&disposition.transport, &disposition.delivery_id],
+        )?;
+        let diagnostic: String = row.get(0);
+        let payload: Vec<u8> = row.get(1);
+        if diagnostic == disposition.diagnostic && payload == disposition.payload {
+            Ok(false)
+        } else {
+            Err(PostgresDurableError::IngressDispositionConflict)
+        }
+    }
+
+    pub fn load_ingress_poison(
+        &self,
+        transport: &str,
+        delivery_id: &str,
+    ) -> Result<Option<PostgresIngressDisposition>, PostgresDurableError> {
+        let row = self.client.borrow_mut().query_opt(
+            "SELECT diagnostic, payload, disposed_at_epoch_millis
+			 FROM lazily_durable_ingress_disposition
+			 WHERE transport = $1 AND delivery_id = $2",
+            &[&transport, &delivery_id],
+        )?;
+        Ok(row.map(|row| PostgresIngressDisposition {
+            transport: transport.to_owned(),
+            delivery_id: delivery_id.to_owned(),
+            diagnostic: row.get(0),
+            payload: row.get(1),
+            disposed_at_epoch_millis: row.get(2),
+        }))
     }
 
     pub fn advance_owner_fence(
@@ -1083,6 +1171,8 @@ mod tests {
     #[test]
     fn migration_uses_skip_locked_and_durable_claim_columns() {
         assert!(POSTGRES_DURABLE_MIGRATION.contains("claim_until_epoch_millis"));
+        assert!(POSTGRES_DURABLE_MIGRATION.contains("lazily_durable_ingress_disposition"));
+        assert!(POSTGRES_DURABLE_MIGRATION.contains("PRIMARY KEY (transport, delivery_id)"));
         let claim_sql = include_str!("durable_postgres.rs");
         assert!(claim_sql.contains("FOR UPDATE SKIP LOCKED"));
         assert!(claim_sql.contains("ORDER BY accepted_at, owner_id, effect_id"));

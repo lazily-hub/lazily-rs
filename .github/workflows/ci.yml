@@ -357,6 +357,9 @@ jobs:
       - name: Test PostgreSQL durable owner transaction and relay recovery
         run: ./scripts/test-durable-postgres.sh
 
+      - name: Test NATS JetStream durable transport crash windows
+        run: ./scripts/test-durable-jetstream.sh
+
       # All three map flavors. Under anything narrower than --all-features this
       # binary reports "running 0 tests" and exits 0.
       - name: Test keyed collections family conformance across all three flavors

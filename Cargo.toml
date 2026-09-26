@@ -52,6 +52,10 @@ durable-sqlite = ["ipc", "dep:rusqlite"]
 # transaction boundary explicit; async scheduling belongs to the later runner
 # phase rather than the persistence contract.
 durable-postgres = ["serde", "dep:postgres", "dep:serde_json"]
+# Pull-based JetStream transport over the Postgres durable-owner authority.
+# Broker delivery never authorizes state: durable-postgres is deliberately
+# included so commit-before-ACK cannot be assembled without the authority host.
+durable-jetstream = ["durable-postgres", "tokio", "dep:async-nats", "dep:futures-util"]
 ipc-binary = ["ipc", "dep:postcard"]
 ipc-msgpack = ["ipc", "dep:rmp-serde"]
 # #lzspecbase64: over the JSON codec, encode `Inline`/`Payload` byte arrays as
@@ -117,6 +121,7 @@ scale-compare = ["dep:leptos_reactive"]
 lazily-macros = { version = "=0.23.0", path = "macros" }
 leptos_reactive = { version = "0.6", optional = true }
 arc-swap = "1"
+async-nats = { version = "0.50", optional = true }
 base64 = { version = "0.22", optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
 libc = { version = "0.2", optional = true }
