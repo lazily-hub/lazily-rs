@@ -1,0 +1,7 @@
+@lazily/signaling
+Copyright 2025-2026 Brian Takita and Lazily contributors
+
+This package is distributed under the Apache License, Version 2.0.
+
+Third-party development dependencies remain subject to their respective license
+and notice terms. Dependency metadata is retained in package-lock.json.

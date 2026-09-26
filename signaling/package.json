@@ -3,14 +3,23 @@
   "version": "0.1.0",
   "description": "Cloudflare Worker signaling server + client for lazily-distributed peer discovery (#yxjw/#s0fc)",
   "type": "module",
-  "license": "MIT",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lazily-hub/lazily-rs.git",
+    "directory": "signaling"
+  },
+  "homepage": "https://github.com/lazily-hub/lazily-rs/tree/main/signaling",
+  "bugs": "https://github.com/lazily-hub/lazily-rs/issues",
   "exports": {
     "./client": "./src/client.ts",
     "./protocol": "./src/protocol.ts"
   },
   "files": [
     "src/client.ts",
-    "src/protocol.ts"
+    "src/protocol.ts",
+    "LICENSE",
+    "NOTICE"
   ],
   "publishConfig": {
     "access": "public"

@@ -1,0 +1,9 @@
+lazily-rs
+Copyright 2025-2026 Brian Takita and Lazily contributors
+
+This product includes independently authored runtime libraries, procedural
+macros, examples, benchmark support, and signaling components distributed under
+the Apache License, Version 2.0.
+
+Third-party dependencies remain subject to their respective license and notice
+terms. Dependency metadata is retained in the repository lockfiles.

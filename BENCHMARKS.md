@@ -877,4 +877,4 @@ lazily is implemented across three languages with shared semantics:
 
 ## License
 
-MIT
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
