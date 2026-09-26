@@ -93,6 +93,9 @@ jobs:
       - name: Check formatting
         run: cargo +stable fmt --all --check
 
+      - name: Check dependency licenses and durable-runtime provenance
+        run: python3 scripts/dependency-inventory.py --check
+
       - name: Clippy
         run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
 

@@ -160,6 +160,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"clippy"
 	"conformance-coverage"
 	"conformance-manifest-reset"
+	"dependency-inventory-check"
 	"fmt"
 	"test"
 	"test-async"
@@ -408,6 +409,7 @@ EXPECTED_NO_GATE_TARGETS=(
 # CI step must edit it, and the guard says so by name.
 EXPECTED_GATE_STEPS=(
 	"fmt	Check formatting"
+	"dependency-inventory-check	Check dependency licenses and durable-runtime provenance"
 	"clippy	Clippy"
 	"build	Build"
 	"test	Test default features"
@@ -465,7 +467,7 @@ EXPECTED_GATE_STEPS=(
 # directions -- because refusing a member a gate-step entry is NOT the same as
 # pinning that it is make-invoked, and the difference is a measured false green.
 #
-# The map above fixes 46 members. This set fixes the other 4. Before it existed,
+# The map above fixes 47 members. This set fixes the other 4. Before it existed,
 # "which members are make-invoked" was fixed only as the COMPLEMENT of the map --
 # and a population pinned only as another population's complement is not pinned
 # against an edit that moves BOTH TOGETHER (lazily-dart's formulation, after
