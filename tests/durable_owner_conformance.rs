@@ -2,13 +2,17 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::Expect;
 use lazily::{
-    CodecVersion, DurableCommit, DurableCommitOutcome, DurableContractError, DurableEffectIntent,
+    CodecVersion, CompleteHistoryEvent, CompleteHistoryOperation, CompleteHistoryProjector,
+    DurableCommit, DurableCommitOutcome, DurableContractError, DurableEffectIntent,
     DurableEffectOutcome, DurableOwnerCore, DurableOwnerId, DurableOwnerMode, DurablePosition,
     DurableProjectionFingerprint, DurableReceiptIntent, DurableReceiptOutcome,
-    DurableStateMutation, EffectIdentity, FenceToken, InboxIdentity, ReceiptIdentity, ReplayValue,
-    SchemaVersion, VersionedBytes,
+    DurableStateMutation, EffectIdentity, FenceToken, InboxIdentity, ProjectionCheckpoint,
+    ProjectionHealth, ReceiptIdentity, ReconciliationReport, ReplayValue, SchemaVersion,
+    VersionedBytes,
 };
 use serde_json::{Value, json};
 
@@ -320,6 +324,39 @@ fn relation<T: PartialEq>(left: &T, right: &T) -> &'static str {
     if left == right { "equal" } else { "different" }
 }
 
+fn reconciliation_checkpoint(value: &Value) -> ProjectionCheckpoint {
+    let entries = value["entries"]
+        .as_array()
+        .expect("projection entries are an array")
+        .iter()
+        .map(|entry| {
+            (
+                text(entry, "entity_id").to_owned(),
+                text(entry, "value").as_bytes().to_vec(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    ProjectionCheckpoint {
+        source_position: DurablePosition::new(number(value, "through")),
+        projection_version: number(value, "projection_version"),
+        entries,
+    }
+}
+
+fn reconciliation_event(value: &Value) -> CompleteHistoryEvent {
+    let operation = match text(value, "type") {
+        "create" => CompleteHistoryOperation::Create(text(value, "value").as_bytes().to_vec()),
+        "amend" => CompleteHistoryOperation::Amend(text(value, "value").as_bytes().to_vec()),
+        "retract" => CompleteHistoryOperation::Retract,
+        other => panic!("unknown projection operation `{other}`"),
+    };
+    CompleteHistoryEvent {
+        position: DurablePosition::new(number(value, "position")),
+        entity_id: text(value, "entity_id").to_owned(),
+        operation,
+    }
+}
+
 #[test]
 fn operation_fixtures_replay_against_the_reference_core() {
     replay_operations("atomic_crash_boundary.json");
@@ -423,4 +460,105 @@ fn projection_fingerprint_fixture_separates_content_from_history() {
         different_relations > 0,
         "fixture exercises a different control"
     );
+}
+
+#[test]
+fn complete_history_reconciliation_fixture_proves_resume_health_and_authority() {
+    let name = "projection_fingerprint.json";
+    let path = format!("{SPEC_DIR}/{name}");
+    let fixture = load_fixture(name);
+    for (_, scenario_id, scenario) in common::scenarios(&path, &fixture) {
+        let scenario = scenario.value();
+        let Some(cases) = scenario.get("reconciliation_cases") else {
+            continue;
+        };
+        for case in cases.as_array().expect("reconciliation cases are an array") {
+            let case_id = text(case, "id");
+            let history = case["history"]
+                .as_array()
+                .expect("reconciliation history is an array")
+                .iter()
+                .map(reconciliation_event)
+                .collect::<Vec<_>>();
+            let checkpoint = if case["resume_from"].is_null() {
+                ProjectionCheckpoint::default()
+            } else {
+                reconciliation_checkpoint(&case["resume_from"])
+            };
+            let rebuilt = CompleteHistoryProjector::resume(checkpoint, &history)
+                .expect("canonical reconciliation history replays");
+            assert_eq!(rebuilt, reconciliation_checkpoint(&case["expected"]));
+            let expected = Expect::new(
+                &path,
+                format!("{scenario_id}.reconciliation_cases.{case_id}.expected"),
+                &case["expected"],
+            );
+            expected.assert_key("through", rebuilt.source_position.get());
+            expected.assert_key("projection_version", rebuilt.projection_version);
+            expected.assert_key(
+                "entries",
+                rebuilt
+                    .entries
+                    .iter()
+                    .map(|(entity_id, value)| {
+                        json!({
+                            "entity_id": entity_id,
+                            "value": String::from_utf8(value.clone())
+                                .expect("fixture projection values are UTF-8")
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            );
+
+            let report = ReconciliationReport::dry_run(
+                rebuilt,
+                reconciliation_checkpoint(&case["observed_projection"]),
+            );
+            let owner_id = DurableOwnerId::new(text(scenario, "owner_id")).unwrap();
+            let mut repair_commit = DurableCommit {
+                owner_id: owner_id.clone(),
+                expected_position: report.expected.source_position,
+                fence: FenceToken::new(number(scenario, "fence")),
+                inbox_identity: InboxIdentity::new(format!("reconcile/{case_id}")).unwrap(),
+                ingress_fingerprint: case_id.as_bytes().to_vec(),
+                state: DurableStateMutation::AppendEvents(vec![VersionedBytes::new(
+                    SchemaVersion::new(1).unwrap(),
+                    CodecVersion::new(1).unwrap(),
+                    b"schedule-reconciliation",
+                )]),
+                effects: Vec::new(),
+                receipts: Vec::new(),
+            };
+            let _ = report
+                .schedule_reconciliation(
+                    &owner_id,
+                    &mut repair_commit,
+                    SchemaVersion::new(1).unwrap(),
+                    CodecVersion::new(1).unwrap(),
+                )
+                .expect("stable reconciliation identity");
+            let effect_id = report
+                .reconciliation_effect_identity(&owner_id)
+                .expect("stable reconciliation identity");
+
+            let expect = Expect::new(
+                &path,
+                format!("{scenario_id}.reconciliation_cases.{case_id}.expect"),
+                &case["expect"],
+            );
+            expect.assert_key(
+                "health",
+                match report.health {
+                    ProjectionHealth::Healthy => "healthy",
+                    ProjectionHealth::Lagging => "lagging",
+                    ProjectionHealth::Drifted => "drifted",
+                },
+            );
+            expect.assert_key("drift", report.drift);
+            expect.assert_key("lag", report.lag);
+            expect.assert_key("transition_authority", "durable_owner");
+            expect.assert_key("reconciliation_effect_id", effect_id.as_str());
+            assert!(!report.read_authority.may_authorize_transition());
+        }
+    }
 }

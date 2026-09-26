@@ -241,6 +241,14 @@ pub struct StoredProjection {
     pub fingerprint: Vec<u8>,
 }
 
+/// Owner authority and advisory projection read from one PostgreSQL statement
+/// snapshot. Only `owner` may be used to authorize a transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionConsistentSnapshot {
+    pub owner: DurableOwnerImage,
+    pub projection: Option<StoredProjection>,
+}
+
 /// Transport-neutral durable poison disposition. Persisting this record is a
 /// prerequisite for terminal broker handling; it is not a broker ACK.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,6 +380,42 @@ impl PostgresDurableHost {
             ),
             fingerprint: row.get(4),
         }))
+    }
+
+    /// Load owner authority and its projection metadata from the same row and
+    /// PostgreSQL statement snapshot. This prevents a reconciliation pass from
+    /// comparing values observed at different transaction frontiers.
+    pub fn load_transaction_consistent_snapshot(
+        &self,
+        owner_id: &DurableOwnerId,
+    ) -> Result<Option<TransactionConsistentSnapshot>, PostgresDurableError> {
+        let row = self.client.borrow_mut().query_opt(
+            "SELECT image_json, projection_version, projection_schema_version,
+                    projection_codec_version, projection_bytes, projection_fingerprint
+             FROM lazily_durable_owner WHERE owner_id = $1",
+            &[&owner_id.as_str()],
+        )?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let owner = decode_image(row.get(0))?;
+        let version: i64 = row.get(1);
+        let projection = if version == 0 {
+            None
+        } else {
+            let schema: i32 = row.get(2);
+            let codec: i32 = row.get(3);
+            Some(StoredProjection {
+                version: from_i64(version, "negative projection version")?,
+                payload: VersionedBytes::new(
+                    SchemaVersion::new(to_u32(schema, "invalid projection schema version")?)?,
+                    CodecVersion::new(to_u32(codec, "invalid projection codec version")?)?,
+                    row.get::<_, Vec<u8>>(4),
+                ),
+                fingerprint: row.get(5),
+            })
+        };
+        Ok(Some(TransactionConsistentSnapshot { owner, projection }))
     }
 
     pub fn load_timers(

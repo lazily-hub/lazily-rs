@@ -3,12 +3,13 @@
 use std::env;
 
 use lazily::{
-    CodecVersion, DurableCommit, DurableCommitOutcome, DurableEffectIntent, DurableEffectOutcome,
-    DurableOwnerId, DurableOwnerMode, DurablePosition, DurableProjectionUpdate,
-    DurableReceiptIntent, DurableStateMutation, DurableTimerChange, DurableTimerRecord,
-    EffectIdentity, FenceToken, InboxIdentity, PostgresDurableError, PostgresDurableHost,
-    PostgresDurableUnitOfWork, PostgresRetryPolicy, ReceiptIdentity, SchemaVersion, TimerIdentity,
-    VersionedBytes,
+    CodecVersion, CompleteHistoryEvent, CompleteHistoryOperation, CompleteHistoryProjector,
+    DurableCommit, DurableCommitOutcome, DurableEffectIntent, DurableEffectOutcome, DurableOwnerId,
+    DurableOwnerMode, DurablePosition, DurableProjectionUpdate, DurableReceiptIntent,
+    DurableStateMutation, DurableTimerChange, DurableTimerRecord, EffectIdentity, FenceToken,
+    InboxIdentity, PostgresDurableError, PostgresDurableHost, PostgresDurableUnitOfWork,
+    PostgresRetryPolicy, ProjectionCheckpoint, ReceiptIdentity, ReconciliationReport,
+    SchemaVersion, TimerIdentity, VersionedBytes,
 };
 use postgres::{Client, NoTls};
 
@@ -273,4 +274,77 @@ fn full_event_history_rebuild_survives_multiple_commits() {
     );
     assert_eq!(rebuilt.history[0].payload.bytes, b"create");
     assert_eq!(rebuilt.history[1].payload.bytes, b"amend");
+}
+
+#[test]
+fn reconciliation_snapshot_and_repair_share_the_transactional_boundary() {
+    let host = reset_database();
+    let owner_id = DurableOwnerId::new("reconciliation-owner").unwrap();
+    host.create_owner(
+        owner_id.clone(),
+        DurableOwnerMode::EventHistory,
+        FenceToken::new(1),
+    )
+    .unwrap();
+
+    let expected = CompleteHistoryProjector::rebuild(&[CompleteHistoryEvent {
+        position: DurablePosition::new(1),
+        entity_id: "document".into(),
+        operation: CompleteHistoryOperation::Create(b"canonical".to_vec()),
+    }])
+    .unwrap();
+    let report = ReconciliationReport::dry_run(expected.clone(), ProjectionCheckpoint::default());
+    assert!(!report.read_authority.may_authorize_transition());
+
+    let mut owner_commit = commit(
+        &owner_id,
+        "reconcile-inbox",
+        0,
+        "create:document:canonical",
+        "discarded-helper-effect",
+    );
+    owner_commit.effects.clear();
+    assert!(
+        report
+            .schedule_reconciliation(
+                &owner_id,
+                &mut owner_commit,
+                SchemaVersion::new(1).unwrap(),
+                CodecVersion::new(1).unwrap(),
+            )
+            .unwrap()
+    );
+    let work = PostgresDurableUnitOfWork {
+        commit: owner_commit.clone(),
+        projection: Some(DurableProjectionUpdate {
+            version: 1,
+            payload: payload("projection:document:canonical"),
+            fingerprint: expected.canonical_bytes(),
+        }),
+        timers: Vec::new(),
+    };
+    assert!(matches!(
+        host.commit_unit_of_work(work.clone()).unwrap(),
+        DurableCommitOutcome::Committed { .. }
+    ));
+
+    let snapshot = host
+        .load_transaction_consistent_snapshot(&owner_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.owner.position, DurablePosition::new(1));
+    let projection = snapshot.projection.unwrap();
+    assert_eq!(projection.version, 1);
+    assert_eq!(projection.fingerprint, expected.canonical_bytes());
+
+    assert!(matches!(
+        host.commit_unit_of_work(work).unwrap(),
+        DurableCommitOutcome::Duplicate { .. }
+    ));
+    let claims = host.claim_outbox("reconciler", 0, 100, 10).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(
+        claims[0].effect.identity.as_str(),
+        "reconcile/reconciliation-owner/1"
+    );
 }

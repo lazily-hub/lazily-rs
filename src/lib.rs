@@ -102,6 +102,7 @@ mod durable_jetstream;
 mod durable_owner;
 #[cfg(feature = "durable-postgres")]
 mod durable_postgres;
+mod durable_reconciliation;
 mod effect;
 mod egress;
 mod egress_core;
@@ -283,6 +284,11 @@ pub use durable_postgres::{
     DurableProjectionUpdate, DurableTimerChange, DurableTimerRecord, POSTGRES_DURABLE_MIGRATION,
     PostgresDurableError, PostgresDurableHost, PostgresDurableOwner, PostgresDurableUnitOfWork,
     PostgresIngressDisposition, PostgresOutboxClaim, PostgresRetryPolicy, StoredProjection,
+    TransactionConsistentSnapshot,
+};
+pub use durable_reconciliation::{
+    CompleteHistoryEvent, CompleteHistoryOperation, CompleteHistoryProjector, ProjectionCheckpoint,
+    ProjectionHealth, ProjectionReadAuthority, ProjectionReplayError, ReconciliationReport,
 };
 pub use effect::{Effect, EffectCallbackResult};
 pub use egress::{EgressCell, EgressTransport};
