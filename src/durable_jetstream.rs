@@ -15,10 +15,10 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CodecVersion, DurableCommitOutcome, DurableEffectOutcome, DurableReceiptIntent,
-    DurableReceiptOutcome, PostgresDurableError, PostgresDurableHost, PostgresDurableUnitOfWork,
-    PostgresIngressDisposition, PostgresOutboxClaim, ReceiptIdentity, SchemaVersion,
-    VersionedBytes,
+    CodecVersion, DurableCommitOutcome, DurableEffectOutcome, DurableEnvelope,
+    DurableReceiptIntent, DurableReceiptOutcome, PostgresDurableError, PostgresDurableHost,
+    PostgresDurableUnitOfWork, PostgresIngressDisposition, PostgresOutboxClaim, ReceiptIdentity,
+    SchemaVersion, VersionedBytes,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +112,30 @@ impl JetStreamEnvelope {
             codec_version,
             self.payload.clone(),
         ))
+    }
+}
+
+impl From<DurableEnvelope> for JetStreamEnvelope {
+    fn from(envelope: DurableEnvelope) -> Self {
+        Self {
+            protocol_version: envelope.protocol_version,
+            message_id: envelope.message_id,
+            schema_version: envelope.schema_version,
+            codec_version: envelope.codec_version,
+            payload: envelope.payload,
+        }
+    }
+}
+
+impl From<JetStreamEnvelope> for DurableEnvelope {
+    fn from(envelope: JetStreamEnvelope) -> Self {
+        Self {
+            protocol_version: envelope.protocol_version,
+            message_id: envelope.message_id,
+            schema_version: envelope.schema_version,
+            codec_version: envelope.codec_version,
+            payload: envelope.payload,
+        }
     }
 }
 
@@ -560,5 +584,28 @@ impl JetStreamWakeupSource {
 
     pub async fn next(&self) -> Option<()> {
         self.subscriber.lock().await.next().await.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JetStreamEnvelope;
+    use crate::{CodecVersion, DurableEnvelope, SchemaVersion, VersionedBytes};
+
+    #[test]
+    fn legacy_envelope_is_wire_identical_to_durable_client_v1() {
+        let payload = VersionedBytes::new(
+            SchemaVersion::new(7).expect("schema"),
+            CodecVersion::new(11).expect("codec"),
+            [0, 1, 127, 128, 255],
+        );
+        let legacy =
+            JetStreamEnvelope::new("sample-owner/message-1", &payload).expect("legacy envelope");
+        let portable: DurableEnvelope = legacy.clone().into();
+        assert_eq!(
+            serde_json::to_vec(&legacy).expect("legacy JSON"),
+            serde_json::to_vec(&portable).expect("portable JSON")
+        );
+        assert_eq!(JetStreamEnvelope::from(portable), legacy);
     }
 }

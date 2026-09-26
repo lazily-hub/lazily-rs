@@ -354,6 +354,9 @@ jobs:
           cargo +stable test --locked --features durable-sqlite --test durable_outbox
           cargo +stable test --locked --features durable-sqlite --lib outbox::
 
+      - name: Test lightweight durable client against canonical spec fixtures
+        run: cargo +stable test --locked --features durable-client --test durable_client_conformance
+
       - name: Test PostgreSQL durable owner transaction and relay recovery
         run: ./scripts/test-durable-postgres.sh
 

@@ -47,6 +47,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 | Message passing | ✅ | ✅ | ✅ | ✅ | ✅ | ~ | ✅ | ✅ | ✅ | — |
 | Reliable sync | ~ | ~ | ~ | ~ | ~ | ~ | ~ | ~ | ~ | — |
 | Durable owner | ✅ | — | — | — | — | — | — | — | — | — |
+| Durable capability tiers | ~ | ~ | ~ | ~ | ~ | ~ | ~ | ~ | ~ | ~ |
 | Distributed plane | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | Causal receipts | ~ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | Security boundary | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
@@ -63,7 +64,7 @@ canonical matrix with per-cell notes and platform carve-outs lives in
 
 **Roll-up rule:** a family cell is `✅` only when *every required* row in that family is `✅`; `~` when the family is mixed (some shipped or partial); `—` when no required row is shipped or partial; `⊘` only when every required row in the family is not applicable. Rows the spec marks **MAY** (`optional`) are excluded from the roll-up — declining an optional feature is not a gap.
 
-A family cell summarises 77 feature rows. For row-level marks, per-cell notes, and platform carve-outs see [the canonical coverage matrix in `lazily-spec`](https://github.com/lazily-hub/lazily-spec/blob/main/docs/coverage.md).
+A family cell summarises 82 feature rows. For row-level marks, per-cell notes, and platform carve-outs see [the canonical coverage matrix in `lazily-spec`](https://github.com/lazily-hub/lazily-spec/blob/main/docs/coverage.md).
 <!-- coverage-table:end -->
 
 CRDT convergence and the wire protocol are pinned by the shared conformance fixtures
@@ -144,6 +145,14 @@ exercises the same path in tests; the `durable-sqlite` feature adds
 `SqliteStore`/`SqliteOutbox`, partitioned by document hash, so acknowledged
 epochs remain pruned across process restarts.
 
+The `durable-client` feature adds the portable v1 durable envelope and a typed
+publish/observe client over an injected NATS-compatible transport. It has no
+database or broker dependency and never owns a durable transition. Its advisory
+helpers replay source-position order across delivery gaps, distinguish exact
+duplicates from identity conflicts, keep terminal owner receipts separate from
+transport acknowledgements, and compare projection fingerprints without
+promoting latest-state-only observations to complete history.
+
 The `durable-postgres` feature adds the reference multi-owner durable host. A
 serializable transaction claims an inbox identity and atomically persists the
 accepted owner image, projection version, effect intents, timer changes,
@@ -162,6 +171,11 @@ PostgreSQL receipt is stored. Progress ACKs extend only the broker lease,
 are durably classified before TERM. See [the JetStream transport contract](docs/durable-jetstream.md)
 and run `./scripts/test-durable-jetstream.sh` for the real NATS/PostgreSQL crash
 window corpus.
+
+The highest available Rust tier is `DistributedHost` when `durable-jetstream`
+is compiled (`durable-postgres` is implied). `compiled_durable_capability_tier`
+reports `Core`, `Client`, `DurableHost`, or `DistributedHost` for the actual
+feature set; Rust declares no `AcceleratedHost` implementation.
 
 ### Decorator-style typed factories
 

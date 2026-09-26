@@ -26,6 +26,11 @@ name = "lazily-interop-peer"
 path = "src/bin/lazily-interop-peer.rs"
 required-features = ["distributed", "webrtc"]
 
+[[test]]
+name = "durable_client_conformance"
+path = "tests/durable_client_conformance.rs"
+required-features = ["durable-client"]
+
 [features]
 # Thread-safe reactive context (lock-backed, Send + Sync). Required of any
 # binding whose platform exposes preemptive threading (lazily-spec §
@@ -48,6 +53,10 @@ ffi = ["ipc", "dep:serde_json"]
 instrumentation = []
 ipc = ["serde", "dep:serde_json"]
 durable-sqlite = ["ipc", "dep:rusqlite"]
+# Lightweight typed NATS wire client. The transport is injected and compatible
+# with NATS publish/observe semantics; it carries no durable-owner authority and
+# does not pull in a database or broker implementation.
+durable-client = ["serde", "dep:serde_json"]
 # Reference Postgres durable-owner host. The synchronous driver keeps the
 # transaction boundary explicit; async scheduling belongs to the later runner
 # phase rather than the persistence contract.
@@ -55,7 +64,7 @@ durable-postgres = ["serde", "dep:postgres", "dep:serde_json"]
 # Pull-based JetStream transport over the Postgres durable-owner authority.
 # Broker delivery never authorizes state: durable-postgres is deliberately
 # included so commit-before-ACK cannot be assembled without the authority host.
-durable-jetstream = ["durable-postgres", "tokio", "dep:async-nats", "dep:futures-util"]
+durable-jetstream = ["durable-client", "durable-postgres", "tokio", "dep:async-nats", "dep:futures-util"]
 ipc-binary = ["ipc", "dep:postcard"]
 ipc-msgpack = ["ipc", "dep:rmp-serde"]
 # #lzspecbase64: over the JSON codec, encode `Inline`/`Payload` byte arrays as

@@ -93,6 +93,7 @@ ci-reach \
 	test-reliable-sync-conformance \
 	test-protobuf-graph-boundary \
 	test-durable-outbox \
+	test-durable-client \
 	test-durable-postgres \
 	test-durable-jetstream \
 	test-collections-conformance \
@@ -122,7 +123,7 @@ test-registers-conformance \
 	instrumentation-profile \
 	benchmark-spread
 
-check: conformance-manifest-reset fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-interop-peer test-distributed-conformance test-ffi test-ffi-binary test-ipc test-ipc-binary test-json-base64 test-ipc-conformance test-codec-roundtrip-conformance test-nodeid-exact-range-conformance test-nodekey-null-leniency-conformance test-blob-backend-discriminator-conformance test-reliable-sync-conformance test-protobuf-graph-boundary test-durable-outbox test-durable-postgres test-durable-jetstream test-shm test-collections-conformance test-collections-family-conformance test-queue-family-conformance test-ingress-family-conformance test-egress-family-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-registers-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-evidence benchmark-check conformance-coverage assertion-ordering-check ci-reach
+check: conformance-manifest-reset fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-interop-peer test-distributed-conformance test-ffi test-ffi-binary test-ipc test-ipc-binary test-json-base64 test-ipc-conformance test-codec-roundtrip-conformance test-nodeid-exact-range-conformance test-nodekey-null-leniency-conformance test-blob-backend-discriminator-conformance test-reliable-sync-conformance test-protobuf-graph-boundary test-durable-outbox test-durable-client test-durable-postgres test-durable-jetstream test-shm test-collections-conformance test-collections-family-conformance test-queue-family-conformance test-ingress-family-conformance test-egress-family-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-registers-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-evidence benchmark-check conformance-coverage assertion-ordering-check ci-reach
 
 assertion-ordering-check:
 >$(PYTHON) ../lazily-spec/scripts/check-assertion-ordering.py --binding rs --root .
@@ -290,6 +291,11 @@ test-durable-outbox:
 # The sqlite store's own corrupt-row guard (#failclosedsweep) is a lib test:
 # `--test durable_outbox` cannot reach `rusqlite` to write a malformed row.
 >$(CARGO) test --locked --features durable-sqlite --lib outbox::
+
+# Lightweight durable client: typed envelope, injected compatible transport,
+# ordering/dedup/receipt/fingerprint corpus; no database or broker required.
+test-durable-client:
+>$(CARGO) test --locked --features durable-client --test durable_client_conformance
 
 # PostgreSQL durable-owner reference host (#lzdurablepg): starts an isolated
 # local server unless LAZILY_POSTGRES_URL already selects one.

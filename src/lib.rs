@@ -97,12 +97,15 @@ mod crdt_plane;
 mod crdt_tree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 mod distributed;
+#[cfg(feature = "durable-client")]
+mod durable_client;
 #[cfg(feature = "durable-jetstream")]
 mod durable_jetstream;
 mod durable_owner;
 #[cfg(feature = "durable-postgres")]
 mod durable_postgres;
 mod durable_reconciliation;
+mod durable_tier;
 mod effect;
 mod egress;
 mod egress_core;
@@ -264,6 +267,13 @@ pub use crdt_plane::CrdtPlaneRuntime;
 pub use crdt_tree::CrdtTree;
 #[cfg(any(feature = "distributed", feature = "ipc", feature = "signaling-client"))]
 pub use distributed::{NodeId, OpKind, PeerId, PeerPermissions, PermissionDenied, RemoteOp};
+#[cfg(feature = "durable-client")]
+pub use durable_client::{
+    AdvisoryProjectionOrder, CompatibleNatsTransport, DurableClient, DurableClientError,
+    DurableClientReceipt, DurableDeliveryClassification, DurableEnvelope,
+    DurableProjectionObservation, DurableReceiptStatus, ProjectionDelivery,
+    ProjectionObservationCompleteness, ProjectionOrderObservation, classify_durable_delivery,
+};
 #[cfg(feature = "durable-jetstream")]
 pub use durable_jetstream::{
     JetStreamAdapterError, JetStreamDeadLetterSink, JetStreamDelivery, JetStreamDeliveryMetadata,
@@ -290,6 +300,7 @@ pub use durable_reconciliation::{
     CompleteHistoryEvent, CompleteHistoryOperation, CompleteHistoryProjector, ProjectionCheckpoint,
     ProjectionHealth, ProjectionReadAuthority, ProjectionReplayError, ReconciliationReport,
 };
+pub use durable_tier::{DurableCapabilityTier, compiled_durable_capability_tier};
 pub use effect::{Effect, EffectCallbackResult};
 pub use egress::{EgressCell, EgressTransport};
 pub use egress_core::{
