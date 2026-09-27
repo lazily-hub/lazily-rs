@@ -64,6 +64,7 @@ conformance-coverage \
 assertion-ordering-check \
 dependency-inventory \
 dependency-inventory-check \
+default-build-dependency-check \
 ci-reach \
 	conformance-manifest-reset \
 	check \
@@ -125,13 +126,26 @@ test-registers-conformance \
 	instrumentation-profile \
 	benchmark-spread
 
-check: conformance-manifest-reset dependency-inventory-check fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-interop-peer test-distributed-conformance test-ffi test-ffi-binary test-ipc test-ipc-binary test-json-base64 test-ipc-conformance test-codec-roundtrip-conformance test-nodeid-exact-range-conformance test-nodekey-null-leniency-conformance test-blob-backend-discriminator-conformance test-reliable-sync-conformance test-protobuf-graph-boundary test-durable-outbox test-durable-client test-durable-postgres test-durable-jetstream test-shm test-collections-conformance test-collections-family-conformance test-queue-family-conformance test-ingress-family-conformance test-egress-family-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-registers-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-evidence benchmark-check conformance-coverage assertion-ordering-check ci-reach
+check: conformance-manifest-reset dependency-inventory-check default-build-dependency-check fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-interop-peer test-distributed-conformance test-ffi test-ffi-binary test-ipc test-ipc-binary test-json-base64 test-ipc-conformance test-codec-roundtrip-conformance test-nodeid-exact-range-conformance test-nodekey-null-leniency-conformance test-blob-backend-discriminator-conformance test-reliable-sync-conformance test-protobuf-graph-boundary test-durable-outbox test-durable-client test-durable-postgres test-durable-jetstream test-shm test-collections-conformance test-collections-family-conformance test-queue-family-conformance test-ingress-family-conformance test-egress-family-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-registers-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-evidence benchmark-check conformance-coverage assertion-ordering-check ci-reach
 
 dependency-inventory:
 >$(PYTHON) scripts/dependency-inventory.py --write --accept-current-review
 
 dependency-inventory-check:
 >$(PYTHON) scripts/dependency-inventory.py --check
+
+# `#lzdefaultgraphpin`: pin the DEFAULT-feature dependency graph. Every backend
+# and codec dependency here is optional, which is easy to assert in prose and
+# easy to lose in a diff -- an unconditional [build-dependencies] entry is
+# compiled for every build of the crate whether or not its feature is on, which
+# is how prost-build plus nine protoc-bin-vendored-* crates sat in the default
+# graph of a reactive-signals library (9 crates -> 45). The guard measures the
+# graph cargo resolves, and asserts the gated crates ARE reachable under
+# --all-features so an empty measurement cannot pass vacuously. Self-test first,
+# because a pin whose assertions cannot fail is worse than no pin.
+default-build-dependency-check:
+>$(PYTHON) scripts/default-build-dependency-guard.py --self-test
+>$(PYTHON) scripts/default-build-dependency-guard.py
 
 assertion-ordering-check:
 >$(PYTHON) ../lazily-spec/scripts/check-assertion-ordering.py --binding rs --root .

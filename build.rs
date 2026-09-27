@@ -1,9 +1,13 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=LAZILY_SPEC_DIR");
-    if std::env::var_os("CARGO_FEATURE_PROTOBUF").is_none() {
-        return;
-    }
+    #[cfg(feature = "protobuf")]
+    compile_graph_boundary_proto();
+}
 
+// `prost-build` and `protoc-bin-vendored` are optional build-dependencies gated
+// on `protobuf`, so this body must not be compiled without the feature.
+#[cfg(feature = "protobuf")]
+fn compile_graph_boundary_proto() {
     let spec_dir = std::env::var_os("LAZILY_SPEC_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("../lazily-spec"));

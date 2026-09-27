@@ -74,7 +74,12 @@ ipc-msgpack = ["ipc", "dep:rmp-serde"]
 json-base64 = ["ffi", "dep:base64"]
 # Optional generated Protobuf encoding of the canonical graph-boundary algebra.
 # The feature adds message transport only; semantic admission remains native.
-protobuf = ["dep:prost"]
+# `dep:prost-build` / `dep:protoc-bin-vendored` name the optional
+# [build-dependencies] of the same names: without this feature the codegen
+# toolchain is not resolved at all, so a default build never downloads or
+# compiles the nine vendored `protoc` binaries. See
+# scripts/default-build-dependency-guard.py, which measures that.
+protobuf = ["dep:prost", "dep:prost-build", "dep:protoc-bin-vendored"]
 # Loom model tests for the thread-safe context. Implies `thread-safe` so the
 # model has something to test.
 loom = ["thread-safe"]
@@ -162,9 +167,14 @@ serde_json = "1"
 syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 
+# Optional and gated on `protobuf`. Unconditional build-dependencies are still
+# resolved, downloaded, and compiled for every build of this crate, so leaving
+# these ungated put prost-build plus all nine `protoc-bin-vendored-*` platform
+# crates (each embedding a full protoc binary) into the DEFAULT dependency graph
+# of a reactive-signals library.
 [build-dependencies]
-prost-build = "0.14.4"
-protoc-bin-vendored = "3.2.0"
+prost-build = { version = "0.14.4", optional = true }
+protoc-bin-vendored = { version = "3.2.0", optional = true }
 
 [[example]]
 name = "tokio_sync"

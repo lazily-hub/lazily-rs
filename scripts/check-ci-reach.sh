@@ -131,8 +131,8 @@ CONF="${CI_REACH_CONF:-scripts/ci-reach.conf}"
 # already means exact equality, so `MIN_`, `MAX_` or `KNOWN_` would misdescribe
 # what is checked here.
 #
-# The pin holds the WHOLE discovered closure — all 52 names, which is today's
-# 50 reached + 0 excused + 2 carrying no gate. The two gateless members (`check`
+# The pin holds the WHOLE discovered closure — all 57 names, which is today's
+# 55 reached + 0 excused + 2 carrying no gate. The two gateless members (`check`
 # itself and `conformance-manifest-reset`) are pinned too, deliberately: "no
 # gate" is the category an unreadable or emptied recipe gets reported as, so
 # leaving those names unpinned would leave a hole exactly where one of the
@@ -160,6 +160,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"clippy"
 	"conformance-coverage"
 	"conformance-manifest-reset"
+	"default-build-dependency-check"
 	"dependency-inventory-check"
 	"fmt"
 	"test"
@@ -410,6 +411,7 @@ EXPECTED_NO_GATE_TARGETS=(
 EXPECTED_GATE_STEPS=(
 	"fmt	Check formatting"
 	"dependency-inventory-check	Check dependency licenses and durable-runtime provenance"
+	"default-build-dependency-check	Default-feature dependency graph pin (#lzdefaultgraphpin)"
 	"clippy	Clippy"
 	"build	Build"
 	"test	Test default features"
