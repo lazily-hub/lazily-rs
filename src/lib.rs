@@ -147,6 +147,7 @@ mod seq_crdt;
 mod service;
 #[cfg(feature = "signaling-client")]
 mod signaling_client;
+mod sim_consumer;
 mod spill;
 mod stable_id;
 mod state_machine;
@@ -441,6 +442,14 @@ pub use service::{
 };
 #[cfg(feature = "signaling-client")]
 pub use signaling_client::{ClientMessage, ServerMessage, SignalingClient, SignalingError};
+pub use sim_consumer::{
+    SimConsumerAction, SimConsumerAdapter, SimConsumerAdapterEvidence, SimConsumerAdapterKind,
+    SimConsumerCallbackResult, SimConsumerCallbacks, SimConsumerCheckpoint, SimConsumerError,
+    SimConsumerExternalPort, SimConsumerExternalSelection, SimConsumerGeneratedAction,
+    SimConsumerObservation, SimConsumerPort, SimConsumerPortDeterminism, SimConsumerRunResult,
+    SimConsumerScenario, SimConsumerTestkit, SimConsumerTestkitSpec, SimConsumerTraceEntry,
+    SimConsumerWorldEvidence,
+};
 #[allow(deprecated)]
 pub use source_tree::CellTree;
 pub use source_tree::SourceTree;
