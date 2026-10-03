@@ -7,20 +7,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Generic receipt outcomes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-pub enum ReceiptOutcome {
-    /// A peer/process observed the causation request.
-    Observed,
-    /// A peer/process accepted or queued the request.
-    Accepted,
-    /// The requested effect/state change was applied.
-    Applied,
-    /// The requested effect/state change was rejected.
-    Rejected,
-}
+// Wire declarations are generated from lazily-spec `schemas/receipts.json`
+// (#lzwiremodel); only the receipt semantics below are hand-written.
+#[path = "generated/receipts.rs"]
+mod wire;
+pub use wire::{CausalReceipt, CausalReceipts, ReceiptMessage, ReceiptOutcome};
 
 impl ReceiptOutcome {
     /// Whether this outcome completes the causation.
@@ -28,26 +19,6 @@ impl ReceiptOutcome {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Applied | Self::Rejected)
     }
-}
-
-/// One receipt event for a command/effect causation id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct CausalReceipt {
-    /// Idempotency key for this receipt event.
-    pub receipt_id: String,
-    /// Stable id of the command/effect request this receipt observes.
-    pub causation_id: String,
-    /// Peer, process, or subsystem that produced the receipt.
-    pub observer: String,
-    /// Producer/editor generation.
-    pub generation: u64,
-    /// Receipt outcome.
-    pub outcome: ReceiptOutcome,
-    /// Optional human/debug rejection reason.
-    pub reason: Option<String>,
-    /// Optional hash of the state/payload observed by the receipt.
-    pub payload_hash: Option<String>,
 }
 
 impl CausalReceipt {
@@ -154,14 +125,6 @@ impl CausalReceipt {
     }
 }
 
-/// Wire body for the externally-tagged `CausalReceipts` envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct CausalReceipts {
-    /// Receipt batch.
-    pub receipts: Vec<CausalReceipt>,
-}
-
 impl CausalReceipts {
     /// Construct a receipt batch.
     #[must_use]
@@ -170,14 +133,6 @@ impl CausalReceipts {
             receipts: receipts.into_iter().collect(),
         }
     }
-}
-
-/// Externally-tagged receipt wire message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ReceiptMessage {
-    /// Receipt batch envelope.
-    CausalReceipts(CausalReceipts),
 }
 
 /// Result of applying a receipt to a projection.
