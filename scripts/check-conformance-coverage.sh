@@ -415,7 +415,6 @@ KNOWN_UNCOVERED=(
   # No runner at all — these were already excused under the static guard.
   "agent-doc/delta_agent_doc_state.json"
   "agent-doc/snapshot_agent_doc_state.json"
-"receipts/causal_receipts.json"
 "reliable-sync/coalesce_bounds_outbox.json"
 "reliable-sync/liveness_lease_eviction.json"
 # Rust's durable outbox is SQLite-backed; it has no append-only journal decoder.
