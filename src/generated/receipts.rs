@@ -2,6 +2,17 @@
 // Surface `receipts` from schemas/receipts.json, model sha256:faf31f5c1db054295114b513d51ae6d4b7b47658147cf8044838340a72946b87.
 // Regenerate from lazily-spec with `make wire-codegen`; semantics stay hand-written.
 
+/// Decodes a field that is always on the wire and is `null` when absent. A bare
+/// `Option` would let serde default a missing key to `None`.
+#[cfg(feature = "serde")]
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer)
+}
+
 /// Outcome vocabulary. observed/accepted are non-terminal; applied/rejected are terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -20,6 +31,7 @@ pub enum ReceiptOutcome {
 /// One receipt event for a command/effect causation id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct CausalReceipt {
     /// Idempotency key for this receipt event.
     pub receipt_id: String,
@@ -33,14 +45,17 @@ pub struct CausalReceipt {
     /// Receipt outcome.
     pub outcome: ReceiptOutcome,
     /// Optional human/debug rejection reason.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "required_nullable"))]
     pub reason: Option<String>,
     /// Optional hash of the state/payload observed by the receipt.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "required_nullable"))]
     pub payload_hash: Option<String>,
 }
 
 /// Wire body for the externally-tagged `CausalReceipts` envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct CausalReceipts {
     /// Receipt batch.
     pub receipts: Vec<CausalReceipt>,

@@ -367,4 +367,54 @@ mod tests {
             serde_json::Value::Null
         );
     }
+
+    #[cfg(feature = "serde")]
+    fn receipt_json() -> serde_json::Value {
+        serde_json::json!({
+            "receipt_id": "receipt-1",
+            "causation_id": "patch-123",
+            "observer": "editor",
+            "generation": 7,
+            "outcome": "applied",
+            "reason": null,
+            "payload_hash": "sha256:abc",
+        })
+    }
+
+    /// The schema closes every record and keeps `reason` / `payload_hash` on the wire
+    /// even when null (#lzwiremodel2): a decoder rejects both a missing and an unknown key.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn receipt_decode_is_strict() {
+        let receipt: CausalReceipt =
+            serde_json::from_value(receipt_json()).expect("canonical receipt decodes");
+        assert_eq!(receipt.reason, None);
+        assert_eq!(receipt.payload_hash.as_deref(), Some("sha256:abc"));
+
+        for key in ["reason", "payload_hash", "generation"] {
+            let mut value = receipt_json();
+            value.as_object_mut().unwrap().remove(key);
+            let err = serde_json::from_value::<CausalReceipt>(value).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("missing field `{key}`")),
+                "{err}"
+            );
+        }
+
+        let mut value = receipt_json();
+        value["extra"] = serde_json::json!(1);
+        let err = serde_json::from_value::<CausalReceipt>(value).unwrap_err();
+        assert!(err.to_string().contains("unknown field `extra`"), "{err}");
+
+        let frame = serde_json::json!({"CausalReceipts": {"receipts": [], "x": 0}});
+        let err = serde_json::from_value::<ReceiptMessage>(frame).unwrap_err();
+        assert!(err.to_string().contains("unknown field `x`"), "{err}");
+
+        let frame = serde_json::json!({"CausalReceipts": {}});
+        let err = serde_json::from_value::<ReceiptMessage>(frame).unwrap_err();
+        assert!(
+            err.to_string().contains("missing field `receipts`"),
+            "{err}"
+        );
+    }
 }
