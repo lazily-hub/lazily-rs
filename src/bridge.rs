@@ -214,7 +214,20 @@ fn authorize_inbound(peer: PeerId, perms: &PeerPermissions, message: &IpcMessage
             .iter()
             .filter(|op| match op {
                 DeltaOp::CellSet { node, .. } => perms.is_allowed(peer, RemoteOp::write(*node)),
-                _ => false,
+                // Authority-derived publications and graph structure: a peer
+                // cannot forge them.
+                DeltaOp::SlotValue { .. }
+                | DeltaOp::Invalidate { .. }
+                | DeltaOp::NodeAdd { .. }
+                | DeltaOp::NodeRemove { .. }
+                | DeltaOp::EdgeAdd { .. }
+                | DeltaOp::EdgeRemove { .. } => false,
+                // QueueCell op-log ops (`#lzdeltaqueueops`): the hub is a
+                // graph-apply authority with no queue projection adapter, so
+                // it cannot authorize or apply them — deny, never forward.
+                DeltaOp::QueuePush { .. }
+                | DeltaOp::QueuePop { .. }
+                | DeltaOp::QueueClose { .. } => false,
             })
             .cloned()
             .collect(),
@@ -385,6 +398,9 @@ mod tests {
             },
             DeltaOp::slot_value(NodeId(1), vec![9u8]),
             DeltaOp::invalidate(NodeId(1)),
+            DeltaOp::queue_push(NodeId(1), vec![9u8]),
+            DeltaOp::queue_pop(NodeId(1)),
+            DeltaOp::queue_close(NodeId(1)),
         ];
         for op in forgeries {
             let mut hub = BridgeHub::new();

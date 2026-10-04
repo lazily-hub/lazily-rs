@@ -187,6 +187,9 @@ fn delta_op_kind(op: &DeltaOp) -> &'static str {
         DeltaOp::NodeRemove { .. } => "NodeRemove",
         DeltaOp::EdgeAdd { .. } => "EdgeAdd",
         DeltaOp::EdgeRemove { .. } => "EdgeRemove",
+        DeltaOp::QueuePush { .. } => "QueuePush",
+        DeltaOp::QueuePop { .. } => "QueuePop",
+        DeltaOp::QueueClose { .. } => "QueueClose",
     }
 }
 
@@ -584,6 +587,9 @@ fn conformance_permission_delta_filter_omits_without_redaction() {
             DeltaOp::NodeRemove { .. } => "NodeRemove",
             DeltaOp::EdgeAdd { .. } => "EdgeAdd",
             DeltaOp::EdgeRemove { .. } => "EdgeRemove",
+            DeltaOp::QueuePush { .. } => "QueuePush",
+            DeltaOp::QueuePop { .. } => "QueuePop",
+            DeltaOp::QueueClose { .. } => "QueueClose",
         })
         .collect();
     assert_eq!(

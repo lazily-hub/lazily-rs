@@ -83,6 +83,12 @@ fn apply_frame(state: &mut NodeState64, msg: &IpcMessage) {
     match msg {
         IpcMessage::Delta(d) => {
             for op in &d.ops {
+                // A graph-state view cannot apply QueueCell op-log ops
+                // (`#lzdeltaqueueops`): refuse loudly rather than skip them.
+                assert!(
+                    !op.is_queue_op(),
+                    "{op:?} requires a queue projection adapter; the graph-state projection cannot apply it"
+                );
                 if let lazily::DeltaOp::CellSet { node, payload }
                 | lazily::DeltaOp::SlotValue { node, payload } = op
                     && let IpcValue::Inline(bytes) = payload
@@ -1017,4 +1023,27 @@ fn liveness_orset_lww_fixture() {
         alone == vec![doc.clone()] && forward.without_doc(doc).live_docs() == without
     });
     exp.assert_key_at("per_doc_isolation", isolated, "per_doc_isolation");
+}
+
+/// `#lzdeltaqueueops`: the node -> bytes graph-state view must REFUSE a
+/// QueueCell op-log op explicitly rather than silently skip it.
+#[test]
+fn graph_state_view_refuses_queue_ops() {
+    for op in [
+        lazily::DeltaOp::queue_push(lazily::NodeId(6), vec![97]),
+        lazily::DeltaOp::queue_pop(lazily::NodeId(6)),
+        lazily::DeltaOp::queue_close(lazily::NodeId(6)),
+    ] {
+        let frame = IpcMessage::Delta(lazily::Delta::next(0, vec![op.clone()]));
+        let refused = std::panic::catch_unwind(|| apply_frame(&mut NodeState64::new(), &frame))
+            .expect_err("a queue op must be refused, not ignored");
+        let message = refused
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains("requires a queue projection adapter"),
+            "{op:?}: {message}"
+        );
+    }
 }

@@ -275,6 +275,16 @@ reorders, or sender restarts by checking `base_epoch == last_epoch`.
 | `NodeRemove` | `node` | Node was removed |
 | `EdgeAdd` | `dependent`, `dependency` | Dependency edge added |
 | `EdgeRemove` | `dependent`, `dependency` | Dependency edge removed |
+| `QueuePush` | `node`, `payload` (IpcValue) | QueueCell op-log: append to the tail (`#lzdeltaqueueops`) |
+| `QueuePop` | `node` | QueueCell op-log: remove the head |
+| `QueueClose` | `node` | QueueCell op-log: mark closed (terminal) |
+
+The three queue ops are the QueueCell op-log delta form (lazily-spec protocol.md
+§ QueueCell op-log delta form). They are read-filtered by `node` like
+`Invalidate`, and a `QueuePush` payload spills/resolves like a `CellSet` payload.
+A graph-state projection has no queue semantics and must refuse them; the
+`BridgeHub` denies them inbound. Postcard appends them after `EdgeRemove`
+(indices 7–9), so every pre-existing variant index is unchanged.
 
 ### Example: Sequential delta with all op variants
 

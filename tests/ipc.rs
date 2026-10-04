@@ -171,6 +171,97 @@ fn delta_filter_omits_non_readable_ops_without_redaction() {
     );
 }
 
+/// The three QueueCell op-log ops (`#lzdeltaqueueops`) as one Delta: the
+/// shared fixture for the per-codec round-trip tests below.
+fn queue_ops_delta() -> Delta {
+    Delta::next(
+        11,
+        vec![
+            DeltaOp::queue_push(NodeId(6), vec![97]),
+            DeltaOp::queue_pop(NodeId(6)),
+            DeltaOp::queue_close(NodeId(6)),
+        ],
+    )
+}
+
+#[test]
+fn queue_ops_round_trip_through_json_with_spec_body_shapes() {
+    let message = IpcMessage::Delta(queue_ops_delta());
+    let json: serde_json::Value = serde_json::to_value(&message).unwrap();
+    // protocol.md § QueueCell op-log delta form: QueuePush shares CellSet's
+    // body, QueuePop/QueueClose share Invalidate's.
+    assert_eq!(
+        json["Delta"]["ops"],
+        serde_json::json!([
+            { "QueuePush": { "node": 6, "payload": { "Inline": [97] } } },
+            { "QueuePop": { "node": 6 } },
+            { "QueueClose": { "node": 6 } },
+        ])
+    );
+    let back: IpcMessage = serde_json::from_value(json).unwrap();
+    assert_eq!(back, message);
+}
+
+#[test]
+fn queue_op_bodies_require_node_and_payload() {
+    for bad in [
+        r#"{"QueuePop":{}}"#,
+        r#"{"QueueClose":{}}"#,
+        r#"{"QueuePush":{"payload":{"Inline":[1]}}}"#,
+        r#"{"QueuePush":{"node":6}}"#,
+        r#"{"QueuePop":{"node":"6"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<DeltaOp>(bad).is_err(),
+            "{bad} must be rejected"
+        );
+    }
+    // The well-formed bodies decode to the matching variants.
+    assert_eq!(
+        serde_json::from_str::<DeltaOp>(r#"{"QueueClose":{"node":6}}"#).unwrap(),
+        DeltaOp::queue_close(NodeId(6))
+    );
+}
+
+#[test]
+fn queue_ops_are_read_filtered_by_node_like_invalidate() {
+    let delta = Delta::next(
+        8,
+        vec![
+            DeltaOp::queue_push(NodeId(1), vec![1]),
+            DeltaOp::queue_pop(NodeId(1)),
+            DeltaOp::queue_close(NodeId(1)),
+            DeltaOp::queue_push(NodeId(2), vec![2]),
+            DeltaOp::queue_pop(NodeId(2)),
+            DeltaOp::queue_close(NodeId(2)),
+        ],
+    );
+    let mut permissions = PeerPermissions::new();
+    permissions.allow_many(PEER_A, OpKind::Read, [NodeId(1)]);
+
+    assert_eq!(
+        delta.filter_readable(&permissions, PEER_A).ops,
+        vec![
+            DeltaOp::queue_push(NodeId(1), vec![1]),
+            DeltaOp::queue_pop(NodeId(1)),
+            DeltaOp::queue_close(NodeId(1)),
+        ]
+    );
+    // A write grant is not a read grant.
+    let mut write_only = PeerPermissions::new();
+    write_only.allow_many(PEER_B, OpKind::Write, [NodeId(1), NodeId(2)]);
+    assert!(delta.filter_readable(&write_only, PEER_B).ops.is_empty());
+}
+
+#[test]
+fn queue_ops_are_classified_as_queue_ops() {
+    for op in queue_ops_delta().ops {
+        assert!(op.is_queue_op(), "{op:?}");
+    }
+    assert!(!DeltaOp::cell_set(NodeId(6), vec![97]).is_queue_op());
+    assert!(!DeltaOp::invalidate(NodeId(6)).is_queue_op());
+}
+
 #[test]
 fn crdt_sync_round_trips_through_serde() {
     let sync = CrdtSync::new(
@@ -758,6 +849,58 @@ mod binary {
     }
 
     #[test]
+    fn ipc_message_binary_round_trips_queue_ops() {
+        let message = IpcMessage::Delta(super::queue_ops_delta());
+        let encoded = message.encode_binary().unwrap();
+        assert_eq!(IpcMessage::decode_binary(&encoded).unwrap(), message);
+    }
+
+    #[test]
+    fn binary_queue_op_variant_indices_append_after_the_original_seven() {
+        // Postcard is positional: the variant index IS the wire tag. The queue
+        // ops are appended (7, 8, 9) so every pre-existing index is unchanged.
+        for (op, index) in [
+            (DeltaOp::invalidate(NodeId(6)), 2u8),
+            (
+                DeltaOp::EdgeRemove {
+                    dependent: NodeId(6),
+                    dependency: NodeId(6),
+                },
+                6,
+            ),
+            (DeltaOp::queue_pop(NodeId(6)), 8),
+            (DeltaOp::queue_close(NodeId(6)), 9),
+        ] {
+            let encoded = IpcMessage::Delta(Delta::new(0, 1, vec![op.clone()]))
+                .encode_binary()
+                .unwrap();
+            let tail = &encoded[encoded.len() - if index == 6 { 3 } else { 2 }..];
+            assert_eq!(tail[0], index, "{op:?} encoded as {encoded:?}");
+        }
+        let push = IpcMessage::Delta(Delta::new(
+            0,
+            1,
+            vec![DeltaOp::queue_push(NodeId(6), vec![97])],
+        ))
+        .encode_binary()
+        .unwrap();
+        let cell_set = IpcMessage::Delta(Delta::new(
+            0,
+            1,
+            vec![DeltaOp::cell_set(NodeId(6), vec![97])],
+        ))
+        .encode_binary()
+        .unwrap();
+        // Same body shape as CellSet: only the variant tag differs.
+        assert_eq!(push.len(), cell_set.len());
+        let diff: Vec<usize> = (0..push.len())
+            .filter(|&i| push[i] != cell_set[i])
+            .collect();
+        assert_eq!(diff.len(), 1, "push={push:?} cell_set={cell_set:?}");
+        assert_eq!((push[diff[0]], cell_set[diff[0]]), (7, 0));
+    }
+
+    #[test]
     fn ipc_message_binary_rejects_invalid_bytes() {
         let result = IpcMessage::decode_binary(b"garbage");
         assert!(matches!(result, Err(DecodeError::Binary(_))));
@@ -830,6 +973,19 @@ mod msgpack {
         let decoded = IpcMessage::decode_msgpack(&encoded).unwrap();
 
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ipc_message_msgpack_round_trips_queue_ops() {
+        let message = IpcMessage::Delta(super::queue_ops_delta());
+        let encoded = message.encode_msgpack().unwrap();
+        assert_eq!(IpcMessage::decode_msgpack(&encoded).unwrap(), message);
+        // Named-field map, externally tagged — same shape as the JSON form.
+        let schemaless: serde_json::Value = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(
+            schemaless["Delta"]["ops"][1],
+            serde_json::json!({ "QueuePop": { "node": 6 } })
+        );
     }
 
     #[test]
