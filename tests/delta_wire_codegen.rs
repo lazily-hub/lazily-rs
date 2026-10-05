@@ -13,11 +13,8 @@
 use lazily::{DecodeError, Delta, DeltaOp, IpcMessage, NodeId, NodeKey, NodeState, ShmBlobRef};
 use serde_json::{Value, json};
 
-/// A non-default backend. `ShmBlobRef` is hand-written (`external` to the
-/// generator) and skips `backend: "shm"` in EVERY codec, including positional
-/// Postcard, so a default-backend descriptor does not survive a Postcard round
-/// trip (`DeserializeUnexpectedEnd`). That predates this lowering and is out of
-/// its scope; `arrow` keeps the field on the wire so every codec can round-trip.
+/// A non-default backend, which every codec writes. The default backend is
+/// covered separately by `default_backend_blob_round_trips_in_every_codec`.
 fn blob() -> ShmBlobRef {
     serde_json::from_value(json!({
         "offset": 1, "len": 2, "generation": 3, "epoch": 4, "checksum": 5, "backend": "arrow"
@@ -207,4 +204,44 @@ fn closed_records_refuse_unknown_keys() {
             other => panic!("{label}: msgpack decoded {other:?}"),
         }
     }
+}
+
+/// `#lzshmblobpostcard`: a descriptor with the default backend (`shm`) used to
+/// skip `backend` in every codec, so positional Postcard encoded it one field
+/// short and could not decode it back (`DeserializeUnexpectedEnd`). Now only a
+/// self-describing codec omits it.
+#[test]
+fn default_backend_blob_round_trips_in_every_codec() {
+    let default_blob: ShmBlobRef = serde_json::from_value(json!({
+        "offset": 1, "len": 2, "generation": 3, "epoch": 4, "checksum": 5
+    }))
+    .unwrap();
+    let message = frame(vec![
+        DeltaOp::cell_set_blob(NodeId(1), default_blob),
+        node_add(2, NodeState::SharedBlob(default_blob), None),
+    ]);
+    assert_eq!(
+        IpcMessage::decode_binary(&message.encode_binary().unwrap()).unwrap(),
+        message
+    );
+    assert_eq!(
+        IpcMessage::decode_json(&message.encode_json().unwrap()).unwrap(),
+        message
+    );
+    assert_eq!(
+        IpcMessage::decode_msgpack(&message.encode_msgpack().unwrap()).unwrap(),
+        message
+    );
+
+    // JSON is unchanged: the default backend is still omitted.
+    let json_text = String::from_utf8(message.encode_json().unwrap()).unwrap();
+    assert!(!json_text.contains("backend"), "{json_text}");
+    // msgpack too: decoded schemalessly, the descriptor has five keys.
+    let packed: Value = rmp_serde::from_slice(&message.encode_msgpack().unwrap()).unwrap();
+    let descriptor = &packed["Delta"]["ops"][0]["CellSet"]["payload"]["SharedBlob"];
+    assert_eq!(descriptor.as_object().unwrap().len(), 5, "{descriptor}");
+    // Postcard writes it, so a bare descriptor round-trips too.
+    let postcard = postcard::to_allocvec(&default_blob).unwrap();
+    let decoded: ShmBlobRef = postcard::from_bytes(&postcard).unwrap();
+    assert_eq!(decoded, default_blob);
 }

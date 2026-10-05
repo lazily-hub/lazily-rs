@@ -245,7 +245,7 @@ where
 /// descriptors validate unchanged, and an explicit null on the way IN is read as
 /// that same absence. The arena header itself is backend-agnostic and does not
 /// store `backend` — the discriminator is wire-level routing metadata only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
 pub struct ShmBlobRef {
     /// Offset of the blob header from the beginning of the shared arena.
     pub offset: u64,
@@ -264,12 +264,42 @@ pub struct ShmBlobRef {
     /// Absence has two spellings and both mean `Shm`: no map entry at all
     /// (`serde(default)`), or an explicit null
     /// ([`deserialize_backend_null_as_absent`]).
-    #[serde(
-        default,
-        deserialize_with = "deserialize_backend_null_as_absent",
-        skip_serializing_if = "BlobBackendKind::is_default"
-    )]
+    ///
+    /// Only a self-describing codec omits it (see the `Serialize` impl): a
+    /// positional codec such as Postcard has no field names to omit, so it always
+    /// writes the field (`#lzshmblobpostcard`).
+    #[serde(default, deserialize_with = "deserialize_backend_null_as_absent")]
     pub backend: BlobBackendKind,
+}
+
+/// Omits a default `backend` only in a self-describing codec.
+///
+/// This used to be `skip_serializing_if = "BlobBackendKind::is_default"`, which
+/// skips the field in every codec. Postcard is positional, so a descriptor with
+/// the default backend encoded one field short and could not be decoded back
+/// (`DeserializeUnexpectedEnd`); [`deserialize_backend_null_as_absent`] already
+/// reads the field positionally there. JSON and msgpack bytes are unchanged
+/// (`#lzshmblobpostcard`); this is the same rule `DeltaOp::NodeAdd` applies to
+/// its optional `key`.
+impl serde::Serialize for ShmBlobRef {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let emit_backend = !self.backend.is_default() || !serializer.is_human_readable();
+        let len = 5 + usize::from(emit_backend);
+        let mut out = serializer.serialize_struct("ShmBlobRef", len)?;
+        out.serialize_field("offset", &self.offset)?;
+        out.serialize_field("len", &self.len)?;
+        out.serialize_field("generation", &self.generation)?;
+        out.serialize_field("epoch", &self.epoch)?;
+        out.serialize_field("checksum", &self.checksum)?;
+        if emit_backend {
+            out.serialize_field("backend", &self.backend)?;
+        } else {
+            out.skip_field("backend")?;
+        }
+        out.end()
+    }
 }
 
 impl From<IpcPayload> for IpcValue {
