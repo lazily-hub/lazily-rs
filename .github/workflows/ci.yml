@@ -186,6 +186,11 @@ jobs:
       - name: Test IPC transport (binary codec)
         run: cargo +stable test --locked --features ipc-binary --test ipc
 
+      # Generated `delta` wire declarations (#lzwiremodel7): every DeltaOp
+      # variant in all three codecs plus the codec-aware NodeAdd.key.
+      - name: Test generated delta wire codec (#lzwiremodel7)
+        run: cargo +stable test --locked --features ffi,ipc-msgpack,ipc-binary --test delta_wire_codegen
+
       # #lzspecbase64: the json-base64 codec's tests are feature-gated and no other
       # step enables the feature, so before this they compiled under clippy and ran
       # nowhere. The --lib half carries the encoder's byte-array guards.

@@ -13,6 +13,15 @@ use crate::distributed::{NodeId, PeerId, PeerPermissions, RemoteOp};
 use std::collections::HashMap;
 use std::fmt;
 
+// Wire declarations for `DeltaOp`, `Delta`, `IpcValue` and `NodeState` are
+// generated from lazily-spec `schemas/delta.json` (#lzwiremodel7), including
+// `DeltaOp`'s codec-aware `Serialize`. `NodeId`, `NodeKey` and `ShmBlobRef` stay
+// hand-written (newtype, construction bounds, `backend: null` leniency), as do
+// the constructors and projections below.
+#[path = "generated/delta.rs"]
+mod delta_wire;
+pub use delta_wire::{Delta, DeltaOp, IpcValue, NodeState};
+
 /// Bytes reserved before every shared-memory blob payload.
 pub const SHM_BLOB_HEADER_LEN: usize = 40;
 
@@ -261,15 +270,6 @@ pub struct ShmBlobRef {
         skip_serializing_if = "BlobBackendKind::is_default"
     )]
     pub backend: BlobBackendKind,
-}
-
-/// IPC value stored inline or by shared-memory blob reference.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum IpcValue {
-    /// Inline serialized bytes.
-    Inline(IpcPayload),
-    /// Descriptor for bytes stored in a shared-memory blob arena.
-    SharedBlob(ShmBlobRef),
 }
 
 impl From<IpcPayload> for IpcValue {
@@ -702,17 +702,6 @@ impl<'de> serde::Deserialize<'de> for NodeKey {
     }
 }
 
-/// Serializable state for one allowlisted node in a [`Snapshot`] or `NodeAdd`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum NodeState {
-    /// Concrete serialized value bytes.
-    Payload(IpcPayload),
-    /// Descriptor for a concrete value stored in a shared-memory blob arena.
-    SharedBlob(ShmBlobRef),
-    /// A known node whose value cannot be serialized.
-    Opaque,
-}
-
 /// Full state for one node in a snapshot.
 ///
 /// `key` serialization is format-aware: self-describing codecs (JSON,
@@ -896,52 +885,6 @@ impl Snapshot {
     }
 }
 
-/// One incremental graph mutation in a [`Delta`].
-///
-/// `NodeAdd`'s `key` serialization is format-aware (see [`NodeSnapshot`]):
-/// self-describing codecs omit a `None` key; positional Postcard keeps it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeltaOp {
-    /// A source cell was changed to `payload`.
-    CellSet { node: NodeId, payload: IpcValue },
-    /// A lazily recomputed slot published a concrete value.
-    SlotValue { node: NodeId, payload: IpcValue },
-    /// A node was dirtied without publishing a concrete value.
-    Invalidate { node: NodeId },
-    /// A new node became visible.
-    NodeAdd {
-        node: NodeId,
-        type_tag: String,
-        state: NodeState,
-        /// Optional wire-stable keyed address for the new node (see
-        /// [`NodeKey`]). `None` keeps opaque-NodeId-only addressing.
-        key: Option<NodeKey>,
-    },
-    /// A node was removed.
-    NodeRemove { node: NodeId },
-    /// A dependency edge was added.
-    EdgeAdd {
-        dependent: NodeId,
-        dependency: NodeId,
-    },
-    /// A dependency edge was removed.
-    EdgeRemove {
-        dependent: NodeId,
-        dependency: NodeId,
-    },
-    /// QueueCell op-log delta (`#lzdeltaqueueops`, protocol.md § QueueCell
-    /// op-log delta form): append `payload` to the queue node's tail. Same
-    /// body shape as [`CellSet`](Self::CellSet); the payload spills/resolves
-    /// exactly like a `CellSet` payload.
-    QueuePush { node: NodeId, payload: IpcValue },
-    /// QueueCell op-log delta: remove the queue node's head. Carries no value —
-    /// the popped element is determined by ordered replay.
-    QueuePop { node: NodeId },
-    /// QueueCell op-log delta: mark the queue node closed (idempotent,
-    /// terminal; Closed is distinct from Empty).
-    QueueClose { node: NodeId },
-}
-
 impl DeltaOp {
     /// Construct a `CellSet`.
     pub fn cell_set(node: NodeId, payload: impl Into<IpcValue>) -> Self {
@@ -1023,279 +966,6 @@ impl DeltaOp {
             .then(|| self.clone()),
         }
     }
-}
-
-fn delta_op_key_ref_is_none(key: &&Option<NodeKey>) -> bool {
-    key.is_none()
-}
-
-impl serde::Serialize for DeltaOp {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Two borrowed shadows differing only in `NodeAdd.key` omission. The
-        // human-readable shadow omits a `None` key; the binary shadow always
-        // writes it so positional Postcard keeps a stable schema. "Human
-        // readable" means SELF-DESCRIBING here — msgpack takes the `Hr` branch
-        // because `encode_msgpack` sets the flag (`#lzmsgpackparity`).
-        #[derive(serde::Serialize)]
-        #[serde(rename = "DeltaOp")]
-        enum Hr<'a> {
-            CellSet {
-                node: &'a NodeId,
-                payload: &'a IpcValue,
-            },
-            SlotValue {
-                node: &'a NodeId,
-                payload: &'a IpcValue,
-            },
-            Invalidate {
-                node: &'a NodeId,
-            },
-            NodeAdd {
-                node: &'a NodeId,
-                type_tag: &'a String,
-                state: &'a NodeState,
-                #[serde(skip_serializing_if = "delta_op_key_ref_is_none")]
-                key: &'a Option<NodeKey>,
-            },
-            NodeRemove {
-                node: &'a NodeId,
-            },
-            EdgeAdd {
-                dependent: &'a NodeId,
-                dependency: &'a NodeId,
-            },
-            EdgeRemove {
-                dependent: &'a NodeId,
-                dependency: &'a NodeId,
-            },
-            // Appended AFTER the original seven so positional Postcard keeps
-            // every pre-existing variant index stable (`#lzdeltaqueueops`).
-            QueuePush {
-                node: &'a NodeId,
-                payload: &'a IpcValue,
-            },
-            QueuePop {
-                node: &'a NodeId,
-            },
-            QueueClose {
-                node: &'a NodeId,
-            },
-        }
-        #[derive(serde::Serialize)]
-        #[serde(rename = "DeltaOp")]
-        enum Bin<'a> {
-            CellSet {
-                node: &'a NodeId,
-                payload: &'a IpcValue,
-            },
-            SlotValue {
-                node: &'a NodeId,
-                payload: &'a IpcValue,
-            },
-            Invalidate {
-                node: &'a NodeId,
-            },
-            NodeAdd {
-                node: &'a NodeId,
-                type_tag: &'a String,
-                state: &'a NodeState,
-                key: &'a Option<NodeKey>,
-            },
-            NodeRemove {
-                node: &'a NodeId,
-            },
-            EdgeAdd {
-                dependent: &'a NodeId,
-                dependency: &'a NodeId,
-            },
-            EdgeRemove {
-                dependent: &'a NodeId,
-                dependency: &'a NodeId,
-            },
-            // Appended AFTER the original seven so positional Postcard keeps
-            // every pre-existing variant index stable (`#lzdeltaqueueops`).
-            QueuePush {
-                node: &'a NodeId,
-                payload: &'a IpcValue,
-            },
-            QueuePop {
-                node: &'a NodeId,
-            },
-            QueueClose {
-                node: &'a NodeId,
-            },
-        }
-
-        if serializer.is_human_readable() {
-            match self {
-                DeltaOp::CellSet { node, payload } => Hr::CellSet { node, payload },
-                DeltaOp::SlotValue { node, payload } => Hr::SlotValue { node, payload },
-                DeltaOp::Invalidate { node } => Hr::Invalidate { node },
-                DeltaOp::NodeAdd {
-                    node,
-                    type_tag,
-                    state,
-                    key,
-                } => Hr::NodeAdd {
-                    node,
-                    type_tag,
-                    state,
-                    key,
-                },
-                DeltaOp::NodeRemove { node } => Hr::NodeRemove { node },
-                DeltaOp::EdgeAdd {
-                    dependent,
-                    dependency,
-                } => Hr::EdgeAdd {
-                    dependent,
-                    dependency,
-                },
-                DeltaOp::EdgeRemove {
-                    dependent,
-                    dependency,
-                } => Hr::EdgeRemove {
-                    dependent,
-                    dependency,
-                },
-                DeltaOp::QueuePush { node, payload } => Hr::QueuePush { node, payload },
-                DeltaOp::QueuePop { node } => Hr::QueuePop { node },
-                DeltaOp::QueueClose { node } => Hr::QueueClose { node },
-            }
-            .serialize(serializer)
-        } else {
-            match self {
-                DeltaOp::CellSet { node, payload } => Bin::CellSet { node, payload },
-                DeltaOp::SlotValue { node, payload } => Bin::SlotValue { node, payload },
-                DeltaOp::Invalidate { node } => Bin::Invalidate { node },
-                DeltaOp::NodeAdd {
-                    node,
-                    type_tag,
-                    state,
-                    key,
-                } => Bin::NodeAdd {
-                    node,
-                    type_tag,
-                    state,
-                    key,
-                },
-                DeltaOp::NodeRemove { node } => Bin::NodeRemove { node },
-                DeltaOp::EdgeAdd {
-                    dependent,
-                    dependency,
-                } => Bin::EdgeAdd {
-                    dependent,
-                    dependency,
-                },
-                DeltaOp::EdgeRemove {
-                    dependent,
-                    dependency,
-                } => Bin::EdgeRemove {
-                    dependent,
-                    dependency,
-                },
-                DeltaOp::QueuePush { node, payload } => Bin::QueuePush { node, payload },
-                DeltaOp::QueuePop { node } => Bin::QueuePop { node },
-                DeltaOp::QueueClose { node } => Bin::QueueClose { node },
-            }
-            .serialize(serializer)
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for DeltaOp {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(serde::Deserialize)]
-        #[serde(rename = "DeltaOp")]
-        enum Wire {
-            CellSet {
-                node: NodeId,
-                payload: IpcValue,
-            },
-            SlotValue {
-                node: NodeId,
-                payload: IpcValue,
-            },
-            Invalidate {
-                node: NodeId,
-            },
-            NodeAdd {
-                node: NodeId,
-                type_tag: String,
-                state: NodeState,
-                #[serde(default)]
-                key: Option<NodeKey>,
-            },
-            NodeRemove {
-                node: NodeId,
-            },
-            EdgeAdd {
-                dependent: NodeId,
-                dependency: NodeId,
-            },
-            EdgeRemove {
-                dependent: NodeId,
-                dependency: NodeId,
-            },
-            // Same order as the serialize shadows: appended after the original
-            // seven so Postcard variant indices stay stable.
-            QueuePush {
-                node: NodeId,
-                payload: IpcValue,
-            },
-            QueuePop {
-                node: NodeId,
-            },
-            QueueClose {
-                node: NodeId,
-            },
-        }
-
-        Ok(match Wire::deserialize(deserializer)? {
-            Wire::CellSet { node, payload } => DeltaOp::CellSet { node, payload },
-            Wire::SlotValue { node, payload } => DeltaOp::SlotValue { node, payload },
-            Wire::Invalidate { node } => DeltaOp::Invalidate { node },
-            Wire::NodeAdd {
-                node,
-                type_tag,
-                state,
-                key,
-            } => DeltaOp::NodeAdd {
-                node,
-                type_tag,
-                state,
-                key,
-            },
-            Wire::NodeRemove { node } => DeltaOp::NodeRemove { node },
-            Wire::EdgeAdd {
-                dependent,
-                dependency,
-            } => DeltaOp::EdgeAdd {
-                dependent,
-                dependency,
-            },
-            Wire::EdgeRemove {
-                dependent,
-                dependency,
-            } => DeltaOp::EdgeRemove {
-                dependent,
-                dependency,
-            },
-            Wire::QueuePush { node, payload } => DeltaOp::QueuePush { node, payload },
-            Wire::QueuePop { node } => DeltaOp::QueuePop { node },
-            Wire::QueueClose { node } => DeltaOp::QueueClose { node },
-        })
-    }
-}
-
-/// Incremental change set emitted after one outermost batch flush.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Delta {
-    /// Receiver epoch this delta must apply after.
-    pub base_epoch: u64,
-    /// New epoch after applying this delta.
-    pub epoch: u64,
-    /// Coalesced operations for this flush.
-    pub ops: Vec<DeltaOp>,
 }
 
 impl Delta {

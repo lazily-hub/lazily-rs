@@ -87,6 +87,7 @@ ci-reach \
 	test-ffi-binary \
 	test-ipc \
 	test-ipc-binary \
+	test-delta-wire-codegen \
 	test-json-base64 \
 	test-ipc-conformance \
 	test-codec-roundtrip-conformance \
@@ -126,7 +127,7 @@ test-registers-conformance \
 	instrumentation-profile \
 	benchmark-spread
 
-check: conformance-manifest-reset dependency-inventory-check default-build-dependency-check fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-interop-peer test-distributed-conformance test-ffi test-ffi-binary test-ipc test-ipc-binary test-json-base64 test-ipc-conformance test-codec-roundtrip-conformance test-nodeid-exact-range-conformance test-nodekey-null-leniency-conformance test-blob-backend-discriminator-conformance test-reliable-sync-conformance test-protobuf-graph-boundary test-durable-outbox test-durable-client test-durable-postgres test-durable-jetstream test-shm test-collections-conformance test-collections-family-conformance test-queue-family-conformance test-ingress-family-conformance test-egress-family-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-registers-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-evidence benchmark-check conformance-coverage assertion-ordering-check ci-reach
+check: conformance-manifest-reset dependency-inventory-check default-build-dependency-check fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-interop-peer test-distributed-conformance test-ffi test-ffi-binary test-ipc test-ipc-binary test-delta-wire-codegen test-json-base64 test-ipc-conformance test-codec-roundtrip-conformance test-nodeid-exact-range-conformance test-nodekey-null-leniency-conformance test-blob-backend-discriminator-conformance test-reliable-sync-conformance test-protobuf-graph-boundary test-durable-outbox test-durable-client test-durable-postgres test-durable-jetstream test-shm test-collections-conformance test-collections-family-conformance test-queue-family-conformance test-ingress-family-conformance test-egress-family-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-registers-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-evidence benchmark-check conformance-coverage assertion-ordering-check ci-reach
 
 dependency-inventory:
 >$(PYTHON) scripts/dependency-inventory.py --write --accept-current-review
@@ -236,6 +237,12 @@ test-json-base64:
 
 test-ipc-binary:
 >$(CARGO) test --locked --features ipc-binary --test ipc
+
+# Generated `delta` wire declarations (#lzwiremodel7): every DeltaOp variant in
+# json, json-intern, msgpack and Postcard, the codec-aware `NodeAdd.key`, and
+# unknown-key refusal. All three codec features, or a codec half is skipped.
+test-delta-wire-codegen:
+>$(CARGO) test --locked --features ffi,ipc-msgpack,ipc-binary --test delta_wire_codegen
 
 test-ipc-conformance:
 >$(CARGO) test --locked --features ipc --test conformance
