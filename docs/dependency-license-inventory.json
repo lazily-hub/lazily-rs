@@ -1,5 +1,5 @@
 {
-  "cargo_lock_sha256": "49bd0136afed2c41ca15ef34c8107d93a77a1c0d9c8ba1427d57f29a33125e18",
+  "cargo_lock_sha256": "d3d9eafc6520986429b06096b5fe8eb026216d1b4ce1bf0697f30e2cfec7d9c6",
   "generated_by": "scripts/dependency-inventory.py",
   "license_expression_count": 28,
   "license_reviews": {
@@ -4470,7 +4470,7 @@
       "source": "workspace",
       "source_provenance": "workspace-authored",
       "source_url": "https://github.com/lazily-hub/lazily-rs",
-      "version": "0.23.0"
+      "version": "0.23.1"
     },
     {
       "checksum": "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe",
