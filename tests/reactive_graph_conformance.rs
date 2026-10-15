@@ -374,3 +374,21 @@ fn divergence_ledger_names_only_known_models() {
         );
     }
 }
+
+#[test]
+fn reactive_graph_assertion_family_negative_controls() {
+    // Exercise the same equality seam used by every replay assertion with one
+    // deliberately wrong value from each assertion-value family in the Core
+    // corpus. Every control must be rejected; these are active controls, not a
+    // claim that a fixture mutant was run.
+    assert!(!engine::assertion_values_equal(&1_i64, &2_i64));
+    assert!(!engine::assertion_values_equal(&true, &false));
+    assert!(!engine::assertion_values_equal(
+        &vec!["first".to_owned()],
+        &vec!["second".to_owned()],
+    ));
+    assert!(!engine::assertion_values_equal(
+        &Ok::<i64, ()>(1),
+        &Ok::<i64, ()>(2),
+    ));
+}

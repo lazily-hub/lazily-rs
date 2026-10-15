@@ -60,6 +60,13 @@ pub struct Report {
     pub observation: Observation,
 }
 
+/// Equality seam shared by every fixture assertion and the runner's active
+/// family negative controls. Keeping the controls on the production comparison
+/// path prevents an evidence record from proving a different comparator.
+pub fn assertion_values_equal<T: PartialEq>(got: &T, want: &T) -> bool {
+    got == want
+}
+
 /// REQUIRE the array (`#lzsiblingrunnermasking`). This is the engine runner's
 /// only fixture-array reader, and `.unwrap_or(&[])` made every mistyped list
 /// read as EMPTY — which for an expectation list is the claim "nothing was
@@ -230,7 +237,7 @@ pub fn replay<'a, M: GraphModel>(
         ($key:expr, $got:expr, $want:expr) => {{
             checks += 1;
             let (got, want) = ($got, $want);
-            if got != want {
+            if !assertion_values_equal(&got, &want) {
                 failures.push(Divergence {
                     step: step_idx,
                     key: $key.to_string(),

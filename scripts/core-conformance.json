@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "profile_id": "core-v1",
+  "binding_id": "rust",
+  "report_command": ["python3", "scripts/generate-core-report.py"],
+  "runtime_skips": [
+    {
+      "fixture": "reactive-graph/failed_compute_is_never_cached.json",
+      "scenario": "*",
+      "execution_flavor": "async",
+      "reason": "AsyncContext compute returns a future with no error channel; Context and ThreadSafeContext execute this fixture"
+    },
+    {
+      "fixture": "reactive-graph/feedback_drain_bound_reports_exhaustion.json",
+      "scenario": "*",
+      "execution_flavor": "async",
+      "reason": "AsyncContext has no bounded divergent-feedback drain; Context and ThreadSafeContext execute this fixture"
+    }
+  ],
+  "fixtureless_claims": [
+    {
+      "id": "c_abi_ffi_boundary",
+      "proof_classes": ["native_artifact_consumer"],
+      "command": ["python3", "scripts/prove-core-c-abi.py"]
+    }
+  ]
+}
