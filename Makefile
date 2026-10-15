@@ -60,7 +60,9 @@ endif
 export LAZILY_CONFORMANCE_RUN_ID
 
 .PHONY: \
+core-api-check \
 core-artifact-consumer-check \
+core-facade-check \
 conformance-coverage \
 assertion-ordering-check \
 dependency-inventory \
@@ -131,7 +133,13 @@ test-registers-conformance \
 core-artifact-consumer-check:
 >./scripts/core-artifact-consumer-check.sh
 
-check: conformance-manifest-reset dependency-inventory-check default-build-dependency-check fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-interop-peer test-distributed-conformance test-ffi test-ffi-binary test-ipc test-ipc-binary test-delta-wire-codegen test-json-base64 test-ipc-conformance test-codec-roundtrip-conformance test-nodeid-exact-range-conformance test-nodekey-null-leniency-conformance test-blob-backend-discriminator-conformance test-reliable-sync-conformance test-protobuf-graph-boundary test-durable-outbox test-durable-client test-durable-postgres test-durable-jetstream test-shm test-collections-conformance test-collections-family-conformance test-queue-family-conformance test-ingress-family-conformance test-egress-family-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-registers-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-evidence benchmark-check conformance-coverage assertion-ordering-check core-artifact-consumer-check ci-reach
+core-facade-check:
+>$(CARGO) test --locked --test core_facade
+
+core-api-check:
+>$(CARGO) test --locked --test core_api_compat
+
+check: conformance-manifest-reset dependency-inventory-check default-build-dependency-check fmt clippy build test test-thread-safe test-tokio test-async test-async-resolve test-loom test-distributed test-crdt-plane test-interop-peer test-distributed-conformance test-ffi test-ffi-binary test-ipc test-ipc-binary test-delta-wire-codegen test-json-base64 test-ipc-conformance test-codec-roundtrip-conformance test-nodeid-exact-range-conformance test-nodekey-null-leniency-conformance test-blob-backend-discriminator-conformance test-reliable-sync-conformance test-protobuf-graph-boundary test-durable-outbox test-durable-client test-durable-postgres test-durable-jetstream test-shm test-collections-conformance test-collections-family-conformance test-queue-family-conformance test-ingress-family-conformance test-egress-family-conformance test-queue-conformance test-queue-demand-driven test-seqcrdt-conformance test-registers-conformance test-lossless-tree test-schema-compliance test-statechart-conformance test-lean-formal test-lazily-formal test-signaling-client test-webrtc test-webrtc-signaling test-websocket benchmark-evidence benchmark-check conformance-coverage assertion-ordering-check core-facade-check core-api-check core-artifact-consumer-check ci-reach
 
 dependency-inventory:
 >$(PYTHON) scripts/dependency-inventory.py --write --accept-current-review

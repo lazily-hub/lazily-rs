@@ -470,6 +470,12 @@ jobs:
       - name: Assertion observation ordering (#lzassertordering)
         run: python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding rs --root .
 
+      - name: Core facade contract
+        run: cargo test --locked --test core_facade
+
+      - name: Core API compatibility gate
+        run: cargo test --locked --test core_api_compat
+
       # The gate that keeps every step above honest. It compares `make check`'s
       # prerequisite closure against the run: bodies in this file and fails on
       # any target CI does not reach. Comments inside run: bodies are stripped
@@ -633,7 +639,9 @@ jobs:
         rust: ["1.88", stable]
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal
-      - run: rustup override set ${{ matrix.rust }}
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - name: Select pinned Rust toolchain
+        run: rustup override set ${{ matrix.rust }}
       - name: Core artifact consumer (minimum/current)
-        run: make core-artifact-consumer-check
+        run: ./scripts/core-artifact-consumer-check.sh
