@@ -71,6 +71,7 @@ mod cell_family;
 #[cfg(feature = "ipc")]
 mod command;
 mod context;
+pub mod core;
 pub mod reactive_graph;
 mod source_tree;
 /// #lzspecedgeindex audit probe (`--cfg audit_probe`): records the
