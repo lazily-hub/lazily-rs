@@ -1,0 +1,11 @@
+# lazily-core-api-v1
+generation	1
+deprecation_window_generations	2
+symbol	context	type	lazily::Context	pub struct Context	1	-	-	-
+symbol	source	type	lazily::Source	pub struct Source<T, M = KeepLatest>	1	-	-	-
+symbol	computed	type	lazily::Computed	pub struct Computed<T>	1	-	-	-
+symbol	effect	type	lazily::Effect	pub struct Effect	1	-	-	-
+symbol	batch	operation	lazily::Context::batch	fn<F, R>(&self, F) -> R where F: FnOnce(&Context) -> R	1	-	-	-
+symbol	scope	operation	lazily::Context::scope	fn(&self) -> TeardownScope<'_>	1	-	-	-
+symbol	scope	type	lazily::TeardownScope	pub struct TeardownScope<'ctx>	1	-	-	-
+symbol	typed_context	type	lazily::TypedContext	pub struct TypedContext<Schema>	1	-	-	-

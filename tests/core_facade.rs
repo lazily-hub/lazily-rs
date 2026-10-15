@@ -49,6 +49,7 @@ fn cargo_package_contains_core_facade_and_metadata() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     for entry in [
+        "api/core-v1.tsv",
         "src/core.rs",
         "Cargo.toml",
         "LICENSE",
