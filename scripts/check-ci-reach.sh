@@ -160,6 +160,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"clippy"
 	"conformance-coverage"
 	"conformance-manifest-reset"
+	"core-artifact-consumer-check"
 	"default-build-dependency-check"
 	"dependency-inventory-check"
 	"fmt"
@@ -460,6 +461,7 @@ EXPECTED_GATE_STEPS=(
 	"test-webrtc-signaling	Test WebRTC handshake over signaling"
 	"test-websocket	Test WebSocket DataChannel backend (#akp3)"
 	"conformance-coverage	Conformance coverage + scenario replay ledger (#lzguardsnotinci)"
+	"core-artifact-consumer-check	Core artifact consumer (minimum/current)"
 	"assertion-ordering-check	Assertion observation ordering (#lzassertordering)"
 	"ci-reach	CI-reachability guard"
 )

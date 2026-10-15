@@ -623,3 +623,17 @@ jobs:
       - name: Build the lazily-formal Lean model through make
         working-directory: lazily-rs
         run: make test-lazily-formal
+
+  core-artifact-consumer:
+    name: Core artifact consumer / Rust ${{ matrix.rust }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: ["1.88", stable]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - run: rustup override set ${{ matrix.rust }}
+      - name: Core artifact consumer (minimum/current)
+        run: make core-artifact-consumer-check
