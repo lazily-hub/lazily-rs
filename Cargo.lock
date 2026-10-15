@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "lazily"
-version = "0.59.0"
+version = "0.60.0"
 dependencies = [
  "arc-swap",
  "async-nats",
