@@ -929,6 +929,17 @@ pub enum DeltaOp {
         dependent: NodeId,
         dependency: NodeId,
     },
+    /// QueueCell op-log delta (`#lzdeltaqueueops`, protocol.md § QueueCell
+    /// op-log delta form): append `payload` to the queue node's tail. Same
+    /// body shape as [`CellSet`](Self::CellSet); the payload spills/resolves
+    /// exactly like a `CellSet` payload.
+    QueuePush { node: NodeId, payload: IpcValue },
+    /// QueueCell op-log delta: remove the queue node's head. Carries no value —
+    /// the popped element is determined by ordered replay.
+    QueuePop { node: NodeId },
+    /// QueueCell op-log delta: mark the queue node closed (idempotent,
+    /// terminal; Closed is distinct from Empty).
+    QueueClose { node: NodeId },
 }
 
 impl DeltaOp {
@@ -963,13 +974,43 @@ impl DeltaOp {
         Self::Invalidate { node }
     }
 
+    /// Construct a `QueuePush` (`#lzdeltaqueueops`).
+    pub fn queue_push(node: NodeId, payload: impl Into<IpcValue>) -> Self {
+        Self::QueuePush {
+            node,
+            payload: payload.into(),
+        }
+    }
+
+    /// Construct a `QueuePop` (`#lzdeltaqueueops`).
+    pub fn queue_pop(node: NodeId) -> Self {
+        Self::QueuePop { node }
+    }
+
+    /// Construct a `QueueClose` (`#lzdeltaqueueops`).
+    pub fn queue_close(node: NodeId) -> Self {
+        Self::QueueClose { node }
+    }
+
+    /// True for the QueueCell op-log ops (`QueuePush` / `QueuePop` /
+    /// `QueueClose`), which only a queue projection adapter can apply.
+    pub fn is_queue_op(&self) -> bool {
+        matches!(
+            self,
+            Self::QueuePush { .. } | Self::QueuePop { .. } | Self::QueueClose { .. }
+        )
+    }
+
     fn filter_readable(&self, permissions: &PeerPermissions, peer: PeerId) -> Option<Self> {
         match self {
             Self::CellSet { node, .. }
             | Self::SlotValue { node, .. }
             | Self::Invalidate { node }
             | Self::NodeAdd { node, .. }
-            | Self::NodeRemove { node } => can_read(permissions, peer, *node).then(|| self.clone()),
+            | Self::NodeRemove { node }
+            | Self::QueuePush { node, .. }
+            | Self::QueuePop { node }
+            | Self::QueueClose { node } => can_read(permissions, peer, *node).then(|| self.clone()),
             Self::EdgeAdd {
                 dependent,
                 dependency,
@@ -1027,6 +1068,18 @@ impl serde::Serialize for DeltaOp {
                 dependent: &'a NodeId,
                 dependency: &'a NodeId,
             },
+            // Appended AFTER the original seven so positional Postcard keeps
+            // every pre-existing variant index stable (`#lzdeltaqueueops`).
+            QueuePush {
+                node: &'a NodeId,
+                payload: &'a IpcValue,
+            },
+            QueuePop {
+                node: &'a NodeId,
+            },
+            QueueClose {
+                node: &'a NodeId,
+            },
         }
         #[derive(serde::Serialize)]
         #[serde(rename = "DeltaOp")]
@@ -1058,6 +1111,18 @@ impl serde::Serialize for DeltaOp {
             EdgeRemove {
                 dependent: &'a NodeId,
                 dependency: &'a NodeId,
+            },
+            // Appended AFTER the original seven so positional Postcard keeps
+            // every pre-existing variant index stable (`#lzdeltaqueueops`).
+            QueuePush {
+                node: &'a NodeId,
+                payload: &'a IpcValue,
+            },
+            QueuePop {
+                node: &'a NodeId,
+            },
+            QueueClose {
+                node: &'a NodeId,
             },
         }
 
@@ -1092,6 +1157,9 @@ impl serde::Serialize for DeltaOp {
                     dependent,
                     dependency,
                 },
+                DeltaOp::QueuePush { node, payload } => Hr::QueuePush { node, payload },
+                DeltaOp::QueuePop { node } => Hr::QueuePop { node },
+                DeltaOp::QueueClose { node } => Hr::QueueClose { node },
             }
             .serialize(serializer)
         } else {
@@ -1125,6 +1193,9 @@ impl serde::Serialize for DeltaOp {
                     dependent,
                     dependency,
                 },
+                DeltaOp::QueuePush { node, payload } => Bin::QueuePush { node, payload },
+                DeltaOp::QueuePop { node } => Bin::QueuePop { node },
+                DeltaOp::QueueClose { node } => Bin::QueueClose { node },
             }
             .serialize(serializer)
         }
@@ -1165,6 +1236,18 @@ impl<'de> serde::Deserialize<'de> for DeltaOp {
                 dependent: NodeId,
                 dependency: NodeId,
             },
+            // Same order as the serialize shadows: appended after the original
+            // seven so Postcard variant indices stay stable.
+            QueuePush {
+                node: NodeId,
+                payload: IpcValue,
+            },
+            QueuePop {
+                node: NodeId,
+            },
+            QueueClose {
+                node: NodeId,
+            },
         }
 
         Ok(match Wire::deserialize(deserializer)? {
@@ -1197,6 +1280,9 @@ impl<'de> serde::Deserialize<'de> for DeltaOp {
                 dependent,
                 dependency,
             },
+            Wire::QueuePush { node, payload } => DeltaOp::QueuePush { node, payload },
+            Wire::QueuePop { node } => DeltaOp::QueuePop { node },
+            Wire::QueueClose { node } => DeltaOp::QueueClose { node },
         })
     }
 }
@@ -1351,7 +1437,10 @@ impl KeyIndex {
                 | DeltaOp::SlotValue { .. }
                 | DeltaOp::Invalidate { .. }
                 | DeltaOp::EdgeAdd { .. }
-                | DeltaOp::EdgeRemove { .. } => {}
+                | DeltaOp::EdgeRemove { .. }
+                | DeltaOp::QueuePush { .. }
+                | DeltaOp::QueuePop { .. }
+                | DeltaOp::QueueClose { .. } => {}
             }
         }
     }

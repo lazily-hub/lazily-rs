@@ -152,6 +152,9 @@ fn op_variant(op: &DeltaOp) -> &'static str {
         DeltaOp::NodeRemove { .. } => "NodeRemove",
         DeltaOp::EdgeAdd { .. } => "EdgeAdd",
         DeltaOp::EdgeRemove { .. } => "EdgeRemove",
+        DeltaOp::QueuePush { .. } => "QueuePush",
+        DeltaOp::QueuePop { .. } => "QueuePop",
+        DeltaOp::QueueClose { .. } => "QueueClose",
     }
 }
 

@@ -552,7 +552,7 @@ fn spill_state(state: &mut NodeState, backend: &mut dyn BlobBackend, threshold: 
 }
 
 /// Spill large payloads across an [`IpcMessage`]'s value/state sites: Snapshot
-/// node states, Delta `CellSet`/`SlotValue` payloads + `NodeAdd` states, and
+/// node states, Delta `CellSet`/`SlotValue`/`QueuePush` payloads + `NodeAdd` states, and
 /// `CrdtSync` op states. Returns the total bytes spilled.
 ///
 /// Each [`Inline`](IpcValue::Inline)/[`Payload`](NodeState::Payload) above
@@ -583,6 +583,11 @@ pub fn spill_message(
                     DeltaOp::NodeAdd { state, .. } => {
                         total += spill_state(state, backend, threshold);
                     }
+                    // `#lzdeltaqueueops`: a QueuePush payload is an `IpcValue`
+                    // spilled exactly like a CellSet payload.
+                    DeltaOp::QueuePush { payload, .. } => {
+                        total += spill_value(payload, backend, threshold);
+                    }
                     // The payload-free ops are listed rather than absorbed by a
                     // catch-all, so a future `DeltaOp` that carries bytes is a
                     // compile error here instead of a payload that silently
@@ -590,7 +595,9 @@ pub fn spill_message(
                     DeltaOp::Invalidate { .. }
                     | DeltaOp::NodeRemove { .. }
                     | DeltaOp::EdgeAdd { .. }
-                    | DeltaOp::EdgeRemove { .. } => {}
+                    | DeltaOp::EdgeRemove { .. }
+                    | DeltaOp::QueuePop { .. }
+                    | DeltaOp::QueueClose { .. } => {}
                 }
             }
         }
@@ -796,6 +803,44 @@ mod tests {
         };
         assert!(matches!(payload, IpcValue::SharedBlob(_)));
         assert!(bytes_eq(router.resolve(payload), &big));
+    }
+
+    // `#lzdeltaqueueops`: a QueuePush payload spills and resolves exactly like
+    // a CellSet payload; QueuePop/QueueClose carry no bytes and pass through.
+    #[test]
+    fn queue_push_payload_spills_and_resolves_like_cell_set() {
+        use crate::{Delta, DeltaOp, NodeId};
+
+        let mut backend = InProcessBackend::new().unwrap();
+        let big = vec![0x61u8; 400];
+        let small = vec![1u8, 2, 3];
+        let mut msg = IpcMessage::Delta(Delta::next(
+            1,
+            vec![
+                DeltaOp::queue_push(NodeId(6), big.clone()),
+                DeltaOp::queue_push(NodeId(6), small.clone()),
+                DeltaOp::queue_pop(NodeId(6)),
+                DeltaOp::queue_close(NodeId(6)),
+            ],
+        ));
+
+        let spilled = spill_message(&mut msg, &mut backend, 64);
+        assert_eq!(spilled, big.len(), "only the over-threshold push spills");
+
+        let mut router = BlobRouter::new();
+        router.register(&backend);
+        let IpcMessage::Delta(delta) = &msg else {
+            panic!("expected Delta");
+        };
+        let DeltaOp::QueuePush { payload, .. } = &delta.ops[0] else {
+            panic!("expected QueuePush, got {:?}", delta.ops[0]);
+        };
+        assert!(matches!(payload, IpcValue::SharedBlob(_)));
+        assert!(bytes_eq(router.resolve(payload), &big));
+        assert!(bytes_eq(resolve_value(payload, &backend), &big));
+        assert_eq!(delta.ops[1], DeltaOp::queue_push(NodeId(6), small));
+        assert_eq!(delta.ops[2], DeltaOp::queue_pop(NodeId(6)));
+        assert_eq!(delta.ops[3], DeltaOp::queue_close(NodeId(6)));
     }
 
     // Spill across Snapshot NodeState + CrdtSync op state.

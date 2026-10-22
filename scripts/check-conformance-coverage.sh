@@ -416,6 +416,21 @@ KNOWN_UNCOVERED=(
 "reliable-sync/liveness_lease_eviction.json"
 # Rust's durable outbox is SQLite-backed; it has no append-only journal decoder.
 "reliable-sync/outbox_journal_decode.json"
+# lazily-rs 0.57 predates the durable-client/owner APIs introduced on the 0.59
+# line. Keep the maintenance release honest against the v0.43 corpus without
+# pretending those later APIs are part of its patch-compatible surface.
+"durable-client/envelope_v1.json"
+"durable-owner/atomic_crash_boundary.json"
+"durable-owner/inbox_outbox_deduplication.json"
+"durable-owner/ordered_replay.json"
+"durable-owner/projection_fingerprint.json"
+# The replay proof harness and consumer simulation testkit also shipped after
+# 0.57. They remain explicit gaps; the stale-handle fixture is replayed rather
+# than being hidden in this ledger.
+"replay/canonical_encoding_equality.json"
+"replay/divergence_localization.json"
+"replay/fingerprint_log_binding.json"
+"simulation/consumer_testkit.json"
 )
 
 # Scenarios of an OPENED fixture that this binding deliberately does not replay
