@@ -9,6 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  LAZILY_SPEC_REF: v0.43.0
 
 jobs:
   test:
@@ -85,7 +86,7 @@ jobs:
       # generated Protobuf source. Fetch it before any all-feature compile so
       # the optional `protobuf` build cannot fall back to a copied schema.
       - name: Fetch canonical lazily-spec conformance fixtures (#lzspecconf)
-        run: git clone --depth 1 https://github.com/lazily-hub/lazily-spec.git ../lazily-spec
+        run: git clone --depth 1 --branch "$LAZILY_SPEC_REF" https://github.com/lazily-hub/lazily-spec.git ../lazily-spec
 
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
@@ -558,7 +559,7 @@ jobs:
       # --noEmit` fails TS2307 on the fixture imports before a single test runs.
       - name: Fetch canonical lazily-spec conformance fixtures
         working-directory: .
-        run: git clone --depth 1 https://github.com/lazily-hub/lazily-spec.git ../lazily-spec
+        run: git clone --depth 1 --branch "$LAZILY_SPEC_REF" https://github.com/lazily-hub/lazily-spec.git ../lazily-spec
 
       - name: Guard the sibling fixtures the typecheck imports
         working-directory: .
@@ -590,6 +591,7 @@ jobs:
         with:
           repository: lazily-hub/lazily-spec
           path: lazily-spec
+          ref: ${{ env.LAZILY_SPEC_REF }}
 
       - name: Build lazily-spec Lean formal model (#lzleanmodel)
         uses: leanprover/lean-action@v1
