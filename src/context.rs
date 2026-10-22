@@ -1648,6 +1648,12 @@ impl Context {
     pub fn dispose_effect(&self, handle: &Effect) {
         let torn_down = {
             let mut inner = self.inner.borrow_mut();
+            // Check the kind BEFORE descheduling or taking: a stale effect
+            // handle whose id has been recycled must not tear down the source
+            // or computed node that now owns that id.
+            if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Effect(_))) {
+                return;
+            }
             // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
             // a tombstone rather than scanning `pending_effects` for it. A mass
             // teardown during a flush disposes W effects while the queue still
@@ -3504,6 +3510,20 @@ mod tests {
             !ctx.inner.borrow().free_ids.contains(&cell.id.0),
             "a live node's id must not be recycled"
         );
+    }
+
+    #[test]
+    fn stale_effect_handle_cannot_remove_a_recycled_cell() {
+        let ctx = Context::new();
+        let stale = ctx.effect(|_| {});
+        ctx.dispose_effect(&stale);
+
+        let cell = ctx.cell(1i64);
+        assert_eq!(cell.id, stale.id, "the test requires recycled-id reuse");
+
+        ctx.dispose_effect(&stale);
+        ctx.set(&cell, 2);
+        assert_eq!(ctx.get(&cell), 2);
     }
 
     #[test]
