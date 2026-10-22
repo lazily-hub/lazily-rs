@@ -1471,6 +1471,8 @@ where
 #[derive(Default)]
 struct ThreadSafeState {
     nodes: Vec<Option<ThreadSafeNode>>,
+    /// Per-slot occupant generation, bumped before an id is recycled.
+    generations: Vec<u64>,
     next_id: u64,
     free_ids: Vec<u64>,
     pending_effects: VecDeque<SlotId>,
@@ -1505,6 +1507,24 @@ fn node_index(id: SlotId) -> Option<usize> {
 }
 
 impl ThreadSafeState {
+    fn generation(&self, id: SlotId) -> u64 {
+        node_index(id)
+            .and_then(|index| self.generations.get(index))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn generation_matches(&self, id: SlotId, generation: u64) -> bool {
+        self.generation(id) == generation
+    }
+
+    fn retire_id(&mut self, id: SlotId) {
+        if let Some(index) = node_index(id) {
+            self.generations[index] = self.generations[index].wrapping_add(1);
+        }
+        self.free_ids.push(id.0);
+    }
+
     fn get_node(&self, id: SlotId) -> Option<&ThreadSafeNode> {
         self.nodes.get(node_index(id)?).and_then(|opt| opt.as_ref())
     }
@@ -1985,7 +2005,15 @@ impl ThreadSafeContext {
         {
             state.instrumentation.record_node_allocation();
         }
+        let index = node_index(slot_id).expect("SlotId does not fit usize");
+        if state.generations.len() <= index {
+            state.generations.resize(index + 1, 0);
+        }
         slot_id
+    }
+
+    fn generation(&self, id: SlotId) -> u64 {
+        self.read_state().generation(id)
     }
 
     fn slot_fast_path(&self, id: SlotId) -> Option<Arc<ThreadSafeSlotFastPath>> {
@@ -2351,7 +2379,7 @@ impl ThreadSafeContext {
         slot_fast_paths[idx] = Some(fast_path);
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Computed(node));
-        Computed::from_id(id)
+        Computed::from_id_generation(id, self.generation(id))
     }
 
     /// Read the current value of a cell — a [`Computed`] or a [`Source`]
@@ -2765,7 +2793,7 @@ impl ThreadSafeContext {
         cell_fast_paths[idx] = Some(fast_path);
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Source(node));
-        Source::from_id(id)
+        Source::from_id_generation(id, self.generation(id))
     }
 
     /// Compatibility constructor for the pre-Cell-kernel API.
@@ -2811,7 +2839,7 @@ impl ThreadSafeContext {
         cell_fast_paths[idx] = Some(fast_path);
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Source(node));
-        Source::from_id(id)
+        Source::from_id_generation(id, self.generation(id))
     }
 
     /// Compatibility constructor for the pre-Cell-kernel API.
@@ -3044,7 +3072,7 @@ impl ThreadSafeContext {
         };
         self.lock_state()
             .insert_node(id, ThreadSafeNode::Effect(node));
-        let handle = Effect::new(id);
+        let handle = Effect::new_generation(id, self.generation(id));
         self.schedule_effect(id, false);
         self.flush_effects();
         handle
@@ -3058,7 +3086,9 @@ impl ThreadSafeContext {
             // handle whose id has been recycled must not tear down the source
             // or computed node that now owns that id. `dispose_slot` and
             // `dispose_cell` enforce the same stale-handle fence.
-            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Effect(_))) {
+            if !state.generation_matches(handle.id, handle.generation)
+                || !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Effect(_)))
+            {
                 return;
             }
             // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
@@ -3073,7 +3103,7 @@ impl ThreadSafeContext {
             let Some(ThreadSafeNode::Effect(effect)) = state.remove_node(handle.id) else {
                 return;
             };
-            state.free_ids.push(handle.id.0);
+            state.retire_id(handle.id);
             (effect.dependencies, effect.cleanup)
         };
 
@@ -3166,7 +3196,9 @@ impl ThreadSafeContext {
             let mut state = self.lock_state();
             // Check the kind BEFORE removing: a stale handle whose id has been
             // recycled must not tear down whatever now owns it.
-            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Computed(_))) {
+            if !state.generation_matches(handle.id, handle.generation)
+                || !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Computed(_)))
+            {
                 return;
             }
             let Some(ThreadSafeNode::Computed(slot)) = state.remove_node(handle.id) else {
@@ -3184,7 +3216,7 @@ impl ThreadSafeContext {
             {
                 registry[idx] = None;
             }
-            state.free_ids.push(handle.id.0);
+            state.retire_id(handle.id);
             slot
         };
         // Drop outside both locks: the node owns its compute closure and
@@ -3202,7 +3234,9 @@ impl ThreadSafeContext {
         let torn_down = {
             let mut registry = self.inner.cell_fast_paths.write();
             let mut state = self.lock_state();
-            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Source(_))) {
+            if !state.generation_matches(handle.id, handle.generation)
+                || !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Source(_)))
+            {
                 return;
             }
             let Some(ThreadSafeNode::Source(cell)) = state.remove_node(handle.id) else {
@@ -3217,7 +3251,7 @@ impl ThreadSafeContext {
             {
                 registry[idx] = None;
             }
-            state.free_ids.push(handle.id.0);
+            state.retire_id(handle.id);
             cell
         };
         drop(torn_down);
@@ -3255,23 +3289,28 @@ impl ThreadSafeContext {
 
     /// Tear down whatever node `id` names, dispatching on its own kind.
     fn dispose_id(&self, id: SlotId) {
-        let kind = match self.read_state().get_node(id) {
-            Some(ThreadSafeNode::Computed(_)) => 0u8,
-            Some(ThreadSafeNode::Source(_)) => 1,
-            Some(ThreadSafeNode::Effect(_)) => 2,
-            None => return,
+        let (kind, generation) = {
+            let state = self.read_state();
+            let kind = match state.get_node(id) {
+                Some(ThreadSafeNode::Computed(_)) => 0u8,
+                Some(ThreadSafeNode::Source(_)) => 1,
+                Some(ThreadSafeNode::Effect(_)) => 2,
+                None => return,
+            };
+            (kind, state.generation(id))
         };
         match kind {
-            0 => self.dispose_slot(&Computed::<()>::from_id(id)),
-            1 => self.dispose_cell(&Source::<()>::from_id(id)),
-            _ => self.dispose_effect(&Effect::new(id)),
+            0 => self.dispose_slot(&Computed::<()>::from_id_generation(id, generation)),
+            1 => self.dispose_cell(&Source::<()>::from_id_generation(id, generation)),
+            _ => self.dispose_effect(&Effect::new_generation(id, generation)),
         }
     }
 
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &Effect) -> bool {
         let state = self.read_state();
-        matches!(state.get_node(handle.id), Some(ThreadSafeNode::Effect(_)))
+        state.generation_matches(handle.id, handle.generation)
+            && matches!(state.get_node(handle.id), Some(ThreadSafeNode::Effect(_)))
     }
 
     // -- Signal API --------------------------------------------------------
@@ -4104,6 +4143,24 @@ mod tests {
         ctx.dispose_effect(&stale);
         ctx.set(&source, 2);
         assert_eq!(ctx.get(&source), 2);
+    }
+
+    #[test]
+    fn stale_same_kind_handle_cannot_remove_a_recycled_source() {
+        let ctx = ThreadSafeContext::new();
+        let stale = ctx.source(1i64);
+        ctx.dispose_cell(&stale);
+
+        let successor = ctx.source(2i64);
+        assert_eq!(
+            successor.id, stale.id,
+            "the test requires recycled-id reuse"
+        );
+        assert_ne!(successor.generation, stale.generation);
+
+        ctx.dispose_cell(&stale);
+        ctx.set(&successor, 3);
+        assert_eq!(ctx.get(&successor), 3);
     }
 
     #[test]

@@ -64,19 +64,22 @@ use crate::merge::MergePolicy;
 /// [`KeepLatest`], i.e. last-writer-wins replace). `Source<T>` is a plain input
 /// cell; `Source<T, Sum>` folds additively; etc.
 ///
-/// Lightweight: just a recycled [`SlotId`] into the arena; the value lives
-/// inside the `Context`. Two handles are equal when they address the same
-/// underlying node — the observable cell-identity contract behind atomic moves
-/// (`#lzcellmove`) and keyed reconciliation.
+/// Lightweight: an arena [`SlotId`] plus its occupant generation; the value
+/// lives inside the `Context`. Two handles are equal only when both fields
+/// match, so a recycled slot never aliases its prior occupant — the observable
+/// cell-identity contract behind atomic moves (`#lzcellmove`) and keyed
+/// reconciliation.
 pub struct Source<T, M = KeepLatest> {
     pub(crate) id: SlotId,
+    pub(crate) generation: u64,
     pub(crate) _marker: PhantomData<(T, M)>,
 }
 
 impl<T, M> Source<T, M> {
-    pub(crate) fn from_id(id: SlotId) -> Self {
+    pub(crate) fn from_id_generation(id: SlotId, generation: u64) -> Self {
         Self {
             id,
+            generation,
             _marker: PhantomData,
         }
     }
@@ -99,7 +102,7 @@ impl<T, M> Source<T, M> {
     where
         T: 'static,
     {
-        ctx.dispose_node(self.id);
+        ctx.dispose_node(self.id, self.generation);
     }
 
     /// Run `on_change` now and again on every change to this value. Returns the
@@ -143,7 +146,7 @@ impl<T, M: MergePolicy<T>> Source<T, M> {
     /// The plain (keep-latest) view of this source cell, for wiring into derived
     /// readers that want a policy-erased handle. Same underlying node.
     pub fn cell(&self) -> Source<T> {
-        Source::from_id(self.id)
+        Source::from_id_generation(self.id, self.generation)
     }
 
     /// Clear all dependent computed cells without changing this cell's value.
@@ -162,7 +165,7 @@ impl<T, M> Copy for Source<T, M> {}
 
 impl<T, M> PartialEq for Source<T, M> {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.id == other.id && self.generation == other.generation
     }
 }
 
@@ -170,7 +173,10 @@ impl<T, M> Eq for Source<T, M> {}
 
 impl<T, M> std::fmt::Debug for Source<T, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Source").field("id", &self.id).finish()
+        f.debug_struct("Source")
+            .field("id", &self.id)
+            .field("generation", &self.generation)
+            .finish()
     }
 }
 
@@ -182,17 +188,24 @@ impl<T, M> std::fmt::Debug for Source<T, M> {
 /// from upstream. Lazy by default; `computed().eager()` makes it eager (an eager
 /// computed cell).
 ///
-/// Lightweight: just a recycled [`SlotId`] into the arena. Two handles are equal
-/// when they address the same underlying node.
+/// Lightweight: an arena [`SlotId`] plus its occupant generation. Two handles
+/// are equal only when they address the same live-or-retired occupant, not when
+/// an allocator slot has merely been recycled.
 pub struct Computed<T> {
     pub(crate) id: SlotId,
+    pub(crate) generation: u64,
     pub(crate) _marker: PhantomData<T>,
 }
 
 impl<T> Computed<T> {
     pub(crate) fn from_id(id: SlotId) -> Self {
+        Self::from_id_generation(id, u64::MAX)
+    }
+
+    pub(crate) fn from_id_generation(id: SlotId, generation: u64) -> Self {
         Self {
             id,
+            generation,
             _marker: PhantomData,
         }
     }
@@ -224,7 +237,7 @@ impl<T> Computed<T> {
     where
         T: 'static,
     {
-        ctx.dispose_node(self.id);
+        ctx.dispose_node(self.id, self.generation);
     }
 
     /// Run `on_change` now and again on every change to this value. Returns the
@@ -291,7 +304,7 @@ impl<T> Copy for Computed<T> {}
 
 impl<T> PartialEq for Computed<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.id == other.id && self.generation == other.generation
     }
 }
 
@@ -299,6 +312,9 @@ impl<T> Eq for Computed<T> {}
 
 impl<T> std::fmt::Debug for Computed<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Computed").field("id", &self.id).finish()
+        f.debug_struct("Computed")
+            .field("id", &self.id)
+            .field("generation", &self.generation)
+            .finish()
     }
 }
