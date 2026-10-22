@@ -447,6 +447,8 @@ struct FactoryEntry {
 
 struct ContextInner {
     nodes: Vec<Option<Node>>,
+    /// Per-slot occupant generation, bumped before an id is recycled.
+    generations: Vec<u64>,
     next_id: u64,
     free_ids: Vec<u64>,
     /// #lzspecedgeindex. Hash indexes for promoted (wide) edge lists only; see
@@ -504,7 +506,7 @@ struct ContextInner {
     /// cleared when a formula is disposed or made lazy — it is owner-keyed and
     /// would otherwise alias a recycled id (the `recycled_id_inherits_nothing`
     /// hazard).
-    eager_by: HashMap<SlotId, SlotId>,
+    eager_by: HashMap<SlotId, Effect>,
     #[cfg(feature = "instrumentation")]
     instrumentation: crate::instrumentation::InstrumentationCounters,
 }
@@ -562,6 +564,7 @@ impl Context {
         Self {
             inner: RefCell::new(ContextInner {
                 nodes: Vec::new(),
+                generations: Vec::new(),
                 next_id: 0,
                 free_ids: Vec::new(),
                 dependents_index: EdgeIndex::default(),
@@ -616,7 +619,33 @@ impl Context {
         {
             inner.instrumentation.record_node_allocation();
         }
+        let index = Self::node_index(slot_id).expect("SlotId does not fit usize");
+        if inner.generations.len() <= index {
+            inner.generations.resize(index + 1, 0);
+        }
         slot_id
+    }
+
+    fn generation_locked(inner: &ContextInner, id: SlotId) -> u64 {
+        Self::node_index(id)
+            .and_then(|index| inner.generations.get(index))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn generation(&self, id: SlotId) -> u64 {
+        Self::generation_locked(&self.inner.borrow(), id)
+    }
+
+    fn generation_matches(inner: &ContextInner, id: SlotId, generation: u64) -> bool {
+        Self::generation_locked(inner, id) == generation
+    }
+
+    fn retire_id_locked(inner: &mut ContextInner, id: SlotId) {
+        if let Some(index) = Self::node_index(id) {
+            inner.generations[index] = inner.generations[index].wrapping_add(1);
+        }
+        inner.free_ids.push(id.0);
     }
 
     fn node_index(id: SlotId) -> Option<usize> {
@@ -938,7 +967,7 @@ impl Context {
             verified_at: 0,
         };
         self.insert_node(id, Node::Computed(node));
-        Computed::from_id(id)
+        Computed::from_id_generation(id, self.generation(id))
     }
 
     /// Read the current value of a cell — a [`Computed`] or a [`Source`].
@@ -1305,7 +1334,8 @@ impl Context {
         T: PartialEq + 'static,
         M: MergePolicy<T>,
     {
-        Source::from_id(self.cell(value).id)
+        let source = self.cell(value);
+        Source::from_id_generation(source.id, source.generation)
     }
 
     /// `#lzcellkernel` — make a formula eager by id. Idempotent: a
@@ -1330,14 +1360,14 @@ impl Context {
         if let Some(Node::Computed(slot)) = Self::get_node_mut(&mut inner.nodes, id) {
             slot.eager = true;
         }
-        inner.eager_by.insert(id, effect.id);
+        inner.eager_by.insert(id, effect);
     }
 
     /// `#lzcellkernel` — make a formula lazy (revert from eager): dispose its
     /// puller effect, clear the eager bit, and remove its `eager_by` entry. No-op
     /// if not eager. This is the reverse transition that replaces `dispose_signal`.
     pub(crate) fn make_lazy(&self, id: SlotId) {
-        let effect_id = {
+        let effect = {
             let mut inner = self.inner.borrow_mut();
             match Self::get_node_mut(&mut inner.nodes, id) {
                 Some(Node::Computed(slot)) if slot.eager => slot.eager = false,
@@ -1345,8 +1375,8 @@ impl Context {
             }
             inner.eager_by.remove(&id)
         };
-        if let Some(effect_id) = effect_id {
-            self.dispose_effect(&Effect::new(effect_id));
+        if let Some(effect) = effect {
+            self.dispose_effect(&effect);
         }
     }
 
@@ -1361,8 +1391,8 @@ impl Context {
 
     /// `#lzcellkernel` — tear down a node by id, dispatching on its own kind.
     /// Backs the kind-agnostic `Source::dispose` / `Computed::dispose`.
-    pub(crate) fn dispose_node(&self, id: SlotId) {
-        self.dispose_id(id);
+    pub(crate) fn dispose_node(&self, id: SlotId, generation: u64) {
+        self.dispose_id_generation(id, generation);
     }
 
     // -- Cell API ----------------------------------------------------------
@@ -1376,7 +1406,7 @@ impl Context {
             dependents: EdgeVec::new(),
         };
         self.insert_node(id, Node::Source(node));
-        Source::from_id(id)
+        Source::from_id_generation(id, self.generation(id))
     }
 
     /// Create a [`Source`] — a cell whose write is a *merge* under
@@ -1390,7 +1420,8 @@ impl Context {
     {
         // A merge cell is just a `Source<T, M>` over an ordinary cell node —
         // same node as a plain cell, the policy lives in `Source<T, M>`'s param.
-        Source::from_id(self.cell(initial).id)
+        let source = self.cell(initial);
+        Source::from_id_generation(source.id, source.generation)
     }
 
     /// Fold `op` into a cell's value under policy `M` (the merge write). Reads
@@ -1638,7 +1669,7 @@ impl Context {
         };
         self.insert_node(id, Node::Effect(node));
         self.inner.borrow_mut().all_effect_ids.push(id);
-        let handle = Effect::new(id);
+        let handle = Effect::new_generation(id, self.generation(id));
         self.schedule_effect(id, false);
         self.flush_effects();
         handle
@@ -1651,7 +1682,12 @@ impl Context {
             // Check the kind BEFORE descheduling or taking: a stale effect
             // handle whose id has been recycled must not tear down the source
             // or computed node that now owns that id.
-            if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Effect(_))) {
+            if !Self::generation_matches(&inner, handle.id, handle.generation)
+                || !matches!(
+                    Self::get_node(&inner.nodes, handle.id),
+                    Some(Node::Effect(_))
+                )
+            {
                 return;
             }
             // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
@@ -1675,7 +1711,7 @@ impl Context {
             // The id is about to be recycled, so drop both index entries — a
             // stale one would alias the next node allocated with this id.
             Self::drop_edge_index_entries(&mut inner, handle.id);
-            inner.free_ids.push(handle.id.0);
+            Self::retire_id_locked(&mut inner, handle.id);
             effect
         };
         // Outside the borrow: the effect owns its run closure and everything it
@@ -1703,6 +1739,17 @@ impl Context {
     /// Reading a disposed node throws on the next recompute — the same contract
     /// as [`Context::dispose_effect`] and the JS binding's `disposeSlot`.
     pub fn dispose_slot<T>(&self, handle: &Computed<T>) {
+        {
+            let inner = self.inner.borrow();
+            if !Self::generation_matches(&inner, handle.id, handle.generation)
+                || !matches!(
+                    Self::get_node(&inner.nodes, handle.id),
+                    Some(Node::Computed(_))
+                )
+            {
+                return;
+            }
+        }
         // `#lzcellkernel` — disposing an eager formula tears down its puller
         // first, so no poisoned effect is stranded and the `eager_by` side
         // table never aliases a recycled id.
@@ -1711,10 +1758,12 @@ impl Context {
             let mut inner = self.inner.borrow_mut();
             // Check the kind BEFORE taking: a stale handle whose id has been
             // recycled must not tear down whatever now owns it.
-            if !matches!(
-                Self::get_node(&inner.nodes, handle.id),
-                Some(Node::Computed(_))
-            ) {
+            if !Self::generation_matches(&inner, handle.id, handle.generation)
+                || !matches!(
+                    Self::get_node(&inner.nodes, handle.id),
+                    Some(Node::Computed(_))
+                )
+            {
                 return;
             }
             let Some(Node::Computed(slot)) = Self::take_node(&mut inner.nodes, handle.id) else {
@@ -1724,7 +1773,7 @@ impl Context {
             Self::remove_dependency_edges_locked(&mut inner, handle.id, &slot.dependents);
             Self::invalidate_disposed_dependents_locked(&mut inner, &slot.dependents);
             Self::drop_edge_index_entries(&mut inner, handle.id);
-            inner.free_ids.push(handle.id.0);
+            Self::retire_id_locked(&mut inner, handle.id);
             slot
         };
         // Drop the node outside the borrow. It owns the compute closure and
@@ -1741,10 +1790,12 @@ impl Context {
     /// need detaching. Same contract as [`Context::dispose_slot`].
     pub fn dispose_cell<T>(&self, handle: &Source<T>) {
         let mut inner = self.inner.borrow_mut();
-        if !matches!(
-            Self::get_node(&inner.nodes, handle.id),
-            Some(Node::Source(_))
-        ) {
+        if !Self::generation_matches(&inner, handle.id, handle.generation)
+            || !matches!(
+                Self::get_node(&inner.nodes, handle.id),
+                Some(Node::Source(_))
+            )
+        {
             return;
         }
         let Some(Node::Source(cell)) = Self::take_node(&mut inner.nodes, handle.id) else {
@@ -1753,7 +1804,7 @@ impl Context {
         Self::remove_dependency_edges_locked(&mut inner, handle.id, &cell.dependents);
         Self::invalidate_disposed_dependents_locked(&mut inner, &cell.dependents);
         Self::drop_edge_index_entries(&mut inner, handle.id);
-        inner.free_ids.push(handle.id.0);
+        Self::retire_id_locked(&mut inner, handle.id);
         drop(inner);
         // Same reason as dispose_slot: the cell owns its value, whose Drop may
         // re-enter.
@@ -1797,6 +1848,11 @@ impl Context {
     /// The kind is read from the arena rather than remembered by the caller, so
     /// a teardown scope stores 8 bytes per node and no tag.
     fn dispose_id(&self, id: SlotId) {
+        let generation = self.generation(id);
+        self.dispose_id_generation(id, generation);
+    }
+
+    fn dispose_id_generation(&self, id: SlotId, generation: u64) {
         let kind = match Self::get_node(&self.inner.borrow().nodes, id) {
             Some(Node::Computed(_)) => 0u8,
             Some(Node::Source(_)) => 1,
@@ -1804,9 +1860,9 @@ impl Context {
             None => return,
         };
         match kind {
-            0 => self.dispose_slot(&Computed::<()>::from_id(id)),
-            1 => self.dispose_cell(&Source::<()>::from_id(id)),
-            _ => self.dispose_effect(&Effect::new(id)),
+            0 => self.dispose_slot(&Computed::<()>::from_id_generation(id, generation)),
+            1 => self.dispose_cell(&Source::<()>::from_id_generation(id, generation)),
+            _ => self.dispose_effect(&Effect::new_generation(id, generation)),
         }
     }
 
@@ -1857,10 +1913,11 @@ impl Context {
     /// Check whether an effect is still registered.
     pub fn is_effect_active(&self, handle: &Effect) -> bool {
         let inner = self.inner.borrow();
-        matches!(
-            Self::get_node(&inner.nodes, handle.id),
-            Some(Node::Effect(_))
-        )
+        Self::generation_matches(&inner, handle.id, handle.generation)
+            && matches!(
+                Self::get_node(&inner.nodes, handle.id),
+                Some(Node::Effect(_))
+            )
     }
 
     fn schedule_effect(&self, id: SlotId, force: bool) {
@@ -3084,7 +3141,7 @@ pub trait ComputeOps {
         F: FnOnce(&Context) -> R;
 
     /// Tear down a node by id (detach both edge directions, recycle the id).
-    fn dispose_node(&self, id: SlotId);
+    fn dispose_node(&self, id: SlotId, generation: u64);
 }
 
 impl ComputeOps for Context {
@@ -3140,8 +3197,8 @@ impl ComputeOps for Context {
         Context::batch(self, f)
     }
 
-    fn dispose_node(&self, id: SlotId) {
-        Context::dispose_node(self, id)
+    fn dispose_node(&self, id: SlotId, generation: u64) {
+        Context::dispose_node(self, id, generation)
     }
 }
 
@@ -3201,8 +3258,8 @@ impl ComputeOps for Compute<'_> {
         self.ctx.batch(f)
     }
 
-    fn dispose_node(&self, id: SlotId) {
-        self.ctx.dispose_node(id)
+    fn dispose_node(&self, id: SlotId, generation: u64) {
+        self.ctx.dispose_node(id, generation)
     }
 }
 
@@ -3396,6 +3453,7 @@ mod tests {
         struct ReentersOnDrop {
             ctx: std::rc::Weak<Context>,
             victim: SlotId,
+            generation: u64,
         }
         impl Drop for ReentersOnDrop {
             fn drop(&mut self) {
@@ -3403,6 +3461,7 @@ mod tests {
                     // any context call that borrows would do
                     ctx.dispose_slot(&Computed::<u64> {
                         id: self.victim,
+                        generation: self.generation,
                         _marker: std::marker::PhantomData,
                     });
                 }
@@ -3417,6 +3476,7 @@ mod tests {
         let reentrant = ReentersOnDrop {
             ctx: std::rc::Rc::downgrade(&ctx),
             victim: victim.id,
+            generation: victim.generation,
         };
         let holder = ctx.computed(move |c| {
             let _ = &reentrant;
@@ -3502,6 +3562,7 @@ mod tests {
         let cell = ctx.cell(1usize);
         let stale: Computed<usize> = Computed {
             id: cell.id,
+            generation: cell.generation,
             _marker: std::marker::PhantomData,
         };
         ctx.dispose_slot(&stale);
@@ -3524,6 +3585,24 @@ mod tests {
         ctx.dispose_effect(&stale);
         ctx.set(&cell, 2);
         assert_eq!(ctx.get(&cell), 2);
+    }
+
+    #[test]
+    fn stale_same_kind_handle_cannot_remove_a_recycled_cell() {
+        let ctx = Context::new();
+        let stale = ctx.cell(1i64);
+        ctx.dispose_cell(&stale);
+
+        let successor = ctx.cell(2i64);
+        assert_eq!(
+            successor.id, stale.id,
+            "the test requires recycled-id reuse"
+        );
+        assert_ne!(successor.generation, stale.generation);
+
+        ctx.dispose_cell(&stale);
+        ctx.set(&successor, 3);
+        assert_eq!(ctx.get(&successor), 3);
     }
 
     #[test]

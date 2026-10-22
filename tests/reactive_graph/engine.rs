@@ -13,7 +13,8 @@ use serde_json::Value;
 
 use super::model::{
     COMPUTE_FAILED, Computes, GraphModel, Merges, Ref, ScopeModel, arm_failure, computes_seen,
-    count_merge, dependencies_of, dependents_of, dispose, log_snapshot, merges_seen,
+    count_merge, dependencies_of, dependents_of, dispose, is_writable, log_snapshot, merges_seen,
+    node_kind, same_raw_node_id,
 };
 
 /// The node ids a descended per-node assertion block declares.
@@ -256,6 +257,7 @@ pub fn replay<'a, M: GraphModel>(
         let runs_before = log_snapshot(model.run_log()).len();
         let mut op_error = false;
         let mut op_value: Option<i64> = None;
+        let mut recycled_id_confirmed = false;
         ops += 1;
         // Measure this op's drain in isolation: `drain_exhausted` is a
         // cumulative observable on the model, so clear it before every op.
@@ -490,14 +492,27 @@ pub fn replay<'a, M: GraphModel>(
                     .get(of)
                     .unwrap_or_else(|| panic!("{fixture}: no recorded handle for {of}"));
                 let want = op["handle_kind"].as_str().unwrap();
-                let matches = matches!(
-                    (want, h),
-                    ("cell", Ref::Cell(_)) | ("slot", Ref::Slot(_)) | ("effect", Ref::Effect(_))
-                );
-                assert!(
-                    matches,
+                assert_eq!(
+                    node_kind(h),
+                    want,
                     "{fixture}: handle_kind {want} does not match recorded handle"
                 );
+
+                let successor_name = op["successor"].as_str().unwrap();
+                let successor = *nodes.get(successor_name).unwrap_or_else(|| {
+                    panic!("{fixture}: no current successor named {successor_name}")
+                });
+                let successor_kind = op["successor_kind"].as_str().unwrap();
+                assert_eq!(
+                    node_kind(successor),
+                    successor_kind,
+                    "{fixture}: successor_kind {successor_kind} does not match current successor"
+                );
+                assert!(
+                    same_raw_node_id(h, successor),
+                    "{fixture}: stale handle and successor did not reuse one allocator slot"
+                );
+                recycled_id_confirmed = true;
                 dispose(model.graph(), h);
             }
             other => panic!("{fixture}: unknown op {other}"),
@@ -596,6 +611,40 @@ pub fn replay<'a, M: GraphModel>(
                 let got = merges_seen(counter) as u64;
                 want.assert_key_with(id.as_str(), |v| {
                     check!(format!("merges_of.{id}"), got, v.as_u64().unwrap());
+                });
+            }
+            want.finish();
+        }
+
+        expect.assert_key_if_present("recycled_id_confirmed", |want| {
+            check!(
+                "recycled_id_confirmed",
+                recycled_id_confirmed,
+                want.fixture_flag("recycled_id_confirmed")
+            );
+        });
+
+        if let Some(want) = expect.sub_if_present("writable") {
+            for id in node_ids(&want) {
+                let node = *nodes
+                    .get(id.as_str())
+                    .unwrap_or_else(|| panic!("{fixture}: writable of unknown node {id}"));
+                want.assert_key_with(id.as_str(), |v| {
+                    check!(
+                        format!("writable.{id}"),
+                        is_writable(node),
+                        v.fixture_flag(&format!("writable.{id}"))
+                    );
+                });
+            }
+            want.finish();
+        }
+
+        if let Some(want) = expect.sub_if_present("cleanups_of") {
+            for id in node_ids(&want) {
+                let got = cleaned.iter().filter(|name| *name == &id).count() as u64;
+                want.assert_key_with(id.as_str(), |v| {
+                    check!(format!("cleanups_of.{id}"), got, v.as_u64().unwrap());
                 });
             }
             want.finish();

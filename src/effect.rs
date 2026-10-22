@@ -27,19 +27,22 @@ where
     }
 }
 
-/// A typed handle to an effect within a [`Context`].
+/// A typed handle to an effect within a [`Context`], carrying both its arena
+/// slot and occupant generation so disposal cannot alias a recycled node.
 ///
 /// Effects run immediately when created, automatically track any slots/cells
 /// read during the run, and rerun after those dependencies are invalidated.
 pub struct Effect {
     pub(crate) id: SlotId,
+    pub(crate) generation: u64,
     pub(crate) _marker: PhantomData<()>,
 }
 
 impl Effect {
-    pub(crate) fn new(id: SlotId) -> Self {
+    pub(crate) fn new_generation(id: SlotId, generation: u64) -> Self {
         Self {
             id,
+            generation,
             _marker: PhantomData,
         }
     }
