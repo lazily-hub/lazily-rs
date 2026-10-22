@@ -506,6 +506,7 @@ pub struct AsyncContext {
 
 pub struct AsyncComputed<T> {
     pub(crate) id: SlotId,
+    pub(crate) generation: u64,
     pub(crate) _marker: PhantomData<T>,
 }
 
@@ -534,7 +535,7 @@ impl<T> Copy for AsyncComputed<T> {}
 // the async flavor.
 impl<T> PartialEq for AsyncComputed<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.id == other.id && self.generation == other.generation
     }
 }
 
@@ -544,6 +545,7 @@ impl<T> fmt::Debug for AsyncComputed<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AsyncComputed")
             .field("id", &self.id)
+            .field("generation", &self.generation)
             .finish()
     }
 }
@@ -554,6 +556,7 @@ pub type AsyncSlotHandle<T> = AsyncComputed<T>;
 
 pub struct AsyncSource<T> {
     pub(crate) id: SlotId,
+    pub(crate) generation: u64,
     pub(crate) _marker: PhantomData<T>,
 }
 
@@ -567,7 +570,7 @@ impl<T> Copy for AsyncSource<T> {}
 // Node identity, matching the single-threaded `Source`. See `AsyncComputed`.
 impl<T> PartialEq for AsyncSource<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.id == other.id && self.generation == other.generation
     }
 }
 
@@ -575,7 +578,10 @@ impl<T> Eq for AsyncSource<T> {}
 
 impl<T> fmt::Debug for AsyncSource<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AsyncSource").field("id", &self.id).finish()
+        f.debug_struct("AsyncSource")
+            .field("id", &self.id)
+            .field("generation", &self.generation)
+            .finish()
     }
 }
 
@@ -585,6 +591,7 @@ pub type AsyncCellHandle<T> = AsyncSource<T>;
 
 pub struct AsyncEffectHandle {
     pub(crate) id: SlotId,
+    pub(crate) generation: u64,
 }
 
 impl Clone for AsyncEffectHandle {
@@ -930,10 +937,11 @@ impl AsyncContext {
     where
         T: PartialEq + Clone + Send + Sync + 'static,
     {
-        let id;
+        let (id, generation);
         {
             let mut inner = self.inner.lock();
             id = inner.alloc_id();
+            generation = inner.generation(id);
             let node = AsyncSourceNode {
                 value: Arc::new(value),
                 dependents: EdgeVec::new(),
@@ -942,6 +950,7 @@ impl AsyncContext {
         }
         AsyncSource {
             id,
+            generation,
             _marker: PhantomData,
         }
     }
@@ -1257,10 +1266,11 @@ impl AsyncContext {
             let fut = compute(ctx);
             Box::pin(async move { Arc::new(fut.await) as Arc<AsyncAny> })
         });
-        let id;
+        let (id, generation);
         {
             let mut inner = self.inner.lock();
             id = inner.alloc_id();
+            generation = inner.generation(id);
             let node = AsyncComputedNode {
                 state: AsyncSlotState::Empty,
                 value: None,
@@ -1277,6 +1287,7 @@ impl AsyncContext {
         }
         AsyncComputed {
             id,
+            generation,
             _marker: PhantomData,
         }
     }
@@ -1392,10 +1403,11 @@ impl AsyncContext {
         // code path (dispose, invalidate, edge walks) unchanged.
         let unused: Arc<AsyncComputeFn> =
             Arc::new(|_| Box::pin(async { Arc::new(()) as Arc<AsyncAny> }));
-        let id;
+        let (id, generation);
         {
             let mut inner = self.inner.lock();
             id = inner.alloc_id();
+            generation = inner.generation(id);
             let node = AsyncComputedNode {
                 state: AsyncSlotState::Empty,
                 value: None,
@@ -1412,6 +1424,7 @@ impl AsyncContext {
         }
         AsyncComputed {
             id,
+            generation,
             _marker: PhantomData,
         }
     }
@@ -1562,10 +1575,11 @@ impl AsyncContext {
         Fut: Future<Output = Option<C>> + Send + 'static,
         C: FnOnce() + Send + 'static,
     {
-        let id;
+        let (id, generation);
         {
             let mut inner = self.inner.lock();
             id = inner.alloc_id();
+            generation = inner.generation(id);
             let effect_fn: Arc<AsyncEffectFn> = Arc::new(move |ctx| {
                 let fut = effect(ctx);
                 Box::pin(async move { fut.await.map(|c| Box::new(c) as BoxedCleanupFn) })
@@ -1581,7 +1595,7 @@ impl AsyncContext {
             inner.insert_node(id, AsyncNode::Effect(node));
             Self::schedule_async_effect(&mut inner, id);
         }
-        let handle = AsyncEffectHandle { id };
+        let handle = AsyncEffectHandle { id, generation };
         self.flush_async_effects();
         handle
     }
@@ -1613,7 +1627,8 @@ impl AsyncContext {
     /// Check whether an async effect is still registered.
     pub fn is_async_effect_active(&self, handle: &AsyncEffectHandle) -> bool {
         let inner = self.inner.lock();
-        matches!(inner.get_node(handle.id), Some(AsyncNode::Effect(_)))
+        inner.generation(handle.id) == handle.generation
+            && matches!(inner.get_node(handle.id), Some(AsyncNode::Effect(_)))
     }
 
     /// Detach `id` from both edge directions of everything it touches.
@@ -1741,7 +1756,9 @@ impl AsyncContext {
             let mut inner = self.inner.lock();
             // Check the kind BEFORE removing: a stale handle whose id has been
             // recycled must not tear down whatever now owns it.
-            if !matches!(inner.get_node(handle.id), Some(AsyncNode::Computed(_))) {
+            if inner.generation(handle.id) != handle.generation
+                || !matches!(inner.get_node(handle.id), Some(AsyncNode::Computed(_)))
+            {
                 return;
             }
             let Some(idx) = AsyncContextInner::node_index(handle.id) else {
@@ -1775,7 +1792,9 @@ impl AsyncContext {
     pub fn dispose_cell<T>(&self, handle: &AsyncSource<T>) {
         let stale = {
             let mut inner = self.inner.lock();
-            if !matches!(inner.get_node(handle.id), Some(AsyncNode::Source(_))) {
+            if inner.generation(handle.id) != handle.generation
+                || !matches!(inner.get_node(handle.id), Some(AsyncNode::Source(_)))
+            {
                 return;
             }
             let Some(idx) = AsyncContextInner::node_index(handle.id) else {
@@ -1804,16 +1823,19 @@ impl AsyncContext {
             None => return,
         };
         let marker = std::marker::PhantomData;
+        let generation = self.inner.lock().generation(id);
         match kind {
             0 => self.dispose_slot(&AsyncComputed::<()> {
                 id,
+                generation,
                 _marker: marker,
             }),
             1 => self.dispose_cell(&AsyncSource::<()> {
                 id,
+                generation,
                 _marker: marker,
             }),
-            _ => self.dispose_async_effect(&AsyncEffectHandle { id }),
+            _ => self.dispose_async_effect(&AsyncEffectHandle { id, generation }),
         }
     }
 
@@ -1854,6 +1876,11 @@ impl AsyncContext {
     pub fn dispose_async_effect(&self, handle: &AsyncEffectHandle) {
         let (cleanup, in_flight) = {
             let mut inner = self.inner.lock();
+            if inner.generation(handle.id) != handle.generation
+                || !matches!(inner.get_node(handle.id), Some(AsyncNode::Effect(_)))
+            {
+                return;
+            }
             inner.pending_async_effects.retain(|&id| id != handle.id);
             inner.scheduled_async_effects.remove(&handle.id);
             let (cleanup, in_flight) = match inner.get_node_mut(handle.id) {
@@ -2326,9 +2353,28 @@ mod tests {
         ctx.dispose_slot(&derived);
         let stale = AsyncSource::<i64> {
             id: derived.id,
+            generation: derived.generation,
             _marker: std::marker::PhantomData,
         };
         ctx.dispose_cell(&stale);
+    }
+
+    #[test]
+    fn stale_same_kind_handle_cannot_remove_a_recycled_source() {
+        let ctx = AsyncContext::new();
+        let stale = ctx.source(1i64);
+        ctx.dispose_cell(&stale);
+
+        let successor = ctx.source(2i64);
+        assert_eq!(
+            successor.id, stale.id,
+            "the test requires recycled-id reuse"
+        );
+        assert_ne!(successor.generation, stale.generation);
+
+        ctx.dispose_cell(&stale);
+        ctx.set(&successor, 3);
+        assert_eq!(ctx.get(&successor), 3);
     }
 
     #[test]

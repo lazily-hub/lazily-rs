@@ -61,7 +61,7 @@ const SPEC_DIR: common::SpecDir = common::SpecDir("reactive-graph");
 
 /// The canonical fixture set. Asserted against the directory listing so a
 /// fixture added or renamed upstream fails loudly instead of going unrun.
-const FIXTURES: [&str; 21] = [
+const FIXTURES: [&str; 22] = [
     "churn_returns_to_baseline.json",
     "cross_scope_teardown_hazard.json",
     "disarm_disposes_nothing.json",
@@ -73,6 +73,7 @@ const FIXTURES: [&str; 21] = [
     "signal_materializes_once_per_batch.json",
     "signal_materializes_without_a_read.json",
     "recycled_id_inherits_nothing.json",
+    "stale_effect_handle_cannot_remove_recycled_source.json",
     "scope_teardown_equals_fold_of_disposals.json",
     "scoping_bounds_teardown_not_visibility.json",
     "teardown_runs_members_in_reverse_creation_order.json",
