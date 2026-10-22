@@ -3054,6 +3054,13 @@ impl ThreadSafeContext {
     pub fn dispose_effect(&self, handle: &Effect) {
         let (dependencies, cleanup) = {
             let mut state = self.lock_state();
+            // Check the kind BEFORE descheduling or removing: a stale effect
+            // handle whose id has been recycled must not tear down the source
+            // or computed node that now owns that id. `dispose_slot` and
+            // `dispose_cell` enforce the same stale-handle fence.
+            if !matches!(state.get_node(handle.id), Some(ThreadSafeNode::Effect(_))) {
+                return;
+            }
             // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
             // a tombstone rather than scanning `pending_effects` for it. Mass
             // teardown during a flush disposes W effects while the queue still
@@ -4083,6 +4090,20 @@ mod tests {
         // A stale *slot* handle over the recycled id must not tear down a cell.
         let stale = Computed::<i64>::from_id(topic.id);
         ctx.dispose_slot(&stale);
+    }
+
+    #[test]
+    fn stale_effect_handle_cannot_remove_a_recycled_source() {
+        let ctx = ThreadSafeContext::new();
+        let stale = ctx.effect(|_| {});
+        ctx.dispose_effect(&stale);
+
+        let source = ctx.source(1i64);
+        assert_eq!(source.id, stale.id, "the test requires recycled-id reuse");
+
+        ctx.dispose_effect(&stale);
+        ctx.set(&source, 2);
+        assert_eq!(ctx.get(&source), 2);
     }
 
     #[test]
