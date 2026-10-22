@@ -29,7 +29,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
-use lazily::ReactiveGraph;
+use lazily::{GraphNode, ReactiveGraph};
 
 /// Shared effect run / cleanup log. `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>`
 /// because thread-safe compute closures must be `Send + Sync`.
@@ -187,6 +187,38 @@ pub fn dependencies_of<G: ReactiveGraph>(graph: &G, node: Ref<G>) -> usize {
         Ref::Slot(h) => graph.dependency_count(&h),
         Ref::Effect(h) => graph.dependency_count(&h),
     }
+}
+
+/// The allocator slot named by a handle, independent of its node kind.
+///
+/// The stale-handle fixture uses this to prove that it actually exercised an
+/// ABA reuse rather than disposing an unrelated node and observing no effect.
+pub fn same_raw_node_id<G: ReactiveGraph>(left: Ref<G>, right: Ref<G>) -> bool {
+    let left = match left {
+        Ref::Cell(h) => h.node_id(),
+        Ref::Slot(h) => h.node_id(),
+        Ref::Effect(h) => h.node_id(),
+    };
+    let right = match right {
+        Ref::Cell(h) => h.node_id(),
+        Ref::Slot(h) => h.node_id(),
+        Ref::Effect(h) => h.node_id(),
+    };
+    left == right
+}
+
+/// Canonical fixture spelling for a handle's node kind.
+pub fn node_kind<G: ReactiveGraph>(node: Ref<G>) -> &'static str {
+    match node {
+        Ref::Cell(_) => "cell",
+        Ref::Slot(_) => "computed",
+        Ref::Effect(_) => "effect",
+    }
+}
+
+/// Whether the handle exposes a write operation in the Cell kernel.
+pub fn is_writable<G: ReactiveGraph>(node: Ref<G>) -> bool {
+    matches!(node, Ref::Cell(_))
 }
 
 /// Nodes owned by a teardown scope, created through it rather than through the

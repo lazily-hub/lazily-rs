@@ -1651,7 +1651,10 @@ impl Context {
             // Check the kind BEFORE descheduling or taking: a stale effect
             // handle whose id has been recycled must not tear down the source
             // or computed node that now owns that id.
-            if !matches!(Self::get_node(&inner.nodes, handle.id), Some(Node::Effect(_))) {
+            if !matches!(
+                Self::get_node(&inner.nodes, handle.id),
+                Some(Node::Effect(_))
+            ) {
                 return;
             }
             // #lzspecedgeindex: deschedule in O(1) and leave any queue entry as
