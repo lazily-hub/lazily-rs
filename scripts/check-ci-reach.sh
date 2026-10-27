@@ -162,6 +162,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"conformance-manifest-reset"
 	"core-api-check"
 	"core-artifact-consumer-check"
+	"core-evidence-check"
 	"core-facade-check"
 	"default-build-dependency-check"
 	"dependency-inventory-check"
@@ -466,6 +467,7 @@ EXPECTED_GATE_STEPS=(
 	"core-api-check	Core API compatibility gate"
 	"core-artifact-consumer-check	Core artifact consumer (minimum/current)"
 	"core-facade-check	Core facade contract"
+	"core-evidence-check	Core evidence gate (#lzbindingevidenceci)"
 	"assertion-ordering-check	Assertion observation ordering (#lzassertordering)"
 	"ci-reach	CI-reachability guard"
 )
