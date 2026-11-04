@@ -20,6 +20,17 @@
 # `tests/fixture_flag_hygiene.rs` guards this file: it fails if the entry below
 # is removed, if an `#[allow(clippy::disallowed_methods)]` appears anywhere else
 # under `tests/`, or if a coercing chain clippy cannot express reappears.
+#
+# `rusqlite::Connection::{transaction, unchecked_transaction}` are BANNED
+# (`#lazilysqlitestoreopen`). Both issue a DEFERRED `BEGIN`: the first read takes
+# a snapshot and the first write must then upgrade it, and SQLite refuses that
+# upgrade with an immediate `SQLITE_BUSY` while another connection holds the
+# write lock -- the busy timeout is never consulted. `SqliteStore`'s tables share
+# databases with other writers (agent-doc's `state.db`), so a transaction that
+# may write must take the lock up front with
+# `transaction_with_behavior(TransactionBehavior::Immediate)`.
 disallowed-methods = [
     { path = "serde_json::Value::as_bool", reason = "coerces a mistyped fixture flag to `false`, which asserts the opposite claim and passes; use common::FixtureJson::fixture_flag* (#lzsiblingrunnermasking)" },
+    { path = "rusqlite::Connection::transaction", reason = "DEFERRED BEGIN: a read-then-write upgrade fails with an immediate SQLITE_BUSY that busy_timeout never waits out; use transaction_with_behavior(TransactionBehavior::Immediate) (#lazilysqlitestoreopen)" },
+    { path = "rusqlite::Connection::unchecked_transaction", reason = "DEFERRED BEGIN: a read-then-write upgrade fails with an immediate SQLITE_BUSY that busy_timeout never waits out; use Transaction::new_unchecked(conn, TransactionBehavior::Immediate) (#lazilysqlitestoreopen)" },
 ]

@@ -143,6 +143,7 @@ impl Default for Outbox<InMemoryStore> {
 mod sqlite {
     use std::fmt;
     use std::path::Path;
+    use std::time::Duration;
 
     use rusqlite::{Connection, params, types::ValueRef};
 
@@ -201,12 +202,42 @@ mod sqlite {
         connection.execute_batch(OUTBOX_SCHEMA)
     }
 
+    /// Busy timeout [`SqliteStore::open`] installs on the connection it opens
+    /// (`#lazilysqlitestoreopen`).
+    ///
+    /// The outbox tables are routinely co-tenants of a database other writers
+    /// share (agent-doc keeps them in its `state.db`). A statement that needs
+    /// the write lock while another connection holds it waits at most this
+    /// long, then fails with `SQLITE_BUSY` (`database is locked`). The
+    /// [`OutboxStore`] operations only log their errors, so a write that gives
+    /// up is an append or cursor save silently dropped.
+    ///
+    /// `open` used to rely on whatever `rusqlite::Connection::open` happened to
+    /// install (5 seconds in rusqlite 0.40; 0 in SQLite itself). The timeout is
+    /// now explicit and matches the 30-second budget agent-doc applies to every
+    /// other `state.db` connection, so the outbox no longer gives up while a
+    /// co-tenant writer it shares the file with is still inside its budget.
+    pub const SQLITE_STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// SQLite-backed [`OutboxStore`], partitioned by document hash.
+    ///
+    /// Every operation is a single autocommit statement, never a transaction
+    /// that reads and then writes. That matters under contention: SQLite runs
+    /// the busy handler only when a statement acquires the write lock from no
+    /// open transaction. A DEFERRED transaction that has already read and then
+    /// tries to write is refused with an immediate `SQLITE_BUSY` that no busy
+    /// timeout can wait out, so any read-then-write transaction added here must
+    /// be `BEGIN IMMEDIATE` (`clippy.toml` bans the deferred
+    /// `rusqlite::Connection::transaction` / `unchecked_transaction`).
     pub struct SqliteStore {
         connection: Connection,
         document_hash: String,
     }
 
     impl SqliteStore {
+        /// Open (creating if needed) the database at `path` with the
+        /// [`SQLITE_STORE_BUSY_TIMEOUT`] busy timeout, and ensure the outbox
+        /// schema.
         pub fn open(
             path: &Path,
             document_hash: impl Into<String>,
@@ -214,9 +245,16 @@ mod sqlite {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            Self::with_connection(Connection::open(path)?, document_hash)
+            let connection = Connection::open(path)?;
+            connection.busy_timeout(SQLITE_STORE_BUSY_TIMEOUT)?;
+            Self::with_connection(connection, document_hash)
         }
 
+        /// Adopt a caller-configured connection and ensure the outbox schema.
+        ///
+        /// The connection's busy handler is left exactly as the caller set it.
+        /// A connection to a database other writers share needs one (see
+        /// [`SQLITE_STORE_BUSY_TIMEOUT`]); [`SqliteStore::open`] installs it.
         pub fn with_connection(
             connection: Connection,
             document_hash: impl Into<String>,
@@ -354,6 +392,7 @@ mod sqlite {
         use super::*;
         use crate::outbox::DurableOutbox;
         use crate::{Delta, IpcMessage};
+        use std::time::Duration;
 
         fn frame(epoch: u64) -> IpcMessage {
             IpcMessage::Delta(Delta::new(epoch.saturating_sub(1), epoch, vec![]))
@@ -411,6 +450,108 @@ mod sqlite {
             );
         }
 
+        fn busy_timeout_ms(connection: &Connection) -> i64 {
+            connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        /// `#lazilysqlitestoreopen`: `open` used a bare `Connection::open` and
+        /// inherited rusqlite's implicit 5-second default. The concurrency tests
+        /// below prove the store waits at all (they fail with no busy handler);
+        /// this pins how long.
+        #[test]
+        fn open_installs_the_busy_timeout() {
+            let temp = tempfile::tempdir().unwrap();
+            let store = SqliteStore::open(&temp.path().join("busy.db"), "doc").unwrap();
+            assert_eq!(
+                busy_timeout_ms(&store.connection),
+                SQLITE_STORE_BUSY_TIMEOUT.as_millis() as i64
+            );
+        }
+
+        /// How long the second writer's append must stay blocked while the
+        /// first writer holds the lock. Without a busy handler the append fails
+        /// in microseconds, so this only bounds how late a preempted writer
+        /// thread may reach SQLite before a defective build could pass; it never
+        /// decides a correct build's outcome (that build waits out the full
+        /// [`SQLITE_STORE_BUSY_TIMEOUT`]).
+        const STILL_BLOCKED_WINDOW: Duration = Duration::from_millis(500);
+
+        /// `#lazilysqlitestoreopen`: two writers on one database. The first
+        /// holds the write lock (`BEGIN IMMEDIATE` plus an uncommitted append);
+        /// the second appends meanwhile. Without a busy handler the second
+        /// append fails at once with `database is locked`, is only logged, and
+        /// the epoch is lost. It must instead wait for the first writer to
+        /// commit and then land.
+        fn assert_append_waits_for_a_concurrent_writer(journal_mode: &str) {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("two-writers.db");
+
+            let mut first = SqliteStore::open(&path, "other").unwrap();
+            let mode: String = first
+                .connection
+                .query_row(
+                    &format!("PRAGMA journal_mode = {journal_mode}"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(mode.to_ascii_lowercase(), journal_mode.to_ascii_lowercase());
+            let held = first
+                .connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            held.execute(
+                "INSERT INTO reliable_sync_outbox (document_hash, epoch, frame_json) VALUES (?1, ?2, ?3)",
+                params!["other", 1i64, serde_json::to_vec(&frame(1)).unwrap()],
+            )
+            .unwrap();
+
+            let (reached_append, reached_append_rx) = std::sync::mpsc::channel();
+            let (appended, appended_rx) = std::sync::mpsc::channel();
+            let second_path = path.clone();
+            let second = std::thread::spawn(move || {
+                let mut outbox = SqliteOutbox::open(&second_path, "doc").unwrap();
+                reached_append.send(()).unwrap();
+                outbox.append(1, frame(1));
+                appended.send(()).unwrap();
+                outbox.retained_epochs()
+            });
+
+            reached_append_rx.recv().unwrap();
+            let returned_under_lock = appended_rx.recv_timeout(STILL_BLOCKED_WINDOW).is_ok();
+            held.commit().unwrap();
+            let retained = second.join().unwrap();
+
+            assert!(
+                !returned_under_lock,
+                "[{journal_mode}] the append returned while another writer held the lock: \
+                 it failed with SQLITE_BUSY instead of waiting (retained {retained:?})"
+            );
+            assert_eq!(
+                retained,
+                vec![1],
+                "[{journal_mode}] the waited append is durable once the first writer commits"
+            );
+            let reopened = SqliteOutbox::open(&path, "other").unwrap();
+            assert_eq!(
+                reopened.retained_epochs(),
+                vec![1],
+                "[{journal_mode}] the first writer's committed append is intact"
+            );
+        }
+
+        #[test]
+        fn an_append_waits_for_a_concurrent_writer_rollback_journal() {
+            assert_append_waits_for_a_concurrent_writer("delete");
+        }
+
+        #[test]
+        fn an_append_waits_for_a_concurrent_writer_wal() {
+            assert_append_waits_for_a_concurrent_writer("wal");
+        }
+
         #[test]
         fn well_formed_blob_and_text_frames_still_scan() {
             let temp = tempfile::tempdir().unwrap();
@@ -446,4 +587,6 @@ mod sqlite {
 }
 
 #[cfg(feature = "durable-sqlite")]
-pub use sqlite::{SqliteOutbox, SqliteStore, SqliteStoreError, ensure_outbox_schema};
+pub use sqlite::{
+    SQLITE_STORE_BUSY_TIMEOUT, SqliteOutbox, SqliteStore, SqliteStoreError, ensure_outbox_schema,
+};

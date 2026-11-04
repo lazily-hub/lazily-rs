@@ -136,7 +136,7 @@ this repo.
   `ReplayValue::Opaque` is the residual dynamic case and fails loudly rather than
   degrading to a `Debug` rendering that would embed an address and report a FALSE
   divergence every run. Optional (MAY) row in `coverage.json`
-- `src/outbox.rs` — storage-independent durable outbox (`#lzdurableoutbox`): `OutboxStore` ordered-byte boundary, shared `Outbox<S>` append/ack/prune/replay protocol, in-memory backend, and `durable-sqlite` adapter
+- `src/outbox.rs` — storage-independent durable outbox (`#lzdurableoutbox`): `OutboxStore` ordered-byte boundary, shared `Outbox<S>` append/ack/prune/replay protocol, in-memory backend, and `durable-sqlite` adapter (`SqliteStore::open` sets `SQLITE_STORE_BUSY_TIMEOUT`; every op is one autocommit statement, and `clippy.toml` bans deferred `rusqlite` transactions — `#lazilysqlitestoreopen`)
 - `tests/ingress_family_conformance.rs` — the ingress contract
   (`#designimplementtransport`) replayed against **all three flavors** through one
   `IngressModel` trait, over `lazily-spec/conformance/ingress/*.json`: ordered

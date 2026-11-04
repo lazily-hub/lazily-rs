@@ -128,7 +128,11 @@ Reliable senders use `Outbox<S>` for one append/ack/prune/replay protocol and an
 `OutboxStore` for five ordered-byte persistence operations. `InMemoryStore`
 exercises the same path in tests; the `durable-sqlite` feature adds
 `SqliteStore`/`SqliteOutbox`, partitioned by document hash, so acknowledged
-epochs remain pruned across process restarts.
+epochs remain pruned across process restarts. `SqliteStore::open` installs a
+30-second busy timeout (`SQLITE_STORE_BUSY_TIMEOUT`), so the outbox can share a
+database with other writers: a contended append waits for the lock instead of
+failing with `database is locked`. `with_connection` keeps the caller's own
+busy handler.
 
 The `durable-client` feature adds the portable v1 durable envelope and a typed
 publish/observe client over an injected NATS-compatible transport. It has no

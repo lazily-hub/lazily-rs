@@ -389,7 +389,9 @@ pub use merge::{KeepLatest, Max, MergePolicy, RawFifo, SetUnion, Sum};
 #[cfg(feature = "ipc")]
 pub use outbox::{DurableOutbox, InMemoryOutbox, InMemoryStore, OutboxStore};
 #[cfg(feature = "durable-sqlite")]
-pub use outbox::{SqliteOutbox, SqliteStore, SqliteStoreError, ensure_outbox_schema};
+pub use outbox::{
+    SQLITE_STORE_BUSY_TIMEOUT, SqliteOutbox, SqliteStore, SqliteStoreError, ensure_outbox_schema,
+};
 pub use presence::{
     AwarenessCell, Durable, Ephemeral, EphemeralCell, EphemeralCore, EphemeralMapCore,
     EphemeralValue, PresenceCell,
