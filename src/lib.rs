@@ -309,7 +309,8 @@ pub use durable_tier::{DurableCapabilityTier, compiled_durable_capability_tier};
 pub use effect::{Effect, EffectCallbackResult};
 pub use effect_cas_core::{
     CompareAndApply, EffectApply, EffectAttempt, EffectAttemptIdentity, EffectCasApplied,
-    EffectCasChange, EffectCasClaim, EffectCasCore, EffectCasFailure, EffectCasKeyState,
+    EffectCasChange, EffectCasClaim, EffectCasCore, EffectCasDurableInflight, EffectCasDurableKey,
+    EffectCasDurableState, EffectCasFailure, EffectCasHydrateError, EffectCasKeyState,
     EffectCasOutcome, EffectCasReconnect, EffectCasSnapshot, EffectCasUpsert, EffectIntent,
     EffectPending, EffectPlan, EffectPlanError, EffectReceipt, EffectRetry, EffectTerminal,
 };

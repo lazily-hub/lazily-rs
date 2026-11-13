@@ -4,7 +4,7 @@ This note covers the independently authored Postgres durable-owner host and the
 JetStream transport that delivers work to that authority. It is an engineering
 provenance record, not legal advice or a substitute for contributor agreements.
 
-Implementation source digest: `sha256:0b44348e20d905d81503f1c514b966eb8041ee89cf85c0a039d4c66f3f05af30`
+Implementation source digest: `sha256:ace995a9fa66be806f979a4ad094ee625f7dbaf31538bdf64a0ce39ca265c6b6`
 
 ## Official public sources
 

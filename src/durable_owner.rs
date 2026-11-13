@@ -43,6 +43,25 @@ macro_rules! stable_identity {
                 value.0
             }
         }
+
+        #[cfg(feature = "serde")]
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(&self.0)
+            }
+        }
+
+        /// Deserialization re-validates the identity: a persisted empty string
+        /// is refused exactly like [`Self::new`].
+        #[cfg(feature = "serde")]
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::new(value).map_err(|_| {
+                    <D::Error as serde::de::Error>::custom(concat!("empty ", $what, " identity"))
+                })
+            }
+        }
     };
 }
 

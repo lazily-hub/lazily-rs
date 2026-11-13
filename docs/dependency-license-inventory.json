@@ -12079,11 +12079,12 @@
       "tests/durable_owner_conformance.rs",
       "tests/durable_postgres_integration.rs",
       "tests/durable_reconciliation.rs",
+      "tests/effect_cas_durable.rs",
       "tests/latest_durable_projection_family_conformance.rs"
     ],
-    "implementation_source_sha256": "0b44348e20d905d81503f1c514b966eb8041ee89cf85c0a039d4c66f3f05af30",
+    "implementation_source_sha256": "ace995a9fa66be806f979a4ad094ee625f7dbaf31538bdf64a0ce39ca265c6b6",
     "note": "docs/durable-runtime-provenance.md",
-    "note_sha256": "16b81afbc29100a7f5410dd10919b2e445132bef28d138b4c4ddca52b5629ebc"
+    "note_sha256": "ab4b5c8f9c2a45b7053061e46e3e18770b4d79e740477f7f0b6d00c3a56915f0"
   },
   "schema_version": 1
 }

@@ -11,6 +11,8 @@ use crate::EffectIdentity;
 
 /// An ordered, non-empty sequence of idempotent effect payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "Vec<P>"))]
 pub struct EffectPlan<P> {
     steps: Vec<P>,
 }
@@ -47,8 +49,42 @@ pub enum EffectPlanError {
     Empty,
 }
 
+impl std::fmt::Display for EffectPlanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("an effect plan must contain at least one step"),
+        }
+    }
+}
+
+impl std::error::Error for EffectPlanError {}
+
+impl<P> TryFrom<Vec<P>> for EffectPlan<P> {
+    type Error = EffectPlanError;
+
+    fn try_from(steps: Vec<P>) -> Result<Self, Self::Error> {
+        Self::new(steps)
+    }
+}
+
+/// A plan persists as its ordered step list; deserialization re-validates that
+/// the list is non-empty.
+#[cfg(feature = "serde")]
+impl<P: serde::Serialize> serde::Serialize for EffectPlan<P> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.steps.serialize(serializer)
+    }
+}
+
+impl<P> From<EffectPlan<P>> for Vec<P> {
+    fn from(plan: EffectPlan<P>) -> Self {
+        plan.steps
+    }
+}
+
 /// Immutable desired effect. One epoch names exactly one identity and plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EffectIntent<K, A, P> {
     pub identity: EffectIdentity,
     pub epoch: u64,
@@ -59,6 +95,7 @@ pub struct EffectIntent<K, A, P> {
 
 /// Exact identity of one adapter call.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EffectAttemptIdentity {
     pub effect: EffectIdentity,
     pub generation: u64,
@@ -69,6 +106,7 @@ pub struct EffectAttemptIdentity {
 
 /// A successful step receipt retained as lineage for later plan steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EffectReceipt<R, A> {
     pub attempt: EffectAttemptIdentity,
     pub receipt: R,
@@ -77,6 +115,7 @@ pub struct EffectReceipt<R, A> {
 
 /// The exact compare-and-apply call handed to an application adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EffectAttempt<K, A, P, R> {
     pub identity: EffectAttemptIdentity,
     pub key: K,
@@ -107,6 +146,7 @@ pub trait CompareAndApply<K, A, P, R> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EffectPending<K, A, P, R> {
     pub intent: EffectIntent<K, A, P>,
     pub next_step: usize,
@@ -117,6 +157,7 @@ pub struct EffectPending<K, A, P, R> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EffectRetry<E> {
     pub attempt: EffectAttemptIdentity,
     pub error: E,
@@ -124,6 +165,7 @@ pub struct EffectRetry<E> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EffectTerminal<R, A, E> {
     Applied {
         identity: EffectIdentity,
@@ -215,6 +257,76 @@ pub enum EffectCasReconnect {
 pub struct EffectCasChange {
     pub state: bool,
 }
+
+/// Full-fidelity durable image of an [`EffectCasCore`] (`#lzeffectcasdurable`).
+///
+/// [`EffectCasSnapshot`] is a reader projection: it omits the retained intent
+/// behind an in-flight attempt and the last terminal intent, so it cannot
+/// restore the core. This image carries every field the core needs to resume
+/// after a crash or in another process: the actor generation, retained intents,
+/// plan cursors, logical retry times, receipts, and terminal evidence. Keys are
+/// a list rather than a map so a non-string key round-trips through JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EffectCasDurableState<K, A, P, R, E> {
+    pub generation: u64,
+    pub keys: Vec<EffectCasDurableKey<K, A, P, R, E>>,
+}
+
+/// Durable image of one key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EffectCasDurableKey<K, A, P, R, E> {
+    pub key: K,
+    pub pending: Option<EffectPending<K, A, P, R>>,
+    pub inflight: Option<EffectCasDurableInflight<K, A, P, R>>,
+    pub retry: Option<EffectRetry<E>>,
+    pub applied_through: Option<u64>,
+    pub terminal: Option<EffectTerminal<R, A, E>>,
+    pub terminal_intent: Option<EffectIntent<K, A, P>>,
+}
+
+/// Durable image of an in-flight attempt and the retained work behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EffectCasDurableInflight<K, A, P, R> {
+    pub retained: EffectPending<K, A, P, R>,
+    pub attempt: EffectAttempt<K, A, P, R>,
+}
+
+/// Why a durable image cannot be hydrated. Hydration never repairs an image:
+/// a corrupt image is refused so no adapter call runs on invented state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectCasHydrateError {
+    /// Two entries name the same key.
+    DuplicateKey,
+    /// A retained or terminal intent belongs to a different key.
+    KeyMismatch,
+    /// A plan cursor points past the end of its plan.
+    CursorOutOfRange,
+    /// An in-flight attempt does not describe its retained cursor.
+    AttemptMismatch,
+    /// An in-flight attempt claims an actor generation newer than the image.
+    FutureGeneration,
+}
+
+impl std::fmt::Display for EffectCasHydrateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::DuplicateKey => "durable effect-CAS image repeats a key",
+            Self::KeyMismatch => "durable effect-CAS intent belongs to another key",
+            Self::CursorOutOfRange => "durable effect-CAS plan cursor is out of range",
+            Self::AttemptMismatch => {
+                "durable effect-CAS attempt does not match its retained cursor"
+            }
+            Self::FutureGeneration => {
+                "durable effect-CAS attempt is newer than the image generation"
+            }
+        })
+    }
+}
+
+impl std::error::Error for EffectCasHydrateError {}
 
 #[derive(Debug, Clone)]
 struct Inflight<K, A, P, R> {
@@ -746,6 +858,117 @@ where
             }
         }
     }
+}
+
+impl<K, A, P, R, E> EffectCasCore<K, A, P, R, E>
+where
+    K: Ord + Clone,
+    A: Clone + PartialEq,
+    P: Clone + PartialEq,
+    R: Clone + PartialEq,
+    E: Clone + PartialEq,
+{
+    /// Full-fidelity image for crash recovery and cross-process persistence.
+    pub fn durable_state(&self) -> EffectCasDurableState<K, A, P, R, E> {
+        EffectCasDurableState {
+            generation: self.generation,
+            keys: self
+                .keys
+                .iter()
+                .map(|(key, entry)| EffectCasDurableKey {
+                    key: key.clone(),
+                    pending: entry.pending.clone(),
+                    inflight: entry
+                        .inflight
+                        .as_ref()
+                        .map(|inflight| EffectCasDurableInflight {
+                            retained: inflight.retained.clone(),
+                            attempt: inflight.attempt.clone(),
+                        }),
+                    retry: entry.retry.clone(),
+                    applied_through: entry.applied_through,
+                    terminal: entry.terminal.clone(),
+                    terminal_intent: entry.terminal_intent.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Restore a core from [`Self::durable_state`] before the runtime becomes
+    /// live. The restored core is observably identical to the one that wrote
+    /// the image: the same generation, retained intents, cursors, retry times,
+    /// receipts, and frontier. A recovering actor then calls
+    /// [`Self::reconnect`] with a newer generation to fence the crashed actor
+    /// and replay its retained work under the same effect identity.
+    pub fn hydrate(
+        state: EffectCasDurableState<K, A, P, R, E>,
+    ) -> Result<Self, EffectCasHydrateError> {
+        let mut keys = BTreeMap::new();
+        for durable in state.keys {
+            if let Some(pending) = &durable.pending {
+                validate_retained(&durable.key, pending)?;
+            }
+            if let Some(intent) = &durable.terminal_intent
+                && intent.key != durable.key
+            {
+                return Err(EffectCasHydrateError::KeyMismatch);
+            }
+            let inflight = match durable.inflight {
+                Some(inflight) => {
+                    validate_retained(&durable.key, &inflight.retained)?;
+                    let attempt = &inflight.attempt;
+                    let retained = &inflight.retained;
+                    if attempt.identity.generation > state.generation {
+                        return Err(EffectCasHydrateError::FutureGeneration);
+                    }
+                    if attempt.key != durable.key
+                        || attempt.identity.effect != retained.intent.identity
+                        || attempt.identity.epoch != retained.intent.epoch
+                        || attempt.identity.step != retained.next_step
+                        || attempt.identity.attempt != retained.next_attempt
+                        || attempt.expected != retained.expected
+                        || attempt.payload != retained.intent.plan.steps[retained.next_step]
+                        || attempt.prior_receipts != retained.receipts
+                    {
+                        return Err(EffectCasHydrateError::AttemptMismatch);
+                    }
+                    Some(Inflight {
+                        retained: inflight.retained,
+                        attempt: inflight.attempt,
+                    })
+                }
+                None => None,
+            };
+            let entry = Entry {
+                pending: durable.pending,
+                inflight,
+                retry: durable.retry,
+                applied_through: durable.applied_through,
+                terminal: durable.terminal,
+                terminal_intent: durable.terminal_intent,
+            };
+            if keys.insert(durable.key, entry).is_some() {
+                return Err(EffectCasHydrateError::DuplicateKey);
+            }
+        }
+        Ok(Self {
+            generation: state.generation,
+            keys,
+        })
+    }
+}
+
+fn validate_retained<K: PartialEq, A, P, R>(
+    key: &K,
+    retained: &EffectPending<K, A, P, R>,
+) -> Result<(), EffectCasHydrateError> {
+    if retained.intent.key != *key {
+        return Err(EffectCasHydrateError::KeyMismatch);
+    }
+    if retained.next_step >= retained.intent.plan.len() {
+        return Err(EffectCasHydrateError::CursorOutOfRange);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
