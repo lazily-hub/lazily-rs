@@ -595,11 +595,11 @@ impl InlineSeqlock {
         std::sync::atomic::fence(Ordering::Release);
         match src {
             Some(ptr) => {
-                for i in 0..self.size {
+                for (i, cell) in self.buf[..self.size].iter().enumerate() {
                     // SAFETY: `ptr` is valid for `self.size` reads (caller
                     // contract); `i < self.size <= INLINE_CAP` indexes the buffer.
                     let byte = unsafe { *ptr.add(i) };
-                    self.buf[i].store(byte, Ordering::Relaxed);
+                    cell.store(byte, Ordering::Relaxed);
                 }
                 self.occupied.store(true, Ordering::Relaxed);
             }
@@ -632,8 +632,8 @@ impl InlineSeqlock {
             let mut snapshot = MaybeUninit::<T>::uninit();
             if occupied {
                 let dst = snapshot.as_mut_ptr() as *mut u8;
-                for i in 0..self.size {
-                    let byte = self.buf[i].load(Ordering::Relaxed);
+                for (i, cell) in self.buf[..self.size].iter().enumerate() {
+                    let byte = cell.load(Ordering::Relaxed);
                     // SAFETY: `i < self.size == size_of::<T>()`, so `dst.add(i)`
                     // is in bounds of the `MaybeUninit<T>` storage.
                     unsafe { *dst.add(i) = byte };
