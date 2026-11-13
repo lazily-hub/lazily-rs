@@ -108,6 +108,7 @@ mod durable_postgres;
 mod durable_reconciliation;
 mod durable_tier;
 mod effect;
+mod effect_cas_core;
 mod egress;
 mod egress_core;
 #[cfg(feature = "ffi")]
@@ -164,6 +165,8 @@ mod text_crdt;
 mod thread_safe;
 #[cfg(feature = "thread-safe")]
 mod thread_safe_boundary_ingress;
+#[cfg(feature = "thread-safe")]
+mod thread_safe_effect_cas;
 #[cfg(feature = "thread-safe")]
 mod thread_safe_egress;
 #[cfg(feature = "thread-safe")]
@@ -304,6 +307,12 @@ pub use durable_reconciliation::{
 };
 pub use durable_tier::{DurableCapabilityTier, compiled_durable_capability_tier};
 pub use effect::{Effect, EffectCallbackResult};
+pub use effect_cas_core::{
+    CompareAndApply, EffectApply, EffectAttempt, EffectAttemptIdentity, EffectCasApplied,
+    EffectCasChange, EffectCasClaim, EffectCasCore, EffectCasFailure, EffectCasKeyState,
+    EffectCasOutcome, EffectCasReconnect, EffectCasSnapshot, EffectCasUpsert, EffectIntent,
+    EffectPending, EffectPlan, EffectPlanError, EffectReceipt, EffectRetry, EffectTerminal,
+};
 pub use egress::{EgressCell, EgressTransport};
 pub use egress_core::{
     EgressAck, EgressChange, EgressClaim, EgressConfigError, EgressCore, EgressEnvelope,
@@ -488,6 +497,8 @@ pub use thread_safe::{
 };
 #[cfg(feature = "thread-safe")]
 pub use thread_safe_boundary_ingress::ThreadSafeBoundaryIngressCell;
+#[cfg(feature = "thread-safe")]
+pub use thread_safe_effect_cas::ThreadSafeEffectCas;
 #[cfg(feature = "thread-safe")]
 pub use thread_safe_egress::ThreadSafeEgressCell;
 #[cfg(feature = "thread-safe")]
