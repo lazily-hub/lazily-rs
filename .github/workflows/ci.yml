@@ -9,7 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LAZILY_SPEC_REF: v0.43.0
+  LAZILY_SPEC_REF: v0.46.0
 
 jobs:
   test:
