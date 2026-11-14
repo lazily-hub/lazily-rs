@@ -63,9 +63,22 @@ pub enum EgressClaim<T> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressAck {
-    Advanced { through: u64 },
-    Unchanged { through: Option<u64> },
-    StaleGeneration { current: u64 },
+    Advanced {
+        through: u64,
+    },
+    Unchanged {
+        through: Option<u64>,
+    },
+    /// `through` is at or beyond `next_sequence`: the peer acknowledged a
+    /// sequence that was never assigned (so never sent). This is a protocol
+    /// error; the core changes nothing and invalidates no reader. Accepting it
+    /// would lift the watermark over the next enqueued record and strand it.
+    BeyondSent {
+        next_sequence: u64,
+    },
+    StaleGeneration {
+        current: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,12 +257,23 @@ impl<T: Clone> EgressCore<T> {
     }
 
     /// Advance the acknowledgement watermark and prune acknowledged records.
+    ///
+    /// An acknowledgement may only cover assigned sequences: `through` at or
+    /// beyond `next_sequence` is refused with [`EgressAck::BeyondSent`].
     pub fn ack(&mut self, generation: u64, through: u64) -> (EgressChange, EgressAck) {
         if generation != self.generation {
             return (
                 EgressChange::default(),
                 EgressAck::StaleGeneration {
                     current: self.generation,
+                },
+            );
+        }
+        if through >= self.next_sequence {
+            return (
+                EgressChange::default(),
+                EgressAck::BeyondSent {
+                    next_sequence: self.next_sequence,
                 },
             );
         }
@@ -375,6 +399,10 @@ impl<T: Clone> EgressCore<T> {
         }
         self.generation = generation;
         let replayed = self.inflight.len() + self.failed.len();
+        // Every retained envelope is rewritten to the new generation, so the
+        // `pending` projection changes whenever anything is retained — including
+        // never-claimed records when nothing replays.
+        let pending_changed = replayed > 0 || !self.pending.is_empty();
         let inflight = std::mem::take(&mut self.inflight);
         for (_, mut record) in inflight {
             record.generation = generation;
@@ -391,7 +419,7 @@ impl<T: Clone> EgressCore<T> {
         let retry_changed = self.retry.take().is_some();
         (
             EgressChange {
-                pending: replayed > 0,
+                pending: pending_changed,
                 inflight: replayed > 0,
                 retry: retry_changed,
                 ..EgressChange::default()
@@ -451,6 +479,52 @@ mod tests {
         ));
         assert_eq!(core.claim(7).1, EgressClaim::StaleGeneration { current: 8 });
         assert_eq!(core.acked_through(), Some(0));
+    }
+
+    #[test]
+    fn ack_beyond_next_sequence_is_refused_and_changes_nothing() {
+        let mut core = EgressCore::new(1, policy()).unwrap();
+        assert_eq!(
+            core.ack(1, 0),
+            (
+                EgressChange::default(),
+                EgressAck::BeyondSent { next_sequence: 0 }
+            )
+        );
+        assert_eq!(core.acked_through(), None);
+        core.enqueue("a");
+        assert_eq!(
+            core.ack(1, 5),
+            (
+                EgressChange::default(),
+                EgressAck::BeyondSent { next_sequence: 1 }
+            )
+        );
+        // A stale attachment is fenced before the boundary is checked.
+        assert_eq!(core.ack(0, 5).1, EgressAck::StaleGeneration { current: 1 });
+        // The next record is not stranded: its genuine ACK advances.
+        assert_eq!(core.ack(1, 0).1, EgressAck::Advanced { through: 0 });
+        assert!(core.pending().is_empty());
+    }
+
+    #[test]
+    fn reconnect_without_replay_still_refreshes_pending_generation() {
+        let mut core = EgressCore::new(3, policy()).unwrap();
+        core.enqueue("a");
+        let (change, outcome) = core.reconnect(4);
+        assert_eq!(
+            outcome,
+            EgressReconnect::Advanced {
+                generation: 4,
+                replayed: 0
+            }
+        );
+        assert!(change.pending);
+        assert!(!change.inflight);
+        assert_eq!(core.pending()[0].generation, 4);
+        // Nothing retained: nothing to invalidate.
+        let mut empty = EgressCore::<u8>::new(3, policy()).unwrap();
+        assert!(empty.reconnect(4).0.is_empty());
     }
 
     #[test]

@@ -95,6 +95,9 @@ fn ack_value(ack: EgressAck) -> Value {
     match ack {
         EgressAck::Advanced { through } => json!({ "ack": "advanced", "through": through }),
         EgressAck::Unchanged { through } => json!({ "ack": "unchanged", "through": through }),
+        EgressAck::BeyondSent { next_sequence } => {
+            json!({ "ack": "beyond_sent", "next_sequence": next_sequence })
+        }
         EgressAck::StaleGeneration { current } => {
             json!({ "ack": "stale_generation", "current": current })
         }
