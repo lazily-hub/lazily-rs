@@ -12,9 +12,9 @@ use crate::common::{Expect, FixtureJson};
 use serde_json::Value;
 
 use super::model::{
-    COMPUTE_FAILED, Computes, GraphModel, Merges, Ref, ScopeModel, arm_failure, computes_seen,
-    count_merge, dependencies_of, dependents_of, dispose, is_writable, log_snapshot, merges_seen,
-    node_kind, same_raw_node_id,
+    COMPUTE_FAILED, CleanupShape, Computes, GraphModel, Merges, Ref, ScopeModel, arm_failure,
+    computes_seen, count_merge, dependencies_of, dependents_of, dispose, is_writable, log_snapshot,
+    merges_seen, node_kind, same_raw_node_id,
 };
 
 /// The node ids a descended per-node assertion block declares.
@@ -371,17 +371,26 @@ pub fn replay<'a, M: GraphModel>(
                 // a scheduler feedback loop by writing its own dependency; a
                 // plain effect is a pure sink. Scoped effects are always plain —
                 // the corpus never scopes a feed or a divergent loop.
+                // `#lzeffectvoid`: a `cleanup` shape only applies to a plain
+                // effect; on a feed or divergent effect it would be silently
+                // dropped, so it is rejected there.
+                let shaped = op.get("cleanup").is_some();
                 let h = if let Some(target_id) = op["merges_into"].as_str() {
+                    assert!(!shaped, "{fixture}: `cleanup` on a merges_into effect");
                     let target = cell_of!(target_id);
                     let counter = merges.entry(target_id.to_owned()).or_default().clone();
                     Ref::Effect(model.feed_effect(&id, &reads, target, &counter))
                 } else if let Some(own_id) = op["writes_own_cone"].as_str() {
+                    assert!(!shaped, "{fixture}: `cleanup` on a writes_own_cone effect");
                     let own = cell_of!(own_id);
                     Ref::Effect(model.diverge_effect(&id, own))
                 } else {
+                    // What the body returns from each run; an unknown value
+                    // panics.
+                    let cleanup = CleanupShape::parse(fixture, op.get("cleanup"));
                     match op["scope"].as_str() {
-                        Some(s) => Ref::Effect(scopes[s].effect(&id, &reads)),
-                        None => Ref::Effect(model.effect(&id, &reads)),
+                        Some(s) => Ref::Effect(scopes[s].effect(&id, &reads, cleanup)),
+                        None => Ref::Effect(model.effect(&id, &reads, cleanup)),
                     }
                 };
                 nodes.insert(id.clone(), h);
@@ -426,7 +435,7 @@ pub fn replay<'a, M: GraphModel>(
                     // asserts `observed_count` on a publish, and in a lazy
                     // binding only an eager reader observes a publish without
                     // being pulled.
-                    let h = Ref::Effect(model.effect(&id, &base));
+                    let h = Ref::Effect(model.effect(&id, &base, CleanupShape::EveryRun));
                     nodes.insert(id.clone(), h);
                     stale.insert(id, h);
                 }
@@ -454,7 +463,8 @@ pub fn replay<'a, M: GraphModel>(
                             if let Some(n) = nodes.get(&id) {
                                 dispose(model.graph(), *n);
                             }
-                            let h = Ref::Effect(model.effect(&id, &[source]));
+                            let h =
+                                Ref::Effect(model.effect(&id, &[source], CleanupShape::EveryRun));
                             nodes.insert(id, h);
                         }
                     }
@@ -464,7 +474,7 @@ pub fn replay<'a, M: GraphModel>(
                         let name = format!("{prefix}_scoped");
                         for _ in 0..cycles {
                             let sc = model.scope();
-                            sc.effect(&name, &[source]);
+                            sc.effect(&name, &[source], CleanupShape::EveryRun);
                             drop(sc);
                         }
                     }

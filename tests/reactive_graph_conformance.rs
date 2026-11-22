@@ -61,13 +61,16 @@ const SPEC_DIR: common::SpecDir = common::SpecDir("reactive-graph");
 
 /// The canonical fixture set. Asserted against the directory listing so a
 /// fixture added or renamed upstream fails loudly instead of going unrun.
-const FIXTURES: [&str; 22] = [
+const FIXTURES: [&str; 23] = [
     "churn_returns_to_baseline.json",
     "cross_scope_teardown_hazard.json",
     "disarm_disposes_nothing.json",
     "disposal_does_not_run_surviving_effects.json",
     "dispose_detaches_edges_both_directions.json",
     "dispose_signal_reverts_to_lazy.json",
+    // `#lzeffectvoid`: an effect body may return a cleanup or none; the
+    // `effect` op's `cleanup` field selects every_run / none / alternate.
+    "effect_cleanup_is_optional.json",
     "failed_compute_is_never_cached.json",
     "read_after_dispose_is_an_error.json",
     "signal_materializes_once_per_batch.json",

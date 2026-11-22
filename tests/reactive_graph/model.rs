@@ -139,6 +139,45 @@ pub fn merges_seen(merges: &Merges) -> usize {
     merges.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// What an effect body returns from each run (`#lzeffectvoid`), selected by the
+/// `effect` op's optional `cleanup` field.
+///
+/// The library spells "no cleanup" as a body that returns `()` (sync models) or
+/// `None` (async); a no-op cleanup closure would be observationally identical to
+/// a real one and test nothing, so `None` here never means "an empty closure".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CleanupShape {
+    /// Every run returns a cleanup closure. The default when `cleanup` is absent.
+    EveryRun,
+    /// Every run returns the binding's idiomatic no-cleanup form.
+    None,
+    /// Odd-numbered runs (the run at creation is run 1) return a cleanup;
+    /// even-numbered runs return none.
+    Alternate,
+}
+
+impl CleanupShape {
+    /// Parse the op's `cleanup` field. Anything but an absent field or one of
+    /// the three named strings is a hard runner failure, never a silent default.
+    pub fn parse(fixture: &str, raw: Option<&serde_json::Value>) -> Self {
+        match raw {
+            None => Self::EveryRun,
+            Some(serde_json::Value::String(s)) => match s.as_str() {
+                "every_run" => Self::EveryRun,
+                "none" => Self::None,
+                "alternate" => Self::Alternate,
+                other => panic!("{fixture}: unknown effect cleanup shape {other:?}"),
+            },
+            Some(other) => panic!("{fixture}: effect cleanup must be a string, got {other}"),
+        }
+    }
+
+    /// Whether 1-based run `run` of an `Alternate` effect returns a cleanup.
+    pub fn alternate_returns_cleanup(run: usize) -> bool {
+        run % 2 == 1
+    }
+}
+
 /// A handle to a node in whichever graph is under test.
 ///
 /// Parameterised by the *library* trait, not by the test model, so the generic
@@ -231,7 +270,12 @@ pub trait ScopeModel<M: GraphModel> {
         offset: i64,
         computes: &Computes,
     ) -> <M::Graph as ReactiveGraph>::Computed<i64>;
-    fn effect(&self, name: &str, reads: &[Ref<M::Graph>]) -> <M::Graph as ReactiveGraph>::Effect;
+    fn effect(
+        &self,
+        name: &str,
+        reads: &[Ref<M::Graph>],
+        cleanup: CleanupShape,
+    ) -> <M::Graph as ReactiveGraph>::Effect;
     /// How many nodes the scope currently owns.
     ///
     /// There is deliberately no scoped `signal` here: `TeardownScope` and its
@@ -291,10 +335,14 @@ pub trait GraphModel: Sized {
         offset: i64,
         computes: &Computes,
     ) -> <Self::Graph as ReactiveGraph>::Computed<i64>;
+    /// A plain sink effect over `reads` whose body returns what `cleanup`
+    /// selects (`#lzeffectvoid`). The run counter `Alternate` needs lives inside
+    /// the body closure the library invokes, never at the call site.
     fn effect(
         &self,
         name: &str,
         reads: &[Ref<Self::Graph>],
+        cleanup: CleanupShape,
     ) -> <Self::Graph as ReactiveGraph>::Effect;
 
     /// Create an eager signal over `reads`, computing `sum(reads) + offset` —

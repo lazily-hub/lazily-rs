@@ -5,11 +5,11 @@
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::model::{
-    COMPUTE_FAILED, Computes, GraphModel, Log, Merges, Poison, Ref, ScopeModel, count_computes,
-    count_merge, log_push,
+    COMPUTE_FAILED, CleanupShape, Computes, GraphModel, Log, Merges, Poison, Ref, ScopeModel,
+    count_computes, count_merge, log_push,
 };
 use lazily::Sum;
 
@@ -47,7 +47,9 @@ pub fn quiet<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
 
 mod basic {
     use super::*;
-    use lazily::{Compute, ComputeOps, Computed, Context, Effect, Source, TeardownScope};
+    use lazily::{
+        Compute, ComputeOps, Computed, Context, Effect, EffectCallbackResult, Source, TeardownScope,
+    };
 
     pub struct BasicModel {
         pub ctx: Context,
@@ -99,27 +101,77 @@ mod basic {
         }
     }
 
-    fn effect_body(
+    /// The shared effect body: track `reads`, log the run, number it (the run
+    /// at creation is run 1), and return whatever `ret` makes of that number.
+    ///
+    /// The counter lives inside the closure the library invokes, so it moves
+    /// only when the runtime actually runs the effect (`#lzeffectvoid`).
+    fn effect_body<R: 'static>(
         name: &str,
         reads: &[Ref<Context>],
         runs: &Log,
-        cleanups: &Log,
         poison: &Poison,
-    ) -> impl Fn(&Compute) -> Box<dyn FnOnce()> + 'static {
+        ret: impl Fn(usize) -> R + 'static,
+    ) -> impl Fn(&Compute) -> R + 'static {
         let reads = reads.to_vec();
         let name = name.to_owned();
         let runs = runs.clone();
-        let cleanups = cleanups.clone();
         let poison = poison.clone();
+        let run = AtomicUsize::new(0);
         move |c: &Compute| {
             for r in &reads {
                 tracked(c, *r, &poison);
             }
             log_push(&runs, &name);
-            let cleanups = cleanups.clone();
-            let name = name.clone();
-            Box::new(move || log_push(&cleanups, &name)) as Box<dyn FnOnce()>
+            ret(run.fetch_add(1, Ordering::SeqCst) + 1)
         }
+    }
+
+    fn cleanup_for(name: &str, cleanups: &Log) -> Box<dyn FnOnce()> {
+        let (name, cleanups) = (name.to_owned(), cleanups.clone());
+        Box::new(move || log_push(&cleanups, &name))
+    }
+
+    /// `CleanupShape::Alternate`'s return value: a TEST-LOCAL implementation of
+    /// the library's public `EffectCallbackResult` extension point, because one
+    /// closure cannot return `()` on some runs and a closure on others. `None`
+    /// reaches exactly the library's no-cleanup path that `()` does — it is not
+    /// a no-op closure, which would be indistinguishable from a real cleanup.
+    struct MaybeCleanup(Option<Box<dyn FnOnce()>>);
+
+    impl EffectCallbackResult for MaybeCleanup {
+        fn into_cleanup(self) -> Option<Box<dyn FnOnce()>> {
+            self.0
+        }
+    }
+
+    /// Register a plain effect on `$target` (the context or a teardown scope)
+    /// whose body returns what `$shape` selects. A macro rather than a function
+    /// because each shape is a different closure type with a different return.
+    macro_rules! shaped_effect {
+        ($target:expr, $name:expr, $reads:expr, $shape:expr, $runs:expr, $cleanups:expr, $poison:expr) => {{
+            let (name, cleanups): (&str, &Log) = ($name, $cleanups);
+            let (owned, log) = (name.to_owned(), cleanups.clone());
+            match $shape {
+                CleanupShape::EveryRun => {
+                    $target.effect(effect_body(name, $reads, $runs, $poison, move |_| {
+                        cleanup_for(&owned, &log)
+                    }))
+                }
+                // The idiomatic no-cleanup form: the body returns `()`.
+                CleanupShape::None => {
+                    $target.effect(effect_body(name, $reads, $runs, $poison, |_| ()))
+                }
+                CleanupShape::Alternate => {
+                    $target.effect(effect_body(name, $reads, $runs, $poison, move |run| {
+                        MaybeCleanup(
+                            CleanupShape::alternate_returns_cleanup(run)
+                                .then(|| cleanup_for(&owned, &log)),
+                        )
+                    }))
+                }
+            }
+        }};
     }
 
     /// The feed effect (`#lzmergefeed`): read `reads` (tracked, so the effect —
@@ -189,9 +241,8 @@ mod basic {
         ) -> Computed<i64> {
             self.0.computed(compute(reads, offset, &self.3, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Context>]) -> Effect {
-            self.0
-                .effect(effect_body(name, reads, &self.1, &self.2, &self.3))
+        fn effect(&self, name: &str, reads: &[Ref<Context>], cleanup: CleanupShape) -> Effect {
+            shaped_effect!(self.0, name, reads, cleanup, &self.1, &self.2, &self.3)
         }
         fn owned(&self) -> usize {
             self.0.len()
@@ -233,14 +284,16 @@ mod basic {
             self.ctx
                 .computed(compute(reads, offset, &self.poison, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> Effect {
-            self.ctx.effect(effect_body(
+        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>], cleanup: CleanupShape) -> Effect {
+            shaped_effect!(
+                self.ctx,
                 name,
                 reads,
+                cleanup,
                 &self.runs,
                 &self.cleanups,
-                &self.poison,
-            ))
+                &self.poison
+            )
         }
         fn signal(
             &self,
@@ -330,8 +383,8 @@ pub use basic::BasicModel;
 mod threadsafe {
     use super::*;
     use lazily::{
-        Computed, Effect, Source, ThreadSafeContext, ThreadSafeSignalHandle,
-        ThreadSafeTeardownScope,
+        Computed, Effect, Source, ThreadSafeContext, ThreadSafeEffectCallbackResult,
+        ThreadSafeSignalHandle, ThreadSafeTeardownScope,
     };
 
     pub struct ThreadSafeModel {
@@ -380,28 +433,71 @@ mod threadsafe {
         }
     }
 
-    fn effect_body(
+    /// The shared effect body, thread-safe flavour. See the basic module's
+    /// `effect_body`; the only difference is the `Send + Sync` closure bound.
+    fn effect_body<R: 'static>(
         name: &str,
         reads: &[Ref<ThreadSafeContext>],
         runs: &Log,
-        cleanups: &Log,
         poison: &Poison,
-    ) -> impl Fn(&ThreadSafeContext) -> Box<dyn FnOnce() + Send + Sync> + Send + Sync + 'static
-    {
+        ret: impl Fn(usize) -> R + Send + Sync + 'static,
+    ) -> impl Fn(&ThreadSafeContext) -> R + Send + Sync + 'static {
         let reads = reads.to_vec();
         let name = name.to_owned();
         let runs = runs.clone();
-        let cleanups = cleanups.clone();
         let poison = poison.clone();
+        let run = AtomicUsize::new(0);
         move |c: &ThreadSafeContext| {
             for r in &reads {
                 tracked(c, *r, &poison);
             }
             log_push(&runs, &name);
-            let cleanups = cleanups.clone();
-            let name = name.clone();
-            Box::new(move || log_push(&cleanups, &name)) as Box<dyn FnOnce() + Send + Sync>
+            ret(run.fetch_add(1, Ordering::SeqCst) + 1)
         }
+    }
+
+    type Cleanup = Box<dyn FnOnce() + Send + Sync>;
+
+    fn cleanup_for(name: &str, cleanups: &Log) -> Cleanup {
+        let (name, cleanups) = (name.to_owned(), cleanups.clone());
+        Box::new(move || log_push(&cleanups, &name))
+    }
+
+    /// Test-local `ThreadSafeEffectCallbackResult` for `CleanupShape::Alternate`
+    /// — see the basic module's `MaybeCleanup`.
+    struct MaybeCleanup(Option<Cleanup>);
+
+    impl ThreadSafeEffectCallbackResult for MaybeCleanup {
+        fn into_thread_safe_cleanup(self) -> Option<Cleanup> {
+            self.0
+        }
+    }
+
+    /// See the basic module's `shaped_effect!`.
+    macro_rules! shaped_effect {
+        ($target:expr, $name:expr, $reads:expr, $shape:expr, $runs:expr, $cleanups:expr, $poison:expr) => {{
+            let (name, cleanups): (&str, &Log) = ($name, $cleanups);
+            let (owned, log) = (name.to_owned(), cleanups.clone());
+            match $shape {
+                CleanupShape::EveryRun => {
+                    $target.effect(effect_body(name, $reads, $runs, $poison, move |_| {
+                        cleanup_for(&owned, &log)
+                    }))
+                }
+                // The idiomatic no-cleanup form: the body returns `()`.
+                CleanupShape::None => {
+                    $target.effect(effect_body(name, $reads, $runs, $poison, |_| ()))
+                }
+                CleanupShape::Alternate => {
+                    $target.effect(effect_body(name, $reads, $runs, $poison, move |run| {
+                        MaybeCleanup(
+                            CleanupShape::alternate_returns_cleanup(run)
+                                .then(|| cleanup_for(&owned, &log)),
+                        )
+                    }))
+                }
+            }
+        }};
     }
 
     /// Feed effect (`#lzmergefeed`), thread-safe flavour. See the basic module's
@@ -454,9 +550,13 @@ mod threadsafe {
         ) -> Computed<i64> {
             self.0.computed(compute(reads, offset, &self.3, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<ThreadSafeContext>]) -> Effect {
-            self.0
-                .effect(effect_body(name, reads, &self.1, &self.2, &self.3))
+        fn effect(
+            &self,
+            name: &str,
+            reads: &[Ref<ThreadSafeContext>],
+            cleanup: CleanupShape,
+        ) -> Effect {
+            shaped_effect!(self.0, name, reads, cleanup, &self.1, &self.2, &self.3)
         }
         fn owned(&self) -> usize {
             self.0.len()
@@ -498,14 +598,16 @@ mod threadsafe {
             self.ctx
                 .computed(compute(reads, offset, &self.poison, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> Effect {
-            self.ctx.effect(effect_body(
+        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>], cleanup: CleanupShape) -> Effect {
+            shaped_effect!(
+                self.ctx,
                 name,
                 reads,
+                cleanup,
                 &self.runs,
                 &self.cleanups,
-                &self.poison,
-            ))
+                &self.poison
+            )
         }
         fn signal(
             &self,
@@ -667,12 +769,18 @@ mod asynchronous {
         }
     }
 
+    /// The async effect body. `effect_async`'s future resolves to an `Option`,
+    /// so "no cleanup" is idiomatically `None` and one closure serves all three
+    /// `CleanupShape`s without a test-local type. The run is numbered inside the
+    /// future, next to the run log, so a run is counted only once the library
+    /// has actually driven it (`#lzeffectvoid`).
     fn effect_body(
         name: &str,
         reads: &[Ref<AsyncContext>],
         runs: &Log,
         cleanups: &Log,
         poison: &Poison,
+        cleanup: CleanupShape,
     ) -> impl Fn(AsyncComputeContext) -> EffectFuture + Send + Sync + 'static {
         // A private counter: an effect body is not a node the corpus can name in
         // `computes_of`, so its runs must not land on any node's count.
@@ -681,14 +789,26 @@ mod asynchronous {
         let name = name.to_owned();
         let runs = runs.clone();
         let cleanups = cleanups.clone();
+        let run = Arc::new(AtomicUsize::new(0));
         move |c: AsyncComputeContext| {
             let fut = body(c);
             let name = name.clone();
             let runs = runs.clone();
             let cleanups = cleanups.clone();
+            let run = run.clone();
             Box::pin(async move {
                 let _ = fut.await;
                 log_push(&runs, &name);
+                let n = run.fetch_add(1, Ordering::SeqCst) + 1;
+                let returns_cleanup = match cleanup {
+                    CleanupShape::EveryRun => true,
+                    CleanupShape::None => false,
+                    CleanupShape::Alternate => CleanupShape::alternate_returns_cleanup(n),
+                };
+                if !returns_cleanup {
+                    // The idiomatic no-cleanup form for an async effect.
+                    return None;
+                }
                 let cleanup_name = name.clone();
                 Some(Box::new(move || log_push(&cleanups, &cleanup_name))
                     as Box<dyn FnOnce() + Send>)
@@ -754,10 +874,15 @@ mod asynchronous {
             self.0
                 .computed_async(compute(reads, offset, &self.3, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<AsyncContext>]) -> AsyncEffectHandle {
+        fn effect(
+            &self,
+            name: &str,
+            reads: &[Ref<AsyncContext>],
+            cleanup: CleanupShape,
+        ) -> AsyncEffectHandle {
             let _guard = self.4.enter();
             self.0
-                .effect_async(effect_body(name, reads, &self.1, &self.2, &self.3))
+                .effect_async(effect_body(name, reads, &self.1, &self.2, &self.3, cleanup))
         }
         fn owned(&self) -> usize {
             self.0.len()
@@ -806,7 +931,12 @@ mod asynchronous {
             self.ctx
                 .computed_async(compute(reads, offset, &self.poison, computes))
         }
-        fn effect(&self, name: &str, reads: &[Ref<Self::Graph>]) -> AsyncEffectHandle {
+        fn effect(
+            &self,
+            name: &str,
+            reads: &[Ref<Self::Graph>],
+            cleanup: CleanupShape,
+        ) -> AsyncEffectHandle {
             let _guard = self.rt.enter();
             self.ctx.effect_async(effect_body(
                 name,
@@ -814,6 +944,7 @@ mod asynchronous {
                 &self.runs,
                 &self.cleanups,
                 &self.poison,
+                cleanup,
             ))
         }
         fn signal(
@@ -871,7 +1002,7 @@ mod asynchronous {
         /// per-model divergence ledger rather than papered over — bounding
         /// divergent async feedback is future work beyond the merge algebra.
         fn diverge_effect(&self, name: &str, own: AsyncSource<i64>) -> AsyncEffectHandle {
-            self.effect(name, &[Ref::Cell(own)])
+            self.effect(name, &[Ref::Cell(own)], CleanupShape::EveryRun)
         }
         fn read(&self, node: Ref<Self::Graph>) -> Result<i64, ()> {
             match node {
