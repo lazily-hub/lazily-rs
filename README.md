@@ -6,7 +6,7 @@ Lazy reactive primitives for Rust — Context, Slots, Cells with automatic depen
 
 ## Overview
 
-`lazily` provides five core primitives for reactive computation:
+`lazily` provides five reactive primitives:
 
 - **Context** — owns all reactive state and manages the dependency graph
 - **Slot** — a lazily-computed cached value that automatically tracks dependencies
@@ -17,6 +17,22 @@ Lazy reactive primitives for Rust — Context, Slots, Cells with automatic depen
 Values are **lazy by default**: dependents are marked dirty on invalidation but only validated or recomputed when accessed. When you need eager push-style semantics — recompute immediately, observe `v1 -> v2` with no unset window — reach for **`Signal`**, which layers a puller effect over a memoized slot. The `Slot -> Cell -> Signal` progression lets you choose lazy or eager per derived value within one graph.
 `ctx.computed()` cells are **guarded** (`T: PartialEq`): if recomputation produces the same value, downstream dirty caches and effects are left alone. There is no unguarded mode.
 Multiple updates can be grouped with `ctx.batch(...)` so invalidation and effect reruns happen once after the outermost batch exits.
+
+<!-- beta-stability:start -->
+## Beta stability
+
+The list above is the reactive vocabulary. It is not the beta contract.
+
+Profile `core-v1` is a **candidate**. This crate does not promote it.
+
+What is stable enough for the beta is the beta contract in the lazily-spec registry [`profiles/interface-stability.json`](https://github.com/lazily-hub/lazily-spec/blob/docs/beta-stability-updatedocsexplain/profiles/interface-stability.json).
+That classification is not on the default branch yet. It is on `docs/beta-stability-updatedocsexplain`, which includes `audit/interface-stability-auditlazilywant`.
+What is unstable is the rest of that registry: `unstable_modules`, `not_candidate_bindings`, `reactive_graph_outside_core_closure`, and `rust_core_facade` re-exports that are not `beta_contract_reexports`.
+`lazily::core` publishes both sets. A re-export is in the beta contract only when `beta_contract_reexports` names it.
+The rendered split is [Interface stability](https://github.com/lazily-hub/lazily-spec/blob/docs/beta-stability-updatedocsexplain/docs/interface-stability.md).
+
+A check in the feature matrix below is coverage, not a compatibility promise.
+<!-- beta-stability:end -->
 
 ## Feature Set
 

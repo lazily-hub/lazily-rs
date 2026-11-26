@@ -90,6 +90,74 @@ fn core_facade_reexports_match_the_stability_split() {
     }
 }
 
+fn marked(text: &str, name: &str) -> String {
+    let start = format!("<!-- {name}:start -->");
+    let end = format!("<!-- {name}:end -->");
+    let after = text
+        .split_once(&start)
+        .unwrap_or_else(|| panic!("missing {start}"))
+        .1;
+    after
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("missing {end}"))
+        .0
+        .to_string()
+}
+
+#[test]
+fn reader_docs_point_at_the_registry() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let readme = fs::read_to_string(root.join("README.md"))
+        .unwrap_or_else(|error| panic!("read README: {error}"));
+    let section = marked(&readme, "beta-stability");
+    for phrase in [
+        "profiles/interface-stability.json",
+        "candidate",
+        "does not promote",
+        "beta contract",
+        "unstable",
+        "unstable_modules",
+        "not_candidate_bindings",
+        "reactive_graph_outside_core_closure",
+        "beta_contract_reexports",
+        "docs/beta-stability-updatedocsexplain",
+    ] {
+        assert!(section.contains(phrase), "README beta section missing {phrase}");
+    }
+    let symbols = BETA
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        !section.contains(&symbols),
+        "README copied the beta-contract re-export list"
+    );
+    let unstable = UNSTABLE
+        .iter()
+        .map(|(name, _)| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        !section.contains(&unstable),
+        "README copied the unstable re-export list"
+    );
+
+    let facade = fs::read_to_string(root.join("src/core.rs"))
+        .unwrap_or_else(|error| panic!("read src/core.rs: {error}"));
+    for phrase in [
+        "profiles/interface-stability.json",
+        "does not promote",
+        "explicitly unstable",
+        "beta_contract_reexports",
+        "unstable_modules",
+    ] {
+        assert!(facade.contains(phrase), "src/core.rs missing {phrase}");
+    }
+    assert!(!facade.contains(&symbols));
+    assert!(!facade.contains(&unstable));
+}
+
 #[test]
 fn beta_contract_names_are_public() {
     let ctx = lazily::Context::new();
