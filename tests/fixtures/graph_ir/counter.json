@@ -1,0 +1,19 @@
+{
+  "kind": "graph",
+  "ir": "1",
+  "id": "counter",
+  "nodes": [
+    {"id": "count", "kind": "source", "init": 1},
+    {
+      "id": "doubled",
+      "kind": "computed",
+      "eager": true,
+      "expr": {"op": "mul", "args": [{"ref": "count"}, {"lit": 2}]}
+    },
+    {
+      "id": "log",
+      "kind": "effect",
+      "body": {"do": "eval", "expr": {"ref": "doubled"}}
+    }
+  ]
+}

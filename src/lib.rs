@@ -155,6 +155,8 @@ mod stable_id;
 mod state_machine;
 mod state_table;
 pub mod statechart;
+#[cfg(feature = "graph-ir")]
+pub mod graph_ir;
 pub mod stdlib;
 #[cfg(feature = "webrtc-str0m")]
 mod str0m_backend;
@@ -486,6 +488,8 @@ pub use statechart::AsyncStateChart;
 pub use statechart::ThreadSafeStateChart;
 pub use statechart::{ChartBuilder, StateBuilder, TransitionBuilder};
 pub use statechart::{ChartDef, StateChart};
+#[cfg(feature = "graph-ir")]
+pub use graph_ir::{GraphEdit, GraphIr, GraphRuntime};
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]

@@ -1,0 +1,8 @@
+{
+  "kind": "graph",
+  "ir": "1",
+  "nodes": [
+    {"id": "a", "kind": "computed", "expr": {"ref": "b"}},
+    {"id": "b", "kind": "computed", "expr": {"ref": "a"}}
+  ]
+}

@@ -1961,8 +1961,11 @@ required feature flags, they fail closed before applying any `Snapshot` or
   tracking, `PartialEq`/equality-guarded invalidation, memo equality
   suppression, batching, and permission-filtered snapshots/deltas.
 - Compute closures are language-local. Cross-language sync shares the cell
-  state plane by default; derived slots converge remotely only when peers use a
-  shared compiled graph or an explicit compute-descriptor system.
+  state plane by default; derived slots converge remotely only when peers hold
+  the same graph IR document (`lazily-spec` `schemas/graph-ir.json`, Rust
+  feature `graph-ir`) and the same inputs. That document is the compute
+  descriptor: an expression tree lowered onto a `Context`. It is not a field
+  of `Snapshot` or `Delta`; the wire image stays values and edges.
 - JavaScript/TypeScript peers must keep `PeerId` values at or below
   `Number.MAX_SAFE_INTEGER`, matching the #s0fc signaling protocol.
 - Permission filtering happens before serialization on every channel. A

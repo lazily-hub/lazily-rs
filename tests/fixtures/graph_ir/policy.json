@@ -1,0 +1,19 @@
+{
+  "kind": "graph",
+  "ir": "1",
+  "nodes": [
+    {"id": "tick", "kind": "source", "init": 0},
+    {"id": "total", "kind": "source", "init": 0, "policy": "sum"},
+    {
+      "id": "bump",
+      "kind": "effect",
+      "body": {
+        "do": "seq",
+        "steps": [
+          {"do": "eval", "expr": {"ref": "tick"}},
+          {"do": "merge", "target": "total", "expr": {"lit": 1}}
+        ]
+      }
+    }
+  ]
+}

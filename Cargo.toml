@@ -31,6 +31,11 @@ name = "durable_client_conformance"
 path = "tests/durable_client_conformance.rs"
 required-features = ["durable-client"]
 
+[[test]]
+name = "graph_ir_runtime"
+path = "tests/graph_ir_runtime.rs"
+required-features = ["graph-ir"]
+
 [features]
 # Thread-safe reactive context (lock-backed, Send + Sync). Required of any
 # binding whose platform exposes preemptive threading (lazily-spec §
@@ -100,6 +105,10 @@ statechart = []
 # tooling, cross-language fixtures). This is the only chart surface that needs a
 # dependency (serde_json), so it stays gated; the typed builder needs nothing.
 statechart-json = ["dep:serde_json"]
+# Graph IR — parse schemas/graph-ir.json, lower it onto a Context, edit the
+# document while the runtime holds it, and emit canonical-source. Compute, not
+# a Snapshot or Delta field. serde_json is only the document codec.
+graph-ir = ["dep:serde_json"]
 # Switch ThreadSafeContext's inner state mutex from parking_lot::Mutex to
 # std::sync::Mutex — a fully std-only thread-safe build. No-op without
 # `thread-safe`. ReadStrategy::Cached still uses parking_lot::RwLock.

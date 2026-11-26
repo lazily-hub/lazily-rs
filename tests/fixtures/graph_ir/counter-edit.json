@@ -1,0 +1,24 @@
+{
+  "kind": "edit",
+  "ir": "1",
+  "ops": [
+    {
+      "op": "replace",
+      "node": {
+        "id": "doubled",
+        "kind": "computed",
+        "expr": {"op": "add", "args": [{"ref": "count"}, {"lit": 10}]}
+      }
+    },
+    {"op": "add", "node": {"id": "label", "kind": "source", "init": "n"}},
+    {
+      "op": "add",
+      "node": {
+        "id": "shown",
+        "kind": "computed",
+        "expr": {"op": "concat", "args": [{"ref": "label"}, {"lit": ":"}]}
+      }
+    },
+    {"op": "remove", "id": "log"}
+  ]
+}

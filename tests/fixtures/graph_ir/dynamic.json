@@ -1,0 +1,17 @@
+{
+  "kind": "graph",
+  "ir": "1",
+  "nodes": [
+    {"id": "flag", "kind": "source", "init": false},
+    {"id": "left", "kind": "source", "init": "L"},
+    {"id": "right", "kind": "source", "init": "R"},
+    {
+      "id": "picked",
+      "kind": "computed",
+      "expr": {
+        "op": "if",
+        "args": [{"ref": "flag"}, {"ref": "left"}, {"ref": "right"}]
+      }
+    }
+  ]
+}

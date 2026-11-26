@@ -1,0 +1,37 @@
+{
+  "kind": "graph",
+  "ir": "1",
+  "nodes": [
+    {"id": "row", "kind": "source", "init": {"name": "ada", "n": 2}},
+    {
+      "id": "name",
+      "kind": "computed",
+      "expr": {"op": "get", "args": [{"ref": "row"}, {"lit": "name"}]}
+    },
+    {
+      "id": "n",
+      "kind": "computed",
+      "expr": {"op": "get", "args": [{"ref": "row"}, {"lit": "n"}]}
+    },
+    {
+      "id": "tag",
+      "kind": "computed",
+      "expr": {"op": "concat", "args": [{"ref": "name"}, {"lit": "#"}]}
+    },
+    {
+      "id": "width",
+      "kind": "computed",
+      "expr": {"op": "len", "args": [{"ref": "name"}]}
+    },
+    {
+      "id": "pair",
+      "kind": "computed",
+      "expr": {"op": "array", "args": [{"ref": "name"}, {"ref": "n"}]}
+    },
+    {
+      "id": "wrapped",
+      "kind": "computed",
+      "expr": {"object": [{"key": "name", "value": {"ref": "name"}}]}
+    }
+  ]
+}
