@@ -100,6 +100,11 @@ statechart = []
 # tooling, cross-language fixtures). This is the only chart surface that needs a
 # dependency (serde_json), so it stays gated; the typed builder needs nothing.
 statechart-json = ["dep:serde_json"]
+# Host-neutral view compute document (`schemas/view.json`). Off by default,
+# same posture as graph-ir: signals install as sources, expressions as guarded
+# computeds, and the optional chart as one statechart cell. `ChartDef::from_json`
+# is the only chart loader, so the feature pulls `statechart-json`.
+view = ["statechart-json"]
 # Switch ThreadSafeContext's inner state mutex from parking_lot::Mutex to
 # std::sync::Mutex — a fully std-only thread-safe build. No-op without
 # `thread-safe`. ReadStrategy::Cached still uses parking_lot::RwLock.
