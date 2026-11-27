@@ -1,8 +1,6 @@
 //! View-document conformance. Replays `lazily-spec/conformance/view`.
 //!
-//! The area is absent from the published spec tag this crate's CI clones, so a
-//! missing directory skips. When the directory is present every fixture in it
-//! is listed and replayed.
+//! Enumerates and replays every fixture from the pinned spec corpus.
 
 #![cfg(feature = "view")]
 
@@ -93,10 +91,7 @@ fn run_malformed() {
 
 #[test]
 fn view_conformance() {
-    if !SPEC_DIR.is_dir() {
-        eprintln!("skipping: {SPEC_DIR} absent - run with the lazily-spec sibling");
-        return;
-    }
+    assert!(SPEC_DIR.is_dir(), "missing canonical {SPEC_DIR} fixtures");
     let mut found: Vec<String> = fs::read_dir(SPEC_DIR.path())
         .unwrap_or_else(|e| panic!("read {}: {e}", SPEC_DIR.path().display()))
         .map(|entry| {

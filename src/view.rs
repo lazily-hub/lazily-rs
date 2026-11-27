@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::context::ComputeOps;
 use crate::{ChartDef, Computed, Context, Effect, Source, StateChart};
@@ -445,7 +445,11 @@ fn parse_layout(nid: &str, value: &Value) -> Result<Option<String>, String> {
     let obj = value
         .as_object()
         .ok_or_else(|| format!("node `{nid}` layout must be an object"))?;
-    allow(obj, &["flow", "align", "grow"], &format!("node `{nid}` layout"))?;
+    allow(
+        obj,
+        &["flow", "align", "grow"],
+        &format!("node `{nid}` layout"),
+    )?;
     let flow = match obj.get("flow") {
         None => None,
         Some(v) => {
@@ -493,7 +497,7 @@ fn standing_bool_or_expr(
     value: &Value,
     signals: &BTreeSet<String>,
 ) -> Result<Value, String> {
-    if let Some(flag) = value.as_bool() {
+    if let Value::Bool(flag) = value {
         return Ok(json!({"op": "lit", "args": [flag]}));
     }
     if value.is_object() {
@@ -566,7 +570,11 @@ fn validate_expr(expr: &Value, signals: &BTreeSet<String>, in_effect: bool) -> R
     Ok(())
 }
 
-fn validate_call(args: &[Value], signals: &BTreeSet<String>, in_effect: bool) -> Result<(), String> {
+fn validate_call(
+    args: &[Value],
+    signals: &BTreeSet<String>,
+    in_effect: bool,
+) -> Result<(), String> {
     if args.is_empty() {
         return Err("call takes a name".into());
     }
@@ -619,7 +627,11 @@ fn validate_arg(value: &Value, signals: &BTreeSet<String>, in_effect: bool) -> R
     }
 }
 
-fn validate_effect(effect: &Value, signals: &BTreeSet<String>, has_chart: bool) -> Result<(), String> {
+fn validate_effect(
+    effect: &Value,
+    signals: &BTreeSet<String>,
+    has_chart: bool,
+) -> Result<(), String> {
     let obj = effect
         .as_object()
         .ok_or_else(|| "effect must be an object".to_string())?;

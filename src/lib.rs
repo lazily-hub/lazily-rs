@@ -155,8 +155,6 @@ mod stable_id;
 mod state_machine;
 mod state_table;
 pub mod statechart;
-#[cfg(feature = "view")]
-pub mod view;
 pub mod stdlib;
 #[cfg(feature = "webrtc-str0m")]
 mod str0m_backend;
@@ -192,6 +190,8 @@ mod topic_core;
 #[cfg(feature = "ipc")]
 mod transport;
 mod typed_context;
+#[cfg(feature = "view")]
+pub mod view;
 #[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
 mod webrtc_signaling;
 #[cfg(feature = "webrtc")]
@@ -488,8 +488,6 @@ pub use statechart::AsyncStateChart;
 pub use statechart::ThreadSafeStateChart;
 pub use statechart::{ChartBuilder, StateBuilder, TransitionBuilder};
 pub use statechart::{ChartDef, StateChart};
-#[cfg(feature = "view")]
-pub use view::View;
 #[cfg(feature = "webrtc-str0m")]
 pub use str0m_backend::{Side, Str0mChannel, Str0mError, Str0mLoopback};
 #[cfg(feature = "webrtc-str0m")]
@@ -549,6 +547,8 @@ pub use typed_context::{
     TypedThreadSafeCellHandle, TypedThreadSafeContext, TypedThreadSafeContextRef,
     TypedThreadSafeSlotHandle,
 };
+#[cfg(feature = "view")]
+pub use view::View;
 #[cfg(all(feature = "signaling-client", feature = "webrtc-str0m"))]
 pub use webrtc_signaling::{WebrtcSignalingError, answer_next_offer, offer_to_peer};
 #[cfg(feature = "webrtc")]

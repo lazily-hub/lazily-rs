@@ -9,7 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LAZILY_SPEC_REF: v0.47.0
+  LAZILY_SPEC_REF: v0.48.0
 
 jobs:
   test:
@@ -415,6 +415,9 @@ jobs:
         run: |
           cargo +stable test --locked --features statechart-json --test statechart_conformance
           cargo +stable test --locked --features statechart-json --lib statechart::
+
+      - name: Test View conformance against canonical spec fixtures
+        run: cargo +stable test --locked --features view --test view_conformance
 
       - name: Test loom model
         run: cargo +stable test --locked --features loom --test thread_safe_loom
