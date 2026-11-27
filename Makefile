@@ -338,6 +338,8 @@ test-protobuf-graph-boundary:
 # second line that scenario is never replayed and the fixture still counts as
 # covered, which is exactly the accounting gap the scenario ledger closes
 # (#lzscenariocoverage).
+# Require the canonical SQLite stores registry for the lib timeout assertion.
+test-durable-outbox: export LAZILY_SPEC_DIR ?= ../lazily-spec
 test-durable-outbox:
 >$(CARGO) test --locked --features ipc --test durable_outbox
 >$(CARGO) test --locked --features durable-sqlite --test durable_outbox

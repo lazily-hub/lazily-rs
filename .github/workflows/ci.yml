@@ -363,6 +363,8 @@ jobs:
       # never replayed while the fixture still counts as covered, which is
       # exactly the accounting gap the scenario ledger closes.
       - name: Test durable outbox store protocol against canonical spec fixtures
+        env:
+          LAZILY_SPEC_DIR: ../lazily-spec
         run: |
           cargo +stable test --locked --features ipc --test durable_outbox
           cargo +stable test --locked --features durable-sqlite --test durable_outbox

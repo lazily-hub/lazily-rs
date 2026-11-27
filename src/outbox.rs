@@ -464,10 +464,33 @@ mod sqlite {
         fn open_installs_the_busy_timeout() {
             let temp = tempfile::tempdir().unwrap();
             let store = SqliteStore::open(&temp.path().join("busy.db"), "doc").unwrap();
-            assert_eq!(
-                busy_timeout_ms(&store.connection),
-                SQLITE_STORE_BUSY_TIMEOUT.as_millis() as i64
-            );
+            let actual_timeout = busy_timeout_ms(&store.connection);
+            assert_eq!(actual_timeout, SQLITE_STORE_BUSY_TIMEOUT.as_millis() as i64);
+
+            // A conformance run names its spec checkout explicitly. Standalone
+            // unit tests can still verify the timeout without that checkout.
+            if let Some(spec_dir) = std::env::var_os("LAZILY_SPEC_DIR") {
+                let registry_path = Path::new(&spec_dir).join("sqlite-stores.json");
+                let contents = std::fs::read(&registry_path).unwrap_or_else(|error| {
+                    panic!("could not read {}: {error}", registry_path.display())
+                });
+                let registry: serde_json::Value =
+                    serde_json::from_slice(&contents).unwrap_or_else(|error| {
+                        panic!("could not parse {}: {error}", registry_path.display())
+                    });
+                let spec_timeout = registry["contract"]["busy_timeout_ms"]
+                    .as_i64()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} must declare an integer contract.busy_timeout_ms",
+                            registry_path.display()
+                        )
+                    });
+                assert_eq!(
+                    actual_timeout, spec_timeout,
+                    "SQLite timeout differs from the spec registry"
+                );
+            }
         }
 
         /// How long the second writer's append must stay blocked while the
